@@ -1,0 +1,60 @@
+{
+	"ownerAddressed": {
+		"tasks": {
+			"kind": "task",
+			"schemaVersion": 1,
+			"done": 1,
+			"total": 3,
+			"active": "Wire the runner",
+			"blocked": 1,
+			"outcome": "stuck",
+			"rows": [
+				{
+					"idKind": "owner",
+					"ownerTaskId": "t1",
+					"status": "done"
+				},
+				{
+					"idKind": "owner",
+					"ownerTaskId": "t2",
+					"status": "active"
+				},
+				{
+					"idKind": "owner",
+					"ownerTaskId": "t3",
+					"status": "blocked",
+					"reason": "waiting on review"
+				}
+			]
+		}
+	},
+	"workerAddressed": {
+		"tasks": {
+			"kind": "task",
+			"schemaVersion": 1,
+			"done": 1,
+			"total": 3,
+			"active": "Wire the runner",
+			"blocked": 1,
+			"outcome": "stuck",
+			"rows": [
+				{
+					"idKind": "local",
+					"localTaskId": "t1",
+					"status": "done"
+				},
+				{
+					"idKind": "local",
+					"localTaskId": "t2",
+					"status": "active"
+				},
+				{
+					"idKind": "local",
+					"localTaskId": "t3",
+					"status": "blocked",
+					"reason": "waiting on review"
+				}
+			]
+		}
+	}
+}

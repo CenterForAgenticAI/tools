@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".test-dist",
+    "rootDir": ".",
+    "sourceMap": true,
+    "inlineSources": true,
+    "types": []
+  },
+  "include": ["compaction-history.ts", "history-integrity.ts", "compaction-ownership.ts", "config-layers.ts", "seed-expansion.ts", "context-cache.ts", "context-service.ts", "context-telemetry.ts", "session-tasks.ts", "session-tasks-view.ts", "session-tasks-contract.ts", "session-tasks-runtime.ts", "worker-compaction-contract.ts", "tests/**/*.ts", "tests/**/*.d.ts"]
+}

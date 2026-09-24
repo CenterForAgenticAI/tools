@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "files": {
+    "guarded-decisions.md": {
+      "description": "representative fixture cache doc",
+      "createdBy": "fixture",
+      "updatedBy": "fixture",
+      "created": "2026-01-01T00:00:00.000Z",
+      "updated": "2026-01-01T00:00:00.000Z",
+      "sizeBytes": 0
+    },
+    "tiny-note.md": {
+      "description": "tiny fixture cache doc",
+      "createdBy": "fixture",
+      "updatedBy": "fixture",
+      "created": "2026-01-01T00:00:00.000Z",
+      "updated": "2026-01-01T00:00:00.000Z",
+      "sizeBytes": 0
+    },
+    "decoy.md": {
+      "description": "fixture decoy",
+      "createdBy": "fixture",
+      "updatedBy": "fixture",
+      "created": "2026-01-01T00:00:00.000Z",
+      "updated": "2026-01-01T00:00:00.000Z",
+      "sizeBytes": 0
+    }
+  }
+}

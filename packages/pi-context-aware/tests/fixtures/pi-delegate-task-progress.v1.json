@@ -1,0 +1,82 @@
+{
+	"ownerAddressed": {
+		"tasks": {
+			"kind": "task",
+			"schemaVersion": 1,
+			"done": 1,
+			"total": 3,
+			"active": "Wire the runner",
+			"blocked": 1,
+			"outcome": "stuck",
+			"rows": [
+				{
+					"idKind": "owner",
+					"ownerTaskId": "t1",
+					"title": "Write the parser",
+					"status": "done"
+				},
+				{
+					"idKind": "owner",
+					"ownerTaskId": "t2",
+					"title": "Wire the runner",
+					"status": "active",
+					"subtasks": [
+						{
+							"idKind": "local",
+							"localTaskId": "t2.1",
+							"title": "Write a failing test",
+							"status": "done"
+						}
+					]
+				},
+				{
+					"idKind": "owner",
+					"ownerTaskId": "t3",
+					"title": "Ship the docs",
+					"status": "blocked",
+					"reason": "waiting on review"
+				}
+			]
+		}
+	},
+	"workerAddressed": {
+		"tasks": {
+			"kind": "task",
+			"schemaVersion": 1,
+			"done": 1,
+			"total": 3,
+			"active": "Wire the runner",
+			"blocked": 1,
+			"outcome": "stuck",
+			"rows": [
+				{
+					"idKind": "local",
+					"localTaskId": "t1",
+					"title": "Write the parser",
+					"status": "done"
+				},
+				{
+					"idKind": "local",
+					"localTaskId": "t2",
+					"title": "Wire the runner",
+					"status": "active",
+					"subtasks": [
+						{
+							"idKind": "local",
+							"localTaskId": "t2.1",
+							"title": "Write a failing test",
+							"status": "done"
+						}
+					]
+				},
+				{
+					"idKind": "local",
+					"localTaskId": "t3",
+					"title": "Ship the docs",
+					"status": "blocked",
+					"reason": "waiting on review"
+				}
+			]
+		}
+	}
+}
