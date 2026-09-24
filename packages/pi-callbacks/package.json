@@ -1,0 +1,58 @@
+{
+  "version": "0.1.1",
+  "description": "Persistent reminders, polling checks, background scripts, and token-based external callback hooks that can wake pi agents.",
+  "type": "module",
+  "bin": {
+    "pi-callbacks": "./bin/pi-callbacks.ts"
+  },
+  "scripts": {
+    "lint": "eslint . --cache --cache-location node_modules/.cache/eslint/",
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false --incremental --tsBuildInfoFile node_modules/.cache/tsc/typecheck.tsbuildinfo && tsc -p tsconfig.test.json --noEmit --pretty false --incremental --tsBuildInfoFile node_modules/.cache/tsc/typecheck-tests.tsbuildinfo",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:coverage": "c8 --all --src . --include 'index.ts' --include 'src/**/*.ts' --include 'bin/**/*.ts' --exclude 'tests/**/*.ts' --reporter=text --reporter=lcov --reporter=cobertura --check-coverage --lines 57 --statements 57 --branches 64 --functions 61 node --experimental-strip-types --test tests/*.test.ts",
+    "build": "tsc -p tsconfig.json --pretty false",
+    "package:smoke": "node scripts/package-smoke.mjs",
+    "check": "npm run lint && npm run typecheck && npm run test:coverage && npm run build && npm run package:smoke",
+    "hooks:install": "node scripts/install-hooks.mjs"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "name": "@centerforagenticai/pi-callbacks",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/pi-callbacks"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/pi-callbacks#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.1",
+    "c8": "^11.0.0",
+    "eslint": "^10.7.0",
+    "globals": "^17.7.0",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.64.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}
