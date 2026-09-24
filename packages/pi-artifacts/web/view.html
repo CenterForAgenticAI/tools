@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light dark" />
+<meta name="theme-color" content="#0d1117" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="artifacts" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>artifact · pi</title>
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/icons/icon-180.png" />
+<link rel="icon" href="/icons/icon-192.png" />
+<link rel="stylesheet" href="/app.css" />
+<link id="hljs-light" rel="stylesheet" href="/vendor/hljs-github.min.css" />
+<link id="hljs-dark" rel="stylesheet" href="/vendor/hljs-github-dark.min.css" disabled />
+<script src="/vendor/markdown-it.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
+</head>
+<body>
+<div class="viewer-bar">
+  <a href="/" class="btn-icon" title="Back to explorer">←</a>
+  <span id="title" class="title">…</span>
+  <span class="sep">·</span>
+  <span id="proj" class="muted"></span>
+  <span class="grow"></span>
+  <a id="previewship" class="btn-icon previewship-link" title="Open PreviewShip" target="_blank" rel="noopener noreferrer" hidden>🚢 PreviewShip</a>
+  <button id="save-offline" class="btn-icon" title="Save for offline" hidden>⤓</button>
+  <div class="offline-menu" hidden>
+    <button id="offline-toggle" type="button" class="btn-icon offline-toggle" title="Offline (online)" aria-label="Offline menu (online)" aria-haspopup="dialog" aria-controls="offline-panel" aria-expanded="false">
+      <span class="offline-dot" aria-hidden="true"></span>
+      <span class="offline-label">Offline</span>
+      <span class="offline-connection-state">online</span>
+    </button>
+    <div id="offline-panel" class="offline-panel" role="dialog" aria-label="Offline storage" hidden></div>
+  </div>
+  <button id="annotations-btn" class="btn-icon comments-toggle" title="Open comments" aria-controls="comment-rail" aria-expanded="false"><span aria-hidden="true">💬</span><span class="comments-label">Comments</span><span id="comment-count" class="comment-count" hidden>0</span></button>
+  <button id="versions-btn" class="btn-icon" title="Versions & metadata">ⓘ <span id="vcount"></span></button>
+  <a id="raw" class="btn-icon" title="Open raw" target="_blank">↗ raw</a>
+  <a id="dl" class="btn-icon" title="Download">⤓</a>
+  <button id="theme" class="btn-icon" title="Toggle theme">◐</button>
+</div>
+
+<div id="content"><div class="spinner">Loading…</div></div>
+
+<div id="scrim" class="scrim"></div>
+<aside id="drawer" class="drawer">
+  <h3>Metadata</h3>
+  <div id="meta-kv" class="kv"></div>
+  <h3>Versions</h3>
+  <ul id="vlist" class="vlist"></ul>
+</aside>
+
+<button id="annotation-comment" class="annotation-selection-action" hidden disabled>+ Comment</button>
+<aside id="comment-rail" class="comment-rail" aria-label="Document comments" aria-hidden="true">
+  <header class="comment-rail-head">
+    <div>
+      <strong>Comments</strong>
+      <div id="annotation-snapshot" class="muted comment-snapshot">Select text to start a thread.</div>
+    </div>
+    <span class="grow"></span>
+    <button id="annotation-mode-done" class="comment-head-action" title="Finish commenting">Done</button>
+    <button id="comment-rail-close" class="comment-head-action" title="Hide comments" aria-label="Hide comments">×</button>
+  </header>
+  <div class="comment-rail-body">
+    <p id="annotation-hint" class="muted annotation-hint">Select text, then choose + Comment.</p>
+    <div id="annotation-compose" class="annotation-compose comment-composer" hidden>
+      <div id="annotation-quote" class="annotation-quote"></div>
+      <textarea id="annotation-body" rows="3" maxlength="20000" placeholder="Add a comment…" aria-label="Comment"></textarea>
+      <label id="annotation-status-control" class="annotation-status-control">Status <select id="annotation-status"><option value="open">Open</option><option value="resolved">Resolved</option></select></label>
+      <div class="annotation-actions"><button id="annotation-save">Comment</button><button id="annotation-cancel">Cancel</button></div>
+    </div>
+    <div id="annotation-list" class="annotation-list" aria-live="polite"></div>
+    <div id="annotation-queue" class="annotation-queue" hidden></div>
+  </div>
+</aside>
+
+<script type="module">
+import { initTheme, toggleTheme, currentTheme, fmtDate, fmtSize, timeAgo, esc, shortProject, artifactDisplayPath, shouldPreviewText, TEXT_PREVIEW_CHUNK } from "/common.js";
+import { selectedTextTarget, applyTextAnnotations, clearTextAnnotations, resolveRenderedPlacement } from "/annotations.js";
+import { annotationQueue } from "/annotation-queue.js";
+import { offline, registerServiceWorker, mountOfflinePanel } from "/offline.js";
+initTheme();
+registerServiceWorker();
+mountOfflinePanel();
+document.getElementById("theme").onclick = () => { toggleTheme(); if (window._rerenderMermaid) window._rerenderMermaid(); };
+
+const id = location.pathname.split("/").pop();
+const $ = (s) => document.querySelector(s);
+let meta = null;
+let activeVersion = null; // null => current (live-preferred)
+let annotationActive = false;
+let annotationPinnedCurrent = false;
+let annotations = [];
+let pendingAnnotationTarget = null;
+let editingAnnotation = null;
+let replyingToAnnotation = null;
+let annotationRevision = 0;
+let annotationFrameChannel = null;
+let selectedAnnotationId = null;
+let selectionActionEngaged = false;
+
+function annotationVersion() { return activeVersion || meta.current_version; }
+function annotationUrl() { return `/api/artifact/${id}/annotations?version=${annotationVersion()}`; }
+function updateAnnotationSnapshotLabel() {
+  if (!meta) return;
+  const index = meta.versions.findIndex((version) => version.id === annotationVersion());
+  const label = `Snapshot v${index >= 0 ? meta.versions.length - index : "?"}`;
+  $("#annotation-snapshot").textContent = annotationActive ? `${label} · Select text to start a thread.` : label;
+}
+
+async function boot() {
+  const r = await fetch(`/api/artifact/${id}`);
+  if (!r.ok) { $("#content").innerHTML = `<div class="empty">Artifact not found.</div>`; return; }
+  const data = await r.json();
+  meta = data.artifact;
+  meta.versions = data.versions;
+  document.title = `${meta.title} · pi`;
+  $("#title").textContent = meta.title;
+  $("#proj").textContent = shortProject(meta.project);
+  $("#vcount").textContent = data.versions.length > 1 ? data.versions.length : "";
+  if (meta.previewship_url) {
+    const link = $("#previewship");
+    const current = meta.previewship_artifact_version === meta.current_version;
+    link.href = meta.previewship_url;
+    link.hidden = false;
+    link.classList.toggle("stale", !current);
+    link.textContent = current ? "🚢 PreviewShip" : "🚢 PreviewShip · stale";
+    link.title = current ? "Open the current PreviewShip deployment" : "PreviewShip is from an older artifact version";
+  }
+  buildDrawer();
+  setRawLinks();
+  setupSaveOffline();
+  await loadAnnotations();
+  await renderContent();
+}
+
+// "Save offline" pins the current artifact so its bytes are cached for offline reading.
+// Hidden for video/audio, which stream online-only in v1.
+function setupSaveOffline() {
+  const btn = $("#save-offline");
+  if (!offline.supported || meta.kind === "video" || meta.kind === "audio") { btn.hidden = true; return; }
+  btn.hidden = false;
+  const reflect = () => {
+    const on = offline.isPinned(id);
+    btn.classList.toggle("on", on);
+    btn.textContent = on ? "📥" : "⤓";
+    btn.title = on ? "Saved for offline — tap to remove" : "Save for offline";
+  };
+  reflect();
+  btn.onclick = async () => {
+    btn.disabled = true;
+    await offline.toggle(id);
+    btn.disabled = false;
+    reflect();
+  };
+}
+
+function rawUrl(download) {
+  let u = activeVersion ? `/raw/${id}/v/${activeVersion}` : `/raw/${id}`;
+  if (download) u += (u.includes("?") ? "&" : "?") + "download=1";
+  return u;
+}
+function setRawLinks() {
+  $("#raw").href = rawUrl(false);
+  $("#dl").href = rawUrl(true);
+}
+
+async function renderContent() {
+  const el = $("#content");
+  el.className = "";
+  el.innerHTML = `<div class="spinner">Rendering…</div>`;
+  const kind = meta.kind;
+  const mime = contentMime();
+  if (kind === "html") return renderHtml(el);
+  if (kind === "pdf") return renderPdf(el);
+  if (kind === "image") return renderImage(el);
+  if (kind === "video" || mime.startsWith("video/")) return renderVideo(el);
+  if (kind === "audio" || mime.startsWith("audio/")) return renderAudio(el);
+  if (kind === "other" && !isTextLike(mime)) return renderBrowserContent(el);
+
+  // Text path: preview large files via HEAD + byte ranges when the server supports them.
+  const url = rawUrl(false);
+  const head = await fetch(url, { method: "HEAD" });
+  if (head.ok) {
+    const length = head.headers.get("content-length");
+    const acceptRanges = head.headers.get("accept-ranges");
+    const size = length ? Number(length) : NaN;
+    if (shouldPreviewText(size, acceptRanges === "bytes" || acceptRanges === "*")) {
+      const [headText, tailText] = await Promise.all([
+        fetchRangeText(url, `bytes=0-${TEXT_PREVIEW_CHUNK - 1}`),
+        fetchRangeText(url, `bytes=-${TEXT_PREVIEW_CHUNK}`),
+      ]);
+      if (headText !== null && tailText !== null) {
+        return renderPreview(el, headText, tailText, size);
+      }
+    }
+  }
+  return renderFullText(el);
+}
+
+async function fetchRangeText(url, range) {
+  const res = await fetch(url, { headers: { range } });
+  if (res.status !== 206) return null;
+  return res.text();
+}
+
+function renderPreview(el, headText, tailText, size) {
+  el.className = "full";
+  const markdownNote = meta.kind === "markdown"
+    ? " Markdown is shown as plain text in preview; load the full content to render it."
+    : "";
+  el.innerHTML = `
+    <div class="preview-notice">
+      <div class="preview-notice-text">
+        <strong>Preview</strong> — first and last 64 KB of ${fmtSize(size)}.
+        Download the full file via the <strong>↗ raw</strong> link.${markdownNote}
+      </div>
+      <button id="load-full" class="btn-icon">Load full content</button>
+    </div>
+    <pre class="codeview preview-chunk"><code class="hljs">${esc(headText)}</code></pre>
+    <div class="preview-gap">⋯ middle omitted (${fmtSize(Math.max(0, size - 2 * TEXT_PREVIEW_CHUNK))}) ⋯</div>
+    <pre class="codeview preview-chunk"><code class="hljs">${esc(tailText)}</code></pre>
+  `;
+  $("#load-full").onclick = () => renderFullText(el);
+}
+
+async function renderFullText(el) {
+  el.className = "";
+  el.innerHTML = `<div class="spinner">Loading…</div>`;
+  const res = await fetch(rawUrl(false));
+  const text = await res.text();
+  if (meta.kind === "markdown") return renderMarkdown(el, text);
+  return renderCode(el, text);
+}
+
+function contentMime() {
+  if (activeVersion) return meta.versions.find((v) => v.id === activeVersion)?.mime || meta.mime || "application/octet-stream";
+  return meta.mime || "application/octet-stream";
+}
+function isTextLike(mime) {
+  return mime.startsWith("text/") || /^(application\/(json|xml|javascript|x-ndjson)|image\/svg\+xml)$/.test(mime);
+}
+
+function renderHtml(el) {
+  el.className = "full html-artifact";
+  annotationFrameChannel = annotationActive ? crypto.randomUUID() : null;
+  const raw = rawUrl(false);
+  const src = annotationActive ? `/annotation-frame/${id}/v/${annotationVersion()}?channel=${encodeURIComponent(annotationFrameChannel)}` : raw;
+  el.innerHTML = `<div class="html-print-notice">HTML artifacts cannot paginate inside the viewer frame. Open <a href="${raw}" target="_blank" rel="noopener noreferrer">the raw document</a>, then print that page for complete output.</div><iframe id="htmlframe" class="htmlframe" sandbox="allow-scripts" src="${src}" title="${esc(meta.title)}"></iframe>`;
+}
+function renderPdf(el) {
+  el.className = "full";
+  el.innerHTML = `<iframe class="htmlframe" src="${rawUrl(false)}"></iframe>`;
+}
+function renderImage(el) {
+  el.className = "";
+  el.innerHTML = `<img class="imgview" src="${rawUrl(false)}" alt="${esc(meta.title)}" />`;
+}
+function renderVideo(el) {
+  el.className = "media-page";
+  el.innerHTML = `<div class="media-stack"><video class="media-view" controls playsinline preload="metadata" src="${rawUrl(false)}">
+    Your browser cannot play this video.
+  </video><a class="media-download" href="${rawUrl(true)}">Download original video</a></div>`;
+}
+function renderAudio(el) {
+  el.className = "media-page audio-page";
+  el.innerHTML = `<div class="media-stack"><audio class="audio-view" controls preload="metadata" src="${rawUrl(false)}">
+    Your browser cannot play this audio.
+  </audio><a class="media-download" href="${rawUrl(true)}">Download original audio</a></div>`;
+}
+function renderBrowserContent(el) {
+  el.className = "full";
+  const base = rawUrl(false);
+  const src = base + (base.includes("?") ? "&" : "?") + "embed=1";
+  el.innerHTML = `<iframe class="htmlframe" sandbox src="${src}" title="${esc(meta.title)}"></iframe>`;
+}
+
+let md;
+function getMd() {
+  if (md) return md;
+  md = window.markdownit({
+    html: true, linkify: true, typographer: true,
+    highlight(str, lang) {
+      if (lang === "mermaid") return `<pre class="mermaid">${esc(str)}</pre>`;
+      if (lang && hljs.getLanguage(lang)) {
+        try { return `<pre><code class="hljs language-${lang}">${hljs.highlight(str, { language: lang }).value}</code></pre>`; } catch {}
+      }
+      return `<pre><code class="hljs">${esc(str)}</code></pre>`;
+    },
+  });
+  return md;
+}
+
+async function renderMarkdown(el, text) {
+  const html = getMd().render(text);
+  const clean = DOMPurify.sanitize(html, { ADD_TAGS: ["pre"], ADD_ATTR: ["class"] });
+  el.className = "";
+  el.innerHTML = `<div class="md">${clean}</div>`;
+  applyTextAnnotations(el.querySelector(".md"), annotations, annotationVersion());
+  reflectSelectedAnnotation();
+  // mermaid
+  const mer = el.querySelectorAll("pre.mermaid");
+  if (mer.length) await renderMermaid();
+}
+
+let mermaidLoaded = false;
+function loadMermaid() {
+  return new Promise((resolve, reject) => {
+    if (window.mermaid) return resolve();
+    const s = document.createElement("script");
+    s.src = "/vendor/mermaid.min.js";
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error("failed to load mermaid"));
+    document.head.appendChild(s);
+  });
+}
+async function renderMermaid() {
+  if (!mermaidLoaded) {
+    await loadMermaid();
+    mermaidLoaded = true;
+  }
+  const theme = currentTheme() === "dark" ? "dark" : "default";
+  window.mermaid.initialize({ startOnLoad: false, theme, securityLevel: "loose" });
+  // store source so we can re-render on theme switch
+  document.querySelectorAll("pre.mermaid").forEach((n) => { if (!n.dataset.src) n.dataset.src = n.textContent; });
+  await window.mermaid.run({ querySelector: "pre.mermaid" });
+  window._rerenderMermaid = async () => {
+    document.querySelectorAll("pre.mermaid").forEach((n) => {
+      if (n.dataset.src) { n.removeAttribute("data-processed"); n.innerHTML = n.dataset.src; }
+    });
+    const t = currentTheme() === "dark" ? "dark" : "default";
+    window.mermaid.initialize({ startOnLoad: false, theme: t, securityLevel: "loose" });
+    await window.mermaid.run({ querySelector: "pre.mermaid" });
+  };
+}
+
+function renderCode(el, text) {
+  el.className = "full";
+  const ext = meta.title.split(".").pop().toLowerCase();
+  let out;
+  try {
+    out = hljs.getLanguage(ext) ? hljs.highlight(text, { language: ext }).value : hljs.highlightAuto(text).value;
+  } catch { out = esc(text); }
+  el.innerHTML = `<pre class="codeview"><code class="hljs">${out}</code></pre>`;
+  applyTextAnnotations(el.querySelector("code"), annotations, annotationVersion());
+  reflectSelectedAnnotation();
+}
+
+function currentHtmlPlacements() {
+  return annotations.map(({ id: annotationId, placements }) => ({ id: annotationId, placement: placements.find((placement) => placement.versionId === annotationVersion()) })).filter((item) => item.placement);
+}
+function syncHtmlAnnotations(frame = $("#htmlframe")) {
+  if (!frame || !annotationFrameChannel) return;
+  frame.contentWindow?.postMessage({ type: "pi-artifact-annotation", channel: annotationFrameChannel, action: "placements", placements: currentHtmlPlacements() }, "*");
+  if (selectedAnnotationId) frame.contentWindow?.postMessage({ type: "pi-artifact-annotation", channel: annotationFrameChannel, action: "focus", id: selectedAnnotationId }, "*");
+}
+function refreshAnnotationPresentation() {
+  renderAnnotationList();
+  if (meta.kind === "html") { syncHtmlAnnotations(); return; }
+  const root = meta.kind === "markdown" ? $("#content .md") : meta.kind === "code" ? $("#content code") : null;
+  if (!root) return;
+  clearTextAnnotations(root);
+  applyTextAnnotations(root, annotations, annotationVersion());
+  reflectSelectedAnnotation();
+}
+
+async function loadAnnotations() {
+  if (!meta) return;
+  let base = null;
+  try {
+    const response = await fetch(annotationUrl());
+    if (response.ok) {
+      base = await response.json();
+      await annotationQueue.cacheSidecar(id, annotationVersion(), base);
+    }
+  } catch { /* IndexedDB fallback below */ }
+  if (!base) base = (await annotationQueue.cachedSidecar(id, annotationVersion()))?.sidecar || null;
+  if (!base) return;
+  // A service-worker GET can be a stale cached response while offline. Always replay the local
+  // durable queue as an optimistic projection so pending edits survive reloads and remain visible.
+  const projected = await annotationQueue.project(id, base);
+  annotations = projected.annotations || [];
+  annotationRevision = base.revision || 0;
+  renderAnnotationList();
+  renderQueuedConflicts();
+}
+async function autoMigrate(root) {
+  if (!annotationActive) return false;
+  const versionId = annotationVersion();
+  if (!annotations.length || annotations.every((annotation) => annotation.placements.some((placement) => placement.versionId === versionId))) return false;
+  // HTML frame placement is resolved by the bridge against its actual authored DOM. Text
+  // formats resolve against the rendered corpus here; neither path asks the server to parse raw bytes.
+  if (meta.kind === "html" || !root) return false;
+  const placements = annotations.map((annotation) => ({ annotationId: annotation.id, placement: resolveRenderedPlacement(root, annotation, versionId) }));
+  // A concurrent viewer can win between GET and POST. Refresh and retry once; never spin.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await sendAnnotationMutation(`/api/artifact/${id}/annotations/placements`, "POST", { versionId, placements }, "placement");
+    if (!response) {
+      $("#annotation-hint").textContent = "Placement migration queued until you reconnect.";
+      refreshAnnotationPresentation();
+      return false;
+    }
+    if (response.status === 412 || response.status === 409) { await loadAnnotations(); continue; }
+    if (!response.ok) return false;
+    const data = await response.json(); annotations = data.annotations; annotationRevision = data.revision;
+    refreshAnnotationPresentation(); return true;
+  }
+  return false;
+}
+function renderAnnotationList() {
+  const list = $("#annotation-list");
+  if (selectedAnnotationId && !annotations.some((annotation) => annotation.id === selectedAnnotationId)) selectedAnnotationId = null;
+  const count = annotations.filter((annotation) => !annotation.deleting).length;
+  $("#comment-count").textContent = String(count);
+  $("#comment-count").hidden = count === 0;
+  if (!annotations.length) { list.innerHTML = `<p class="muted comment-empty">No comments on this snapshot yet. Select text to start one.</p>`; return; }
+  list.replaceChildren(...annotations.map((annotation) => {
+    const placement = annotation.placements.find((entry) => entry.versionId === annotationVersion());
+    const target = placement?.target || annotation.origin.target;
+    const item = document.createElement("article"); item.className = `annotation-item${selectedAnnotationId === annotation.id ? " active" : ""}`; item.dataset.annotationId = annotation.id; item.tabIndex = 0;
+    const head = document.createElement("div"); head.className = "annotation-item-head";
+    const author = document.createElement("span"); author.className = `annotation-author ${annotation.author || "user"}`; author.textContent = annotation.author === "agent" ? "Agent" : "You"; head.appendChild(author);
+    if (annotation.pending || annotation.status === "resolved") {
+      const commentStatus = document.createElement("span"); commentStatus.className = `annotation-state ${annotation.status}`; commentStatus.textContent = annotation.pending ? `${annotation.status === "resolved" ? "Resolved · " : ""}Pending sync` : "Resolved"; head.appendChild(commentStatus);
+    }
+    if (placement?.state !== "anchored") {
+      const placementStatus = document.createElement("span"); placementStatus.className = `annotation-state ${placement?.state || "unplaced"}`;
+      placementStatus.textContent = ({ migrated: "Moved to this version", ambiguous: "Placement needs review", orphaned: "Passage not found", unplaced: "Not placed" })[placement?.state || "unplaced"];
+      head.appendChild(placementStatus);
+    }
+    if (head.childElementCount) item.appendChild(head);
+    const quote = document.createElement("div"); quote.className = "annotation-item-quote"; quote.textContent = `“${target.quote.length > 120 ? `${target.quote.slice(0, 117)}…` : target.quote}”`; item.appendChild(quote);
+    const body = document.createElement("div"); body.className = "annotation-item-body"; body.textContent = annotation.deleting ? `${annotation.body} (deleting when online)` : annotation.body; item.appendChild(body);
+    const metaLine = document.createElement("small"); metaLine.className = "muted";
+    const index = meta.versions.findIndex((version) => version.id === annotation.origin.versionId);
+    const originLabel = annotation.origin.versionId !== annotationVersion() ? ` · started on v${index >= 0 ? meta.versions.length - index : "?"}` : "";
+    metaLine.textContent = `${timeAgo(annotation.updatedAt)}${originLabel}`; item.appendChild(metaLine);
+    if (annotation.replies?.length) {
+      const replies = document.createElement("div"); replies.className = "annotation-replies";
+      for (const reply of annotation.replies) {
+        const row = document.createElement("div"); row.className = `annotation-reply${reply.pending ? " pending" : ""}`; row.dataset.replyId = reply.id;
+        const replyHead = document.createElement("div"); replyHead.className = "annotation-reply-head";
+        const replyAuthor = document.createElement("span"); replyAuthor.className = `annotation-author ${reply.author || "user"}`; replyAuthor.textContent = reply.author === "agent" ? "Agent" : "You"; replyHead.appendChild(replyAuthor);
+        const replyTime = document.createElement("small"); replyTime.className = "muted"; replyTime.textContent = reply.pending ? "Pending sync" : timeAgo(reply.createdAt); replyHead.appendChild(replyTime);
+        const replyBody = document.createElement("div"); replyBody.className = "annotation-reply-body"; replyBody.textContent = reply.body;
+        row.append(replyHead, replyBody); replies.appendChild(row);
+      }
+      item.appendChild(replies);
+    }
+    const actions = document.createElement("div"); actions.className = "annotation-item-actions";
+    const availableActions = [["reply", "Reply"], ...(annotation.author === "agent" ? [] : [["edit", "Edit"]]), ["status", annotation.status === "open" ? "Resolve" : "Reopen"], ...(annotation.author === "agent" ? [] : [["delete", "Delete"]])];
+    for (const [action, label] of availableActions) {
+      const button = document.createElement("button"); button.dataset.action = action; button.textContent = label; if (annotation.deleting) button.disabled = true; actions.appendChild(button);
+    }
+    item.appendChild(actions);
+    return item;
+  }));
+  list.querySelectorAll(".annotation-item").forEach((item) => item.onclick = (event) => {
+    const annotation = annotations.find((a) => a.id === item.dataset.annotationId);
+    if (!annotation) return;
+    const action = event.target instanceof Element ? event.target.closest("button[data-action]")?.dataset.action : null;
+    if (action === "reply") { void openReplyComposer(annotation); return; }
+    if (action === "edit") { void openComposer(annotation.origin.target, annotation); return; }
+    if (action === "status") { void setAnnotationStatus(annotation, annotation.status === "open" ? "resolved" : "open"); return; }
+    if (action === "delete") { void deleteAnnotation(annotation); return; }
+    focusAnnotation(annotation);
+  });
+  list.querySelectorAll(".annotation-item").forEach((item) => item.onkeydown = (event) => { if (event.key === "Enter" && !(event.target instanceof HTMLButtonElement)) item.click(); });
+}
+
+function focusAnnotation(annotation) {
+  selectedAnnotationId = annotation.id;
+  $("#annotation-list").querySelectorAll(".annotation-item").forEach((item) => item.classList.toggle("active", item.dataset.annotationId === annotation.id));
+  toggleCommentRail(true);
+  $("#annotation-list [data-annotation-id='" + annotation.id + "']")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  if (meta.kind === "html") {
+    const frame = $("#htmlframe");
+    frame?.contentWindow?.postMessage({ type: "pi-artifact-annotation", channel: annotationFrameChannel, action: "focus", id: annotation.id }, "*");
+  } else {
+    document.querySelectorAll(".annotation-mark").forEach((mark) => mark.classList.toggle("active", mark.dataset.annotationId === annotation.id));
+    document.querySelector(`.annotation-mark[data-annotation-id="${annotation.id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+}
+
+function reflectSelectedAnnotation() {
+  document.querySelectorAll(".annotation-mark").forEach((mark) => mark.classList.toggle("active", Boolean(selectedAnnotationId) && mark.dataset.annotationId === selectedAnnotationId));
+}
+
+async function setAnnotationStatus(annotation, status) {
+  const response = await sendAnnotationMutation(`/api/artifact/${id}/annotation/${annotation.id}`, "PATCH", { status, expectedUpdatedAt: annotation.updatedAt }, "status", annotation.updatedAt);
+  if (!response) { $("#annotation-hint").textContent = `${status === "resolved" ? "Resolve" : "Reopen"} queued until you reconnect.`; return; }
+  if (response.status === 412 || response.status === 409) return alert("This comment changed elsewhere. Refresh and try again.");
+  if (!response.ok) return alert("Could not update comment status.");
+  $("#annotation-hint").textContent = status === "resolved" ? "Comment resolved." : "Comment reopened."; await loadAnnotations(); refreshAnnotationPresentation();
+}
+
+async function deleteAnnotation(annotation) {
+  if (!confirm("Delete this comment?")) return;
+  const response = await sendAnnotationMutation(`/api/artifact/${id}/annotation/${annotation.id}`, "DELETE", { expectedUpdatedAt: annotation.updatedAt }, "delete", annotation.updatedAt);
+  if (!response) { $("#annotation-hint").textContent = "Delete queued until you reconnect."; return; }
+  if (response.status === 412 || response.status === 409) return alert("This comment changed elsewhere. Refresh and try again.");
+  if (!response.ok) return alert("Could not delete comment.");
+  if (selectedAnnotationId === annotation.id) selectedAnnotationId = null;
+  $("#annotation-hint").textContent = "Comment deleted."; await loadAnnotations(); refreshAnnotationPresentation();
+}
+
+async function openComposer(target, existing = null) {
+  if (!annotationActive) await setAnnotationMode(true);
+  pendingAnnotationTarget = target;
+  editingAnnotation = existing;
+  replyingToAnnotation = null;
+  clearSelectionAction();
+  toggleCommentRail(true);
+  $("#annotation-compose").hidden = false;
+  $("#annotation-quote").textContent = `“${target.quote.length > 180 ? `${target.quote.slice(0, 177)}…` : target.quote}”`;
+  $("#annotation-body").value = existing ? existing.body : "";
+  $("#annotation-status").value = existing?.status || "open";
+  $("#annotation-status-control").hidden = !existing;
+  $("#annotation-save").textContent = existing ? "Update comment" : "Comment";
+  requestAnimationFrame(() => $("#annotation-body").focus());
+}
+async function openReplyComposer(annotation) {
+  if (!annotationActive) await setAnnotationMode(true);
+  pendingAnnotationTarget = annotation.origin.target;
+  editingAnnotation = null;
+  replyingToAnnotation = annotation;
+  clearSelectionAction();
+  toggleCommentRail(true);
+  $("#annotation-compose").hidden = false;
+  const quote = annotation.origin.target.quote;
+  $("#annotation-quote").textContent = `Reply to “${quote.length > 165 ? `${quote.slice(0, 162)}…` : quote}”`;
+  $("#annotation-body").value = "";
+  $("#annotation-status-control").hidden = true;
+  $("#annotation-save").textContent = "Reply";
+  requestAnimationFrame(() => $("#annotation-body").focus());
+}
+function closeComposer() { pendingAnnotationTarget = null; editingAnnotation = null; replyingToAnnotation = null; $("#annotation-compose").hidden = true; $("#annotation-body").value = ""; }
+function annotationEtag() { return `W/"annotations-${id}-${annotationRevision}"`; }
+async function sendAnnotationMutation(url, method, body, kind = "mutation", baseUpdatedAt = null, operationId = crypto.randomUUID().replaceAll("-", "")) {
+  try {
+    return await fetch(url, { method, headers: { "content-type": "application/json", "if-match": annotationEtag(), "x-pi-artifacts-operation-id": operationId }, body: JSON.stringify(body) });
+  } catch {
+    try {
+      await annotationQueue.enqueue({ artifactId: id, url, method, body, etag: annotationEtag(), operationId, kind, baseUpdatedAt });
+      optimisticAnnotationMutation(operationId, kind, body, url);
+      return null;
+    } catch (error) {
+      return new Response(JSON.stringify({ error: error instanceof Error ? error.message : "Could not queue annotation change." }), { status: 507, headers: { "content-type": "application/json" } });
+    }
+  }
+}
+function optimisticAnnotationMutation(operationId, kind, body, url) {
+  const now = Date.now();
+  const annotationId = /annotation\/([a-f0-9]{32})(?:\/replies)?$/.exec(url)?.[1];
+  if (kind === "create") annotations = [...annotations, { id: operationId, body: body.body, author: "user", status: "open", pending: true, origin: { versionId: body.versionId, blob: "pending", target: body.target }, placements: [{ versionId: body.versionId, state: "anchored", target: body.target }], replies: [], createdAt: now, updatedAt: now }];
+  else if (kind === "reply" && annotationId) annotations = annotations.map((annotation) => annotation.id === annotationId ? { ...annotation, replies: [...(annotation.replies || []), { id: operationId, body: body.body, author: "user", createdAt: now, pending: true }], updatedAt: Math.max(annotation.updatedAt || 0, now) } : annotation);
+  else if ((kind === "edit" || kind === "status") && annotationId) annotations = annotations.map((annotation) => annotation.id === annotationId ? { ...annotation, ...("body" in body ? { body: body.body } : {}), ...("status" in body ? { status: body.status } : {}), pending: true } : annotation);
+  else if (kind === "delete" && annotationId) annotations = annotations.map((annotation) => annotation.id === annotationId ? { ...annotation, pending: true, deleting: true } : annotation);
+  else if (kind === "placement") {
+    const placements = new Map((body.placements || []).map((entry) => [entry.annotationId, entry.placement]));
+    annotations = annotations.map((annotation) => {
+      const placement = placements.get(annotation.id);
+      if (!placement) return annotation;
+      const next = annotation.placements?.some((existing) => existing.versionId === placement.versionId)
+        ? annotation.placements
+        : [...(annotation.placements || []), placement];
+      return { ...annotation, placements: next, pending: true };
+    });
+  }
+  refreshAnnotationPresentation();
+}
+let annotationRefreshTimer = null;
+function scheduleAnnotationRefresh() {
+  clearTimeout(annotationRefreshTimer);
+  annotationRefreshTimer = setTimeout(() => loadAnnotations().then(refreshAnnotationPresentation), 50);
+}
+annotationQueue.onChange((event) => {
+  if (event.item?.artifactId !== id) return;
+  if (event.type === "replayed") { scheduleAnnotationRefresh(); return; }
+  if (event.type === "conflict") $("#annotation-hint").textContent = "An offline change is stale; review or discard it below.";
+  renderQueuedConflicts();
+});
+async function renderQueuedConflicts() {
+  const box = $("#annotation-queue");
+  const queued = await annotationQueue.items(id);
+  const conflicts = queued.filter((item) => item.state === "conflict");
+  const pending = queued.filter((item) => item.state !== "conflict");
+  if (!queued.length) { box.hidden = true; box.replaceChildren(); return; }
+  box.hidden = false;
+  const summary = document.createElement("div");
+  summary.className = "annotation-sync-summary";
+  summary.textContent = `${pending.length} pending sync${pending.length === 1 ? "" : "s"}${conflicts.length ? ` · ${conflicts.length} conflict${conflicts.length === 1 ? "" : "s"}` : ""}`;
+  box.replaceChildren(summary, ...conflicts.map((item) => {
+    const row = document.createElement("div"); row.className = "annotation-conflict";
+    row.textContent = `Queued ${item.kind} needs review (${item.code || `HTTP ${item.status}`}). `;
+    const discard = document.createElement("button"); discard.textContent = "Discard";
+    discard.onclick = async () => { await annotationQueue.discard(item.id); await loadAnnotations(); refreshAnnotationPresentation(); renderQueuedConflicts(); };
+    if (item.code === "ANNOTATION_ITEM_CONFLICT" || item.status === 412) {
+      const retry = document.createElement("button"); retry.textContent = "Retry rebase";
+      retry.onclick = async () => { if (confirm("Retry this queued change using the latest server annotation state? This can overwrite a newer edit.")) { if (await annotationQueue.retry(item.id)) renderQueuedConflicts(); } };
+      row.append(retry);
+    }
+    row.append(discard); return row;
+  }));
+}
+
+// drawer
+function buildDrawer() {
+  const m = meta;
+  const displayPath = artifactDisplayPath(m);
+  $("#meta-kv").innerHTML = [
+    ["Title", esc(m.title)],
+    ["Project", esc(m.project)],
+    m.project_path ? ["Project root", `<span style="font-family:var(--mono);font-size:12px">${esc(m.project_path)}</span>`] : null,
+    displayPath ? ["Path", `<span style="font-family:var(--mono);font-size:12px">${esc(displayPath)}</span>`] : null,
+    ["Kind", m.kind],
+    ["Mode", m.mode],
+    m.source_machine ? ["Machine", esc(m.source_machine)] : null,
+    m.session ? ["Session", esc(m.session)] : null,
+    (m.tags && m.tags.length) ? ["Tags", m.tags.map((t)=>`<span class="tag">${esc(t)}</span>`).join(" ")] : null,
+    m.previewship_url ? ["PreviewShip", `<a href="${esc(m.previewship_url)}" target="_blank" rel="noopener noreferrer">Open fixed preview URL ↗</a>`] : null,
+    m.previewship_project_name ? ["Preview project", esc(m.previewship_project_name)] : null,
+    m.previewship_deployment_id ? ["Deployment", `#${m.previewship_deployment_id}`] : null,
+    m.previewship_published_at ? ["Published", `${fmtDate(m.previewship_published_at)}${m.previewship_artifact_version === m.current_version ? "" : " · older artifact version"}`] : null,
+    ["Created", fmtDate(m.created_at)],
+    ["Updated", fmtDate(m.updated_at)],
+  ].filter(Boolean).map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join("");
+
+  $("#vlist").innerHTML = meta.versions.map((v, i) => {
+    const isCur = activeVersion === null ? i === 0 : activeVersion === v.id;
+    return `<li data-v="${v.id}" class="${isCur?"active":""}">
+      <strong>v${meta.versions.length - i}</strong> · ${fmtSize(v.size)} · ${timeAgo(v.created_at)}
+      ${i===0?' <span class="tag">current</span>':''}
+      ${v.note?`<br><span class="muted">${esc(v.note)}</span>`:""}
+    </li>`;
+  }).join("");
+  $("#vlist").querySelectorAll("li").forEach((li, i) => {
+    li.onclick = () => {
+      closeComposer(); clearSelectionAction();
+      activeVersion = annotationActive ? Number(li.dataset.v) : i === 0 ? null : Number(li.dataset.v);
+      if (annotationActive) annotationPinnedCurrent = i === 0;
+      updateAnnotationSnapshotLabel(); setRawLinks(); buildDrawer(); loadAnnotations().then(async () => { await renderContent(); if (await autoMigrate(meta.kind === "markdown" ? $("#content .md") : $("#content code"))) await renderContent(); });
+    };
+  });
+}
+
+const drawer = $("#drawer"), scrim = $("#scrim");
+function toggleDrawer(open) {
+  drawer.classList.toggle("open", open);
+  scrim.classList.toggle("open", open);
+}
+$("#versions-btn").onclick = () => { toggleCommentRail(false); toggleDrawer(!drawer.classList.contains("open")); };
+scrim.onclick = () => toggleDrawer(false);
+
+const commentRail = $("#comment-rail");
+function toggleCommentRail(open) {
+  commentRail.classList.toggle("open", open);
+  commentRail.setAttribute("aria-hidden", String(!open));
+  document.body.classList.toggle("comment-rail-open", open);
+  $("#annotations-btn").setAttribute("aria-expanded", String(open));
+}
+function clearSelectionAction() {
+  const action = $("#annotation-comment");
+  action.hidden = true; action.disabled = true; action.style.removeProperty("left"); action.style.removeProperty("top");
+}
+function clearPendingSelection() { pendingAnnotationTarget = null; clearSelectionAction(); }
+async function setAnnotationMode(active) {
+  if (active && !["markdown", "code", "html"].includes(meta.kind)) { alert("Comments are available for Markdown, code, and HTML artifacts."); return false; }
+  const button = $("#annotations-btn"), content = $("#content");
+  const textKind = meta.kind === "markdown" || meta.kind === "code";
+  // Stored current content is already the immutable current snapshot. Likewise, a selected
+  // historical version is already pinned. Reuse that DOM when toggling comments so native
+  // selection, scroll, and iOS keyboard state are not destroyed merely to add/remove marks.
+  const reuseDocument = textKind && (active
+    ? activeVersion !== null || meta.mode === "stored"
+    : !annotationPinnedCurrent || meta.mode === "stored");
+  button.disabled = true; content.inert = true; document.body.classList.add("comment-mode-loading");
+  annotationActive = active;
+  if (!active) { closeComposer(); clearSelectionAction(); toggleCommentRail(false); }
+  if (active && activeVersion === null) { activeVersion = meta.current_version; annotationPinnedCurrent = true; }
+  if (!active && annotationPinnedCurrent) { activeVersion = null; annotationPinnedCurrent = false; }
+  $("#annotations-btn").classList.toggle("on", active);
+  $("#annotations-btn").title = active ? "Show or hide comments" : "Open comments";
+  updateAnnotationSnapshotLabel();
+  $("#annotation-hint").textContent = active ? "Select text, then choose + Comment." : "Open comments to add or edit a thread.";
+  try {
+    setRawLinks(); buildDrawer(); await loadAnnotations();
+    const root = meta.kind === "markdown" ? $("#content .md") : meta.kind === "code" ? $("#content code") : null;
+    if (reuseDocument && root) {
+      if (active) { refreshAnnotationPresentation(); await autoMigrate(root); }
+      else clearTextAnnotations(root);
+    } else {
+      await renderContent();
+      if (active && await autoMigrate(meta.kind === "markdown" ? $("#content .md") : $("#content code"))) await renderContent();
+    }
+    return true;
+  } finally {
+    button.disabled = false; content.inert = false; document.body.classList.remove("comment-mode-loading");
+  }
+}
+$("#annotations-btn").onclick = async () => {
+  if (!annotationActive && !(await setAnnotationMode(true))) return;
+  toggleDrawer(false);
+  toggleCommentRail(!commentRail.classList.contains("open"));
+};
+$("#comment-rail-close").onclick = () => toggleCommentRail(false);
+$("#annotation-mode-done").onclick = () => { void setAnnotationMode(false); };
+$("#annotation-comment").onpointerdown = (event) => { selectionActionEngaged = true; event.preventDefault(); };
+$("#annotation-comment").onpointerup = () => { setTimeout(() => { selectionActionEngaged = false; }, 0); };
+$("#annotation-comment").onclick = () => { const target = pendingAnnotationTarget; if (target) void openComposer(target); };
+$("#annotation-cancel").onclick = closeComposer;
+$("#annotation-save").onclick = async () => {
+  if (!pendingAnnotationTarget) return;
+  const body = $("#annotation-body").value;
+  const status = $("#annotation-status").value;
+  if (!body.trim()) return;
+  const editing = Boolean(editingAnnotation);
+  const replying = replyingToAnnotation;
+  const previousSelectedAnnotationId = selectedAnnotationId;
+  const createdAnnotationId = editing || replying ? null : crypto.randomUUID().replaceAll("-", "");
+  if (createdAnnotationId) selectedAnnotationId = createdAnnotationId;
+  const response = replying
+    ? await sendAnnotationMutation(`/api/artifact/${id}/annotation/${replying.id}/replies`, "POST", { body, expectedUpdatedAt: replying.updatedAt }, "reply", replying.updatedAt)
+    : editingAnnotation
+      ? await sendAnnotationMutation(`/api/artifact/${id}/annotation/${editingAnnotation.id}`, "PATCH", { body, status, expectedUpdatedAt: editingAnnotation.updatedAt }, body === editingAnnotation.body ? "status" : "edit", editingAnnotation.updatedAt)
+      : await sendAnnotationMutation(`/api/artifact/${id}/annotations`, "POST", { versionId: annotationVersion(), target: pendingAnnotationTarget, body }, "create", null, createdAnnotationId);
+  if (!response) { closeComposer(); $("#annotation-hint").textContent = replying ? "Reply queued until you reconnect." : "Comment queued until you reconnect."; return; }
+  if (!response.ok) {
+    selectedAnnotationId = previousSelectedAnnotationId;
+    refreshAnnotationPresentation();
+    return alert((await response.json().catch(() => ({ error: "Could not save comment." }))).error || "Could not save comment.");
+  }
+  closeComposer(); $("#annotation-hint").textContent = replying ? "Reply added." : editing ? "Comment updated." : "Comment added."; await loadAnnotations(); refreshAnnotationPresentation();
+};
+let annotationSelectionTimer = null;
+function positionSelectionAction(rect) {
+  if (!rect || ![rect.left, rect.top, rect.right, rect.bottom].every(Number.isFinite)) return;
+  const action = $("#annotation-comment");
+  const mobile = innerWidth <= 720;
+  let left = mobile ? rect.left + rect.width / 2 - 58 : rect.right + 12;
+  const railBoundary = commentRail.classList.contains("open") && !mobile ? innerWidth - commentRail.getBoundingClientRect().width - 12 : innerWidth - 12;
+  if (!mobile && left + 108 > railBoundary) left = rect.left - 120;
+  let top = rect.top + rect.height / 2 - 20;
+  if (mobile) {
+    const railTop = commentRail.classList.contains("open") ? commentRail.getBoundingClientRect().top - 8 : innerHeight - 8;
+    top = rect.bottom + 10;
+    if (top + 48 > railTop) top = rect.top - 58;
+    top = Math.max(60, Math.min(top, railTop - 48));
+  }
+  action.style.left = `${Math.max(12, Math.min(left, innerWidth - 120))}px`;
+  action.style.top = `${mobile ? top : Math.max(60, Math.min(top, innerHeight - 52))}px`;
+  action.hidden = false; action.disabled = false;
+}
+function captureAnnotationSelection() {
+  if (!annotationActive || meta.kind === "html") return;
+  const root = meta.kind === "markdown" ? $("#content .md") : $("#content code");
+  const candidate = selectedTextTarget(root);
+  const target = validAnnotationTarget(candidate) ? candidate : null;
+  if (target) {
+    pendingAnnotationTarget = target;
+    const selection = getSelection();
+    if (selection?.rangeCount === 1) positionSelectionAction(selection.getRangeAt(0).getBoundingClientRect());
+    $("#annotation-hint").textContent = "Selection ready. Choose + Comment beside it.";
+  } else if (root && !selectionActionEngaged && $("#annotation-compose").hidden) {
+    clearPendingSelection();
+    $("#annotation-hint").textContent = "Select non-empty text to add a comment.";
+  }
+}
+function scheduleAnnotationSelection() {
+  clearTimeout(annotationSelectionTimer);
+  annotationSelectionTimer = setTimeout(captureAnnotationSelection, 120);
+}
+document.addEventListener("pointerup", scheduleAnnotationSelection, { passive: true });
+document.addEventListener("touchend", () => setTimeout(scheduleAnnotationSelection, 0), { passive: true });
+// Capture immediately while the platform selection still exists (notably iOS can collapse it
+// when focus shifts to the contextual action); pointer/touch completion remains debounced above.
+document.addEventListener("selectionchange", captureAnnotationSelection);
+document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+  const mark = event.target.closest(".annotation-mark");
+  if (!mark) return;
+  const annotation = annotations.find((a) => a.id === mark.dataset.annotationId);
+  if (annotation) focusAnnotation(annotation);
+});
+window.addEventListener("message", (event) => {
+  const frame = $("#htmlframe");
+  const data = event.data;
+  if (!annotationActive || !frame || event.origin !== "null" || event.source !== frame.contentWindow || !data || data.channel !== annotationFrameChannel || data.type !== "pi-artifact-annotation" || typeof data.action !== "string") return;
+  if (data.action === "ready") {
+    const current = currentHtmlPlacements();
+    syncHtmlAnnotations(frame);
+    if (current.length !== annotations.length) frame.contentWindow.postMessage({ type: "pi-artifact-annotation", channel: annotationFrameChannel, action: "origins", versionId: annotationVersion(), origins: annotations.map(({ id, origin }) => ({ id, origin })) }, "*");
+  }
+  if (data.action === "placement-results" && validBridgePlacements(data.placements)) {
+    sendAnnotationMutation(`/api/artifact/${id}/annotations/placements`, "POST", { versionId: annotationVersion(), placements: data.placements }, "placement").then(async (response) => {
+      if (response?.ok) { const next = await response.json(); annotations = next.annotations; annotationRevision = next.revision; }
+      if (response?.ok || response === null) refreshAnnotationPresentation();
+    });
+  }
+  if (data.action === "select" && validAnnotationTarget(data.target)) {
+    pendingAnnotationTarget = data.target;
+    const frameRect = frame.getBoundingClientRect();
+    const rect = validSelectionRect(data.rect)
+      ? { left: frameRect.left + data.rect.left, right: frameRect.left + data.rect.right, top: frameRect.top + data.rect.top, bottom: frameRect.top + data.rect.bottom, width: data.rect.width, height: data.rect.height }
+      : { left: frameRect.right - 140, right: frameRect.right - 20, top: frameRect.top + 24, bottom: frameRect.top + 64, width: 120, height: 40 };
+    positionSelectionAction(rect);
+    $("#annotation-hint").textContent = "Selection ready. Choose + Comment beside it.";
+  }
+  if (data.action === "clear-selection" && !selectionActionEngaged && $("#annotation-compose").hidden) {
+    clearPendingSelection();
+    $("#annotation-hint").textContent = "Select non-empty text to add a comment.";
+  }
+  if (data.action === "open" && typeof data.id === "string" && /^[a-f0-9]{32}$/.test(data.id)) {
+    const annotation = annotations.find((candidate) => candidate.id === data.id);
+    if (annotation) focusAnnotation(annotation);
+  }
+});
+
+function validSelectionRect(rect) {
+  return rect && typeof rect === "object" && [rect.left, rect.top, rect.right, rect.bottom, rect.width, rect.height].every(Number.isFinite) && rect.right >= rect.left && rect.bottom >= rect.top && rect.width >= 0 && rect.height >= 0;
+}
+
+function validAnnotationTarget(target) {
+  if (!target || (target.type !== "text" && target.type !== "html") || !Number.isSafeInteger(target.start) || !Number.isSafeInteger(target.end) || target.start < 0 || target.end <= target.start || target.end - target.start > 1_000_000) return false;
+  if (typeof target.quote !== "string" || target.end - target.start !== target.quote.length || !target.quote.trim() || utf8Length(target.quote) > 10_000 || typeof target.prefix !== "string" || target.prefix.length > 128 || utf8Length(target.prefix) > 512 || typeof target.suffix !== "string" || target.suffix.length > 128 || utf8Length(target.suffix) > 512) return false;
+  return target.type !== "html" || (typeof target.selector === "string" && target.selector.length > 0 && utf8Length(target.selector) <= 2_000 && !/[\x00-\x1f\x7f]/.test(target.selector));
+}
+
+function utf8Length(value) { return new TextEncoder().encode(value).byteLength; }
+
+function validBridgePlacements(values) {
+  if (!Array.isArray(values) || values.length !== annotations.length) return false;
+  const seen = new Set();
+  for (const entry of values) {
+    if (!entry || typeof entry !== "object" || typeof entry.annotationId !== "string" || seen.has(entry.annotationId)) return false;
+    const annotation = annotations.find((candidate) => candidate.id === entry.annotationId);
+    const placement = entry.placement;
+    if (!annotation || !placement || typeof placement !== "object" || placement.versionId !== annotationVersion() || !placement.provenance || typeof placement.provenance !== "object") return false;
+    const provenance = placement.provenance;
+    if (provenance.representationVersion !== 1 || provenance.sourceVersionId !== annotation.origin.versionId || provenance.sourceBlob !== annotation.origin.blob || !Number.isSafeInteger(provenance.placedAt) || provenance.placedAt <= 0) return false;
+    if (placement.state === "anchored") {
+      if (provenance.method !== "exact-position" || provenance.confidence !== "high" || !validAnnotationTarget(placement.target) || placement.target.type !== annotation.origin.target.type) return false;
+    } else if (placement.state === "migrated") {
+      if (provenance.method !== "unique-context" || provenance.confidence !== "high" || !validAnnotationTarget(placement.target) || placement.target.type !== annotation.origin.target.type) return false;
+    } else if (placement.state === "ambiguous") {
+      if (placement.reason !== "ambiguous" || provenance.method !== "ambiguous" || provenance.confidence !== "none") return false;
+    } else if (placement.state === "orphaned") {
+      if (placement.reason !== "not-found" || provenance.method !== "not-found" || provenance.confidence !== "none") return false;
+    } else return false;
+    seen.add(entry.annotationId);
+  }
+  return true;
+}
+
+boot();
+</script>
+</body>
+</html>

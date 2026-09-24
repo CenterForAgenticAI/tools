@@ -1,0 +1,12 @@
+{
+  "defaultProject": "group/project",
+  "references": {
+    "#123": {
+      "kind": "issue",
+      "iid": 123,
+      "title": "Demonstrate report references without a network dependency",
+      "state": "opened",
+      "url": "https://gitlab.example.test/group/project/-/work_items/123"
+    }
+  }
+}

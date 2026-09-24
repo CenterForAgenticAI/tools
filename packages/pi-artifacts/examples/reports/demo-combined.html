@@ -1,0 +1,2269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="generator" content="pi-artifacts combined report template v1.1.0" />
+  <meta name="description" content="A narrative-first demonstration with detailed evidence in the same self-contained file." />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; media-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'none'; base-uri 'none'" />
+  <title>A report with evidence on demand</title>
+  <style>
+/* pi-artifacts report styles + reader v1.3.0 */
+:root {
+  color-scheme: light dark;
+  --report-bg: #f7f8fb;
+  --report-surface: #ffffff;
+  --report-surface-muted: #eef1f6;
+  --report-text: #172033;
+  --report-muted: #5b6474;
+  --report-border: #d7dce5;
+  --report-accent: #3158c9;
+  --report-accent-strong: #2444a5;
+  --report-accent-soft: #e8edff;
+  --report-highlight: #fff1a8;
+  --report-code: #f1f3f7;
+  --report-danger: #a32323;
+  --report-warning: #825500;
+  --report-success: #23683b;
+  --report-shadow: 0 16px 45px rgb(23 32 51 / 18%);
+  --report-radius: 0.7rem;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --report-bg: #10131a;
+    --report-surface: #191e28;
+    --report-surface-muted: #222936;
+    --report-text: #edf1f7;
+    --report-muted: #aeb8c8;
+    --report-border: #374152;
+    --report-accent: #91aaff;
+    --report-accent-strong: #b5c3ff;
+    --report-accent-soft: #252f51;
+    --report-highlight: #6a5715;
+    --report-code: #111620;
+    --report-danger: #ff9e9e;
+    --report-warning: #ffd479;
+    --report-success: #8ce1a8;
+    --report-shadow: 0 18px 50px rgb(0 0 0 / 48%);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--report-bg);
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+body.report {
+  min-height: 100vh;
+  margin: 0;
+  background: var(--report-bg);
+  color: var(--report-text);
+  font-size: 1rem;
+  line-height: 1.7;
+  overflow-wrap: break-word;
+}
+
+body.report a {
+  color: var(--report-accent-strong);
+  text-underline-offset: 0.16em;
+}
+
+body.report a:hover {
+  text-decoration-thickness: 0.14em;
+}
+
+.gl-ref {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22em;
+  max-width: 100%;
+  border-radius: 0.2em;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.94em;
+  font-weight: 700;
+  line-height: 1.35;
+  text-decoration-thickness: 0.08em;
+  text-decoration-style: dotted;
+  vertical-align: -0.08em;
+}
+
+.gl-ref-state-closed,
+.gl-ref-state-merged {
+  color: var(--report-muted);
+  text-decoration-style: dashed;
+}
+
+.gl-ref-icon {
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.gl-ref-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.gl-ref-tooltip {
+  position: fixed;
+  z-index: 11000;
+  display: grid;
+  gap: 0.18rem;
+  width: max-content;
+  max-width: min(25rem, calc(100vw - 1rem));
+  padding: 0.58rem 0.68rem;
+  border: 1px solid var(--report-border);
+  border-radius: 0.45rem;
+  background: var(--report-text);
+  color: var(--report-bg);
+  box-shadow: var(--report-shadow);
+  font-size: 0.78rem;
+  font-weight: 500;
+  line-height: 1.35;
+  opacity: 0;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  transform: translateY(0.25rem);
+  transition: opacity 120ms ease, transform 120ms ease;
+  visibility: hidden;
+  white-space: normal;
+}
+
+.gl-ref[data-gl-tooltip-placement="below"] .gl-ref-tooltip {
+  transform: translateY(-0.25rem);
+}
+
+.gl-ref[data-gl-tooltip-visible="true"] .gl-ref-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
+
+.gl-ref-tooltip::before {
+  color: color-mix(in srgb, var(--report-bg) 78%, transparent);
+  content: attr(data-gl-tooltip-meta);
+  font-size: 0.7rem;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.gl-ref-tooltip::after {
+  content: attr(data-gl-tooltip-title);
+  font-weight: 650;
+}
+
+body.report :focus-visible {
+  outline: 3px solid var(--report-accent);
+  outline-offset: 3px;
+}
+
+.report-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.report-skip-link {
+  position: fixed;
+  inset: 0 auto auto 1rem;
+  z-index: 10000;
+  padding: 0.65rem 0.9rem;
+  border-radius: 0 0 0.4rem 0.4rem;
+  background: var(--report-text);
+  color: var(--report-bg) !important;
+  transform: translateY(-130%);
+}
+
+.report-skip-link:focus {
+  transform: translateY(0);
+}
+
+.report-header {
+  border-bottom: 1px solid var(--report-border);
+  background: var(--report-surface);
+}
+
+.report-header-inner,
+.report-layout,
+.report-footer-inner {
+  width: min(100% - 2rem, 76rem);
+  margin-inline: auto;
+}
+
+.report-header-inner {
+  padding-block: clamp(2.4rem, 6vw, 5rem) 2rem;
+}
+
+.report-eyebrow {
+  margin: 0 0 0.45rem;
+  color: var(--report-accent-strong);
+  font-size: 0.78rem;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.report h1 {
+  max-width: 22ch;
+  margin: 0;
+  font-size: clamp(2rem, 5vw, 3.8rem);
+  line-height: 1.08;
+  letter-spacing: -0.035em;
+}
+
+.report-deck {
+  max-width: 68ch;
+  margin: 1rem 0 0;
+  color: var(--report-muted);
+  font-size: clamp(1.05rem, 2vw, 1.25rem);
+}
+
+.report-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  margin: 1.5rem 0 0;
+  color: var(--report-muted);
+  font-size: 0.88rem;
+}
+
+.report-meta div {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.report-meta dt {
+  font-weight: 700;
+}
+
+.report-meta dd {
+  margin: 0;
+}
+
+.report-companion {
+  margin: 1.25rem 0 0;
+}
+
+.report-companion a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2.5rem;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--report-border);
+  border-radius: 999px;
+  background: var(--report-surface-muted);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.report-header-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1.25rem;
+}
+
+.report-header-toolbar button,
+.report-evidence-pane button {
+  min-height: 2.5rem;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--report-border);
+  border-radius: 0.45rem;
+  background: var(--report-surface-muted);
+  color: var(--report-text);
+  font: 700 0.86rem/1.3 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+
+.report-header-toolbar button[aria-expanded="true"],
+.report-evidence-pane button[aria-pressed="true"] {
+  border-color: var(--report-accent);
+  color: var(--report-accent-strong);
+}
+
+.report-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2rem;
+  padding-block: 2rem 5rem;
+}
+
+.report-toc {
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--report-border);
+  border-radius: var(--report-radius);
+  background: var(--report-surface);
+}
+
+.report-toc h2 {
+  margin: 0 0 0.6rem;
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.report-toc ol {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.report-toc li + li {
+  margin-top: 0.35rem;
+}
+
+.report-toc a {
+  text-decoration: none;
+}
+
+.report-main {
+  min-width: 0;
+}
+
+.report-narrative .report-main,
+.report-combined .report-narrative-main {
+  width: min(100%, 68ch);
+  margin-inline: auto;
+  font-family: ui-serif, Charter, "Bitstream Charter", "Sitka Text", Cambria, serif;
+  font-size: clamp(1.04rem, 1.5vw, 1.16rem);
+  line-height: 1.82;
+}
+
+.report-main > :first-child,
+.report-main section > :first-child {
+  margin-top: 0;
+}
+
+.report-main section {
+  scroll-margin-top: 1.5rem;
+}
+
+.report-main section + section {
+  margin-top: clamp(3rem, 7vw, 5rem);
+  padding-top: 2rem;
+  border-top: 1px solid var(--report-border);
+}
+
+.report-main h2,
+.report-main h3,
+.report-main h4 {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+}
+
+.report-main h2 {
+  margin: 2rem 0 1rem;
+  font-size: clamp(1.55rem, 3vw, 2.15rem);
+}
+
+.report-main h3 {
+  margin: 1.8rem 0 0.6rem;
+  font-size: 1.25rem;
+}
+
+.report-main p,
+.report-main ul,
+.report-main ol,
+.report-main blockquote {
+  margin-block: 1em;
+}
+
+.report-main blockquote {
+  margin-inline: 0;
+  padding: 0.2rem 0 0.2rem 1.2rem;
+  border-left: 0.28rem solid var(--report-accent);
+  color: var(--report-muted);
+}
+
+.report-main img,
+.report-main svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.report-main code,
+.report-main pre,
+.report-table-wrap,
+.report-detailed table,
+.report-evidence-content table {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
+.report-main :not(pre) > code {
+  padding: 0.12em 0.32em;
+  border-radius: 0.25rem;
+  background: var(--report-code);
+  font-size: 0.9em;
+}
+
+.report-main pre {
+  max-width: 100%;
+  padding: 1rem;
+  border: 1px solid var(--report-border);
+  border-radius: 0.45rem;
+  background: var(--report-code);
+  font-size: 0.84rem;
+  line-height: 1.55;
+  overflow: auto;
+  white-space: pre;
+}
+
+.report-detailed .report-layout {
+  width: min(100% - 2rem, 96rem);
+}
+
+.report-detailed .report-main {
+  font-size: 0.94rem;
+  line-height: 1.6;
+}
+
+.report-detailed .report-toc {
+  align-self: start;
+}
+
+.report-table-wrap {
+  max-width: 100%;
+  margin-block: 1rem;
+  overflow-x: auto;
+}
+
+.report-detailed table,
+.report-evidence-content table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--report-surface);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.report-detailed caption,
+.report-evidence-content caption {
+  padding: 0.6rem 0;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-weight: 700;
+  text-align: left;
+}
+
+.report-detailed th,
+.report-detailed td,
+.report-evidence-content th,
+.report-evidence-content td {
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--report-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.report-detailed th,
+.report-evidence-content th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--report-surface-muted);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.severity {
+  display: inline-block;
+  padding: 0.16rem 0.5rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1.35;
+  text-transform: uppercase;
+}
+
+.severity-critical,
+.severity-high {
+  color: var(--report-danger);
+}
+
+.severity-medium {
+  color: var(--report-warning);
+}
+
+.severity-low,
+.severity-note {
+  color: var(--report-success);
+}
+
+.report-combined-layout {
+  min-width: 0;
+}
+
+.report-evidence-pane {
+  min-width: 0;
+  border: 1px solid var(--report-border);
+  border-radius: var(--report-radius);
+  background: var(--report-surface);
+  box-shadow: var(--report-shadow);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.report-evidence-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1rem 0.8rem;
+  border-bottom: 1px solid var(--report-border);
+}
+
+.report-evidence-header h2 {
+  margin: 0;
+  font-size: 1.45rem;
+  line-height: 1.2;
+}
+
+.report-evidence-header .report-eyebrow {
+  margin-bottom: 0.25rem;
+}
+
+.report-evidence-shortcut {
+  margin: 0.45rem 0 0;
+  color: var(--report-muted);
+  font-size: 0.78rem;
+}
+
+.report-evidence-shortcut kbd {
+  display: inline-block;
+  padding: 0.05rem 0.25rem;
+  border: 1px solid var(--report-border);
+  border-bottom-width: 2px;
+  border-radius: 0.22rem;
+  background: var(--report-surface-muted);
+  font: 0.75rem ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.report-evidence-controls {
+  display: flex;
+  align-items: center;
+  min-height: 3.5rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--report-border);
+}
+
+.report-related-evidence {
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid var(--report-border);
+  background: var(--report-accent-soft);
+}
+
+.report-related-evidence h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.report-related-evidence ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.report-evidence-scroll {
+  min-height: 0;
+  padding: 1rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.report-evidence-toc {
+  margin-bottom: 2rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--report-border);
+  border-radius: var(--report-radius);
+  background: var(--report-surface-muted);
+}
+
+.report-evidence-toc h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.report-evidence-toc ol {
+  columns: 2 13rem;
+  column-gap: 2rem;
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.report-evidence-toc li {
+  break-inside: avoid;
+  margin-bottom: 0.3rem;
+}
+
+.report-evidence-content {
+  font-size: 0.88rem;
+  line-height: 1.58;
+}
+
+.report-evidence-content section {
+  scroll-margin-top: 1rem;
+}
+
+.report-evidence-content h2 {
+  font-size: clamp(1.35rem, 2vw, 1.8rem);
+}
+
+.report-footer {
+  border-top: 1px solid var(--report-border);
+  background: var(--report-surface);
+  color: var(--report-muted);
+  font-size: 0.86rem;
+}
+
+.report-footer-inner {
+  padding-block: 1.4rem 5.5rem;
+}
+
+/* The aside is only the fixed anchor: the panel and the collapsed launcher each
+   carry their own surface, so hiding the panel leaves no empty chrome behind. */
+.report-reader {
+  position: fixed;
+  right: max(0.75rem, env(safe-area-inset-right));
+  bottom: max(0.75rem, env(safe-area-inset-bottom));
+  z-index: 9000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.report-reader-panel {
+  width: min(28rem, calc(100vw - 1.5rem));
+  padding: 0.85rem;
+  border: 1px solid var(--report-border);
+  border-radius: 0.85rem;
+  background: color-mix(in srgb, var(--report-surface) 96%, transparent);
+  box-shadow: var(--report-shadow);
+  backdrop-filter: blur(12px);
+}
+
+.report-reader-title-row,
+.report-reader-title-actions,
+.report-reader-actions,
+.report-reader-options,
+.report-reader-progress-row,
+.report-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.report-reader-title-row {
+  justify-content: space-between;
+  margin-bottom: 0.55rem;
+}
+
+.report-reader-title {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.report-reader button,
+.report-reader select,
+.report-section-actions button,
+.report-reader-help-dialog button {
+  min-height: 2.25rem;
+  border: 1px solid var(--report-border);
+  border-radius: 0.4rem;
+  background: var(--report-surface-muted);
+  color: var(--report-text);
+  font: inherit;
+}
+
+.report-reader button,
+.report-section-actions button,
+.report-reader-help-dialog button {
+  padding: 0.35rem 0.62rem;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.report-reader button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Declared after the shared button rules so the pill radius wins on specificity. */
+.report-reader .report-reader-launcher {
+  border-radius: 999px;
+  box-shadow: var(--report-shadow);
+  backdrop-filter: blur(12px);
+}
+
+.report-reader .report-reader-launcher[data-reader-phase="playing"],
+.report-reader .report-reader-launcher[data-reader-phase="paused"] {
+  border-color: var(--report-accent);
+  color: var(--report-accent-strong);
+}
+
+.report-reader-actions {
+  flex-wrap: wrap;
+}
+
+.report-reader-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  margin-top: 0.5rem;
+}
+
+.report-reader-field {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+  color: var(--report-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.report-reader select {
+  width: 100%;
+  padding: 0.3rem 1.6rem 0.3rem 0.4rem;
+}
+
+.report-reader-progress-row {
+  margin-top: 0.55rem;
+}
+
+.report-reader progress {
+  flex: 1;
+  height: 0.65rem;
+  accent-color: var(--report-accent);
+}
+
+.report-reader-status {
+  min-width: 5.5rem;
+  color: var(--report-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.report-section-actions {
+  flex-wrap: wrap;
+  margin: -0.4rem 0 1rem;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.76rem;
+}
+
+.report-section-actions button {
+  min-height: 2rem;
+  color: var(--report-accent-strong);
+}
+
+.report-reader-current {
+  border-radius: 0.2rem;
+  background: var(--report-highlight);
+  box-shadow: 0 0 0 0.16rem var(--report-highlight);
+}
+
+::highlight(pi-report-reader-follow) {
+  color: inherit;
+  background: var(--report-highlight);
+  text-decoration: underline;
+  text-decoration-color: var(--report-accent-strong);
+  text-decoration-thickness: 0.12em;
+}
+
+.report-reader-help-dialog {
+  width: min(30rem, calc(100vw - 2rem));
+  padding: 1.25rem;
+  border: 1px solid var(--report-border);
+  border-radius: var(--report-radius);
+  background: var(--report-surface);
+  color: var(--report-text);
+  box-shadow: var(--report-shadow);
+}
+
+.report-reader-help-dialog::backdrop {
+  background: rgb(0 0 0 / 48%);
+}
+
+.report-reader-help-dialog h2 {
+  margin-top: 0;
+}
+
+.report-reader-help-dialog table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.report-reader-help-dialog th,
+.report-reader-help-dialog td {
+  padding: 0.4rem;
+  border-bottom: 1px solid var(--report-border);
+  text-align: left;
+}
+
+.report-reader-help-dialog kbd {
+  display: inline-block;
+  padding: 0.12rem 0.34rem;
+  border: 1px solid var(--report-border);
+  border-bottom-width: 2px;
+  border-radius: 0.25rem;
+  background: var(--report-surface-muted);
+  font: 0.8rem ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.report-reader-help-actions {
+  margin: 1rem 0 0;
+  text-align: right;
+}
+
+@media (min-width: 58rem) {
+  .report-narrative .report-layout,
+  .report-detailed .report-layout,
+  .report-combined .report-narrative-layout {
+    grid-template-columns: 15rem minmax(0, 1fr);
+  }
+
+  .report-toc {
+    position: sticky;
+    top: 1rem;
+    max-height: calc(100vh - 2rem);
+    overflow: auto;
+  }
+}
+
+@media (min-width: 62rem) {
+  .report-combined[data-evidence-open="true"] .report-combined-layout {
+    display: grid;
+    grid-template-columns: minmax(28rem, 1fr) minmax(28rem, 1fr);
+    gap: 1.25rem;
+    width: min(100% - 2rem, 120rem);
+    margin-inline: auto;
+  }
+
+  .report-combined[data-evidence-open="true"] .report-narrative-layout {
+    grid-template-columns: minmax(0, 1fr);
+    width: auto;
+    margin: 0;
+  }
+
+  .report-combined[data-evidence-open="true"] .report-narrative-layout .report-toc {
+    position: static;
+    max-height: none;
+  }
+
+  .report-combined[data-evidence-open="true"] .report-evidence-pane {
+    position: sticky;
+    top: 1rem;
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 2rem);
+    margin-top: 2rem;
+  }
+
+  .report-combined[data-evidence-open="true"] .report-evidence-scroll {
+    flex: 1;
+  }
+}
+
+@media (max-width: 61.999rem) {
+  .report-combined[data-evidence-open="true"][data-evidence-mode="narrow"] {
+    overflow: hidden;
+  }
+
+  .report-combined[data-evidence-open="true"][data-evidence-mode="narrow"] .report-evidence-pane {
+    position: fixed;
+    inset: 0;
+    z-index: 9500;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100vh;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .report-combined[data-evidence-open="true"][data-evidence-mode="narrow"] .report-evidence-scroll {
+    flex: 1;
+  }
+}
+
+@media (max-width: 36rem) {
+  .report-header-inner,
+  .report-layout,
+  .report-footer-inner,
+  .report-detailed .report-layout {
+    width: min(100% - 1.25rem, 76rem);
+  }
+
+  .report-reader-options {
+    grid-template-columns: 1fr;
+  }
+
+  .report-reader-actions button {
+    flex: 1;
+  }
+}
+
+@media print {
+  :root {
+    color-scheme: light;
+    --report-bg: #ffffff;
+    --report-surface: #ffffff;
+    --report-surface-muted: #f3f3f3;
+    --report-text: #000000;
+    --report-muted: #333333;
+    --report-border: #b7b7b7;
+    --report-accent: #000000;
+    --report-accent-strong: #000000;
+    --report-code: #f4f4f4;
+  }
+
+  @page {
+    margin: 18mm;
+  }
+
+  body.report {
+    font-size: 10.5pt;
+    background: #ffffff;
+  }
+
+  .report-header-inner,
+  .report-layout,
+  .report-footer-inner,
+  .report-detailed .report-layout {
+    width: 100%;
+  }
+
+  .report-layout {
+    display: block;
+    padding-block: 1rem;
+  }
+
+  .report-toc {
+    position: static;
+    max-height: none;
+    margin-bottom: 1.5rem;
+    break-after: page;
+    border: 0;
+    padding: 0;
+  }
+
+  .report-narrative .report-main,
+  .report-combined .report-narrative-main {
+    width: 68ch;
+    max-width: 100%;
+  }
+
+  .report-reader,
+  .report-section-actions,
+  .report-skip-link,
+  .report-header-toolbar,
+  .report-evidence-controls,
+  .report-evidence-shortcut,
+  .report-evidence-header button,
+  .report-related-evidence,
+  .report-evidence-toc {
+    display: none !important;
+  }
+
+  .report-combined-layout {
+    display: block;
+    width: 100%;
+  }
+
+  .report-evidence-pane {
+    position: static;
+    height: auto;
+    margin-top: 2rem;
+    border: 0;
+    box-shadow: none;
+    break-before: page;
+  }
+
+  .report-evidence-header,
+  .report-evidence-scroll {
+    padding-inline: 0;
+  }
+
+  .report-evidence-scroll {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .report-main section {
+    break-inside: avoid-page;
+  }
+
+  .report-main a[href]::after {
+    content: " (" attr(href) ")";
+    font-size: 0.8em;
+    font-weight: normal;
+  }
+
+  .report-main a[href^="#"]::after {
+    content: "";
+  }
+
+  .gl-ref-tooltip {
+    display: none;
+  }
+
+  .report-detailed th,
+  .report-evidence-content th {
+    position: static;
+  }
+}
+  </style>
+</head>
+<body class="report report-combined">
+  <a class="report-skip-link" href="#main-content">Skip to report</a>
+  <a class="report-skip-link report-evidence-skip-link" href="#report-evidence-content" hidden>Skip to evidence</a>
+  <header class="report-header">
+    <div class="report-header-inner">
+      <p class="report-eyebrow">Combined report</p>
+      <h1 data-tts>A report with evidence on demand</h1>
+      <p class="report-deck" data-tts>A narrative-first demonstration with detailed evidence in the same self-contained file.</p>
+      <dl class="report-meta" aria-label="Report details">
+        <div><dt>Date</dt><dd><time datetime="2026-08-05">August 5, 2026</time></dd></div>
+        <div><dt>Provenance</dt><dd>pi-artifacts template demonstration</dd></div>
+        <div><dt>Reading time</dt><dd>2 min read</dd></div>
+      </dl>
+      <div class="report-header-toolbar" aria-label="Report tools">
+        <button type="button" data-evidence-action="toggle" aria-expanded="false" aria-controls="report-evidence-pane">Evidence</button>
+      </div>
+    </div>
+  </header>
+  <div class="report-combined-layout">
+    <div class="report-layout report-narrative-layout" data-report-narrative-view>
+      <nav class="report-toc" aria-labelledby="report-toc-title">
+        <h2 id="report-toc-title">Contents</h2>
+    <ol>
+      <li><a href="#the-situation">The situation</a></li>
+      <li><a href="#what-changed">What changed</a></li>
+      <li><a href="#what-it-means">What it means</a></li>
+      <li><a href="#what-happens-next">What happens next</a></li>
+    </ol>
+      </nav>
+      <main class="report-main report-narrative-main" id="main-content" tabindex="-1" data-report-narrative>
+<p>This short report demonstrates the house format for analysis that should be easy to read, scan, print, or hear. The same facts remain available as detailed evidence, but this narrative explains why they matter as a connected story.</p>
+
+<section id="the-situation">
+  <h2>The situation</h2>
+  <div class="report-section-actions" data-tts-skip>
+    <button type="button" data-evidence-action="open-section" data-narrative-section-id="the-situation" aria-label="Show evidence for: The situation">Evidence</button>
+  </div>
+  <p>Analysis reports often begin as collections of evidence. That form is useful for verification, but it asks a reader to assemble the argument while moving through tables, code excerpts, and raw observations. On a phone, or at the end of a long day, that extra work can hide the point.</p>
+  <p>The narrative layer solves a different problem. It keeps the content in ordinary semantic HTML, limits each line to a comfortable measure, and puts the conclusion into prose. In a combined report, the underlying evidence stays one action away without leaving the artifact.</p>
+</section>
+
+<section id="what-changed">
+  <h2>What changed</h2>
+  <div class="report-section-actions" data-tts-skip>
+    <button type="button" data-evidence-action="open-section" data-narrative-section-id="what-changed" aria-label="Show evidence for: What changed">Evidence</button>
+  </div>
+  <p>pi-artifacts now owns one shared visual template and one dependency-free audio reader. Report authors supply a body fragment and a small metadata file. The generator adds the page structure, table of contents, print rules, light and dark colors, and inline reader assets. In the combined example, tracked work such as <a class="gl-ref gl-ref-issue gl-ref-state-open" href="https://gitlab.example.test/group/project/-/work_items/123" data-gl-ref="#123" data-gl-kind="issue" data-gl-state="open" aria-label="Issue #123: Demonstrate report references without a network dependency — open" title="Issue #123: Demonstrate report references without a network dependency — open"><svg class="gl-ref-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" stroke-width="2.5"/><circle cx="8" cy="8" r="1.25" fill="currentColor"/></svg><span class="gl-ref-text">#123</span><span class="gl-ref-tooltip" data-gl-tooltip-meta="Issue #123 · open" data-gl-tooltip-title="Demonstrate report references without a network dependency" aria-hidden="true"></span></a> becomes a self-contained reference with its title and state baked in.</p>
+  <p>The reader divides text into short passages before sending it to the browser’s speech engine. This prevents the long-utterance stall seen in Chromium. It also waits for asynchronously loaded voice lists, which is important in Safari.</p>
+</section>
+
+<section id="what-it-means">
+  <h2>What it means</h2>
+  <div class="report-section-actions" data-tts-skip>
+    <button type="button" data-evidence-action="open-section" data-narrative-section-id="what-it-means" aria-label="Show evidence for: What it means">Evidence</button>
+  </div>
+  <p>Every generated report remains a single file. It has no font service, content delivery network, or remote script. A combined report embeds both narrative and evidence, so you can register, download, or open one artifact without relying on a sibling path.</p>
+  <p>The audio controls do not replace accessibility features. The prose remains normal text with a real heading hierarchy. A screen reader can ignore the player and navigate the document as usual. When browser speech is available, a listener can play the whole report, choose one section, or continue from any section.</p>
+</section>
+
+<section id="what-happens-next">
+  <h2>What happens next</h2>
+  <div class="report-section-actions" data-tts-skip>
+    <button type="button" data-evidence-action="open-section" data-narrative-section-id="what-happens-next" aria-label="Show evidence for: What happens next">Evidence</button>
+  </div>
+  <p>Report authors should start with the narrative and evidence body fragments in this directory. Generate the combined file, run the report smoke tests, and open it in a browser. Check that speech begins only after an explicit action, evidence opens to the mapped target, manual evidence browsing yields follow, focus returns on close, and reduced-motion preferences prevent smooth scrolling.</p>
+  <p>That repeatable path turns an improvised output into a reliable reading experience.</p>
+</section>
+      </main>
+    </div>
+    <aside class="report-evidence-pane" id="report-evidence-pane" aria-labelledby="report-evidence-title" hidden>
+      <header class="report-evidence-header">
+        <div>
+          <p class="report-eyebrow">Detailed evidence</p>
+          <h2 id="report-evidence-title">Evidence</h2>
+          <p class="report-evidence-shortcut">Toggle with <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd>.</p>
+        </div>
+        <button type="button" data-evidence-action="close">Close evidence</button>
+      </header>
+      <div class="report-evidence-controls">
+        <button type="button" data-evidence-action="follow" aria-pressed="true">Follow narrative: on</button>
+        <span class="report-visually-hidden" data-evidence-live aria-live="polite" aria-atomic="true"></span>
+      </div>
+      <nav class="report-related-evidence" aria-labelledby="report-related-evidence-title" hidden>
+        <h3 id="report-related-evidence-title">Related evidence</h3>
+        <ul data-related-evidence-list></ul>
+      </nav>
+      <div class="report-evidence-scroll" data-evidence-scroll tabindex="-1">
+        <nav class="report-evidence-toc" aria-labelledby="report-evidence-toc-title">
+          <h3 id="report-evidence-toc-title">All evidence</h3>
+    <ol>
+      <li><a href="#feature-matrix">Feature matrix</a></li>
+      <li><a href="#generator-contract">Generator contract</a></li>
+      <li><a href="#verification-notes">Verification notes</a></li>
+    </ol>
+        </nav>
+        <div class="report-main report-evidence-content" id="report-evidence-content">
+<section id="feature-matrix">
+  <h2>Feature matrix</h2>
+  <div class="report-table-wrap">
+    <table>
+      <caption>Required report capabilities</caption>
+      <thead>
+        <tr><th scope="col">Area</th><th scope="col">Implementation</th><th scope="col">Status</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Structure</td><td>Skip links, provenance, separate narrative and evidence contents, semantic sections, and one self-contained artifact</td><td><span class="severity severity-low">Ready</span></td></tr>
+        <tr><td>Audio</td><td>Native <code>speechSynthesis</code>, short utterance chunks, async voice loading, rate and voice preferences</td><td><span class="severity severity-low">Ready</span></td></tr>
+        <tr><td>Follow-along</td><td>Boundary ranges when supported, with current-paragraph fallback</td><td><span class="severity severity-note">Progressive</span></td></tr>
+        <tr><td>Portability</td><td>CSS and JavaScript inlined into one generated HTML file</td><td><span class="severity severity-low">Ready</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="generator-contract">
+  <h2>Generator contract</h2>
+  <p>The helper accepts a report kind, narrative and evidence body fragments, an output path, and metadata. It rejects missing or duplicate section identifiers, unknown evidence mappings, body scripts, and non-inline resource references.</p>
+  <pre><code>node scripts/make-report.mjs \
+  --kind combined \
+  --body examples/reports/narrative-body.html \
+  --evidence examples/reports/detailed-body.html \
+  --meta examples/reports/combined-meta.json \
+  --out examples/reports/demo-combined.html</code></pre>
+</section>
+
+<section id="verification-notes">
+  <h2>Verification notes</h2>
+  <ul>
+    <li><span class="severity severity-high">Required</span> Run <code>npm run check</code> before publishing a report-template change.</li>
+    <li><span class="severity severity-medium">Manual</span> Exercise speech playback in Chromium and Safari because operating-system voices differ.</li>
+    <li><span class="severity severity-note">Expected</span> The player is absent when the Web Speech API is unavailable.</li>
+  </ul>
+</section>
+        </div>
+      </div>
+    </aside>
+  </div>
+  <footer class="report-footer">
+    <div class="report-footer-inner">
+      <p>Generated with the pi-artifacts combined report template v1.1.0. Evidence starts hidden on every visit; the audio reader reads only the narrative.</p>
+    </div>
+  </footer>
+  <script type="application/json" id="report-evidence-map">{"the-situation":["feature-matrix"],"what-changed":["generator-contract","feature-matrix"],"what-it-means":["feature-matrix","verification-notes"],"what-happens-next":["verification-notes","generator-contract"]}</script>
+  <script>
+/* pi-artifacts report evidence pane v1.1.0 */
+(() => {
+  "use strict";
+
+  const pane = document.querySelector("#report-evidence-pane");
+  const narrative = document.querySelector("[data-report-narrative]");
+  const narrativeView = document.querySelector("[data-report-narrative-view]");
+  const evidenceContent = document.querySelector("#report-evidence-content");
+  const mapElement = document.querySelector("#report-evidence-map");
+  if (!pane || !narrative || !narrativeView || !evidenceContent || !mapElement) return;
+
+  let evidenceMap;
+  try {
+    evidenceMap = JSON.parse(mapElement.textContent || "{}");
+  } catch {
+    return;
+  }
+
+  const globalToggle = requiredControl("[data-evidence-action='toggle']", document);
+  const closeButton = requiredControl("[data-evidence-action='close']", pane);
+  const followButton = requiredControl("[data-evidence-action='follow']", pane);
+  const evidenceScroll = requiredControl("[data-evidence-scroll]", pane);
+  const evidenceToc = requiredControl(".report-evidence-toc", pane);
+  const related = requiredControl(".report-related-evidence", pane);
+  const relatedList = requiredControl("[data-related-evidence-list]", related);
+  const liveStatus = requiredControl("[data-evidence-live]", pane);
+  const evidenceSkipLink = requiredControl(".report-evidence-skip-link", document);
+  const mainSkipLink = document.querySelector(".report-skip-link:not(.report-evidence-skip-link)");
+  const reportHeader = document.querySelector(".report-header");
+  const reportFooter = document.querySelector(".report-footer");
+  const narrowViewport = window.matchMedia("(max-width: 61.999rem)");
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  const narrativeSections = [...narrative.querySelectorAll("section[id]")]
+    .filter((section) => Object.hasOwn(evidenceMap, section.id));
+  const evidenceSections = [...evidenceContent.querySelectorAll("section[id]")];
+  const evidenceSectionsById = new Map(evidenceSections.map((section) => [section.id, section]));
+  const sectionOpeners = [...narrative.querySelectorAll("[data-evidence-action='open-section']")];
+  const backgroundElements = [mainSkipLink, reportHeader, narrativeView, reportFooter].filter(Boolean);
+
+  let evidenceOpen = false;
+  let followEnabled = true;
+  let activeNarrativeId = "";
+  let openingTrigger = globalToggle;
+  let narrativeScrollPosition = window.scrollY;
+  let isNarrow = narrowViewport.matches;
+  let programmaticEvidenceScroll = false;
+  let programmaticScrollTimer = 0;
+  let openingNarrativeId = "";
+  let openingNarrativeTimer = 0;
+  let printRevealedHiddenPane = false;
+
+  globalToggle.addEventListener("click", () => {
+    if (evidenceOpen) closeEvidence();
+    else openEvidence(globalToggle);
+  });
+  closeButton.addEventListener("click", closeEvidence);
+  followButton.addEventListener("click", () => {
+    if (followEnabled) {
+      setFollowEnabled(false, "Follow narrative turned off.");
+      return;
+    }
+    setFollowEnabled(true, "Follow narrative turned on.");
+    const section = currentMappedNarrativeSection();
+    if (section) syncToNarrativeSection(section.id);
+  });
+
+  for (const opener of sectionOpeners) {
+    opener.addEventListener("click", () => {
+      openEvidence(opener, opener.dataset.narrativeSectionId || "");
+    });
+  }
+
+  evidenceToc.addEventListener("click", (event) => {
+    const link = event.target instanceof Element ? event.target.closest("a[href^='#']") : null;
+    if (!link) return;
+    const target = evidenceTargetFromLink(link);
+    if (!target) return;
+    event.preventDefault();
+    setFollowEnabled(false, "Follow narrative turned off because you chose an evidence section.");
+    scrollEvidenceTo(target, { focusTarget: true });
+  });
+
+  related.addEventListener("click", (event) => {
+    const link = event.target instanceof Element ? event.target.closest("a[href^='#']") : null;
+    if (!link) return;
+    const target = evidenceTargetFromLink(link);
+    if (!target) return;
+    event.preventDefault();
+    setFollowEnabled(false, "Follow narrative turned off because you chose related evidence.");
+    scrollEvidenceTo(target, { focusTarget: true });
+  });
+
+  evidenceScroll.addEventListener("scroll", handleEvidenceScroll, { passive: true });
+  evidenceScroll.addEventListener("wheel", () => {
+    programmaticEvidenceScroll = false;
+  }, { passive: true });
+  evidenceScroll.addEventListener("touchmove", () => {
+    programmaticEvidenceScroll = false;
+  }, { passive: true });
+  evidenceScroll.addEventListener("keydown", (event) => {
+    if (["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End", " "].includes(event.key)) {
+      programmaticEvidenceScroll = false;
+    }
+  });
+  evidenceScroll.addEventListener("scrollend", () => {
+    programmaticEvidenceScroll = false;
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (!event.altKey || !event.shiftKey || event.ctrlKey || event.metaKey) return;
+    if (event.key.toLowerCase() !== "e" || isTextEntryTarget(event.target)) return;
+    event.preventDefault();
+    if (evidenceOpen) closeEvidence();
+    else openEvidence(event.target);
+  });
+
+  const observer = typeof window.IntersectionObserver === "function"
+    ? new window.IntersectionObserver(handleNarrativeIntersections, {
+      root: null,
+      rootMargin: "-20% 0px -60% 0px",
+      threshold: [0, 0.01],
+    })
+    : null;
+  if (observer) {
+    for (const section of narrativeSections) observer.observe(section);
+  } else {
+    window.addEventListener("scroll", handleNarrativeIntersections, { passive: true });
+  }
+
+  narrowViewport.addEventListener?.("change", handleViewportChange);
+  window.addEventListener("beforeprint", revealEvidenceForPrint);
+  window.addEventListener("afterprint", restoreEvidenceAfterPrint);
+  updateFollowControl();
+
+  function requiredControl(selector, root) {
+    const element = root.querySelector(selector);
+    if (!element) throw new Error(`Missing report evidence control: ${selector}`);
+    return element;
+  }
+
+  function openEvidence(trigger, requestedNarrativeId = "") {
+    openingTrigger = isUsableFocusTarget(trigger) ? trigger : globalToggle;
+    narrativeScrollPosition = window.scrollY;
+    isNarrow = narrowViewport.matches;
+    evidenceOpen = true;
+    setFollowEnabled(true);
+
+    const requestedSection = requestedNarrativeId
+      ? narrativeSections.find((section) => section.id === requestedNarrativeId)
+      : currentMappedNarrativeSection();
+    activeNarrativeId = requestedSection?.id || "";
+    clearOpeningNarrativeLock();
+    if (requestedNarrativeId && activeNarrativeId) {
+      openingNarrativeId = activeNarrativeId;
+      openingNarrativeTimer = window.setTimeout(clearOpeningNarrativeLock, 500);
+    }
+    const firstTargetId = activeNarrativeId ? evidenceMap[activeNarrativeId]?.[0] : evidenceSections[0]?.id;
+
+    pane.hidden = false;
+    evidenceSkipLink.hidden = false;
+    document.body.dataset.evidenceOpen = "true";
+    document.body.dataset.evidenceMode = isNarrow ? "narrow" : "wide";
+    globalToggle.setAttribute("aria-expanded", "true");
+    globalToggle.setAttribute("aria-label", "Hide evidence");
+    closeButton.textContent = isNarrow ? "Back to the narrative" : "Close evidence";
+    setBackgroundInert(isNarrow);
+    updateRelatedLinks(activeNarrativeId);
+
+    window.requestAnimationFrame(() => {
+      const target = firstTargetId ? evidenceSectionsById.get(firstTargetId) : evidenceSections[0];
+      if (target) scrollEvidenceTo(target);
+      closeButton.focus({ preventScroll: true });
+    });
+  }
+
+  function closeEvidence() {
+    if (!evidenceOpen) return;
+    const returnFocus = openingTrigger instanceof HTMLElement && openingTrigger.isConnected
+      ? openingTrigger
+      : globalToggle;
+    const restoreNarrativeScroll = isNarrow;
+
+    evidenceOpen = false;
+    pane.hidden = true;
+    evidenceSkipLink.hidden = true;
+    delete document.body.dataset.evidenceOpen;
+    delete document.body.dataset.evidenceMode;
+    globalToggle.setAttribute("aria-expanded", "false");
+    globalToggle.setAttribute("aria-label", "Show evidence");
+    setBackgroundInert(false);
+    clearProgrammaticScroll();
+    clearOpeningNarrativeLock();
+
+    window.requestAnimationFrame(() => {
+      if (restoreNarrativeScroll) window.scrollTo({ top: narrativeScrollPosition, behavior: "auto" });
+      returnFocus.focus({ preventScroll: restoreNarrativeScroll });
+    });
+  }
+
+  function handleViewportChange(event) {
+    const nextNarrow = event.matches;
+    if (nextNarrow === isNarrow) return;
+    if (evidenceOpen && nextNarrow) narrativeScrollPosition = window.scrollY;
+    isNarrow = nextNarrow;
+    closeButton.textContent = isNarrow ? "Back to the narrative" : "Close evidence";
+    if (!evidenceOpen) return;
+    document.body.dataset.evidenceMode = isNarrow ? "narrow" : "wide";
+    setBackgroundInert(isNarrow);
+    if (!isNarrow) window.scrollTo({ top: narrativeScrollPosition, behavior: "auto" });
+  }
+
+  function setBackgroundInert(inert) {
+    for (const element of backgroundElements) element.inert = inert;
+  }
+
+  function handleNarrativeIntersections() {
+    const section = currentMappedNarrativeSection();
+    if (!section || section.id === activeNarrativeId) return;
+    if (openingNarrativeId && section.id !== openingNarrativeId) return;
+    clearOpeningNarrativeLock();
+    activeNarrativeId = section.id;
+    updateRelatedLinks(activeNarrativeId);
+    if (evidenceOpen && followEnabled && !isNarrow) syncToNarrativeSection(activeNarrativeId);
+  }
+
+  function currentMappedNarrativeSection() {
+    if (!narrativeSections.length) return null;
+    const anchor = window.innerHeight * 0.32;
+    const visible = narrativeSections.filter((section) => {
+      const rect = section.getBoundingClientRect();
+      return rect.bottom > 0 && rect.top < window.innerHeight;
+    });
+    if (!visible.length) return null;
+    return visible.reduce((best, section) => {
+      const distance = Math.abs(section.getBoundingClientRect().top - anchor);
+      const bestDistance = Math.abs(best.getBoundingClientRect().top - anchor);
+      return distance < bestDistance ? section : best;
+    });
+  }
+
+  function syncToNarrativeSection(narrativeId) {
+    const targetId = evidenceMap[narrativeId]?.[0];
+    const target = targetId ? evidenceSectionsById.get(targetId) : null;
+    if (!target) return;
+    updateRelatedLinks(narrativeId);
+    scrollEvidenceTo(target);
+  }
+
+  function handleEvidenceScroll() {
+    if (programmaticEvidenceScroll) return;
+    setFollowEnabled(false, "Follow narrative turned off because you scrolled the evidence pane.");
+  }
+
+  function setFollowEnabled(enabled, announcement = "") {
+    const changed = followEnabled !== enabled;
+    followEnabled = enabled;
+    updateFollowControl();
+    if (changed && announcement) announce(announcement);
+  }
+
+  function updateFollowControl() {
+    followButton.setAttribute("aria-pressed", followEnabled ? "true" : "false");
+    followButton.textContent = `Follow narrative: ${followEnabled ? "on" : "off"}`;
+  }
+
+  function updateRelatedLinks(narrativeId) {
+    const relatedIds = narrativeId ? (evidenceMap[narrativeId] || []).slice(1) : [];
+    relatedList.replaceChildren();
+    related.hidden = relatedIds.length === 0;
+    for (const id of relatedIds) {
+      const section = evidenceSectionsById.get(id);
+      if (!section) continue;
+      const heading = section.querySelector(":scope > h2, :scope > h3, h2, h3");
+      const item = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = `#${id}`;
+      link.textContent = heading?.textContent?.trim() || id;
+      item.append(link);
+      relatedList.append(item);
+    }
+  }
+
+  function evidenceTargetFromLink(link) {
+    const rawId = link.getAttribute("href")?.slice(1) || "";
+    let id;
+    try {
+      id = decodeURIComponent(rawId);
+    } catch {
+      id = rawId;
+    }
+    return evidenceSectionsById.get(id) || null;
+  }
+
+  function scrollEvidenceTo(target, options = {}) {
+    const { focusTarget = false } = options;
+    clearProgrammaticScroll();
+    programmaticEvidenceScroll = true;
+    const scrollRect = evidenceScroll.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const top = Math.max(0, evidenceScroll.scrollTop + targetRect.top - scrollRect.top - 16);
+    evidenceScroll.scrollTo({ top, behavior: reducedMotion ? "auto" : "smooth" });
+    programmaticScrollTimer = window.setTimeout(() => {
+      programmaticEvidenceScroll = false;
+    }, reducedMotion ? 80 : 800);
+    if (focusTarget) {
+      if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+      window.requestAnimationFrame(() => target.focus({ preventScroll: true }));
+    }
+  }
+
+  function clearProgrammaticScroll() {
+    window.clearTimeout(programmaticScrollTimer);
+    programmaticEvidenceScroll = false;
+  }
+
+  function clearOpeningNarrativeLock() {
+    window.clearTimeout(openingNarrativeTimer);
+    openingNarrativeTimer = 0;
+    openingNarrativeId = "";
+  }
+
+  function announce(message) {
+    liveStatus.textContent = "";
+    window.setTimeout(() => {
+      liveStatus.textContent = message;
+    }, 20);
+  }
+
+  function revealEvidenceForPrint() {
+    printRevealedHiddenPane = pane.hidden;
+    if (printRevealedHiddenPane) pane.hidden = false;
+  }
+
+  function restoreEvidenceAfterPrint() {
+    if (printRevealedHiddenPane) pane.hidden = true;
+    printRevealedHiddenPane = false;
+  }
+
+  function isTextEntryTarget(target) {
+    if (!(target instanceof Element)) return false;
+    return Boolean(target.closest("input, textarea, select"))
+      || (target instanceof HTMLElement && target.isContentEditable);
+  }
+
+  function isUsableFocusTarget(target) {
+    return target instanceof HTMLElement
+      && target.isConnected
+      && target !== document.body
+      && target !== document.documentElement;
+  }
+})();
+  </script>
+  <script>
+/* pi-artifacts report reader v1.3.0 */
+(() => {
+  "use strict";
+
+  const synthesis = window.speechSynthesis;
+  const Utterance = window.SpeechSynthesisUtterance;
+  if (!synthesis || typeof synthesis.speak !== "function" || typeof Utterance !== "function") {
+    return;
+  }
+
+  const main = document.querySelector("[data-report-narrative]");
+  if (!main) return;
+
+  const STORAGE_RATE = "pi-artifacts.report-reader.rate.v1";
+  const STORAGE_VOICE = "pi-artifacts.report-reader.voice.v1";
+  const STORAGE_HIDDEN = "pi-artifacts.report-reader.hidden.v1";
+  // Chromium can stop firing events during utterances of roughly 15 seconds or more.
+  // Keeping each utterance short avoids that stall without a disruptive pause/resume timer.
+  const MAX_CHUNK_CHARS = 160;
+  const documentLanguage = (document.documentElement.lang || navigator.language || "en").toLowerCase();
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+
+  const reader = document.createElement("aside");
+  reader.className = "report-reader";
+  reader.dataset.ttsSkip = "";
+  // The panel is collapsible, so the aside carries its own accessible name: an
+  // aria-labelledby pointing into the panel would lose its target while hidden.
+  reader.setAttribute("aria-label", "Audio reader");
+  reader.innerHTML = `
+    <div class="report-reader-panel" id="report-reader-panel" data-reader-panel>
+      <div class="report-reader-title-row">
+        <h2 class="report-reader-title" id="report-reader-title">Listen to this report</h2>
+        <div class="report-reader-title-actions">
+          <button type="button" data-reader-action="help" aria-label="Open audio reader keyboard shortcut help" aria-haspopup="dialog" aria-controls="report-reader-help">Help</button>
+          <button type="button" data-reader-action="hide" aria-label="Hide the audio reader" aria-expanded="true" aria-controls="report-reader-panel">Hide</button>
+        </div>
+      </div>
+      <div class="report-reader-actions" aria-label="Audio reader playback controls">
+        <button type="button" data-reader-action="play" aria-label="Play report from the beginning">Play</button>
+        <button type="button" data-reader-action="pause" aria-label="Pause report audio">Pause</button>
+        <button type="button" data-reader-action="resume" aria-label="Resume report audio">Resume</button>
+        <button type="button" data-reader-action="stop" aria-label="Stop report audio">Stop</button>
+      </div>
+      <div class="report-reader-options">
+        <label class="report-reader-field">
+          <span>Rate</span>
+          <select data-reader-rate aria-label="Choose report audio speaking rate">
+            <option value="0.75">0.75×</option>
+            <option value="1">1×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option>
+            <option value="1.75">1.75×</option>
+            <option value="2">2×</option>
+          </select>
+        </label>
+        <label class="report-reader-field">
+          <span>Voice</span>
+          <select data-reader-voice aria-label="Choose report audio voice">
+            <option value="">System default</option>
+          </select>
+        </label>
+      </div>
+      <div class="report-reader-progress-row">
+        <progress data-reader-progress max="1" value="0" aria-label="Report audio progress" aria-valuetext="Not started"></progress>
+        <span class="report-reader-status" data-reader-status aria-hidden="true">Ready</span>
+      </div>
+    </div>
+    <button type="button" class="report-reader-launcher" data-reader-action="show" aria-label="Show the audio reader" aria-expanded="false" aria-controls="report-reader-panel" hidden>Listen</button>
+    <span class="report-visually-hidden" data-reader-live aria-live="polite" aria-atomic="true"></span>
+    <dialog class="report-reader-help-dialog" id="report-reader-help" aria-labelledby="report-reader-help-title">
+      <h2 id="report-reader-help-title">Audio reader shortcuts</h2>
+      <p>Shortcuts work when focus is outside a form control.</p>
+      <table>
+        <tbody>
+          <tr><th scope="row"><kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>Space</kbd></th><td>Play or pause</td></tr>
+          <tr><th scope="row"><kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd></th><td>Stop</td></tr>
+          <tr><th scope="row"><kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>H</kbd></th><td>Open this help</td></tr>
+          <tr><th scope="row"><kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>L</kbd></th><td>Hide or show this player</td></tr>
+        </tbody>
+      </table>
+      <p class="report-reader-help-actions"><button type="button" data-reader-action="close-help" aria-label="Close audio reader keyboard shortcut help">Close</button></p>
+    </dialog>
+  `;
+  document.body.append(reader);
+
+  const playButton = requiredControl("[data-reader-action='play']");
+  const pauseButton = requiredControl("[data-reader-action='pause']");
+  const resumeButton = requiredControl("[data-reader-action='resume']");
+  const stopButton = requiredControl("[data-reader-action='stop']");
+  const helpButton = requiredControl("[data-reader-action='help']");
+  const closeHelpButton = requiredControl("[data-reader-action='close-help']");
+  const hideButton = requiredControl("[data-reader-action='hide']");
+  const launcherButton = requiredControl("[data-reader-action='show']");
+  const panel = requiredControl("[data-reader-panel]");
+  const rateSelect = requiredControl("[data-reader-rate]");
+  const voiceSelect = requiredControl("[data-reader-voice]");
+  const progress = requiredControl("[data-reader-progress]");
+  const visualStatus = requiredControl("[data-reader-status]");
+  const liveStatus = requiredControl("[data-reader-live]");
+  const helpDialog = requiredControl("#report-reader-help");
+
+  const savedRate = Number(readPreference(STORAGE_RATE));
+  rateSelect.value = [0.75, 1, 1.25, 1.5, 1.75, 2].includes(savedRate) ? String(savedRate) : "1";
+
+  let voices = [];
+  let selectedVoiceKey = "";
+  let preferredVoiceKey = readPreference(STORAGE_VOICE);
+  let runId = 0;
+  let queue = [];
+  let queueIndex = 0;
+  let completedCharacters = 0;
+  let totalCharacters = 0;
+  let phase = "idle";
+  let currentBlock = null;
+  let panelVisible = true;
+
+  const topLevelSections = [...main.querySelectorAll("section[id]")]
+    .filter((section) => !section.parentElement?.closest("section"));
+
+  for (const [sectionIndex, section] of topLevelSections.entries()) {
+    const heading = section.querySelector(":scope > h2, :scope > h3, h2, h3");
+    if (!heading) continue;
+    const title = heading.textContent?.trim() || `Section ${sectionIndex + 1}`;
+    let actions = heading.nextElementSibling;
+    if (!actions?.classList.contains("report-section-actions")) {
+      actions = document.createElement("div");
+      actions.className = "report-section-actions";
+      heading.insertAdjacentElement("afterend", actions);
+    }
+    actions.dataset.ttsSkip = "";
+
+    const sectionButton = document.createElement("button");
+    sectionButton.type = "button";
+    sectionButton.textContent = "Read this section";
+    sectionButton.setAttribute("aria-label", `Read section: ${title}`);
+    sectionButton.addEventListener("click", () => startReading([section], `Reading ${title}`));
+
+    const fromHereButton = document.createElement("button");
+    fromHereButton.type = "button";
+    fromHereButton.textContent = "Read from here";
+    fromHereButton.setAttribute("aria-label", `Read report from section: ${title}`);
+    fromHereButton.addEventListener("click", () => {
+      startReading(topLevelSections.slice(sectionIndex), `Reading from ${title}`);
+    });
+
+    actions.prepend(sectionButton, fromHereButton);
+  }
+
+  playButton.addEventListener("click", playReport);
+  pauseButton.addEventListener("click", pauseReading);
+  resumeButton.addEventListener("click", resumeReading);
+  stopButton.addEventListener("click", () => stopReading(true));
+  helpButton.addEventListener("click", openHelp);
+  closeHelpButton.addEventListener("click", closeHelp);
+  helpDialog.addEventListener("close", () => helpButton.focus());
+  hideButton.addEventListener("click", () => setPanelVisible(false, { focus: true, announceChange: true }));
+  launcherButton.addEventListener("click", () => setPanelVisible(true, { focus: true, announceChange: true }));
+
+  rateSelect.addEventListener("change", () => {
+    writePreference(STORAGE_RATE, rateSelect.value);
+    announce(`Speaking rate ${rateSelect.value} times. The change applies to the next passage.`);
+  });
+
+  voiceSelect.addEventListener("change", () => {
+    selectedVoiceKey = voiceSelect.value;
+    preferredVoiceKey = selectedVoiceKey;
+    writePreference(STORAGE_VOICE, selectedVoiceKey);
+    const voice = selectedVoice();
+    announce(`${voice ? voice.name : "System default"} voice selected. The change applies to the next passage.`);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (!event.altKey || !event.shiftKey || event.ctrlKey || event.metaKey) return;
+    if (event.code === "Space") {
+      // Space would otherwise activate whichever control has focus.
+      if (isEditingTarget(event.target)) return;
+      event.preventDefault();
+      if (phase === "playing") pauseReading();
+      else if (phase === "paused") resumeReading();
+      else playReport();
+      return;
+    }
+    // Letter shortcuts only conflict with text entry, so they stay available
+    // while a reader button holds focus — notably the launcher after hiding.
+    if (isTextEntryTarget(event.target)) return;
+    const key = event.key.toLowerCase();
+    if (key === "s") {
+      event.preventDefault();
+      stopReading(true);
+    } else if (key === "h") {
+      event.preventDefault();
+      openHelp();
+    } else if (key === "l") {
+      event.preventDefault();
+      setPanelVisible(!panelVisible, { focus: true, announceChange: true });
+    }
+  });
+
+  // Safari and Chromium can both expose an empty voice list until voiceschanged fires.
+  // The retries also cover Safari versions that deliver that event before page code attaches.
+  if (typeof synthesis.addEventListener === "function") {
+    synthesis.addEventListener("voiceschanged", populateVoices);
+  }
+  populateVoices();
+  for (const delay of [50, 250, 1000, 2500]) window.setTimeout(populateVoices, delay);
+
+  const cancelForNavigation = () => {
+    runId += 1;
+    synthesis.cancel();
+  };
+  window.addEventListener("beforeunload", cancelForNavigation);
+  window.addEventListener("pagehide", cancelForNavigation);
+
+  setPanelVisible(readPreference(STORAGE_HIDDEN) !== "1", { persist: false });
+  updateControls();
+
+  function requiredControl(selector) {
+    const element = reader.querySelector(selector);
+    if (!element) throw new Error(`Missing report reader control: ${selector}`);
+    return element;
+  }
+
+  function readPreference(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  function writePreference(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {
+      // Sandboxed and local-file reports may deny storage. Playback still works for this page.
+    }
+  }
+
+  function voiceKey(voice) {
+    return `${voice.voiceURI || ""}::${voice.name}::${voice.lang}`;
+  }
+
+  function populateVoices() {
+    let available;
+    try {
+      available = synthesis.getVoices();
+    } catch {
+      available = [];
+    }
+    if (!available.length) return;
+
+    voices = [...available].sort((left, right) => {
+      const languageOrder = left.lang.localeCompare(right.lang);
+      return languageOrder || left.name.localeCompare(right.name);
+    });
+
+    const fragment = document.createDocumentFragment();
+    const systemOption = document.createElement("option");
+    systemOption.value = "";
+    systemOption.textContent = "System default";
+    fragment.append(systemOption);
+    for (const voice of voices) {
+      const option = document.createElement("option");
+      option.value = voiceKey(voice);
+      option.textContent = `${voice.name} (${voice.lang})${voice.default ? " — default" : ""}`;
+      fragment.append(option);
+    }
+    voiceSelect.replaceChildren(fragment);
+
+    const preferredExists = preferredVoiceKey === ""
+      || voices.some((voice) => voiceKey(voice) === preferredVoiceKey);
+    selectedVoiceKey = preferredVoiceKey !== null && preferredExists
+      ? preferredVoiceKey
+      : voiceKey(defaultVoice(voices));
+    voiceSelect.value = selectedVoiceKey;
+  }
+
+  function defaultVoice(available) {
+    const exactLanguage = available.find((voice) => voice.lang.toLowerCase() === documentLanguage && voice.default)
+      || available.find((voice) => voice.lang.toLowerCase() === documentLanguage);
+    if (exactLanguage) return exactLanguage;
+
+    const languageFamily = documentLanguage.split("-")[0];
+    return available.find((voice) => voice.lang.toLowerCase().startsWith(`${languageFamily}-`) && voice.default)
+      || available.find((voice) => voice.lang.toLowerCase().startsWith(`${languageFamily}-`))
+      || available.find((voice) => voice.default)
+      || available[0];
+  }
+
+  function selectedVoice() {
+    return voices.find((voice) => voiceKey(voice) === selectedVoiceKey) || null;
+  }
+
+  function playReport() {
+    const intro = [...document.querySelectorAll(".report-header [data-tts]")];
+    startReading([...intro, main], "Reading report from the beginning");
+  }
+
+  function startReading(scopes, label) {
+    const nextQueue = buildQueue(scopes);
+    if (!nextQueue.length) {
+      announce("No readable text was found in this part of the report.");
+      return;
+    }
+
+    stopReading(false);
+    const thisRun = runId;
+    queue = nextQueue;
+    queueIndex = 0;
+    completedCharacters = 0;
+    totalCharacters = queue.reduce((total, chunk) => total + chunk.text.length, 0);
+    phase = "playing";
+    updateProgress(0);
+    updateControls();
+    announce(label);
+
+    // A short delay after cancel() avoids a Safari race that can discard the next speak().
+    window.setTimeout(() => speakNext(thisRun), 30);
+  }
+
+  function pauseReading() {
+    if (phase !== "playing") return;
+    synthesis.pause();
+    phase = "paused";
+    updateControls();
+    announce("Audio paused.");
+  }
+
+  function resumeReading() {
+    if (phase !== "paused") return;
+    synthesis.resume();
+    phase = "playing";
+    updateControls();
+    announce("Audio resumed.");
+  }
+
+  function stopReading(shouldAnnounce) {
+    runId += 1;
+    synthesis.cancel();
+    queue = [];
+    queueIndex = 0;
+    completedCharacters = 0;
+    totalCharacters = 0;
+    phase = "idle";
+    clearFollowAlong();
+    updateProgress(0);
+    updateControls();
+    if (shouldAnnounce) announce("Audio stopped.");
+  }
+
+  function speakNext(thisRun) {
+    if (thisRun !== runId || phase === "idle") return;
+    if (queueIndex >= queue.length) {
+      phase = "idle";
+      clearFollowAlong();
+      updateProgress(totalCharacters);
+      updateControls();
+      announce("Report finished.");
+      return;
+    }
+
+    const chunk = queue[queueIndex];
+    const utterance = new Utterance(chunk.text);
+    utterance.rate = Number(rateSelect.value);
+    utterance.lang = selectedVoice()?.lang || documentLanguage;
+    utterance.voice = selectedVoice();
+
+    utterance.onstart = () => {
+      if (thisRun !== runId) return;
+      setCurrentBlock(chunk.block);
+    };
+    utterance.onboundary = (event) => {
+      if (thisRun !== runId) return;
+      const localOffset = Math.max(0, Math.min(chunk.text.length, event.charIndex || 0));
+      updateProgress(completedCharacters + localOffset);
+      highlightBoundary(chunk, localOffset, event.charLength || 0, event.name || "word");
+    };
+    utterance.onend = () => {
+      if (thisRun !== runId) return;
+      completedCharacters += chunk.text.length;
+      queueIndex += 1;
+      updateProgress(completedCharacters);
+      window.setTimeout(() => speakNext(thisRun), 0);
+    };
+    utterance.onerror = (event) => {
+      if (thisRun !== runId) return;
+      const errorName = event.error || "unknown error";
+      stopReading(false);
+      announce(`The audio reader stopped because speech synthesis reported ${errorName}.`);
+    };
+
+    try {
+      synthesis.speak(utterance);
+    } catch {
+      stopReading(false);
+      announce("This browser could not start speech synthesis.");
+    }
+  }
+
+  function buildQueue(scopes) {
+    const seen = new Set();
+    const chunks = [];
+    for (const scope of scopes) {
+      for (const block of speakableBlocks(scope)) {
+        if (seen.has(block)) continue;
+        seen.add(block);
+        const extracted = extractText(block);
+        if (!extracted.text) continue;
+        chunks.push(...chunkText(block, extracted));
+      }
+    }
+    return chunks;
+  }
+
+  function speakableBlocks(scope) {
+    const selector = "[data-tts], h1, h2, h3, h4, p, li, blockquote, figcaption, dt, dd";
+    const candidates = [];
+    if (scope.matches?.(selector)) candidates.push(scope);
+    candidates.push(...scope.querySelectorAll(selector));
+
+    return candidates.filter((candidate) => {
+      if (candidate.closest("[data-tts-skip]")) return false;
+      if (candidate.closest("[hidden], [aria-hidden='true']")) return false;
+      const style = window.getComputedStyle(candidate);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      if (candidate.hasAttribute("data-tts")) return true;
+      return !candidate.querySelector(selector);
+    });
+  }
+
+  function extractText(block) {
+    const rawText = block.textContent || "";
+    const firstNonSpace = rawText.search(/\S/);
+    if (firstNonSpace === -1) return { text: "", trimOffset: 0 };
+    return {
+      text: rawText.slice(firstNonSpace).trimEnd(),
+      trimOffset: firstNonSpace,
+    };
+  }
+
+  function chunkText(block, extracted) {
+    const chunks = [];
+    let cursor = 0;
+    while (cursor < extracted.text.length) {
+      while (/\s/.test(extracted.text[cursor] || "")) cursor += 1;
+      if (cursor >= extracted.text.length) break;
+
+      let end = Math.min(cursor + MAX_CHUNK_CHARS, extracted.text.length);
+      if (end < extracted.text.length) {
+        const windowText = extracted.text.slice(cursor, end + 1);
+        const sentenceBreaks = [...windowText.matchAll(/[.!?](?:["')\]]*)\s+/g)];
+        const lastSentence = sentenceBreaks.at(-1);
+        const sentenceEnd = lastSentence ? lastSentence.index + lastSentence[0].length : 0;
+        if (sentenceEnd >= Math.floor(MAX_CHUNK_CHARS * 0.45)) {
+          end = cursor + sentenceEnd;
+        } else {
+          const whitespace = windowText.lastIndexOf(" ");
+          if (whitespace > 0) end = cursor + whitespace + 1;
+        }
+      }
+
+      const text = extracted.text.slice(cursor, end).trimEnd();
+      if (text) {
+        chunks.push({
+          block,
+          text,
+          blockOffset: extracted.trimOffset + cursor,
+        });
+      }
+      cursor = Math.max(end, cursor + 1);
+    }
+    return chunks;
+  }
+
+  function setCurrentBlock(block) {
+    if (currentBlock === block) return;
+    clearFollowAlong();
+    currentBlock = block;
+    currentBlock.classList.add("report-reader-current");
+    currentBlock.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "center" });
+  }
+
+  function highlightBoundary(chunk, localOffset, reportedLength, boundaryName) {
+    if (!window.CSS?.highlights || typeof window.Highlight !== "function") return;
+    const textAfterBoundary = chunk.text.slice(localOffset);
+    const inferred = boundaryName === "sentence"
+      ? textAfterBoundary.match(/^.*?[.!?](?:["')\]]*)?(?:\s|$)/)?.[0].trimEnd().length
+      : textAfterBoundary.match(/^\S+/)?.[0].length;
+    const length = Math.max(1, reportedLength || inferred || 1);
+    const start = chunk.blockOffset + localOffset;
+    const end = Math.min(chunk.blockOffset + chunk.text.length, start + length);
+    const range = rangeForTextOffsets(chunk.block, start, end);
+    if (!range) return;
+    window.CSS.highlights.set("pi-report-reader-follow", new window.Highlight(range));
+  }
+
+  function rangeForTextOffsets(element, start, end) {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let consumed = 0;
+    let startNode = null;
+    let startOffset = 0;
+    let endNode = null;
+    let endOffset = 0;
+    let node;
+
+    while ((node = walker.nextNode())) {
+      const length = node.nodeValue?.length || 0;
+      if (!startNode && start <= consumed + length) {
+        startNode = node;
+        startOffset = Math.max(0, start - consumed);
+      }
+      if (end <= consumed + length) {
+        endNode = node;
+        endOffset = Math.max(0, end - consumed);
+        break;
+      }
+      consumed += length;
+    }
+
+    if (!startNode || !endNode) return null;
+    const range = document.createRange();
+    range.setStart(startNode, Math.min(startOffset, startNode.nodeValue?.length || 0));
+    range.setEnd(endNode, Math.min(endOffset, endNode.nodeValue?.length || 0));
+    return range;
+  }
+
+  function clearFollowAlong() {
+    currentBlock?.classList.remove("report-reader-current");
+    currentBlock = null;
+    window.CSS?.highlights?.delete("pi-report-reader-follow");
+  }
+
+  function updateProgress(characters) {
+    const maximum = Math.max(1, totalCharacters);
+    const value = Math.max(0, Math.min(maximum, characters));
+    const percent = totalCharacters ? Math.round((value / totalCharacters) * 100) : 0;
+    progress.max = maximum;
+    progress.value = value;
+    progress.setAttribute("aria-valuetext", totalCharacters ? `${percent} percent` : "Not started");
+    visualStatus.textContent = phase === "paused" ? `${percent}% paused` : phase === "playing" ? `${percent}%` : totalCharacters && value === maximum ? "Finished" : "Ready";
+  }
+
+  function updateControls() {
+    pauseButton.disabled = phase !== "playing";
+    resumeButton.disabled = phase !== "paused";
+    stopButton.disabled = phase === "idle";
+    updateLauncherLabel();
+  }
+
+  // Hiding the panel never stops playback, so the collapsed launcher has to
+  // carry the transport state it is standing in for.
+  function updateLauncherLabel() {
+    const label = phase === "playing" ? "Listening" : phase === "paused" ? "Paused" : "Listen";
+    launcherButton.textContent = label;
+    launcherButton.dataset.readerPhase = phase;
+    launcherButton.setAttribute(
+      "aria-label",
+      phase === "playing"
+        ? "Show the audio reader. Currently playing."
+        : phase === "paused"
+          ? "Show the audio reader. Currently paused."
+          : "Show the audio reader",
+    );
+  }
+
+  function setPanelVisible(visible, options = {}) {
+    const { focus = false, announceChange = false, persist = true } = options;
+    panelVisible = visible;
+    panel.hidden = !visible;
+    launcherButton.hidden = visible;
+    reader.dataset.readerCollapsed = visible ? "false" : "true";
+    hideButton.setAttribute("aria-expanded", visible ? "true" : "false");
+    launcherButton.setAttribute("aria-expanded", visible ? "true" : "false");
+    if (persist) writePreference(STORAGE_HIDDEN, visible ? "0" : "1");
+    updateLauncherLabel();
+    if (!visible && helpDialog.hasAttribute("open")) closeHelp();
+    if (focus) (visible ? playButton : launcherButton).focus();
+    if (!announceChange) return;
+    if (visible) {
+      announce("Audio reader shown.");
+    } else if (phase === "playing" || phase === "paused") {
+      announce("Audio reader hidden. Playback continues. Press Alt plus Shift plus S to stop.");
+    } else {
+      announce("Audio reader hidden. Press Alt plus Shift plus L to show it again.");
+    }
+  }
+
+  function announce(message) {
+    liveStatus.textContent = "";
+    window.setTimeout(() => {
+      liveStatus.textContent = message;
+    }, 20);
+  }
+
+  function openHelp() {
+    if (helpDialog.hasAttribute("open")) return;
+    if (typeof helpDialog.showModal === "function") helpDialog.showModal();
+    else helpDialog.setAttribute("open", "");
+  }
+
+  function closeHelp() {
+    if (typeof helpDialog.close === "function") helpDialog.close();
+    else {
+      helpDialog.removeAttribute("open");
+      helpButton.focus();
+    }
+  }
+
+  function isEditingTarget(target) {
+    if (!(target instanceof Element)) return false;
+    return Boolean(target.closest("input, select, textarea, button, [contenteditable='true']"));
+  }
+
+  function isTextEntryTarget(target) {
+    if (!(target instanceof Element)) return false;
+    return Boolean(target.closest("input, select, textarea, [contenteditable='true']"));
+  }
+})();
+  </script>
+<script>
+/* pi-artifacts GitLab references v1.0.0 */
+(() => {
+  "use strict";
+
+  const references = [...document.querySelectorAll("a.gl-ref")];
+  if (!references.length) return;
+
+  let activeReference = null;
+  let frame = 0;
+
+  for (const reference of references) {
+    // The generator supplies title as a no-JavaScript fallback. Once this
+    // visual tooltip is available, remove it so browsers do not show both.
+    reference.removeAttribute("title");
+    reference.addEventListener("pointerenter", () => showTooltip(reference));
+    reference.addEventListener("pointerleave", () => {
+      if (document.activeElement !== reference) hideTooltip(reference);
+    });
+    reference.addEventListener("focus", () => showTooltip(reference));
+    reference.addEventListener("blur", () => hideTooltip(reference));
+  }
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && activeReference) hideTooltip(activeReference);
+  });
+  document.addEventListener("scroll", schedulePosition, { capture: true, passive: true });
+  window.addEventListener("resize", schedulePosition, { passive: true });
+  window.visualViewport?.addEventListener("resize", schedulePosition, { passive: true });
+  window.visualViewport?.addEventListener("scroll", schedulePosition, { passive: true });
+
+  function showTooltip(reference) {
+    if (activeReference && activeReference !== reference) hideTooltip(activeReference);
+    activeReference = reference;
+    reference.dataset.glTooltipVisible = "true";
+    schedulePosition();
+  }
+
+  function hideTooltip(reference) {
+    if (!reference) return;
+    delete reference.dataset.glTooltipVisible;
+    if (activeReference === reference) activeReference = null;
+    window.cancelAnimationFrame(frame);
+    frame = 0;
+  }
+
+  function schedulePosition() {
+    if (!activeReference || frame) return;
+    frame = window.requestAnimationFrame(() => {
+      frame = 0;
+      positionTooltip(activeReference);
+    });
+  }
+
+  function positionTooltip(reference) {
+    if (!reference?.isConnected) {
+      hideTooltip(reference);
+      return;
+    }
+    const tooltip = reference.querySelector(".gl-ref-tooltip");
+    if (!tooltip) return;
+
+    const viewport = window.visualViewport;
+    const viewportLeft = viewport?.offsetLeft || 0;
+    const viewportTop = viewport?.offsetTop || 0;
+    const viewportRight = viewportLeft + (viewport?.width || window.innerWidth);
+    const viewportBottom = viewportTop + (viewport?.height || window.innerHeight);
+    const padding = 8;
+    const gap = 8;
+    const rootFontSize = Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize) || 16;
+    const availableWidth = Math.max(0, viewportRight - viewportLeft - (padding * 2));
+    tooltip.style.maxWidth = `${Math.min(25 * rootFontSize, availableWidth)}px`;
+    const referenceRect = reference.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+
+    let left = referenceRect.left + (referenceRect.width - tooltipRect.width) / 2;
+    left = clamp(left, viewportLeft + padding, viewportRight - tooltipRect.width - padding);
+
+    let top = referenceRect.top - tooltipRect.height - gap;
+    reference.dataset.glTooltipPlacement = "above";
+    if (top < viewportTop + padding) {
+      top = referenceRect.bottom + gap;
+      reference.dataset.glTooltipPlacement = "below";
+    }
+    top = clamp(top, viewportTop + padding, viewportBottom - tooltipRect.height - padding);
+
+    tooltip.style.left = `${Math.round(left)}px`;
+    tooltip.style.top = `${Math.round(top)}px`;
+  }
+
+  function clamp(value, minimum, maximum) {
+    return Math.min(Math.max(value, minimum), Math.max(minimum, maximum));
+  }
+})();
+  </script>
+</body>
+</html>

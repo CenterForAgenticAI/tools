@@ -1,0 +1,37 @@
+<section id="feature-matrix">
+  <h2>Feature matrix</h2>
+  <div class="report-table-wrap">
+    <table>
+      <caption>Required report capabilities</caption>
+      <thead>
+        <tr><th scope="col">Area</th><th scope="col">Implementation</th><th scope="col">Status</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Structure</td><td>Skip links, provenance, separate narrative and evidence contents, semantic sections, and one self-contained artifact</td><td><span class="severity severity-low">Ready</span></td></tr>
+        <tr><td>Audio</td><td>Native <code>speechSynthesis</code>, short utterance chunks, async voice loading, rate and voice preferences</td><td><span class="severity severity-low">Ready</span></td></tr>
+        <tr><td>Follow-along</td><td>Boundary ranges when supported, with current-paragraph fallback</td><td><span class="severity severity-note">Progressive</span></td></tr>
+        <tr><td>Portability</td><td>CSS and JavaScript inlined into one generated HTML file</td><td><span class="severity severity-low">Ready</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="generator-contract">
+  <h2>Generator contract</h2>
+  <p>The helper accepts a report kind, narrative and evidence body fragments, an output path, and metadata. It rejects missing or duplicate section identifiers, unknown evidence mappings, body scripts, and non-inline resource references.</p>
+  <pre><code>node scripts/make-report.mjs \
+  --kind combined \
+  --body examples/reports/narrative-body.html \
+  --evidence examples/reports/detailed-body.html \
+  --meta examples/reports/combined-meta.json \
+  --out examples/reports/demo-combined.html</code></pre>
+</section>
+
+<section id="verification-notes">
+  <h2>Verification notes</h2>
+  <ul>
+    <li><span class="severity severity-high">Required</span> Run <code>npm run check</code> before publishing a report-template change.</li>
+    <li><span class="severity severity-medium">Manual</span> Exercise speech playback in Chromium and Safari because operating-system voices differ.</li>
+    <li><span class="severity severity-note">Expected</span> The player is absent when the Web Speech API is unavailable.</li>
+  </ul>
+</section>

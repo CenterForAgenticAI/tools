@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="{{REPORT_LANGUAGE}}">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="generator" content="pi-artifacts detailed report template v1.1.0" />
+  <meta name="description" content="{{REPORT_DECK}}" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; media-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'none'; base-uri 'none'" />
+  <title>{{REPORT_TITLE}}</title>
+  <style>
+{{REPORT_STYLES}}
+  </style>
+</head>
+<body class="report report-detailed">
+  <a class="report-skip-link" href="#main-content">Skip to detailed report</a>
+  <header class="report-header">
+    <div class="report-header-inner">
+      <p class="report-eyebrow">Detailed report</p>
+      <h1>{{REPORT_TITLE}}</h1>
+      <p class="report-deck">{{REPORT_DECK}}</p>
+      <dl class="report-meta" aria-label="Report details">
+        <div><dt>Date</dt><dd><time datetime="{{REPORT_DATE_ISO}}">{{REPORT_DATE_DISPLAY}}</time></dd></div>
+        <div><dt>Provenance</dt><dd>{{REPORT_PROVENANCE}}</dd></div>
+        <div><dt>Reading time</dt><dd>{{REPORT_READING_TIME}}</dd></div>
+      </dl>
+      <p class="report-companion">{{COMPANION_LINK}}</p>
+    </div>
+  </header>
+  <div class="report-layout">
+    <nav class="report-toc" aria-labelledby="report-toc-title">
+      <h2 id="report-toc-title">Contents</h2>
+{{REPORT_TOC}}
+    </nav>
+    <main class="report-main" id="main-content" tabindex="-1">
+{{REPORT_BODY}}
+    </main>
+  </div>
+  <footer class="report-footer">
+    <div class="report-footer-inner">
+      <p>Generated with the pi-artifacts detailed report template v1.1.0.</p>
+    </div>
+  </footer>
+{{REPORT_REFERENCE_RUNTIME}}
+</body>
+</html>
