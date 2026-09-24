@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "providers": {
+    "openai-codex": {
+      "modelOverrides": {
+        "gpt-5.4": {
+          "contextWindow": 1050000
+        },
+        "gpt-5.5": {
+          "contextWindow": 1050000
+        },
+        "gpt-5.6-sol": {
+          "contextWindow": 1050000
+        },
+        "gpt-5.6-terra": {
+          "contextWindow": 1050000
+        },
+        "gpt-5.6-luna": {
+          "contextWindow": 1050000
+        },
+        "gpt-6-astra": {
+          "contextWindow": 1050000
+        }
+      }
+    },
+    "unified": {
+      "name": "unified",
+      "api": "unified",
+      "baseUrl": "https://unused.invalid"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+Third-party notices
+===================
+
+This package includes modified copies of these MIT-licensed projects. Their
+original license texts are included with each copy.
+
+pi-anthropic-oauth
+------------------
+
+Copyright (c) 2026 Leo Henon
+Upstream: https://github.com/leohenon/pi-anthropic-oauth
+License: MIT (packages/pi-anthropic-oauth/LICENSE)
+Modified version: 0.2.5-intel.1
+
+The modified copy preserves the reviewed OAuth contract, raises the Claude Code
+minimum used for Opus 5.5, documents and tests token boundaries, and projects
+current Pi transcript context into requests.
+
+pi-antigravity
+--------------
+
+Copyright (c) 2026 Rahul Arya
+Upstream: https://github.com/Rahularya01/pi-antigravity
+License: MIT (packages/pi-antigravity/LICENSE)
+Modified version: 0.7.2-intel.1
+
+The modified copy preserves primary response errors, supports bounded usage
+cancellation, projects current Pi transcript context, and writes opt-in debug
+output under the operating system temporary directory.

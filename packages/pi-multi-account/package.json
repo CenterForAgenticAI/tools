@@ -1,0 +1,76 @@
+{
+  "version": "0.1.1",
+  "description": "Global Anthropic and OpenAI Codex multi-account OAuth routing for Pi.",
+  "type": "module",
+  "bin": {
+    "multi-account": "scripts/multi-account.mjs"
+  },
+  "exports": "./src/index.ts",
+  "files": [
+    "src",
+    "scripts/multi-account.mjs",
+    "config",
+    "packages/pi-anthropic-oauth/src",
+    "packages/pi-anthropic-oauth/package.json",
+    "packages/pi-anthropic-oauth/LICENSE",
+    "packages/pi-antigravity/src",
+    "packages/pi-antigravity/package.json",
+    "packages/pi-antigravity/LICENSE",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "check": "npm run typecheck && npm test",
+    "test": "node scripts/with-temp-root.mjs vitest run --no-file-parallelism --testTimeout=15000",
+    "smoke:child": "node scripts/with-temp-root.mjs node scripts/child-smoke.mjs",
+    "canary:audit": "node scripts/with-temp-root.mjs vitest run test/credential-canary.test.ts --no-file-parallelism --testTimeout=15000 && node scripts/with-temp-root.mjs node scripts/child-smoke.mjs",
+    "integration:verify": "npm run check && npm run upstream:check && npm run canary:audit && npm pack --dry-run",
+    "upstream:check": "node scripts/upstream-check.mjs",
+    "upstream:verify-baseline": "node scripts/upstream-verify-baseline.mjs",
+    "upstream:diff": "node scripts/upstream-diff.mjs",
+    "upstream:update": "node scripts/upstream-update.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "name": "@centerforagenticai/pi-multi-account",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/pi-multi-account"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/pi-multi-account#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "undici": "^8.10.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-tui": "0.84.4",
+    "@types/node": "^24.0.0",
+    "typebox": "1.3.7",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.11"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

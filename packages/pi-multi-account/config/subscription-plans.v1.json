@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "presets": [
+    {
+      "id": "chatgpt-individual-free",
+      "provider": "chatgpt",
+      "accountType": "individual",
+      "label": "free",
+      "monthlyUsd": 0,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    },
+    {
+      "id": "chatgpt-individual-go",
+      "provider": "chatgpt",
+      "accountType": "individual",
+      "label": "go",
+      "monthlyUsd": 8,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    },
+    {
+      "id": "chatgpt-individual-plus",
+      "provider": "chatgpt",
+      "accountType": "individual",
+      "label": "plus",
+      "monthlyUsd": 20,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    },
+    {
+      "id": "chatgpt-individual-pro-5x",
+      "provider": "chatgpt",
+      "accountType": "individual",
+      "label": "pro 5x",
+      "monthlyUsd": 100,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    },
+    {
+      "id": "chatgpt-individual-pro-20x",
+      "provider": "chatgpt",
+      "accountType": "individual",
+      "label": "pro 20x",
+      "monthlyUsd": 200,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    },
+    {
+      "id": "chatgpt-business-standard",
+      "provider": "chatgpt",
+      "accountType": "business",
+      "label": "standard",
+      "monthlyUsd": 25,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    },
+    {
+      "id": "chatgpt-business-premium",
+      "provider": "chatgpt",
+      "accountType": "business",
+      "label": "premium",
+      "monthlyUsd": 125,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    },
+    {
+      "id": "anthropic-individual-free",
+      "provider": "anthropic",
+      "accountType": "individual",
+      "label": "free",
+      "monthlyUsd": 0,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    },
+    {
+      "id": "anthropic-individual-pro",
+      "provider": "anthropic",
+      "accountType": "individual",
+      "label": "pro",
+      "monthlyUsd": 17,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    },
+    {
+      "id": "anthropic-individual-max-5x",
+      "provider": "anthropic",
+      "accountType": "individual",
+      "label": "max 5x",
+      "monthlyUsd": 100,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    },
+    {
+      "id": "anthropic-individual-max-20x",
+      "provider": "anthropic",
+      "accountType": "individual",
+      "label": "max 20x",
+      "monthlyUsd": 200,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    },
+    {
+      "id": "anthropic-team-standard",
+      "provider": "anthropic",
+      "accountType": "team",
+      "label": "standard",
+      "monthlyUsd": 25,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    },
+    {
+      "id": "anthropic-team-premium",
+      "provider": "anthropic",
+      "accountType": "team",
+      "label": "premium",
+      "monthlyUsd": 125,
+      "productBasis": "per-account",
+      "provenance": "Operator-provided default monthly-equivalent USD comparison rate, not a researched provider entitlement or independently verified official price."
+    }
+  ]
+}
