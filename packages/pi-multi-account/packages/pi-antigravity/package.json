@@ -1,0 +1,77 @@
+{
+  "name": "pi-antigravity",
+  "version": "0.7.2-intel.1",
+  "description": "Personal Antigravity / Cloud Code Assist provider for Pi Coding Agent",
+  "author": "Rahul Arya",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rahularya01/pi-antigravity.git"
+  },
+  "homepage": "https://github.com/Rahularya01/pi-antigravity#readme",
+  "bugs": {
+    "url": "https://github.com/Rahularya01/pi-antigravity/issues"
+  },
+  "type": "module",
+  "main": "./src/index.ts",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "antigravity",
+    "google",
+    "oauth",
+    "provider"
+  ],
+  "files": [
+    "LICENSE",
+    "README.md",
+    "UPSTREAM.json",
+    "src",
+    "tsconfig.json",
+    "UPSTREAM.md",
+    "SOURCE_MANIFEST.sha256"
+  ],
+  "packageManager": "bun@1.4.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "prepare": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "security-check": "bun scripts/security-check.ts",
+    "test": "bun scripts/test-model-routing.ts && bun scripts/test-model-discovery.ts && bun scripts/test-usage-formatter.ts && bun scripts/test-stream-sse.ts && bun scripts/test-stream-header-deadline.ts && bun scripts/test-http-proxy.ts && bun scripts/test-image-gen.ts && bun run test:stream-primary-error && bun run test:usage-abort && bun run test:context-projection",
+    "test:stream-primary-error": "bun scripts/test-stream-primary-error.ts",
+    "test:usage-abort": "bun scripts/test-usage-abort.ts",
+    "smoke:tools": "bun scripts/smoke-tool-schema.ts",
+    "smoke:models": "bun scripts/smoke-all-models.mjs",
+    "check": "bun run typecheck && bun run lint && bun run format:check && bun run security-check && bun run test",
+    "test:context-projection": "bun scripts/test-context-projection.ts",
+    "test:context-projection:normalized": "bun scripts/test-context-projection.ts normalized"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.80.0",
+    "@earendil-works/pi-coding-agent": ">=0.80.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.1.1",
+    "eslint": "^10.7.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.7.0",
+    "pi-ai-087": "npm:@earendil-works/pi-ai@0.87.1",
+    "prettier": "^3.9.5",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.64.0"
+  },
+  "dependencies": {
+    "undici": "^8.10.0"
+  }
+}
