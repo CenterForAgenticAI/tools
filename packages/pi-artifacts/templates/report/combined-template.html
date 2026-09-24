@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="{{REPORT_LANGUAGE}}">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="generator" content="pi-artifacts combined report template v1.1.0" />
+  <meta name="description" content="{{REPORT_DECK}}" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; media-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'none'; base-uri 'none'" />
+  <title>{{REPORT_TITLE}}</title>
+  <style>
+{{REPORT_STYLES}}
+  </style>
+</head>
+<body class="report report-combined">
+  <a class="report-skip-link" href="#main-content">Skip to report</a>
+  <a class="report-skip-link report-evidence-skip-link" href="#report-evidence-content" hidden>Skip to evidence</a>
+  <header class="report-header">
+    <div class="report-header-inner">
+      <p class="report-eyebrow">Combined report</p>
+      <h1 data-tts>{{REPORT_TITLE}}</h1>
+      <p class="report-deck" data-tts>{{REPORT_DECK}}</p>
+      <dl class="report-meta" aria-label="Report details">
+        <div><dt>Date</dt><dd><time datetime="{{REPORT_DATE_ISO}}">{{REPORT_DATE_DISPLAY}}</time></dd></div>
+        <div><dt>Provenance</dt><dd>{{REPORT_PROVENANCE}}</dd></div>
+        <div><dt>Reading time</dt><dd>{{REPORT_READING_TIME}}</dd></div>
+      </dl>
+      <div class="report-header-toolbar" aria-label="Report tools">
+        <button type="button" data-evidence-action="toggle" aria-expanded="false" aria-controls="report-evidence-pane">Evidence</button>
+      </div>
+    </div>
+  </header>
+  <div class="report-combined-layout">
+    <div class="report-layout report-narrative-layout" data-report-narrative-view>
+      <nav class="report-toc" aria-labelledby="report-toc-title">
+        <h2 id="report-toc-title">Contents</h2>
+{{REPORT_TOC}}
+      </nav>
+      <main class="report-main report-narrative-main" id="main-content" tabindex="-1" data-report-narrative>
+{{REPORT_BODY}}
+      </main>
+    </div>
+    <aside class="report-evidence-pane" id="report-evidence-pane" aria-labelledby="report-evidence-title" hidden>
+      <header class="report-evidence-header">
+        <div>
+          <p class="report-eyebrow">Detailed evidence</p>
+          <h2 id="report-evidence-title">Evidence</h2>
+          <p class="report-evidence-shortcut">Toggle with <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd>.</p>
+        </div>
+        <button type="button" data-evidence-action="close">Close evidence</button>
+      </header>
+      <div class="report-evidence-controls">
+        <button type="button" data-evidence-action="follow" aria-pressed="true">Follow narrative: on</button>
+        <span class="report-visually-hidden" data-evidence-live aria-live="polite" aria-atomic="true"></span>
+      </div>
+      <nav class="report-related-evidence" aria-labelledby="report-related-evidence-title" hidden>
+        <h3 id="report-related-evidence-title">Related evidence</h3>
+        <ul data-related-evidence-list></ul>
+      </nav>
+      <div class="report-evidence-scroll" data-evidence-scroll tabindex="-1">
+        <nav class="report-evidence-toc" aria-labelledby="report-evidence-toc-title">
+          <h3 id="report-evidence-toc-title">All evidence</h3>
+{{REPORT_EVIDENCE_TOC}}
+        </nav>
+        <div class="report-main report-evidence-content" id="report-evidence-content">
+{{REPORT_EVIDENCE}}
+        </div>
+      </div>
+    </aside>
+  </div>
+  <footer class="report-footer">
+    <div class="report-footer-inner">
+      <p>Generated with the pi-artifacts combined report template v1.1.0. Evidence starts hidden on every visit; the audio reader reads only the narrative.</p>
+    </div>
+  </footer>
+  <script type="application/json" id="report-evidence-map">{{REPORT_EVIDENCE_MAP}}</script>
+  <script>
+{{REPORT_EVIDENCE_RUNTIME}}
+  </script>
+  <script>
+{{REPORT_READER}}
+  </script>
+{{REPORT_REFERENCE_RUNTIME}}
+</body>
+</html>

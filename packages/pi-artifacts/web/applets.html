@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light dark" />
+<title>pi artifacts · applets</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<header class="topbar">
+  <a class="brand brand-link" href="/">pi<span class="dot">·</span>artifacts</a>
+  <a class="toplink nav-primary active" href="/applets">Applets</a>
+  <span class="grow"></span>
+  <span id="count" class="count count-pill"></span>
+  <button id="theme" class="btn-icon" title="Toggle theme">◐</button>
+</header>
+<main>
+  <section class="page-hero">
+    <div>
+      <div class="section-title">Applets</div>
+      <h1>Small tools hosted by pi-artifacts</h1>
+      <p class="muted">Interactive, tailnet-reachable mini apps with optional applet-local SQLite persistence.</p>
+    </div>
+    <code>~/.pi/artifacts/applets/&lt;id&gt;/</code>
+  </section>
+  <div id="applets"><div class="spinner">Loading…</div></div>
+</main>
+<script type="module">
+import { initTheme, toggleTheme, esc } from "/common.js";
+initTheme();
+document.getElementById("theme").onclick = toggleTheme;
+
+const $ = (id) => document.getElementById(id);
+
+async function loadApplets() {
+  const r = await fetch("/api/applets");
+  const { applets = [] } = await r.json();
+  $("count").textContent = `${applets.length} applet${applets.length === 1 ? "" : "s"}`;
+  if (!applets.length) {
+    $("applets").innerHTML = `<div class="empty">No applets yet.<br><code>pi-artifacts applet-init &lt;id&gt;</code></div>`;
+    return;
+  }
+  $("applets").innerHTML = `<div class="applet-list applet-index-list">${applets.map((app) => `<a class="applet-card" href="${esc(app.url)}">
+    <div class="title">🧩 ${esc(app.title)}</div>
+    <div class="meta"><span>${esc(app.id)}</span>${app.description ? `<span class="sep">·</span><span>${esc(app.description)}</span>` : ""}</div>
+    <div class="meta"><span>${esc(app.url)}</span></div>
+  </a>`).join("")}</div>`;
+}
+
+loadApplets();
+</script>
+</body>
+</html>

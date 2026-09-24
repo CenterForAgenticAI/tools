@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light dark" />
+<meta name="theme-color" content="#0d1117" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="artifacts" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>pi artifacts</title>
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/icons/icon-180.png" />
+<link rel="icon" href="/icons/icon-192.png" />
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<header class="topbar">
+  <span class="brand">pi<span class="dot">·</span>artifacts</span>
+  <a class="toplink nav-primary" href="/applets">Applets</a>
+  <div class="offline-menu" hidden>
+    <button id="offline-toggle" type="button" class="btn-icon offline-toggle" title="Offline (online)" aria-label="Offline menu (online)" aria-haspopup="dialog" aria-controls="offline-panel" aria-expanded="false">
+      <span class="offline-dot" aria-hidden="true"></span>
+      <span class="offline-label">Offline</span>
+      <span class="offline-connection-state">online</span>
+    </button>
+    <div id="offline-panel" class="offline-panel" role="dialog" aria-label="Offline storage" hidden></div>
+  </div>
+  <input id="search" class="search-control" type="search" placeholder="Search, or type:image tag:qa -tag:smoke project:…" autocomplete="off" />
+  <select id="sort" class="sort-filter">
+    <option value="modified">Recently modified</option>
+    <option value="created">Recently created</option>
+    <option value="title">By title</option>
+  </select>
+  <span class="viewswitch" role="group" aria-label="View">
+    <button id="view-flat" class="vbtn" title="Flat list">☰ List</button>
+    <button id="view-proj" class="vbtn" title="Group by project">▦ Projects</button>
+  </span>
+  <span class="grow"></span>
+  <span id="count" class="count count-pill"></span>
+  <button id="theme" class="btn-icon" title="Toggle theme">◐</button>
+</header>
+<main>
+  <section id="applets-section" class="applets-section" hidden>
+    <div class="section-head">
+      <button id="applets-toggle" class="section-toggle" type="button" aria-expanded="false" aria-controls="applets" aria-label="Expand Applets">
+        <span class="section-toggle-copy">
+          <span class="section-title">Applets</span>
+          <span class="muted">Small artifact-adjacent tools hosted by this daemon.</span>
+        </span>
+      </button>
+      <a class="toplink" href="/applets">View all</a>
+    </div>
+    <div id="applets" class="applet-list" hidden></div>
+  </section>
+  <div id="active-filter" class="active-filter" hidden aria-label="Active filter"></div>
+  <div id="project-tabs" class="ptabs" hidden>
+    <div id="ptabs-strip" class="ptabs-strip" role="tablist" aria-label="Projects"></div>
+    <details id="ptabs-menu" class="ptabs-menu" hidden>
+      <summary class="ptab ptab-more" title="More projects" aria-label="More projects">⋯</summary>
+      <div id="ptabs-menu-list" class="ptabs-menu-list" role="menu"></div>
+    </details>
+  </div>
+  <div id="saved-views" class="sviews" hidden>
+    <span class="sviews-label">Views</span>
+    <div id="sviews-list" class="sviews-list"></div>
+    <button id="sview-save" type="button" class="sview sview-add" title="Save the current filter as a view">+ Save</button>
+  </div>
+  <div id="facets" class="facets" hidden>
+    <div id="facet-types-row" class="facet-row">
+      <span class="facet-label">Type</span>
+      <div id="facet-types" class="chips"></div>
+    </div>
+    <div id="facet-tags-row" class="facet-row">
+      <span class="facet-label">Tags</span>
+      <div id="facet-tags" class="chips"></div>
+    </div>
+    <div id="facet-foot" class="facet-foot" hidden>
+      <button id="facet-clear" type="button" class="chip chip-clear">✕ Clear filters</button>
+    </div>
+  </div>
+  <div id="list"><div class="spinner">Loading…</div></div>
+  <div id="cheatsheet" class="overlay" hidden role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+    <div class="cheatsheet">
+      <div class="cheatsheet-head"><span>Keyboard shortcuts</span><button id="cheatsheet-close" type="button" class="btn-icon" title="Close" aria-label="Close">✕</button></div>
+      <table class="cheatsheet-keys">
+        <tr><td><kbd>/</kbd></td><td>Focus search</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>Clear search / close this</td></tr>
+        <tr><td><kbd>1</kbd>–<kbd>9</kbd></td><td>Jump to saved view</td></tr>
+        <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next project tab</td></tr>
+        <tr><td><kbd>t</kbd></td><td>Jump to type filters</td></tr>
+        <tr><td><kbd>g</kbd></td><td>Cycle grouping (list / projects)</td></tr>
+        <tr><td><kbd>x</kbd></td><td>Clear filters</td></tr>
+        <tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>Move card selection</td></tr>
+        <tr><td><kbd>Enter</kbd></td><td>Open selected card</td></tr>
+        <tr><td><kbd>o</kbd></td><td>Toggle offline-pin on selected card</td></tr>
+        <tr><td><kbd>?</kbd></td><td>Show this cheatsheet</td></tr>
+      </table>
+    </div>
+  </div>
+</main>
+<script type="module">
+import { initTheme, toggleTheme, timeAgo, fmtSize, esc, KIND_ICON, shortProject } from "/common.js";
+import { offline, registerServiceWorker, mountOfflinePanel } from "/offline.js";
+initTheme();
+document.getElementById("theme").onclick = toggleTheme;
+
+const $ = (id) => document.getElementById(id);
+const state = {
+  q: "",
+  project: "",
+  sort: "modified",
+  view: localStorage.getItem("pa-view") || "flat",
+  types: [],
+  tagsInclude: [],
+  tagsExclude: [],
+};
+let loaded = [];
+let tagsExpanded = false;
+const TAG_FACET_LIMIT = 24;
+const projPaths = {}; // project -> full path
+let timer;
+
+// ---- URL filter state (Phase 3) ----
+// The whole filter round-trips to the query string so a view can be reloaded or shared.
+const SORTS = ["modified", "created", "title"];
+const DEFAULT_SORT = "modified";
+const DEFAULT_VIEW = "flat";
+
+function serializeFilter() {
+  const p = new URLSearchParams();
+  if (state.q) p.set("q", state.q);
+  if (state.project) p.set("project", state.project);
+  if (state.types.length) p.set("type", state.types.join(","));
+  if (state.tagsInclude.length) p.set("tag", state.tagsInclude.join(","));
+  if (state.tagsExclude.length) p.set("xtag", state.tagsExclude.join(","));
+  if (state.sort !== DEFAULT_SORT) p.set("sort", state.sort);
+  if (state.view !== DEFAULT_VIEW) p.set("group", state.view);
+  return p.toString();
+}
+
+function syncURL() {
+  const qs = serializeFilter();
+  history.replaceState(null, "", qs ? "?" + qs : location.pathname);
+}
+
+function restoreFilter() {
+  const p = new URLSearchParams(location.search);
+  const csv = (k) => { const v = p.get(k); return v ? v.split(",").map((s) => s.trim()).filter(Boolean) : []; };
+  if (p.has("q")) state.q = p.get("q");
+  if (p.has("project")) state.project = p.get("project");
+  state.types = csv("type");
+  state.tagsInclude = csv("tag");
+  state.tagsExclude = csv("xtag");
+  if (p.has("sort") && SORTS.includes(p.get("sort"))) state.sort = p.get("sort");
+  if (p.has("group") && (p.get("group") === "proj" || p.get("group") === "flat")) state.view = p.get("group");
+  // reflect restored state into the controls
+  $("search").value = state.q;
+  $("sort").value = state.sort;
+}
+function setView(v) {
+  state.view = v;
+  localStorage.setItem("pa-view", v);
+  $("view-flat").classList.toggle("active", v === "flat");
+  $("view-proj").classList.toggle("active", v === "proj");
+}
+
+async function load() {
+  const params = new URLSearchParams();
+  if (state.q) params.set("q", state.q);
+  params.set("sort", state.sort);
+  params.set("limit", "2000"); // load the full set; project/type/tag filtering is client-side
+  const r = await fetch("/api/list?" + params);
+  const { items } = await r.json();
+  loaded = items;
+  for (const a of items) if (a.project_path) projPaths[a.project] = a.project_path;
+  renderAll();
+}
+
+// ---- Project tabs (Phase 2) ----
+const VISIBLE_PROJECT_TABS = 6;
+
+function passProject(a) {
+  return !state.project || a.project === state.project;
+}
+// project -> count within the loaded (q-filtered) set, ignoring type/tag facets (stable tab order)
+function projectOrderCounts() {
+  return countBy(loaded, (a) => [a.project]);
+}
+// project -> count passing the active type+tag facets (the live number shown on each tab)
+function projectShownCounts() {
+  return countBy(loaded.filter((a) => passType(a) && passTags(a)), (a) => [a.project]);
+}
+// Full ordered project list for tabs and keyboard nav: "" (All) first, then projects by size.
+function orderedProjectList() {
+  const order = projectOrderCounts();
+  const projects = [...order.keys()].sort((x, y) => order.get(y) - order.get(x) || x.localeCompare(y));
+  // Keep a restored/active project selectable even if the current query left it with no items.
+  if (state.project && !projects.includes(state.project)) projects.unshift(state.project);
+  return ["", ...projects];
+}
+
+function ptabHtml(project, shown) {
+  const active = state.project === project;
+  const label = project === "" ? "All" : esc(shortProject(project));
+  const path = project ? projPaths[project] : "";
+  const title = path ? ` title="${esc(path)}"` : "";
+  return `<button type="button" role="tab" class="ptab${active ? " active" : ""}" data-project="${esc(project)}" aria-selected="${active}"${title}>${label} <span class="ptab-n">${shown}</span></button>`;
+}
+
+function renderProjectTabs() {
+  const wrap = $("project-tabs");
+  if (!loaded.length) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  const shown = projectShownCounts();
+  const projects = orderedProjectList().slice(1); // drop leading "" (All is rendered separately)
+  let visible = projects.slice(0, VISIBLE_PROJECT_TABS);
+  let overflow = projects.slice(VISIBLE_PROJECT_TABS);
+  // Always keep the active project visible, even if it falls in the overflow tail.
+  if (state.project && overflow.includes(state.project)) {
+    overflow = overflow.filter((p) => p !== state.project);
+    visible = [...visible, state.project];
+  }
+  const allShown = loaded.filter((a) => passType(a) && passTags(a)).length;
+  $("ptabs-strip").innerHTML = ptabHtml("", allShown) + visible.map((p) => ptabHtml(p, shown.get(p) || 0)).join("");
+  const menu = $("ptabs-menu");
+  if (overflow.length) {
+    menu.hidden = false;
+    $("ptabs-menu-list").innerHTML = overflow.map((p) => {
+      const active = state.project === p;
+      const path = projPaths[p] || "";
+      const title = path ? ` title="${esc(path)}"` : "";
+      return `<button type="button" role="menuitem" class="ptabs-menu-item${active ? " active" : ""}" data-project="${esc(p)}"${title}>${esc(shortProject(p))} <span class="ptab-n">${shown.get(p) || 0}</span></button>`;
+    }).join("");
+  } else {
+    menu.hidden = true;
+    menu.open = false;
+  }
+}
+
+function selectProject(project) {
+  state.project = project;
+  $("ptabs-menu").open = false;
+  renderAll();
+}
+
+// ---- Saved views (Phase 4) ----
+// A saved view is a named filter. Starter views are built in; user views persist to localStorage.
+const STARTER_VIEWS = [
+  { name: "Reports", filter: { tagsInclude: ["dossier-report"] } },
+  { name: "QA evidence", filter: { tagsInclude: ["qa"] } },
+  { name: "Smoke-free", filter: { tagsExclude: ["smoke", "screenshot"] } },
+  { name: "Media", filter: { types: ["image", "video"] } },
+];
+const SAVED_VIEWS_KEY = "pa-saved-views";
+
+function userViews() {
+  try { return JSON.parse(localStorage.getItem(SAVED_VIEWS_KEY) || "[]"); } catch { return []; }
+}
+function setUserViews(v) { localStorage.setItem(SAVED_VIEWS_KEY, JSON.stringify(v)); }
+function allViews() {
+  return [...STARTER_VIEWS.map((v) => ({ ...v, builtin: true })), ...userViews().map((v) => ({ ...v, builtin: false }))];
+}
+
+// The current filter reduced to the fields a saved view captures.
+function currentFilter() {
+  const f = {};
+  if (state.q) f.q = state.q;
+  if (state.project) f.project = state.project;
+  if (state.types.length) f.types = [...state.types];
+  if (state.tagsInclude.length) f.tagsInclude = [...state.tagsInclude];
+  if (state.tagsExclude.length) f.tagsExclude = [...state.tagsExclude];
+  if (state.sort !== DEFAULT_SORT) f.sort = state.sort;
+  if (state.view !== DEFAULT_VIEW) f.view = state.view;
+  return f;
+}
+function sameSet(a = [], b = []) { return a.length === b.length && [...a].sort().join("\u0000") === [...b].sort().join("\u0000"); }
+function filterEquals(f) {
+  const c = currentFilter();
+  return (f.q || "") === (c.q || "")
+    && (f.project || "") === (c.project || "")
+    && sameSet(f.types, c.types)
+    && sameSet(f.tagsInclude, c.tagsInclude)
+    && sameSet(f.tagsExclude, c.tagsExclude)
+    && (f.sort || DEFAULT_SORT) === (c.sort || DEFAULT_SORT)
+    && (f.view || DEFAULT_VIEW) === (c.view || DEFAULT_VIEW);
+}
+
+// Count over the loaded set using a view's project/type/tag constraints (ignores the view's own q).
+function itemMatchesFilter(a, f) {
+  if (f.project && a.project !== f.project) return false;
+  if (f.types && f.types.length && !f.types.includes(a.kind)) return false;
+  const tags = a.tags || [];
+  for (const t of (f.tagsInclude || [])) if (!tags.includes(t)) return false;
+  for (const t of (f.tagsExclude || [])) if (tags.includes(t)) return false;
+  return true;
+}
+function viewCount(f) {
+  let n = 0;
+  for (const a of loaded) if (itemMatchesFilter(a, f)) n++;
+  return n;
+}
+
+function applyView(f) {
+  state.q = f.q || "";
+  state.project = f.project || "";
+  state.types = f.types ? [...f.types] : [];
+  state.tagsInclude = f.tagsInclude ? [...f.tagsInclude] : [];
+  state.tagsExclude = f.tagsExclude ? [...f.tagsExclude] : [];
+  state.sort = f.sort || DEFAULT_SORT;
+  setView(f.view || DEFAULT_VIEW);
+  $("search").value = state.q;
+  $("sort").value = state.sort;
+  load(); // q/sort may have changed; load refetches and re-renders (re-applying project/type/tag)
+}
+
+function renderSavedViews() {
+  const wrap = $("saved-views");
+  if (!loaded.length) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  const views = allViews();
+  $("sviews-list").innerHTML = views.map((v, i) => {
+    const active = filterEquals(v.filter);
+    const num = i < 9 ? `<span class="sview-k">${i + 1}</span>` : "";
+    const del = v.builtin ? "" : `<span class="sview-del" data-del="${i}" title="Delete view" role="button">✕</span>`;
+    return `<button type="button" class="sview${active ? " active" : ""}" data-view="${i}">${num}${esc(v.name)} <span class="sview-n">${viewCount(v.filter)}</span>${del}</button>`;
+  }).join("");
+}
+
+function jumpToView(index) {
+  const views = allViews();
+  if (index >= 0 && index < views.length) applyView(views[index].filter);
+}
+function deleteUserView(allIndex) {
+  const uIndex = allIndex - STARTER_VIEWS.length;
+  if (uIndex < 0) return; // never delete a builtin starter view
+  const uv = userViews();
+  uv.splice(uIndex, 1);
+  setUserViews(uv);
+  renderSavedViews();
+}
+function saveCurrentView() {
+  const f = currentFilter();
+  if (Object.keys(f).length === 0) { alert("Set some filters first, then save them as a view."); return; }
+  const name = (prompt("Name this view:") || "").trim();
+  if (!name) return;
+  const uv = userViews();
+  uv.push({ name, filter: f });
+  setUserViews(uv);
+  renderSavedViews();
+}
+
+// ---- Card selection + keyboard (Phase 4) ----
+let selectedIndex = -1;
+function listCards() { return [...document.querySelectorAll("#list .card")]; }
+function highlightSelection(cards) {
+  cards.forEach((c, i) => c.classList.toggle("selected", i === selectedIndex));
+  if (selectedIndex >= 0 && cards[selectedIndex]) cards[selectedIndex].scrollIntoView({ block: "nearest" });
+}
+function restoreSelectionHighlight() {
+  if (selectedIndex < 0) return;
+  const cards = listCards();
+  if (selectedIndex < cards.length) highlightSelection(cards); else selectedIndex = -1;
+}
+function moveSelection(delta) {
+  const cards = listCards();
+  if (!cards.length) return;
+  selectedIndex = selectedIndex < 0 ? 0 : Math.max(0, Math.min(cards.length - 1, selectedIndex + delta));
+  highlightSelection(cards);
+}
+function openSelected() {
+  const c = listCards()[selectedIndex];
+  if (!c) return;
+  const link = c.querySelector(".card-open");
+  if (link) window.location.href = link.getAttribute("href");
+}
+function pinSelected() {
+  const c = listCards()[selectedIndex];
+  if (!c) return;
+  const btn = c.querySelector(".offline-pin");
+  if (btn) btn.click();
+}
+
+function cycleProjectTab(delta) {
+  const list = orderedProjectList();
+  let i = list.indexOf(state.project);
+  if (i < 0) i = 0;
+  i = Math.max(0, Math.min(list.length - 1, i + delta));
+  selectProject(list[i]);
+}
+function cycleGrouping() { setView(state.view === "proj" ? "flat" : "proj"); renderAll(); }
+
+function toggleCheatsheet(force) {
+  const el = $("cheatsheet");
+  const show = force === undefined ? el.hidden : force;
+  el.hidden = !show;
+}
+
+document.addEventListener("keydown", (e) => {
+  // Escape closes the cheatsheet or clears search, whatever the focus.
+  if (e.key === "Escape") {
+    if (!$("cheatsheet").hidden) { toggleCheatsheet(false); return; }
+    if (state.q || document.activeElement === $("search")) { state.q = ""; $("search").value = ""; $("search").blur(); load(); }
+    return;
+  }
+  const t = (e.target.tagName || "").toLowerCase();
+  const typing = t === "input" || t === "textarea" || t === "select" || e.target.isContentEditable;
+  if (e.key === "/" && !typing) { e.preventDefault(); $("search").focus(); return; }
+  if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key >= "1" && e.key <= "9") { jumpToView(Number(e.key) - 1); return; }
+  switch (e.key) {
+    case "[": cycleProjectTab(-1); break;
+    case "]": cycleProjectTab(1); break;
+    case "t": { e.preventDefault(); const c = $("facet-types").querySelector("[data-type]"); if (c) c.focus(); break; }
+    case "g": cycleGrouping(); break;
+    case "x": clearFilters(); break;
+    case "j": e.preventDefault(); moveSelection(1); break;
+    case "k": e.preventDefault(); moveSelection(-1); break;
+    case "Enter": openSelected(); break;
+    case "o": pinSelected(); break;
+    case "?": toggleCheatsheet(); break;
+    default: break;
+  }
+});
+
+// ---- Token query (Phase 5) ----
+// The search box accepts type:/tag:/-tag:/project:/sort: tokens plus quoted phrases;
+// recognized tokens apply to the filter, free words fall through to full-text search.
+const TOKEN_RE = /(-?)(type|tag|project|sort):("[^"]*"|[^\s]+)/gi;
+const HAS_TOKEN_RE = /(?:^|\s)-?(?:type|tag|project|sort):/i;
+
+function parseTokenQuery(input) {
+  const addType = [], addInc = [], addExc = [];
+  let proj = null, srt = null;
+  for (const m of input.matchAll(TOKEN_RE)) {
+    const neg = m[1] === "-";
+    const key = m[2].toLowerCase();
+    const raw = m[3].replace(/^"|"$/g, "");
+    const vals = raw.split(",").map((s) => s.trim()).filter(Boolean);
+    if (key === "type") addType.push(...vals);
+    else if (key === "tag") (neg ? addExc : addInc).push(...vals);
+    else if (key === "project") proj = vals[0] ?? "";
+    else if (key === "sort") srt = vals[0];
+  }
+  const free = input.replace(TOKEN_RE, "").replace(/"/g, " ").replace(/\s+/g, " ").trim();
+  return { addType, addInc, addExc, proj, srt, free };
+}
+
+function applyTokenQuery(input) {
+  const p = parseTokenQuery(input);
+  for (const t of p.addType) if (!state.types.includes(t)) state.types.push(t);
+  for (const t of p.addInc) { state.tagsExclude = state.tagsExclude.filter((x) => x !== t); if (!state.tagsInclude.includes(t)) state.tagsInclude.push(t); }
+  for (const t of p.addExc) { state.tagsInclude = state.tagsInclude.filter((x) => x !== t); if (!state.tagsExclude.includes(t)) state.tagsExclude.push(t); }
+  if (p.proj !== null) state.project = p.proj;
+  if (p.srt !== null && SORTS.includes(p.srt)) { state.sort = p.srt; $("sort").value = p.srt; }
+  state.q = p.free;
+  $("search").value = p.free;
+  load(); // q (and possibly sort) changed; load refetches and re-renders the rest
+}
+
+function tokenChip(kind, value, label) {
+  return `<button type="button" class="afk" data-afk="${kind}" data-val="${esc(value)}" title="Remove">${esc(label)} <span class="afk-x">✕</span></button>`;
+}
+function renderActiveFilter() {
+  const wrap = $("active-filter");
+  const chips = [];
+  for (const t of state.types) chips.push(tokenChip("type", t, `type:${t}`));
+  for (const t of state.tagsInclude) chips.push(tokenChip("tag", t, `tag:${t}`));
+  for (const t of state.tagsExclude) chips.push(tokenChip("xtag", t, `-tag:${t}`));
+  if (state.project) chips.push(tokenChip("project", state.project, `project:${shortProject(state.project)}`));
+  if (state.sort !== DEFAULT_SORT) chips.push(tokenChip("sort", state.sort, `sort:${state.sort}`));
+  if (state.q) chips.push(tokenChip("q", state.q, `\u201c${state.q}\u201d`));
+  if (!chips.length) { wrap.hidden = true; wrap.innerHTML = ""; return; }
+  wrap.hidden = false;
+  wrap.innerHTML = `<span class="sviews-label">Filter</span><div class="afk-list">${chips.join("")}</div><button type="button" class="afk afk-clear" data-afk="all">Clear all</button>`;
+}
+function removeFilterAtom(kind, val) {
+  if (kind === "type") state.types = state.types.filter((x) => x !== val);
+  else if (kind === "tag") state.tagsInclude = state.tagsInclude.filter((x) => x !== val);
+  else if (kind === "xtag") state.tagsExclude = state.tagsExclude.filter((x) => x !== val);
+  else if (kind === "project") state.project = "";
+  else if (kind === "sort") { state.sort = DEFAULT_SORT; $("sort").value = DEFAULT_SORT; }
+  else if (kind === "q") { state.q = ""; $("search").value = ""; }
+  else if (kind === "all") { state.types = []; state.tagsInclude = []; state.tagsExclude = []; state.project = ""; state.sort = DEFAULT_SORT; state.q = ""; $("search").value = ""; $("sort").value = DEFAULT_SORT; }
+  if (kind === "sort" || kind === "q" || kind === "all") load(); else renderAll();
+}
+
+const APPLETS_OPEN_KEY = "pa-applets-open";
+
+function setAppletsExpanded(expanded) {
+  const toggle = $("applets-toggle");
+  toggle.setAttribute("aria-expanded", String(expanded));
+  toggle.setAttribute("aria-label", `${expanded ? "Collapse" : "Expand"} Applets`);
+  toggle.title = `${expanded ? "Collapse" : "Expand"} applets`;
+  $("applets").hidden = !expanded;
+  localStorage.setItem(APPLETS_OPEN_KEY, String(expanded));
+}
+
+$("applets-toggle").onclick = () => {
+  setAppletsExpanded($("applets-toggle").getAttribute("aria-expanded") !== "true");
+};
+setAppletsExpanded(localStorage.getItem(APPLETS_OPEN_KEY) === "true");
+
+async function loadApplets() {
+  const r = await fetch("/api/applets");
+  const { applets = [] } = await r.json();
+  if (!applets.length) return;
+  $("applets-section").hidden = false;
+  $("applets").innerHTML = applets.map((app) => `<a class="applet-card" href="${esc(app.url)}">
+    <div class="title">🧩 ${esc(app.title)}</div>
+    <div class="meta"><span>${esc(app.id)}</span>${app.description?`<span class="sep">·</span><span>${esc(app.description)}</span>`:""}</div>
+  </a>`).join("");
+}
+
+function card(a) {
+  const tags = (a.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join(" ");
+  const live = a.mode === "referenced" ? `<span class="badge" title="${esc(a.source_path||'')}">↪ ref</span>` : "";
+  const vers = a.version_count > 1 ? `<span title="versions">v${a.version_count}</span>` : "";
+  const previewCurrent = a.previewship_artifact_version === a.current_version;
+  const preview = a.previewship_url
+    ? `<a class="badge previewship-link${previewCurrent ? "" : " stale"}" href="${esc(a.previewship_url)}" target="_blank" rel="noopener noreferrer" title="${previewCurrent ? "Open the current PreviewShip deployment" : "PreviewShip is from an older artifact version; publish again to update it"}">🚢 PreviewShip${previewCurrent ? "" : " · stale"}</a>`
+    : "";
+  const thumb = a.kind === "image"
+    ? `<img class="thumb${(a.size!=null && a.size<4096)?" pixel":""}" src="/raw/${a.id}" alt="" loading="lazy" />`
+    : a.kind === "video"
+      ? `<video class="thumb video-thumb" src="/raw/${a.id}" preload="metadata" muted playsinline aria-label="${esc(a.title)}"></video>`
+      : "";
+  const pinned = offline.supported && offline.isPinned(a.id);
+  const pin = offline.supported
+    ? `<button class="offline-pin${pinned ? " on" : ""}" data-pin="${a.id}" title="${pinned ? "Saved offline — tap to remove" : "Save for offline"}">${pinned ? "📥" : "⤓"}</button>`
+    : "";
+  return `<div class="card" data-id="${a.id}">
+    <a class="card-open" href="/view/${a.id}" aria-label="Open ${esc(a.title)}"></a>
+    ${pin}
+    ${thumb}
+    <div class="title">${esc(a.title)}</div>
+    <div class="meta">
+      <span class="badge k-${a.kind}">${KIND_ICON[a.kind]||"📎"} ${a.kind}</span>
+      ${live}
+      ${preview}
+      <span>${esc(shortProject(a.project))}</span>
+      <span class="sep">·</span><span>${timeAgo(a.updated_at)}</span>
+      ${a.size!=null?`<span class="sep">·</span><span>${fmtSize(a.size)}</span>`:""}
+      ${vers?`<span class="sep">·</span>${vers}`:""}
+    </div>
+    ${tags?`<div class="meta">${tags}</div>`:""}
+  </div>`;
+}
+
+// ---- Client-side facet filtering (Phase 1) ----
+function passType(a) {
+  return state.types.length === 0 || state.types.includes(a.kind);
+}
+function passTags(a) {
+  const tags = a.tags || [];
+  for (const t of state.tagsInclude) if (!tags.includes(t)) return false;
+  for (const t of state.tagsExclude) if (tags.includes(t)) return false;
+  return true;
+}
+function filtersActive() {
+  return state.types.length > 0 || state.tagsInclude.length > 0 || state.tagsExclude.length > 0;
+}
+function clearFilters() {
+  state.types = [];
+  state.tagsInclude = [];
+  state.tagsExclude = [];
+  renderAll();
+}
+function toggleType(kind) {
+  const i = state.types.indexOf(kind);
+  if (i === -1) state.types.push(kind); else state.types.splice(i, 1);
+}
+// tri-state cycle: neutral -> include -> exclude -> neutral
+function cycleTag(tag) {
+  const inc = state.tagsInclude.indexOf(tag);
+  const exc = state.tagsExclude.indexOf(tag);
+  if (inc === -1 && exc === -1) {
+    state.tagsInclude.push(tag);
+  } else if (inc !== -1) {
+    state.tagsInclude.splice(inc, 1);
+    state.tagsExclude.push(tag);
+  } else {
+    state.tagsExclude.splice(exc, 1);
+  }
+}
+function tagState(tag) {
+  if (state.tagsInclude.includes(tag)) return "inc";
+  if (state.tagsExclude.includes(tag)) return "exc";
+  return "";
+}
+function countBy(items, keyFn) {
+  const m = new Map();
+  for (const a of items) for (const k of keyFn(a)) m.set(k, (m.get(k) || 0) + 1);
+  return m;
+}
+
+function renderFacets() {
+  const facets = $("facets");
+  if (!loaded.length) { facets.hidden = true; return; }
+  facets.hidden = false;
+
+  // Type counts over items passing the current tag filter (faceted counts).
+  const typeCounts = countBy(loaded.filter(passProject).filter(passTags), (a) => [a.kind]);
+  const kinds = [...typeCounts.keys()].sort((x, y) => typeCounts.get(y) - typeCounts.get(x) || x.localeCompare(y));
+  $("facet-types").innerHTML = kinds.map((k) => {
+    const on = state.types.includes(k);
+    return `<button type="button" class="chip chip-type${on ? " on" : ""}" data-type="${esc(k)}" aria-pressed="${on}">${KIND_ICON[k] || "📎"} ${esc(k)} <span class="chip-n">${typeCounts.get(k)}</span></button>`;
+  }).join("");
+
+  // Tag counts over items passing the current type filter (faceted counts).
+  const tagCounts = countBy(loaded.filter(passProject).filter(passType), (a) => a.tags || []);
+  const selected = new Set([...state.tagsInclude, ...state.tagsExclude]);
+  const names = new Set(tagCounts.keys());
+  for (const t of selected) names.add(t); // keep selected tags visible even at zero count
+  const tags = [...names].sort((x, y) => (tagCounts.get(y) || 0) - (tagCounts.get(x) || 0) || x.localeCompare(y));
+  let shownTags;
+  if (tagsExpanded || tags.length <= TAG_FACET_LIMIT) {
+    shownTags = tags;
+  } else {
+    const head = tags.slice(0, TAG_FACET_LIMIT);
+    const headSet = new Set(head);
+    shownTags = [...head, ...tags.filter((t) => selected.has(t) && !headSet.has(t))];
+  }
+  const tagsRow = $("facet-tags");
+  tagsRow.innerHTML = shownTags.map((t) => {
+    const st = tagState(t);
+    const mark = st === "inc" ? "✓" : st === "exc" ? "✕" : "";
+    const cls = st ? ` ${st}` : "";
+    return `<button type="button" class="chip chip-tag${cls}" data-tag="${esc(t)}" aria-pressed="${st !== ""}">${mark ? `<span class="chip-mark">${mark}</span>` : ""}${esc(t)} <span class="chip-n">${tagCounts.get(t) || 0}</span></button>`;
+  }).join("");
+  if (tags.length > TAG_FACET_LIMIT) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chip chip-more";
+    btn.textContent = tagsExpanded ? "Show fewer" : `+${tags.length - TAG_FACET_LIMIT} more`;
+    btn.onclick = () => { tagsExpanded = !tagsExpanded; renderFacets(); };
+    tagsRow.appendChild(btn);
+  }
+  $("facet-tags-row").hidden = tags.length === 0;
+  $("facet-foot").hidden = !filtersActive();
+}
+
+function renderAll() {
+  syncURL();
+  renderActiveFilter();
+  renderProjectTabs();
+  renderSavedViews();
+  renderFacets();
+  const scope = loaded.filter(passProject);
+  const shown = scope.filter((a) => passType(a) && passTags(a));
+  render(shown, scope.length);
+}
+
+
+function render(items, total = items.length) {
+  const hidden = total - items.length;
+  $("count").textContent = `${items.length} shown · ${hidden} hidden`;
+  const list = $("list");
+  if (!items.length) {
+    if (total > 0) {
+      list.innerHTML = `<div class="empty">No artifacts match these filters.<br><button type="button" class="btn-inline" id="empty-clear">Clear filters</button></div>`;
+      const ec = $("empty-clear");
+      if (ec) ec.onclick = clearFilters;
+    } else {
+      list.innerHTML = `<div class="empty">No artifacts yet.<br>Register one from a pi session or <code>pi-artifacts add</code>.</div>`;
+    }
+    return;
+  }
+  let html = "";
+  if (state.view === "proj") {
+    const groups = {};
+    for (const a of items) {
+      (groups[a.project] ||= []).push(a);
+      if (a.project_path) projPaths[a.project] = a.project_path;
+    }
+    // order projects by most-recently-updated artifact within them
+    const order = Object.keys(groups).sort((x, y) => {
+      const mx = Math.max(...groups[x].map((a) => a.updated_at));
+      const my = Math.max(...groups[y].map((a) => a.updated_at));
+      return my - mx;
+    });
+    for (const proj of order) {
+      const path = projPaths[proj] || "";
+      html += `<div class="group-head">
+        <span class="group-title">${esc(shortProject(proj))}</span>
+        <span class="group-count">${groups[proj].length}</span>
+        ${path ? `<span class="group-path" title="${esc(path)}">${esc(path)}</span>` : ""}
+      </div><div class="cards">${groups[proj].map(card).join("")}</div>`;
+    }
+  } else {
+    html = `<div class="cards">${items.map(card).join("")}</div>`;
+  }
+  list.innerHTML = html;
+  // Navigation uses a real stretched <a.card-open> per card so iOS Safari treats the whole
+  // card as a native link; interactive controls sit above it via z-index and need no handler.
+  list.querySelectorAll(".offline-pin").forEach((el) => {
+    el.onclick = async (event) => {
+      event.stopPropagation();
+      el.disabled = true;
+      const on = await offline.toggle(el.dataset.pin);
+      el.disabled = false;
+      el.classList.toggle("on", on);
+      el.textContent = on ? "📥" : "⤓";
+      el.title = on ? "Saved offline — tap to remove" : "Save for offline";
+    };
+  });
+  restoreSelectionHighlight();
+}
+
+$("search").oninput = (e) => {
+  const v = e.target.value;
+  clearTimeout(timer);
+  if (HAS_TOKEN_RE.test(v)) return; // contains a token; wait for Enter to parse it into the filter
+  timer = setTimeout(() => { state.q = v.trim(); load(); }, 180);
+};
+$("search").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); clearTimeout(timer); applyTokenQuery(e.target.value); } };
+$("ptabs-strip").onclick = (e) => { const b = e.target.closest("[data-project]"); if (!b) return; selectProject(b.dataset.project); };
+$("ptabs-menu-list").onclick = (e) => { const b = e.target.closest("[data-project]"); if (!b) return; selectProject(b.dataset.project); };
+$("sort").onchange = (e) => { state.sort = e.target.value; load(); };
+$("view-flat").onclick = () => { setView("flat"); renderAll(); };
+$("view-proj").onclick = () => { setView("proj"); renderAll(); };
+$("facet-types").onclick = (e) => { const b = e.target.closest("[data-type]"); if (!b) return; toggleType(b.dataset.type); renderAll(); };
+$("facet-tags").onclick = (e) => { const b = e.target.closest("[data-tag]"); if (!b) return; cycleTag(b.dataset.tag); renderAll(); };
+$("facet-clear").onclick = clearFilters;
+$("sviews-list").onclick = (e) => {
+  const del = e.target.closest("[data-del]");
+  if (del) { e.stopPropagation(); deleteUserView(Number(del.dataset.del)); return; }
+  const b = e.target.closest("[data-view]");
+  if (b) jumpToView(Number(b.dataset.view));
+};
+$("sview-save").onclick = saveCurrentView;
+$("cheatsheet-close").onclick = () => toggleCheatsheet(false);
+$("cheatsheet").onclick = (e) => { if (e.target === $("cheatsheet")) toggleCheatsheet(false); };
+$("active-filter").onclick = (e) => { const b = e.target.closest("[data-afk]"); if (!b) return; removeFilterAtom(b.dataset.afk, b.dataset.val); };
+
+restoreFilter();
+setView(state.view);
+loadApplets();
+load();
+setInterval(load, 15000); // light auto-refresh
+
+registerServiceWorker();
+mountOfflinePanel({ getProject: () => state.project });
+</script>
+</body>
+</html>

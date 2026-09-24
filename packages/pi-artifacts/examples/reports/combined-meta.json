@@ -1,0 +1,13 @@
+{
+  "title": "A report with evidence on demand",
+  "deck": "A narrative-first demonstration with detailed evidence in the same self-contained file.",
+  "date": "2026-08-05",
+  "provenance": "pi-artifacts template demonstration",
+  "language": "en",
+  "evidenceMap": {
+    "the-situation": ["feature-matrix"],
+    "what-changed": ["generator-contract", "feature-matrix"],
+    "what-it-means": ["feature-matrix", "verification-notes"],
+    "what-happens-next": ["verification-notes", "generator-contract"]
+  }
+}

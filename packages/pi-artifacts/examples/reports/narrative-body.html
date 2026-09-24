@@ -1,0 +1,25 @@
+<p>This short report demonstrates the house format for analysis that should be easy to read, scan, print, or hear. The same facts remain available as detailed evidence, but this narrative explains why they matter as a connected story.</p>
+
+<section id="the-situation">
+  <h2>The situation</h2>
+  <p>Analysis reports often begin as collections of evidence. That form is useful for verification, but it asks a reader to assemble the argument while moving through tables, code excerpts, and raw observations. On a phone, or at the end of a long day, that extra work can hide the point.</p>
+  <p>The narrative layer solves a different problem. It keeps the content in ordinary semantic HTML, limits each line to a comfortable measure, and puts the conclusion into prose. In a combined report, the underlying evidence stays one action away without leaving the artifact.</p>
+</section>
+
+<section id="what-changed">
+  <h2>What changed</h2>
+  <p>pi-artifacts now owns one shared visual template and one dependency-free audio reader. Report authors supply a body fragment and a small metadata file. The generator adds the page structure, table of contents, print rules, light and dark colors, and inline reader assets. In the combined example, tracked work such as #123 becomes a self-contained reference with its title and state baked in.</p>
+  <p>The reader divides text into short passages before sending it to the browser’s speech engine. This prevents the long-utterance stall seen in Chromium. It also waits for asynchronously loaded voice lists, which is important in Safari.</p>
+</section>
+
+<section id="what-it-means">
+  <h2>What it means</h2>
+  <p>Every generated report remains a single file. It has no font service, content delivery network, or remote script. A combined report embeds both narrative and evidence, so you can register, download, or open one artifact without relying on a sibling path.</p>
+  <p>The audio controls do not replace accessibility features. The prose remains normal text with a real heading hierarchy. A screen reader can ignore the player and navigate the document as usual. When browser speech is available, a listener can play the whole report, choose one section, or continue from any section.</p>
+</section>
+
+<section id="what-happens-next">
+  <h2>What happens next</h2>
+  <p>Report authors should start with the narrative and evidence body fragments in this directory. Generate the combined file, run the report smoke tests, and open it in a browser. Check that speech begins only after an explicit action, evidence opens to the mapped target, manual evidence browsing yields follow, focus returns on close, and reduced-motion preferences prevent smooth scrolling.</p>
+  <p>That repeatable path turns an improvised output into a reliable reading experience.</p>
+</section>
