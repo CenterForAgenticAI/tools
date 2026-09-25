@@ -1,0 +1,112 @@
+{
+  "version": "0.8.3",
+  "description": "Multi-shape pi subagent delegation: supervised forks, direct workers, chain steps, detached drivers, steering, and worktree isolation.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    "./escalations": {
+      "types": "./dist/escalation-api.d.ts",
+      "import": "./dist/escalation-api.js",
+      "default": "./dist/escalation-api.js"
+    },
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./skill-resource": {
+      "types": "./dist/skill-resource.d.ts",
+      "import": "./dist/skill-resource.js",
+      "default": "./dist/skill-resource.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "builtin-agents",
+    "skills",
+    "skill-filter-probe",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check:sdk-config": "node scripts/check-sdk-config.mjs",
+    "prepare": "npm run build",
+    "lint": "eslint . --cache --cache-location node_modules/.cache/eslint/",
+    "test:compile": "node scripts/with-temp-root.mjs node scripts/compile-tests.mjs",
+    "test:file": "node scripts/with-temp-root.mjs node scripts/test-file.mjs",
+    "test:affected": "node scripts/with-temp-root.mjs node scripts/test-affected.mjs",
+    "test:durations": "node scripts/with-temp-root.mjs node scripts/generate-test-duration-manifest.mjs",
+    "test:run": "node scripts/with-temp-root.mjs node --test --test-concurrency=${TEST_CONCURRENCY:-4} .test-dist/tests/unit/*.test.js .test-dist/tests/integration/*.test.js .test-dist/tests/e2e/*.test.js",
+    "test": "npm run test:compile && npm run test:run",
+    "test:e2e": "npm run test:compile && node scripts/with-temp-root.mjs node --test --test-concurrency=${TEST_CONCURRENCY:-1} .test-dist/tests/e2e/*.test.js",
+    "test:unit": "npm run test:compile && node scripts/with-temp-root.mjs node --test --test-concurrency=${TEST_CONCURRENCY:-4} .test-dist/tests/unit/*.test.js",
+    "test:integration": "npm run test:compile && node scripts/with-temp-root.mjs node --test --test-concurrency=${TEST_CONCURRENCY:-4} .test-dist/tests/integration/*.test.js",
+    "test:probes": "npm run test:compile && node scripts/with-temp-root.mjs node --test --test-concurrency=1 .test-dist/tests/probes/*.test.js",
+    "coverage": "npm run test:compile && node scripts/with-temp-root.mjs node scripts/run-coverage.mjs",
+    "typecheck": "tsc -p tsconfig.check.json --incremental --tsBuildInfoFile node_modules/.cache/tsc/check.tsbuildinfo",
+    "typecheck:tests": "tsc -p tsconfig.tests.check.json --incremental --tsBuildInfoFile node_modules/.cache/tsc/tests-check.tsbuildinfo",
+    "smoke": "node scripts/with-temp-root.mjs tsx scripts/smoke.ts",
+    "smoke:pack": "node scripts/with-temp-root.mjs node scripts/smoke-package-import.mjs",
+    "release": "node scripts/release.mjs",
+    "model:difftest": "node scripts/with-temp-root.mjs bash .graft/models/pi-delegate/oracle/compare.sh",
+    "quality": "npm run check:sdk-config && npm run lint && npm run lint:budget && npm run typecheck && npm run typecheck:tests && npm run test:hooks && npm run coverage && npm run smoke && npm run smoke:pack",
+    "check": "npm run lint && npm run typecheck && npm run typecheck:tests && npm run test:affected",
+    "check:ci": "npm run quality",
+    "hooks:install": "sh scripts/install-git-hooks.sh",
+    "test:hooks": "node scripts/with-temp-root.mjs sh scripts/test-autobuild-hooks.sh",
+    "compact-state": "tsx scripts/compact-run-state.ts",
+    "measure:tool-surface": "node --import tsx scripts/measure-tool-surface.mjs",
+    "lint:budget": "node scripts/lint-budget.mjs"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "skills": [
+      "./skills/authoring-delegate-agents",
+      "./skills/merge-coordinate",
+      "./skills/orchestrate-work",
+      "./skills/delegate-only"
+    ]
+  },
+  "name": "@centerforagenticai/pi-delegate",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/pi-delegate"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/pi-delegate#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@earendil-works/pi-tui": "0.84.2",
+    "@eslint/js": "^10.0.1",
+    "c8": "^11.0.0",
+    "eslint": "^10.7.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.64.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1",
+    "@earendil-works/pi-coding-agent": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1",
+    "@earendil-works/pi-tui": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1"
+  }
+}
