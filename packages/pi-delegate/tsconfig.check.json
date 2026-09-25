@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "paths": {
+      "@caair/pi-daemon/client": [
+        "./node_modules/@caair/pi-daemon/dist/client/index.d.ts",
+        "./types/pi-daemon-stubs/client/index.d.ts"
+      ],
+      "@caair/pi-daemon/protocol": [
+        "./node_modules/@caair/pi-daemon/dist/protocol/index.d.ts",
+        "./types/pi-daemon-stubs/protocol/index.d.ts"
+      ]
+    },
+    "strict": false,
+    "noImplicitAny": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "allowJs": false
+  },
+  "include": ["src/**/*.ts"]
+}

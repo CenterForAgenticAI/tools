@@ -1,0 +1,7 @@
+{
+  "name": "pi-delegate-skill-filter-probe",
+  "private": true,
+  "pi": {
+    "skills": ["./skills"]
+  }
+}

@@ -1,0 +1,12 @@
+{
+	"extends": "./tsconfig.check.json",
+	"compilerOptions": {
+		"noEmit": false,
+		"outDir": ".test-dist",
+		"rootDir": ".",
+		"sourceMap": true,
+		"rewriteRelativeImportExtensions": true,
+		"declaration": false
+	},
+	"include": ["src/**/*.ts", "tests/**/*.ts"]
+}
