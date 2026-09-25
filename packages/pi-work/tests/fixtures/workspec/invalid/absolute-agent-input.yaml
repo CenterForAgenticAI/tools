@@ -1,0 +1,14 @@
+title: Absolute agent input
+description: D
+intent: I
+work:
+  - id: agent
+    task: Inspect an input
+    acceptance:
+      - id: A
+        statement: The agent inspects its input.
+        evidence:
+          kind: agent
+          agent: reviewer
+          inputs: [/etc/hosts]
+          rubric: inspect

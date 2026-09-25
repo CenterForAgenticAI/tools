@@ -1,0 +1,13 @@
+{
+  "missing-criteria.md": "criteria-missing",
+  "malformed-bullet.md": "criteria-malformed",
+  "invalid-id.md": "criteria-malformed",
+  "empty-statement.md": "criteria-malformed",
+  "invalid-continuation.md": "criteria-malformed",
+  "orphan-continuation.md": "criteria-malformed",
+  "duplicate-id.md": "criteria-duplicate-id",
+  "marker-wrong-element.md": "criteria-marker-malformed",
+  "duplicate-marker.md": "criteria-duplicate-marker",
+  "overlapping-markers.md": "criteria-overlapping-markers",
+  "empty-criteria.md": "criteria-malformed"
+}

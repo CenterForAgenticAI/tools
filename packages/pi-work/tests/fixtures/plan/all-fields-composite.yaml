@@ -1,0 +1,58 @@
+title: plan-title-sentinel
+description: plan-description-sentinel
+intent: plan-intent-sentinel
+work:
+  - id: parent-sentinel
+    task: parent-task-sentinel
+    description: parent-description-sentinel
+    depends_on: []
+    touches: [src/parent-sentinel]
+    refs:
+      - path: src/ref-sentinel.ts
+        lines: 10-20
+        why: ref-why-sentinel
+    worker:
+      agent: agent-sentinel
+      skills: [skill-sentinel]
+      model: model-sentinel
+    acceptance:
+      - id: parent-criterion-sentinel
+        statement: parent-statement-sentinel
+        evidence:
+          kind: command
+          run: run-sentinel
+          expect:
+            exit: 0
+            output_includes: output-sentinel
+      - id: parent-agent-criterion-sentinel
+        statement: parent-agent-statement-sentinel
+        evidence:
+          kind: agent
+          agent: parent-reviewer-sentinel
+          inputs: [parent-input-sentinel]
+          rubric: parent-rubric-sentinel
+      - id: parent-user-criterion-sentinel
+        statement: parent-user-statement-sentinel
+        evidence:
+          kind: user
+          prompt: parent-prompt-sentinel
+    work:
+      - id: child-sentinel
+        task: child-task-sentinel
+        description: child-description-sentinel
+        acceptance:
+          - id: child-criterion-sentinel
+            statement: child-statement-sentinel
+            evidence:
+              kind: user
+              prompt: child-prompt-sentinel
+      - id: child-agent-sentinel
+        task: child-agent-task-sentinel
+        acceptance:
+          - id: child-agent-criterion-sentinel
+            statement: child-agent-statement-sentinel
+            evidence:
+              kind: agent
+              agent: reviewer-sentinel
+              inputs: [input-sentinel]
+              rubric: rubric-sentinel

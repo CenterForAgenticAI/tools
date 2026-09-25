@@ -1,0 +1,18 @@
+title: One child composite
+description: D
+intent: I
+work:
+  - id: composite
+    task: Integrate the child
+    work:
+      - id: child
+        task: Run the child
+        acceptance:
+          - id: A
+            statement: The child succeeds.
+            evidence:
+              kind: command
+              run: printf x
+              expect:
+                exit: 0
+                output_includes: x

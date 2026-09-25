@@ -1,0 +1,83 @@
+{
+  "version": "0.1.2",
+  "description": "Structured workspec authoring, verification, and plan compilation for pi.",
+  "keywords": [
+    "pi-package"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "skills",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "lint": "eslint . --cache --cache-location node_modules/.cache/eslint/",
+    "typecheck": "tsc -p tsconfig.check.json --incremental --tsBuildInfoFile node_modules/.cache/tsc/check.tsbuildinfo",
+    "typecheck:tests": "tsc -p tsconfig.tests.check.json --incremental --tsBuildInfoFile node_modules/.cache/tsc/tests-check.tsbuildinfo",
+    "test:compile": "node scripts/compile-tests.mjs",
+    "test:run": "node --test --test-concurrency=${TEST_CONCURRENCY:-4} .test-dist/tests/unit/*.test.js",
+    "test:public": "npm run test:compile && node scripts/run-public-tests.mjs",
+    "test": "npm run test:compile && c8 npm run test:run",
+    "smoke:package": "node scripts/smoke-package.mjs",
+    "hooks:install": "sh scripts/install-git-hooks.sh",
+    "test:hooks": "sh scripts/test-autobuild-hooks.sh",
+    "check": "npm run lint && npm run typecheck && npm run typecheck:tests && npm run test:hooks && npm test && npm run build && npm run smoke:package"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "name": "@centerforagenticai/pi-work",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/pi-work"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/pi-work#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.0.0",
+    "c8": "^11.0.0",
+    "eslint": "^10.7.0",
+    "globals": "^16.0.0",
+    "tsx": "^4.19.0",
+    "typebox": "^1.3.11",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "typebox": "^1.3.11"
+  }
+}

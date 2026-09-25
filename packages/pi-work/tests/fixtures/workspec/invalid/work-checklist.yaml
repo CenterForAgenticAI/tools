@@ -1,0 +1,8 @@
+title: T
+description: D
+intent: I
+work:
+  - id: a
+    task: A
+    checklist: [one]
+    work: []

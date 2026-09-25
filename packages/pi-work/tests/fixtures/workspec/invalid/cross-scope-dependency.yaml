@@ -1,0 +1,30 @@
+title: T
+description: D
+intent: I
+work:
+  - id: parent
+    task: P
+    work:
+      - id: child
+        task: C
+        acceptance:
+          - id: child-pass
+            statement: Child is green
+            evidence:
+              kind: command
+              run: printf child
+              expect:
+                exit: 0
+                output_includes: child
+  - id: sibling
+    task: S
+    depends_on: [child]
+    acceptance:
+      - id: sibling-pass
+        statement: Sibling is green
+        evidence:
+          kind: command
+          run: printf sibling
+          expect:
+            exit: 0
+            output_includes: sibling

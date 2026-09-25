@@ -1,0 +1,15 @@
+title: One criterion leaf
+description: D
+intent: I
+work:
+  - id: leaf
+    task: Complete the leaf
+    acceptance:
+      - id: A
+        statement: The leaf succeeds.
+        evidence:
+          kind: command
+          run: x
+          expect:
+            exit: 0
+            output_includes: x

@@ -1,0 +1,32 @@
+title: Nested duplicate ids
+description: Two branches use the same leaf id.
+intent: Keep node addresses qualified.
+work:
+  - id: api
+    task: API branch
+    work:
+      - id: test
+        task: Run API tests
+        acceptance:
+          - id: api-pass
+            statement: API tests pass
+            evidence:
+              kind: command
+              run: printf api
+              expect:
+                exit: 0
+                output_includes: api
+  - id: ui
+    task: UI branch
+    work:
+      - id: test
+        task: Run UI tests
+        acceptance:
+          - id: ui-pass
+            statement: UI tests pass
+            evidence:
+              kind: command
+              run: printf ui
+              expect:
+                exit: 0
+                output_includes: ui

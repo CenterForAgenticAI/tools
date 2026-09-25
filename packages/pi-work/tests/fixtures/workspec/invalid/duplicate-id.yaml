@@ -1,0 +1,26 @@
+title: T
+description: D
+intent: I
+work:
+  - id: a
+    task: A
+    acceptance:
+      - id: a-first
+        statement: A is green
+        evidence:
+          kind: command
+          run: printf a
+          expect:
+            exit: 0
+            output_includes: a
+  - id: a
+    task: B
+    acceptance:
+      - id: a-second
+        statement: B is green
+        evidence:
+          kind: command
+          run: printf b
+          expect:
+            exit: 0
+            output_includes: b

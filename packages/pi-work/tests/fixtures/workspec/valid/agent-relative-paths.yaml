@@ -1,0 +1,14 @@
+title: Agent relative paths
+description: D
+intent: I
+work:
+  - id: agent
+    task: Inspect authored relative paths
+    acceptance:
+      - id: A
+        statement: The agent inspects its inputs.
+        evidence:
+          kind: agent
+          agent: reviewer
+          inputs: [nested/input.txt, dir/../file.txt, ../package.json]
+          rubric: inspect

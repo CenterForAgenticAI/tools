@@ -1,0 +1,80 @@
+title: Publish an accessibility report
+description: !md |
+  Produce a traceable accessibility report and publish the reviewed copy.
+intent: !md |
+  The release needs a report whose source inputs can be inspected and whose
+  publication is confirmed by a person. This work does not redesign the
+  reporting pipeline or infer human approval from an automated judge.
+open_decisions: []
+work:
+  - id: source
+    task: Collect the release inputs and build the source record for the report.
+    description: !md |
+      Gather the named release inputs without changing the publication copy.
+    touches:
+      - reports/source
+    worker:
+      agent: worker
+      skills:
+        - work-execution
+    acceptance:
+      - id: source-record
+        statement: When the release inputs are collected, the build emits the non-empty source record.
+        evidence:
+          kind: command
+          run: !bash |
+            npm run report:collect
+          expect:
+            exit: 0
+            output_includes: source-records
+  - id: copy
+    task: Draft the report copy from the source record.
+    description: !md |
+      Turn the collected source record into the report draft and preserve the
+      source link needed by the release review.
+    depends_on:
+      - source
+    touches:
+      - reports/draft.md
+    refs:
+      - path: reports/source
+        why: Use the collected release inputs as the report's source.
+    worker:
+      agent: worker
+      skills:
+        - work-execution
+    acceptance:
+      - id: draft-links-source
+        statement: The report draft names the source record and contains the required release sections.
+        evidence:
+          kind: command
+          run: !bash |
+            npm run report:check
+          expect:
+            exit: 0
+            output_includes: report-sections
+  - id: publish
+    task: Publish the reviewed report copy and record the human confirmation.
+    description: !md |
+      Publish only the draft produced by the preceding node. A person must
+      confirm the intended copy; an automated agent judgment is unavailable in
+      v1.
+    depends_on:
+      - copy
+    touches:
+      - reports/published
+    worker:
+      agent: worker
+      skills:
+        - work-execution
+    checklist:
+      - publish the reviewed draft
+      - record the publication URL
+    acceptance:
+      - id: publication-confirmed
+        statement: A person confirms that the published copy is the intended report and is readable.
+        evidence:
+          kind: user
+          prompt: !md |
+            Review the published report at the recorded URL and confirm that it
+            is the intended copy and is readable.

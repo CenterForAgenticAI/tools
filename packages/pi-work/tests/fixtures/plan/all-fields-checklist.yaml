@@ -1,0 +1,22 @@
+title: checklist-title-sentinel
+description: checklist-description-sentinel
+intent: checklist-intent-sentinel
+work:
+  - id: checklist-sentinel
+    task: checklist-task-sentinel
+    description: checklist-description-node-sentinel
+    depends_on: []
+    touches: [src/checklist-sentinel]
+    refs:
+      - path: src/checklist-ref.ts
+        why: checklist-ref-why-sentinel
+    worker:
+      agent: checklist-agent-sentinel
+      skills: [checklist-skill-sentinel]
+    acceptance:
+      - id: checklist-criterion-sentinel
+        statement: checklist-statement-sentinel
+        evidence:
+          kind: user
+          prompt: checklist-prompt-sentinel
+    checklist: [checklist-item-one-sentinel, checklist-item-two-sentinel]

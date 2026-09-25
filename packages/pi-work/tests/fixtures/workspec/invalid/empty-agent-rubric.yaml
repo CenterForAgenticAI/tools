@@ -1,0 +1,14 @@
+title: Empty agent rubric
+description: D
+intent: I
+work:
+  - id: agent
+    task: Run the agent
+    acceptance:
+      - id: A
+        statement: The agent succeeds.
+        evidence:
+          kind: agent
+          agent: reviewer
+          inputs: [x]
+          rubric: ""

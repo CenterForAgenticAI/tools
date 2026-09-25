@@ -1,0 +1,27 @@
+title: Evidence minimums
+description: D
+intent: I
+work:
+  - id: leaf
+    task: Complete the evidence minimums
+    acceptance:
+      - id: command
+        statement: The command succeeds.
+        evidence:
+          kind: command
+          run: x
+          expect:
+            exit: 0
+            output_includes: x
+      - id: agent
+        statement: The agent succeeds.
+        evidence:
+          kind: agent
+          agent: x
+          inputs: [x]
+          rubric: x
+      - id: user
+        statement: The user confirms.
+        evidence:
+          kind: user
+          prompt: x

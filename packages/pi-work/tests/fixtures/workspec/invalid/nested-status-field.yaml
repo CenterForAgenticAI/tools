@@ -1,0 +1,10 @@
+title: T
+description: D
+intent: I
+work:
+  - id: parent
+    task: P
+    work:
+      - id: child
+        task: C
+        status: done

@@ -1,0 +1,67 @@
+{
+  "kind": "verification-cache-update",
+  "specPath": "spec.yaml",
+  "nodeId": "node",
+  "recordedAt": "2026-08-12T00:00:00.000Z",
+  "tree": {
+    "kind": "git",
+    "worktreePath": "__WORKTREE__",
+    "resolvedCommit": "__COMMIT__"
+  },
+  "record": {
+    "outcome": "passed",
+    "nodeId": "node",
+    "recordedAt": "2026-08-12T00:00:00.000Z",
+    "tree": {
+      "kind": "git",
+      "worktreePath": "__WORKTREE__",
+      "resolvedCommit": "__COMMIT__"
+    },
+    "criteria": [
+      {
+        "outcome": "passed",
+        "criterion": { "id": "A", "statement": "signal" },
+        "startedAt": "2026-08-12T00:00:00.000Z",
+        "finishedAt": "2026-08-12T00:00:00.000Z",
+        "durationMs": 0,
+        "proof": {
+          "kind": "command-proof",
+          "startedAt": "2026-08-12T00:00:00.000Z",
+          "finishedAt": "2026-08-12T00:00:00.000Z",
+          "durationMs": 0,
+          "authoredCommand": "printf ok; touch __MARKER__",
+          "gitPath": "/usr/bin/git",
+          "executorPath": "/usr/bin/node",
+          "shellPath": "/bin/sh",
+          "expectation": { "exit": 0, "output_includes": "ok" },
+          "stdout": "ok",
+          "stderr": "",
+          "exitCode": 0,
+          "signal": null,
+          "outputMatched": "ok",
+          "monitoring": {
+            "method": "fs.watch",
+            "mode": "recursive",
+            "window": { "startedAt": "2026-08-12T00:00:00.000Z", "finishedAt": "2026-08-12T00:00:00.000Z", "durationMs": 0 },
+            "residualRace": "events-after-final-drain-may-be-missed"
+          },
+          "tree": {
+            "kind": "git",
+            "worktreePath": "__WORKTREE__",
+            "resolvedCommit": "__COMMIT__"
+          }
+        }
+      }
+    ],
+    "checklist": {
+      "outcome": "complete",
+      "items": [],
+      "failures": [],
+      "tree": {
+        "kind": "git",
+        "worktreePath": "__WORKTREE__",
+        "resolvedCommit": "__COMMIT__"
+      }
+    }
+  }
+}

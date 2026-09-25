@@ -1,0 +1,13 @@
+title: T
+description: D
+intent: I
+work:
+  - id: a
+    task: A
+    acceptance:
+      - id: C
+        statement: S
+        evidence:
+          kind: command
+          run: echo
+          expect: {}

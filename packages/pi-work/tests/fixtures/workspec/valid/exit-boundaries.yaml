@@ -1,0 +1,23 @@
+title: Process exit boundaries
+description: D
+intent: I
+work:
+  - id: exits
+    task: Exercise process exit boundaries
+    acceptance:
+      - id: zero
+        statement: Zero is accepted.
+        evidence:
+          kind: command
+          run: printf x
+          expect:
+            exit: 0
+            output_includes: x
+      - id: max
+        statement: 255 is accepted.
+        evidence:
+          kind: command
+          run: printf x
+          expect:
+            exit: 255
+            output_includes: x
