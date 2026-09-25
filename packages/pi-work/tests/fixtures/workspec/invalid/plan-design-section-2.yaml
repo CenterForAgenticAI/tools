@@ -1,0 +1,32 @@
+title: Ship the widget importer
+description: One-paragraph summary of the outcome
+intent: Why this work exists; constraints and non-goals
+work:
+  - id: schema
+    task: Define the import schema and validators
+    touches: [src/import/schema/**]
+    refs:
+      - path: src/export/schema.ts
+        lines: 10-80
+        why: mirror the export naming
+    worker:
+      profile: premium
+      agent: implementer
+      skills: [implement-typescript]
+      model: openai/gpt-5.6-sol
+    acceptance:
+      - id: A1
+        statement: Importing the fixture set produces zero validation errors
+        evidence:
+          kind: command
+          run: npm test -- import/schema
+          expect:
+            exit: 0
+            output_includes: passed
+  - id: docs
+    task: Update the importer runbook
+    depends_on: [schema]
+    checklist:
+      - document the fixture workflow
+      - add troubleshooting section
+      - link from README

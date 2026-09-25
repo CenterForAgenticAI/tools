@@ -1,0 +1,57 @@
+title: Dependencies and decisions
+description: Dependency and decision fixture.
+intent: Exercise conservative gates.
+open_decisions:
+  - id: choose-api
+    question: Which API should be used?
+    tripwire: Do not parse this prose.
+    decides: API contract
+work:
+  - id: base
+    task: Establish base
+    acceptance:
+      - id: base-pass
+        statement: Base is green
+        evidence:
+          kind: command
+          run: printf base
+          expect:
+            exit: 0
+            output_includes: base
+  - id: dependent
+    task: Use base
+    depends_on: [base]
+    acceptance:
+      - id: dependent-pass
+        statement: Dependent is green
+        evidence:
+          kind: command
+          run: printf dependent
+          expect:
+            exit: 0
+            output_includes: dependent
+  - id: integration
+    task: Integrate children
+    work:
+      - id: first
+        task: First child
+        acceptance:
+          - id: first-pass
+            statement: First is green
+            evidence:
+              kind: command
+              run: printf first
+              expect:
+                exit: 0
+                output_includes: first
+      - id: second
+        task: Second child
+        acceptance:
+          - id: second-pass
+            statement: Second is green
+            evidence:
+              kind: command
+              run: printf second
+              expect:
+                exit: 0
+                output_includes: second

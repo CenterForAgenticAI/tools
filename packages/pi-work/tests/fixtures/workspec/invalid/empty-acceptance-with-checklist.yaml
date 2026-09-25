@@ -1,0 +1,8 @@
+title: Empty acceptance with checklist
+description: D
+intent: I
+work:
+  - id: checklist
+    task: Complete the checklist
+    acceptance: []
+    checklist: [one]

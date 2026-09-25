@@ -1,0 +1,77 @@
+title: all fields
+description: !md |
+  markdown description
+intent: !markdown |
+  markdown intent
+links:
+  - url: https://example.test/spec
+    note: !py |
+      note
+corrects:
+  - spec: old.yaml
+    reason: !python |
+      reason
+supersedes:
+  - spec: older.yaml
+    reason: !json |
+      reason
+open_decisions:
+  - id: OD
+    question: !ts |
+      question
+    tripwire: !typescript |
+      tripwire
+    decides: !rs |
+      user
+work:
+  - id: parent
+    task: !rust |
+      parent task
+    description: !bash |
+      parent description
+    depends_on: []
+    touches: [./src/a, src/a/]
+    refs:
+      - path: src/a.ts
+        lines: !sh |
+          1-2
+        why: !shell |
+          context
+    worker:
+      profile: profile
+      agent: agent
+      skills: [skill]
+      model: model
+    acceptance:
+      - id: command
+        statement: !rb |
+          command criterion
+        evidence:
+          kind: command
+          run: !ruby |
+            echo hi
+          expect:
+            exit: 0
+            output_includes: hi
+      - id: agent
+        statement: !diff |
+          agent criterion
+        evidence:
+          kind: agent
+          agent: reviewer
+          inputs: [artifact]
+          rubric: !patch |
+            rubric
+      - id: user
+        statement: !toml |
+          user criterion
+        evidence:
+          kind: user
+          prompt: !md |
+            Confirm this result.
+    work:
+      - id: child
+        task: child task
+        checklist:
+          - first
+          - second

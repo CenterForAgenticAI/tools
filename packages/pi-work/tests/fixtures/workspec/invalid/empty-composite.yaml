@@ -1,0 +1,7 @@
+title: Empty composite
+description: D
+intent: I
+work:
+  - id: composite
+    task: Integrate the children
+    work: []

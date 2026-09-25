@@ -1,0 +1,15 @@
+title: Exit 300
+description: D
+intent: I
+work:
+  - id: command
+    task: Run the command
+    acceptance:
+      - id: A
+        statement: The command succeeds.
+        evidence:
+          kind: command
+          run: printf x
+          expect:
+            exit: 300
+            output_includes: x

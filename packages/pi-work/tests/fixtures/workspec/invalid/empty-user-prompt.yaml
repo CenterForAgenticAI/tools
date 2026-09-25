@@ -1,0 +1,12 @@
+title: Empty user prompt
+description: D
+intent: I
+work:
+  - id: user
+    task: Confirm the result
+    acceptance:
+      - id: A
+        statement: The user confirms.
+        evidence:
+          kind: user
+          prompt: ""

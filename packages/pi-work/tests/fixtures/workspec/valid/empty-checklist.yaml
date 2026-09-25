@@ -1,0 +1,16 @@
+title: Empty checklist
+description: D
+intent: I
+work:
+  - id: checklist
+    task: Complete the checklist
+    acceptance:
+      - id: A
+        statement: The command succeeds.
+        evidence:
+          kind: command
+          run: printf x
+          expect:
+            exit: 0
+            output_includes: x
+    checklist: []

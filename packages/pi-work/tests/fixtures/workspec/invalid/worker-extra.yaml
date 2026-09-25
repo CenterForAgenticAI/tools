@@ -1,0 +1,12 @@
+title: T
+description: D
+intent: I
+work:
+  - id: a
+    task: A
+    worker:
+      profile: p
+      agent: reviewer
+      skills: [typescript]
+      model: model
+      extra: x

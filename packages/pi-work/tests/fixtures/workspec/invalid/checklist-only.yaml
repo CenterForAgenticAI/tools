@@ -1,0 +1,9 @@
+title: Checklist only
+description: A checklist-only leaf is not executable evidence.
+intent: Keep completion fail closed.
+work:
+  - id: checklist
+    task: Complete the manual list
+    checklist:
+      - first item
+      - second item
