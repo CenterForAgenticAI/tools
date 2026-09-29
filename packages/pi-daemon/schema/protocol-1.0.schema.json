@@ -1,0 +1,6134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://caair.dev/schemas/pi-daemon/protocol-1.0.schema.json",
+  "title": "pi-daemon protocol 1.0",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/RequestFrame"
+    },
+    {
+      "$ref": "#/$defs/SuccessFrame"
+    },
+    {
+      "$ref": "#/$defs/FailureFrame"
+    },
+    {
+      "$ref": "#/$defs/StreamFrame"
+    }
+  ],
+  "$defs": {
+    "JsonValue": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          }
+        }
+      ]
+    },
+    "Cursor": {
+      "type": "object",
+      "properties": {
+        "entryId": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "const": null
+            }
+          ]
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "entryId",
+        "epoch"
+      ],
+      "additionalProperties": false
+    },
+    "SessionSummary": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "sessionFile": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "runtime": {
+          "type": "string",
+          "enum": [
+            "awake",
+            "asleep"
+          ]
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "idle",
+            "working",
+            "blocked",
+            "failed",
+            "gone"
+          ]
+        },
+        "observedPhase": {
+          "type": "string",
+          "enum": [
+            "idle",
+            "working",
+            "blocked",
+            "failed",
+            "gone",
+            "asleep"
+          ]
+        },
+        "attention": {
+          "type": "string",
+          "enum": [
+            "none",
+            "question",
+            "failed",
+            "interrupted"
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "cursor": {
+          "type": "object",
+          "properties": {
+            "entryId": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "const": null
+                }
+              ]
+            },
+            "epoch": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "entryId",
+            "epoch"
+          ],
+          "additionalProperties": false
+        },
+        "pendingQuestions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "questionId": {
+                "type": "string"
+              },
+              "method": {
+                "type": "string",
+                "enum": [
+                  "select",
+                  "confirm",
+                  "input",
+                  "editor"
+                ]
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "questionId",
+              "method"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "heartbeat": {
+          "type": "object",
+          "properties": {
+            "seq": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "seq",
+            "at"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "sessionId",
+        "sessionFile",
+        "cwd",
+        "runtime",
+        "phase",
+        "observedPhase",
+        "attention",
+        "generation",
+        "epoch",
+        "cursor",
+        "pendingQuestions",
+        "heartbeat"
+      ],
+      "additionalProperties": false
+    },
+    "Operation": {
+      "type": "string",
+      "enum": [
+        "hello",
+        "list",
+        "open",
+        "create",
+        "attach",
+        "detach",
+        "replay",
+        "prompt",
+        "prompt_status",
+        "steer",
+        "follow_up",
+        "abort",
+        "lease",
+        "ui_answer",
+        "sleep",
+        "wake",
+        "recover",
+        "status",
+        "shutdown"
+      ]
+    },
+    "ErrorCode": {
+      "type": "string",
+      "enum": [
+        "bad_frame",
+        "frame_too_large",
+        "handshake_required",
+        "protocol_mismatch",
+        "unsupported_op",
+        "invalid_request",
+        "unknown_session",
+        "duplicate_session",
+        "path_mismatch",
+        "session_locked",
+        "external_writer",
+        "gone",
+        "not_attached",
+        "busy",
+        "rejected",
+        "no_lease",
+        "lease_held",
+        "lease_expired",
+        "stale_generation",
+        "stale_epoch",
+        "asleep",
+        "already_asleep",
+        "invalid_state",
+        "cursor_unknown",
+        "cursor_off_branch",
+        "unknown_question",
+        "invalid_ui_answer",
+        "idempotency_conflict",
+        "queue_full",
+        "sdk_incompatible",
+        "shutdown_in_progress",
+        "unavailable",
+        "internal"
+      ]
+    },
+    "PromptOutcomeName": {
+      "type": "string",
+      "enum": [
+        "settled",
+        "aborted",
+        "failed"
+      ]
+    },
+    "PromptOutcomeErrorCode": {
+      "type": "string",
+      "enum": [
+        "aborted",
+        "interrupted",
+        "external_writer",
+        "provider_error",
+        "sdk_error",
+        "rejected"
+      ]
+    },
+    "PromptOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "settled"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "aborted"
+            },
+            "errorCode": {
+              "const": "aborted"
+            }
+          },
+          "required": [
+            "outcome",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "failed"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "interrupted",
+                "external_writer",
+                "provider_error",
+                "sdk_error",
+                "rejected"
+              ]
+            }
+          },
+          "required": [
+            "outcome",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "PromptStatusResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "pending"
+            },
+            "promptId": {
+              "type": "string"
+            },
+            "acceptedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "reason": {
+              "const": "external_writer"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "settled"
+            },
+            "promptId": {
+              "type": "string"
+            },
+            "terminalOutcome": {
+              "const": "settled"
+            },
+            "acceptedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "settledAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "finalCursor": {
+              "type": "object",
+              "properties": {
+                "entryId": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "const": null
+                    }
+                  ]
+                },
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "entryId",
+                "epoch"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "state",
+            "terminalOutcome"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "aborted"
+            },
+            "promptId": {
+              "type": "string"
+            },
+            "terminalOutcome": {
+              "const": "aborted"
+            },
+            "acceptedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "settledAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "finalCursor": {
+              "type": "object",
+              "properties": {
+                "entryId": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "const": null
+                    }
+                  ]
+                },
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "entryId",
+                "epoch"
+              ],
+              "additionalProperties": false
+            },
+            "errorCode": {
+              "const": "aborted"
+            }
+          },
+          "required": [
+            "state",
+            "terminalOutcome",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "const": "failed"
+            },
+            "promptId": {
+              "type": "string"
+            },
+            "terminalOutcome": {
+              "const": "failed"
+            },
+            "acceptedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "settledAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "finalCursor": {
+              "type": "object",
+              "properties": {
+                "entryId": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "const": null
+                    }
+                  ]
+                },
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "entryId",
+                "epoch"
+              ],
+              "additionalProperties": false
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "interrupted",
+                "external_writer",
+                "provider_error",
+                "sdk_error",
+                "rejected"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "terminalOutcome",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "OperationError": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "hello"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "protocol_mismatch"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "list"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "open"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "session_locked",
+                "unknown_session",
+                "duplicate_session",
+                "path_mismatch",
+                "gone",
+                "sdk_incompatible"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "create"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "session_locked",
+                "duplicate_session",
+                "sdk_incompatible"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "attach"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "gone",
+                "stale_epoch",
+                "cursor_unknown",
+                "queue_full"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "detach"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "not_attached"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "replay"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "not_attached",
+                "stale_epoch",
+                "cursor_unknown",
+                "cursor_off_branch",
+                "queue_full"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "prompt"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "not_attached",
+                "stale_generation",
+                "asleep",
+                "external_writer",
+                "no_lease",
+                "lease_expired",
+                "busy",
+                "rejected",
+                "idempotency_conflict"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "prompt_status"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "steer"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "not_attached",
+                "stale_generation",
+                "asleep",
+                "external_writer",
+                "invalid_state",
+                "rejected"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "follow_up"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "not_attached",
+                "stale_generation",
+                "asleep",
+                "external_writer",
+                "invalid_state",
+                "rejected"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "abort"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "not_attached",
+                "stale_generation",
+                "asleep",
+                "external_writer",
+                "no_lease",
+                "lease_expired",
+                "invalid_state"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "lease"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "not_attached",
+                "stale_generation",
+                "lease_held",
+                "no_lease",
+                "lease_expired"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "ui_answer"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "not_attached",
+                "stale_generation",
+                "asleep",
+                "external_writer",
+                "no_lease",
+                "lease_expired",
+                "unknown_question",
+                "invalid_ui_answer"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "sleep"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "not_attached",
+                "stale_generation",
+                "asleep",
+                "external_writer",
+                "no_lease",
+                "lease_expired",
+                "already_asleep",
+                "busy",
+                "invalid_state"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "wake"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "not_attached",
+                "stale_generation",
+                "gone",
+                "path_mismatch",
+                "sdk_incompatible",
+                "external_writer"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "recover"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "not_attached",
+                "stale_generation",
+                "no_lease",
+                "lease_expired",
+                "session_locked",
+                "invalid_state",
+                "gone",
+                "path_mismatch",
+                "sdk_incompatible",
+                "external_writer"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "status"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "shutdown"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "shutdown_in_progress",
+                "busy"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "RequestFrame": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "hello"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "protocol": {
+                  "type": "string",
+                  "pattern": "^[0-9]+\\.[0-9]+$"
+                },
+                "client": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                },
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "protocol",
+                "client"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "list"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "phase": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "idle",
+                      "working",
+                      "blocked",
+                      "failed",
+                      "gone",
+                      "asleep"
+                    ]
+                  }
+                },
+                "cwd": {
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "open"
+            },
+            "params": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "sessionId": {
+                      "type": "string"
+                    },
+                    "cwdOverride": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "sessionId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "cwdOverride": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "path"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "create"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "cwd": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "sessionId": {
+                  "type": "string"
+                },
+                "sleepAfterMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "cwd"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "attach"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "fromCursor": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "entryId": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "const": null
+                            }
+                          ]
+                        },
+                        "epoch": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "entryId",
+                        "epoch"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "const": null
+                    }
+                  ]
+                },
+                "live": {
+                  "type": "boolean"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "detach"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "attachmentId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "attachmentId"
+              ],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "replay"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "attachmentId": {
+                  "type": "string"
+                },
+                "fromCursor": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "entryId": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "const": null
+                            }
+                          ]
+                        },
+                        "epoch": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "entryId",
+                        "epoch"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "const": null
+                    }
+                  ]
+                },
+                "throughEntryId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "attachmentId",
+                "fromCursor"
+              ],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "prompt"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "attachmentId": {
+                  "type": "string"
+                },
+                "leaseId": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "idempotencyKey": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "whenBusy": {
+                  "type": "string",
+                  "enum": [
+                    "reject",
+                    "queue"
+                  ]
+                },
+                "attribution": {
+                  "type": "object",
+                  "properties": {
+                    "label": {
+                      "type": "string",
+                      "maxLength": 80
+                    }
+                  },
+                  "required": [],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "attachmentId",
+                "leaseId",
+                "generation",
+                "idempotencyKey",
+                "text",
+                "whenBusy"
+              ],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "prompt_status"
+            },
+            "params": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "promptId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "promptId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "idempotencyKey": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "idempotencyKey"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "steer"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "attachmentId": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "text": {
+                  "type": "string"
+                },
+                "attribution": {
+                  "type": "object",
+                  "properties": {
+                    "label": {
+                      "type": "string",
+                      "maxLength": 80
+                    }
+                  },
+                  "required": [],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "attachmentId",
+                "generation",
+                "text"
+              ],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "follow_up"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "attachmentId": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "text": {
+                  "type": "string"
+                },
+                "attribution": {
+                  "type": "object",
+                  "properties": {
+                    "label": {
+                      "type": "string",
+                      "maxLength": 80
+                    }
+                  },
+                  "required": [],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "attachmentId",
+                "generation",
+                "text"
+              ],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "abort"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "attachmentId": {
+                  "type": "string"
+                },
+                "leaseId": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "attachmentId",
+                "leaseId",
+                "generation"
+              ],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "lease"
+            },
+            "params": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "const": "acquire"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "ttlMs": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "attachmentId",
+                    "generation"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "const": "heartbeat"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "leaseId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "attachmentId",
+                    "leaseId",
+                    "generation"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "const": "release"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "leaseId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "attachmentId",
+                    "leaseId",
+                    "generation"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "const": "takeover"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "ttlMs": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "attachmentId",
+                    "generation",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "ui_answer"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "attachmentId": {
+                  "type": "string"
+                },
+                "leaseId": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "questionId": {
+                  "type": "string"
+                },
+                "answer": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "value": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "confirmed": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "confirmed"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "cancelled": {
+                          "const": true
+                        }
+                      },
+                      "required": [
+                        "cancelled"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "attachmentId",
+                "leaseId",
+                "generation",
+                "questionId",
+                "answer"
+              ],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "sleep"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "attachmentId": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "leaseId": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "attachmentId",
+                "generation"
+              ],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "wake"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "attachmentId": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "attachmentId",
+                "generation"
+              ],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "recover"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "attachmentId": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "leaseId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "attachmentId",
+                "generation"
+              ],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "status"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "verbose": {
+                  "type": "boolean"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "shutdown"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "graceMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "SuccessFrame": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "const": "res"
+        },
+        "id": {
+          "type": "string"
+        },
+        "ok": {
+          "const": true
+        },
+        "result": {
+          "$ref": "#/$defs/JsonValue"
+        }
+      },
+      "required": [
+        "t",
+        "id",
+        "ok",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    "FailureFrame": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "const": "res"
+        },
+        "id": {
+          "type": "string"
+        },
+        "ok": {
+          "const": false
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "enum": [
+                "bad_frame",
+                "frame_too_large",
+                "handshake_required",
+                "protocol_mismatch",
+                "unsupported_op",
+                "invalid_request",
+                "unknown_session",
+                "duplicate_session",
+                "path_mismatch",
+                "session_locked",
+                "external_writer",
+                "gone",
+                "not_attached",
+                "busy",
+                "rejected",
+                "no_lease",
+                "lease_held",
+                "lease_expired",
+                "stale_generation",
+                "stale_epoch",
+                "asleep",
+                "already_asleep",
+                "invalid_state",
+                "cursor_unknown",
+                "cursor_off_branch",
+                "unknown_question",
+                "invalid_ui_answer",
+                "idempotency_conflict",
+                "queue_full",
+                "sdk_incompatible",
+                "shutdown_in_progress",
+                "unavailable",
+                "internal"
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "$ref": "#/$defs/JsonValue"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "t",
+        "id",
+        "ok",
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "StreamKind": {
+      "type": "string",
+      "enum": [
+        "entry",
+        "event",
+        "daemon",
+        "ui_request",
+        "gap",
+        "error"
+      ]
+    },
+    "StreamFrame": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "entry"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "allOf": [
+            {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "entry"
+                    },
+                    "cursor": {
+                      "type": "object",
+                      "properties": {
+                        "entryId": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "const": null
+                            }
+                          ]
+                        },
+                        "epoch": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "entryId",
+                        "epoch"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "entry": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/$defs/JsonValue"
+                      }
+                    },
+                    "origin": {
+                      "const": "live"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "cursor",
+                    "entry",
+                    "origin"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "entry"
+                    },
+                    "cursor": {
+                      "type": "object",
+                      "properties": {
+                        "entryId": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "const": null
+                            }
+                          ]
+                        },
+                        "epoch": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "entryId",
+                        "epoch"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "entry": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/$defs/JsonValue"
+                      }
+                    },
+                    "origin": {
+                      "const": "replay"
+                    },
+                    "replayId": {
+                      "type": "string"
+                    },
+                    "index": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "kind",
+                    "cursor",
+                    "entry",
+                    "origin",
+                    "replayId",
+                    "index"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "event"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "allOf": [
+            {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "agent_start"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {},
+                      "required": [],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "agent_end"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "messages": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "$ref": "#/$defs/JsonValue"
+                            }
+                          }
+                        },
+                        "willRetry": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "messages",
+                        "willRetry"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "turn_start"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {},
+                      "required": [],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "turn_end"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "$ref": "#/$defs/JsonValue"
+                          }
+                        },
+                        "toolResults": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "$ref": "#/$defs/JsonValue"
+                            }
+                          }
+                        }
+                      },
+                      "required": [
+                        "message",
+                        "toolResults"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "message_start"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "$ref": "#/$defs/JsonValue"
+                          }
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "message_update"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "$ref": "#/$defs/JsonValue"
+                          }
+                        },
+                        "assistantMessageEvent": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "$ref": "#/$defs/JsonValue"
+                          }
+                        }
+                      },
+                      "required": [
+                        "message",
+                        "assistantMessageEvent"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "message_end"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "message": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "$ref": "#/$defs/JsonValue"
+                          }
+                        }
+                      },
+                      "required": [
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "tool_execution_start"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "toolCallId": {
+                          "type": "string"
+                        },
+                        "toolName": {
+                          "type": "string"
+                        },
+                        "args": {
+                          "$ref": "#/$defs/JsonValue"
+                        }
+                      },
+                      "required": [
+                        "toolCallId",
+                        "toolName",
+                        "args"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "tool_execution_update"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "toolCallId": {
+                          "type": "string"
+                        },
+                        "toolName": {
+                          "type": "string"
+                        },
+                        "args": {
+                          "$ref": "#/$defs/JsonValue"
+                        },
+                        "partialResult": {
+                          "$ref": "#/$defs/JsonValue"
+                        }
+                      },
+                      "required": [
+                        "toolCallId",
+                        "toolName",
+                        "args",
+                        "partialResult"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "tool_execution_end"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "toolCallId": {
+                          "type": "string"
+                        },
+                        "toolName": {
+                          "type": "string"
+                        },
+                        "result": {
+                          "$ref": "#/$defs/JsonValue"
+                        },
+                        "isError": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "toolCallId",
+                        "toolName",
+                        "result",
+                        "isError"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "agent_settled"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {},
+                      "required": [],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "queue_update"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "steering": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "followUp": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "steering",
+                        "followUp"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "compaction_start"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "reason": {
+                          "type": "string",
+                          "enum": [
+                            "manual",
+                            "threshold",
+                            "overflow"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "reason"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "entry_appended"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "entry": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "$ref": "#/$defs/JsonValue"
+                          }
+                        }
+                      },
+                      "required": [
+                        "entry"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "session_info_changed"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "thinking_level_changed"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "level": {
+                          "type": "string",
+                          "enum": [
+                            "off",
+                            "minimal",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "level"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "compaction_end"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "reason": {
+                          "type": "string",
+                          "enum": [
+                            "manual",
+                            "threshold",
+                            "overflow"
+                          ]
+                        },
+                        "result": {
+                          "$ref": "#/$defs/JsonValue"
+                        },
+                        "aborted": {
+                          "type": "boolean"
+                        },
+                        "willRetry": {
+                          "type": "boolean"
+                        },
+                        "errorMessage": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reason",
+                        "aborted",
+                        "willRetry"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "auto_retry_start"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "attempt": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        "maxAttempts": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        "delayMs": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "errorMessage": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "attempt",
+                        "maxAttempts",
+                        "delayMs",
+                        "errorMessage"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "auto_retry_end"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "success": {
+                          "type": "boolean"
+                        },
+                        "attempt": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        "finalError": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "success",
+                        "attempt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "summarization_retry_scheduled"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "attempt": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        "maxAttempts": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 9007199254740991
+                        },
+                        "delayMs": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "errorMessage": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "attempt",
+                        "maxAttempts",
+                        "delayMs",
+                        "errorMessage"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "summarization_retry_attempt_start"
+                    },
+                    "data": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "source": {
+                              "const": "branchSummary"
+                            }
+                          },
+                          "required": [
+                            "source"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "source": {
+                              "const": "compaction"
+                            },
+                            "reason": {
+                              "type": "string",
+                              "enum": [
+                                "manual",
+                                "threshold",
+                                "overflow"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "source",
+                            "reason"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "summarization_retry_finished"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {},
+                      "required": [],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "event"
+                    },
+                    "eventType": {
+                      "const": "bash_execution_update"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "delta": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "delta"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "durable": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "eventType",
+                    "data",
+                    "durable"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "daemon"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "allOf": [
+            {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
+                      "const": "phase"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/$defs/JsonValue"
+                      }
+                    },
+                    "sourceEntryId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "name",
+                    "data",
+                    "sourceEntryId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
+                      "const": "attention"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/$defs/JsonValue"
+                      }
+                    },
+                    "sourceEntryId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "name",
+                    "data",
+                    "sourceEntryId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
+                      "const": "lease"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/$defs/JsonValue"
+                      }
+                    },
+                    "sourceEntryId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "name",
+                    "data",
+                    "sourceEntryId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
+                      "const": "prompt"
+                    },
+                    "data": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "outcome": {
+                              "const": "settled"
+                            }
+                          },
+                          "required": [
+                            "outcome"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "outcome": {
+                              "const": "aborted"
+                            },
+                            "errorCode": {
+                              "const": "aborted"
+                            }
+                          },
+                          "required": [
+                            "outcome",
+                            "errorCode"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "outcome": {
+                              "const": "failed"
+                            },
+                            "errorCode": {
+                              "type": "string",
+                              "enum": [
+                                "interrupted",
+                                "external_writer",
+                                "provider_error",
+                                "sdk_error",
+                                "rejected"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "outcome",
+                            "errorCode"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "sourceEntryId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "name",
+                    "data",
+                    "sourceEntryId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
+                      "const": "replay_start"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/$defs/JsonValue"
+                      }
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "kind",
+                    "name",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
+                      "const": "replay_end"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/$defs/JsonValue"
+                      }
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "kind",
+                    "name",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
+                      "const": "keepalive"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "cursor": {
+                          "type": "object",
+                          "properties": {
+                            "entryId": {
+                              "oneOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "const": null
+                                }
+                              ]
+                            },
+                            "epoch": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": [
+                            "entryId",
+                            "epoch"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "observedPhase": {
+                          "type": "string",
+                          "enum": [
+                            "idle",
+                            "working",
+                            "blocked",
+                            "failed",
+                            "gone",
+                            "asleep"
+                          ]
+                        },
+                        "attention": {
+                          "type": "string",
+                          "enum": [
+                            "none",
+                            "question",
+                            "failed",
+                            "interrupted"
+                          ]
+                        },
+                        "pendingQuestionIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "cursor",
+                        "observedPhase",
+                        "attention",
+                        "pendingQuestionIds"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "name",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
+                      "const": "sleep"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/$defs/JsonValue"
+                      }
+                    },
+                    "sourceEntryId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "name",
+                    "data",
+                    "sourceEntryId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
+                      "const": "wake"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/$defs/JsonValue"
+                      }
+                    },
+                    "sourceEntryId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "name",
+                    "data",
+                    "sourceEntryId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
+                      "const": "restored"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/$defs/JsonValue"
+                      }
+                    },
+                    "sourceEntryId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "name",
+                    "data",
+                    "sourceEntryId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
+                      "const": "external_writer"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/$defs/JsonValue"
+                      }
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "name",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
+                      "const": "ui_notice"
+                    },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "$ref": "#/$defs/JsonValue"
+                      }
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "name",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "ui_request"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "allOf": [
+            {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "ui_request"
+                    },
+                    "questionId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "method": {
+                      "const": "select"
+                    },
+                    "options": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "questionId",
+                    "method"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "ui_request"
+                    },
+                    "questionId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "method": {
+                      "const": "confirm"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "questionId",
+                    "method"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "ui_request"
+                    },
+                    "questionId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "method": {
+                      "const": "input"
+                    },
+                    "placeholder": {
+                      "type": "string"
+                    },
+                    "prefill": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "questionId",
+                    "method"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "ui_request"
+                    },
+                    "questionId": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "method": {
+                      "const": "editor"
+                    },
+                    "prefill": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "questionId",
+                    "method"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "ev"
+            },
+            "session": {
+              "type": "string"
+            },
+            "attachmentId": {
+              "type": "string"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "epoch": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "kind": {
+              "const": "gap"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "reader_overflow",
+                "socket_backpressure"
+              ]
+            },
+            "lost": {
+              "type": "object",
+              "properties": {
+                "fromSeq": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "toSeq": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "fromSeq",
+                "toSeq"
+              ],
+              "additionalProperties": false
+            },
+            "resumeFrom": {
+              "type": "object",
+              "properties": {
+                "entryId": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "const": null
+                    }
+                  ]
+                },
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "entryId",
+                "epoch"
+              ],
+              "additionalProperties": false
+            },
+            "demoted": {
+              "const": true
+            }
+          },
+          "required": [
+            "t",
+            "session",
+            "attachmentId",
+            "generation",
+            "epoch",
+            "kind",
+            "reason",
+            "lost",
+            "resumeFrom",
+            "demoted"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "ev"
+            },
+            "session": {
+              "type": "string"
+            },
+            "attachmentId": {
+              "type": "string"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "epoch": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "kind": {
+              "const": "error"
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "bad_frame",
+                    "frame_too_large",
+                    "handshake_required",
+                    "protocol_mismatch",
+                    "unsupported_op",
+                    "invalid_request",
+                    "unknown_session",
+                    "duplicate_session",
+                    "path_mismatch",
+                    "session_locked",
+                    "external_writer",
+                    "gone",
+                    "not_attached",
+                    "busy",
+                    "rejected",
+                    "no_lease",
+                    "lease_held",
+                    "lease_expired",
+                    "stale_generation",
+                    "stale_epoch",
+                    "asleep",
+                    "already_asleep",
+                    "invalid_state",
+                    "cursor_unknown",
+                    "cursor_off_branch",
+                    "unknown_question",
+                    "invalid_ui_answer",
+                    "idempotency_conflict",
+                    "queue_full",
+                    "sdk_incompatible",
+                    "shutdown_in_progress",
+                    "unavailable",
+                    "internal"
+                  ]
+                },
+                "message": {
+                  "type": "string"
+                },
+                "details": {
+                  "$ref": "#/$defs/JsonValue"
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ],
+              "additionalProperties": false
+            },
+            "fatal": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "t",
+            "session",
+            "attachmentId",
+            "generation",
+            "epoch",
+            "kind",
+            "error",
+            "fatal"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "CustomEntryType": {
+      "type": "string",
+      "enum": [
+        "pi-daemon/restored",
+        "pi-daemon/lifecycle",
+        "pi-daemon/phase",
+        "pi-daemon/lease",
+        "pi-daemon/prompt-claim",
+        "pi-daemon/prompt-outcome",
+        "pi-daemon/input",
+        "pi-daemon/ui",
+        "pi-daemon/epoch"
+      ]
+    },
+    "DaemonCustomEntry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "custom"
+            },
+            "customType": {
+              "const": "pi-daemon/restored"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "const": 1
+                },
+                "daemonInstanceId": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "interrupted": {
+                  "const": true
+                },
+                "previousPhase": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "working",
+                        "blocked"
+                      ]
+                    },
+                    {
+                      "const": null
+                    }
+                  ]
+                },
+                "unfinishedPromptIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "v",
+                "daemonInstanceId",
+                "generation",
+                "epoch",
+                "interrupted",
+                "previousPhase",
+                "unfinishedPromptIds",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "customType",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "custom"
+            },
+            "customType": {
+              "const": "pi-daemon/lifecycle"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "const": 1
+                },
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "created",
+                    "woke",
+                    "sleeping",
+                    "slept",
+                    "failed",
+                    "gone"
+                  ]
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "reason": {
+                  "type": "string",
+                  "maxLength": 80
+                },
+                "sleepAfterMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "v",
+                "action",
+                "generation",
+                "epoch",
+                "reason",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "customType",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "custom"
+            },
+            "customType": {
+              "const": "pi-daemon/phase"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "const": 1
+                },
+                "from": {
+                  "type": "string",
+                  "enum": [
+                    "idle",
+                    "working",
+                    "blocked",
+                    "failed",
+                    "gone"
+                  ]
+                },
+                "to": {
+                  "type": "string",
+                  "enum": [
+                    "idle",
+                    "working",
+                    "blocked",
+                    "failed",
+                    "gone"
+                  ]
+                },
+                "attention": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "question",
+                    "failed",
+                    "interrupted"
+                  ]
+                },
+                "pendingQuestionIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "v",
+                "from",
+                "to",
+                "attention",
+                "pendingQuestionIds",
+                "reason",
+                "generation",
+                "epoch",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "customType",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "custom"
+            },
+            "customType": {
+              "const": "pi-daemon/lease"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "const": 1
+                },
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "acquired",
+                    "released",
+                    "expired",
+                    "taken_over",
+                    "disconnected"
+                  ]
+                },
+                "leaseId": {
+                  "type": "string"
+                },
+                "actorId": {
+                  "type": "string"
+                },
+                "previousLeaseId": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "expiresAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "v",
+                "action",
+                "leaseId",
+                "actorId",
+                "generation",
+                "epoch",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "customType",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "custom"
+            },
+            "customType": {
+              "const": "pi-daemon/prompt-claim"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "const": 1
+                },
+                "promptId": {
+                  "type": "string"
+                },
+                "idempotencyKey": {
+                  "type": "string"
+                },
+                "payloadSha256": {
+                  "type": "string"
+                },
+                "clientId": {
+                  "type": "string"
+                },
+                "attribution": {
+                  "type": "object",
+                  "properties": {
+                    "actorId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "actorId"
+                  ],
+                  "additionalProperties": false
+                },
+                "acceptedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "v",
+                "promptId",
+                "idempotencyKey",
+                "payloadSha256",
+                "clientId",
+                "attribution",
+                "acceptedAt"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "customType",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "custom"
+            },
+            "customType": {
+              "const": "pi-daemon/prompt-outcome"
+            },
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "v": {
+                      "const": 1
+                    },
+                    "promptId": {
+                      "type": "string"
+                    },
+                    "finalEntryId": {
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "const": null
+                        }
+                      ]
+                    },
+                    "stopReason": {
+                      "type": "string"
+                    },
+                    "settledAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "outcome": {
+                      "const": "settled"
+                    }
+                  },
+                  "required": [
+                    "v",
+                    "promptId",
+                    "settledAt",
+                    "outcome"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "v": {
+                      "const": 1
+                    },
+                    "promptId": {
+                      "type": "string"
+                    },
+                    "finalEntryId": {
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "const": null
+                        }
+                      ]
+                    },
+                    "stopReason": {
+                      "type": "string"
+                    },
+                    "settledAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "outcome": {
+                      "const": "aborted"
+                    },
+                    "errorCode": {
+                      "const": "aborted"
+                    }
+                  },
+                  "required": [
+                    "v",
+                    "promptId",
+                    "settledAt",
+                    "outcome",
+                    "errorCode"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "v": {
+                      "const": 1
+                    },
+                    "promptId": {
+                      "type": "string"
+                    },
+                    "finalEntryId": {
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "const": null
+                        }
+                      ]
+                    },
+                    "stopReason": {
+                      "type": "string"
+                    },
+                    "settledAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "outcome": {
+                      "const": "failed"
+                    },
+                    "errorCode": {
+                      "type": "string",
+                      "enum": [
+                        "interrupted",
+                        "external_writer",
+                        "provider_error",
+                        "sdk_error",
+                        "rejected"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "v",
+                    "promptId",
+                    "settledAt",
+                    "outcome",
+                    "errorCode"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "customType",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "custom"
+            },
+            "customType": {
+              "const": "pi-daemon/input"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "const": 1
+                },
+                "inputId": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "steer",
+                    "follow_up"
+                  ]
+                },
+                "actorId": {
+                  "type": "string"
+                },
+                "contentSha256": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "v",
+                "inputId",
+                "operation",
+                "actorId",
+                "contentSha256",
+                "generation",
+                "epoch",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "customType",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "custom"
+            },
+            "customType": {
+              "const": "pi-daemon/ui"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "const": 1
+                },
+                "questionId": {
+                  "type": "string"
+                },
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "opened",
+                    "answered",
+                    "cancelled",
+                    "timed_out"
+                  ]
+                },
+                "method": {
+                  "type": "string",
+                  "enum": [
+                    "select",
+                    "confirm",
+                    "input",
+                    "editor"
+                  ]
+                },
+                "actorId": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "v",
+                "questionId",
+                "action",
+                "method",
+                "generation",
+                "epoch",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "customType",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "custom"
+            },
+            "customType": {
+              "const": "pi-daemon/epoch"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "const": 1
+                },
+                "fromEpoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "toEpoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "fork",
+                    "switch",
+                    "restore",
+                    "rewind",
+                    "navigate"
+                  ]
+                },
+                "previousLeaf": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "const": null
+                    }
+                  ]
+                },
+                "currentLeaf": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "const": null
+                    }
+                  ]
+                },
+                "forkPoint": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "const": null
+                    }
+                  ]
+                },
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "v",
+                "fromEpoch",
+                "toEpoch",
+                "reason",
+                "previousLeaf",
+                "currentLeaf",
+                "forkPoint",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "customType",
+            "data"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "version": "0.2.0",
+  "description": "Run headless pi agent sessions in-process with local socket clients, durable replay, live streaming, and explicit driver arbitration.",
+  "type": "module",
+  "bin": {
+    "pi-daemon": "./bin/pi-daemon.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol/index.d.ts",
+      "import": "./dist/protocol/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/gate-provider.d.ts",
+      "import": "./dist/testing/gate-provider.js"
+    },
+    "./protocol/protocol-1.0.schema.json": "./schema/protocol-1.0.schema.json"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "src",
+    "schema",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
+    "test": "npm run build && vitest run",
+    "typecheck": "npm run build && tsc -b tsconfig.json --pretty false --force",
+    "lint": "eslint . --cache --cache-location node_modules/.cache/eslint/",
+    "check": "npm run lint && npm run typecheck && npm run test:coverage",
+    "ci": "node scripts/gate.mjs",
+    "sdk:status": "node scripts/sdk-upgrade.mjs status",
+    "sdk:check": "node scripts/sdk-upgrade.mjs check",
+    "generate:protocol-schema": "node scripts/generate-protocol-schema.mjs",
+    "test:coverage": "npm run build && vitest run --coverage"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "name": "@centerforagenticai/pi-daemon",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/pi-daemon"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/pi-daemon#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^4.1.11",
+    "eslint": "^10.0.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^4.0.18"
+  }
+}
