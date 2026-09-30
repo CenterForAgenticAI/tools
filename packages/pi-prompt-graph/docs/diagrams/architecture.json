@@ -1,0 +1,72 @@
+{
+  "type": "flow",
+  "title": "How a graph is checked and run",
+  "description": "A Pi session calls the extension, which loads a graph and passes it through the pure core and resource-aware embedded runner. Independent node adapters may overlap within the graph limit while state, journal entries, and artifacts are committed to the project run directory.",
+  "nodes": [
+    {
+      "id": "session",
+      "label": "Pi session",
+      "sublabel": "person or agent",
+      "kind": "default"
+    },
+    {
+      "id": "source",
+      "label": "Graph file",
+      "sublabel": "project or user scope",
+      "kind": "store"
+    },
+    {
+      "id": "extension",
+      "label": "Graph extension",
+      "sublabel": "command and tool",
+      "tag": "pi-prompt-graph",
+      "kind": "primary"
+    },
+    {
+      "id": "engine",
+      "label": "Graph engine",
+      "sublabel": "pure core, then embedded runner",
+      "tag": "check and route",
+      "kind": "accent"
+    },
+    {
+      "id": "adapters",
+      "label": "Node adapters",
+      "sublabel": "templates, agents, commands",
+      "kind": "primary"
+    },
+    {
+      "id": "run",
+      "label": "Run directory",
+      "sublabel": "state, journal, artifacts",
+      "kind": "store"
+    }
+  ],
+  "edges": [
+    {
+      "from": "session",
+      "to": "extension",
+      "label": "call"
+    },
+    {
+      "from": "source",
+      "to": "extension",
+      "label": "load"
+    },
+    {
+      "from": "extension",
+      "to": "engine",
+      "label": "check or run"
+    },
+    {
+      "from": "engine",
+      "to": "adapters",
+      "label": "execute node"
+    },
+    {
+      "from": "engine",
+      "to": "run",
+      "label": "commit"
+    }
+  ]
+}

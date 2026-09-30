@@ -1,0 +1,75 @@
+{
+  "version": "0.2.0",
+  "description": "Conditional, cyclic workflow graphs for Pi units.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "examples",
+    "README.md",
+    "scripts/public-package-smoke.mjs",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "npm run quality",
+    "coverage": "npm run typecheck:tests && c8 --all --include=src/**/*.ts node --import tsx --test --test-concurrency=${TEST_CONCURRENCY:-4} tests/unit/*.test.ts tests/integration/*.test.ts tests/e2e/*.test.ts",
+    "lint": "eslint . --cache --cache-location node_modules/.cache/eslint/",
+    "prepare": "npm run build",
+    "quality": "npm run lint && npm run typecheck && npm run coverage && npm run build",
+    "test": "npm run typecheck:tests && node --import tsx --test --test-concurrency=${TEST_CONCURRENCY:-4} tests/unit/*.test.ts tests/integration/*.test.ts tests/e2e/*.test.ts",
+    "test:e2e": "npm run typecheck:tests && node --import tsx --test --test-concurrency=1 tests/e2e/*.test.ts",
+    "test:public-package": "node scripts/public-package-smoke.mjs",
+    "test:integration": "npm run typecheck:tests && node --import tsx --test --test-concurrency=${TEST_CONCURRENCY:-4} tests/integration/*.test.ts",
+    "test:unit": "npm run typecheck:tests && node --import tsx --test --test-concurrency=${TEST_CONCURRENCY:-4} tests/unit/*.test.ts",
+    "typecheck": "tsc -p tsconfig.check.json --incremental --tsBuildInfoFile node_modules/.cache/tsc/check.tsbuildinfo",
+    "typecheck:tests": "tsc -p tsconfig.tests.check.json --incremental --tsBuildInfoFile node_modules/.cache/tsc/tests-check.tsbuildinfo"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "name": "@centerforagenticai/pi-prompt-graph",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/pi-prompt-graph"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/pi-prompt-graph#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.0.0",
+    "c8": "^11.0.0",
+    "eslint": "^10.7.0",
+    "tsx": "^4.19.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.64.0",
+    "typebox": "1.3.11"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "typebox": "*"
+  }
+}
