@@ -1,0 +1,52 @@
+{
+  "type": "flow",
+  "title": "pi-dev architecture",
+  "description": "Developers and agents use pi-dev surfaces to inspect Pi's public runtime, exercise terminal UI features, and trace lifecycle metadata.",
+  "nodes": [
+    {
+      "id": "developer",
+      "label": "Developer",
+      "sublabel": "/dev and Ctrl+Shift+U",
+      "tag": "Pi session",
+      "kind": "default"
+    },
+    {
+      "id": "agent",
+      "label": "Agent",
+      "sublabel": "calls pi_dev_demo",
+      "tag": "Pi session",
+      "kind": "default"
+    },
+    {
+      "id": "extension",
+      "label": "pi-dev",
+      "sublabel": "inspect, demo, trace, diagnose",
+      "tag": "Extension",
+      "kind": "primary"
+    },
+    {
+      "id": "runtime",
+      "label": "Pi public APIs",
+      "sublabel": "runtime, session and UI",
+      "tag": "Host",
+      "kind": "accent"
+    }
+  ],
+  "edges": [
+    {
+      "from": "developer",
+      "to": "extension",
+      "label": "commands"
+    },
+    {
+      "from": "agent",
+      "to": "extension",
+      "label": "tool call"
+    },
+    {
+      "from": "extension",
+      "to": "runtime",
+      "label": "public API"
+    }
+  ]
+}

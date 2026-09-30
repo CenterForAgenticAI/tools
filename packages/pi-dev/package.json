@@ -1,0 +1,76 @@
+{
+  "version": "0.2.0",
+  "description": "Pi extension development introspection, diagnostics, UI demos, and event tracing.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    },
+    "./testing": {
+      "types": "./dist/src/testing.d.ts",
+      "import": "./dist/src/testing.js"
+    }
+  },
+  "files": [
+    "dist/src",
+    "docs",
+    "index.ts",
+    "LICENSE",
+    "README.md",
+    "scripts/package-smoke.mjs",
+    "skills",
+    "src"
+  ],
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:coverage": "c8 --all --src . --include \"index.ts\" --include \"src/**/*.ts\" --reporter=text --reporter=lcov --reporter=cobertura --check-coverage --lines 70 --functions 75 --branches 60 --statements 70 node --experimental-strip-types --test tests/*.test.ts",
+    "smoke:package": "node scripts/package-smoke.mjs",
+    "check": "npm run lint && npm run typecheck && npm run build && npm run smoke:package && npm run test:coverage && npm run test:live",
+    "test:live": "node --experimental-strip-types --test tests/live/*.test.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "name": "@centerforagenticai/pi-dev",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/pi-dev"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/pi-dev#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-tui": "^0.85.1",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.1",
+    "c8": "^11.0.0",
+    "eslint": "^10.7.0",
+    "globals": "^17.7.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.64.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}
