@@ -21,12 +21,12 @@
  * beaten rather than leaving the user to guess why it did nothing.
  */
 
-import { DEFAULT_COMMIT_DRAIN_TIMEOUT_MS } from "./compaction-commit-guard.js";
+import { DEFAULT_COMMIT_DRAIN_TIMEOUT_MS } from "../compaction/compaction-commit-guard.js";
 import {
 	DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS,
 	normalizeGenerationOutputReserve,
-} from "./generation-budget.js";
-import { DEFAULT_RESTART_NOTICE_MIN_AWAY_MS } from "./restart-notice.js";
+} from "../compaction/generation-budget.js";
+import { DEFAULT_RESTART_NOTICE_MIN_AWAY_MS } from "../session/restart-notice.js";
 
 // ---------------------------------------------------------------------------
 // Config shape

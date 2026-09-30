@@ -26,7 +26,7 @@ import {
 	formatFileSize,
 	formatAge,
 	type CacheManifest,
-} from "../context-cache.js";
+} from "../src/cache/context-cache.js";
 
 // ---------------------------------------------------------------------------
 // Helpers

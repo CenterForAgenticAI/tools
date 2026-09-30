@@ -4,7 +4,7 @@ import {
 	isHandoffExpired,
 	parseWorktreeHandoff,
 	type WorktreeHandoff,
-} from "./peer-contracts.js";
+} from "../platform/peer-contracts.js";
 import {
 	parseTranscriptWorkstreamEntry,
 	parseTranscriptWorkstreamEntryDetails,

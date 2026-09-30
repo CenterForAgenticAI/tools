@@ -3,17 +3,17 @@
 import {
 	parseRegistryProjection,
 	type RegistryProjection,
-} from "./workstream-schema.js";
+} from "../workstream/workstream-schema.js";
 import {
 	findOverlaps,
 	type OverlapResult,
-} from "./workstream-overlap.js";
+} from "../workstream/workstream-overlap.js";
 import {
 	redactText,
 	sanitizeRegistryProjection,
 	type RedactionOptions,
-} from "./workstream-safety.js";
-import type { WorkspaceLocation } from "./peer-contracts.js";
+} from "../workstream/workstream-safety.js";
+import type { WorkspaceLocation } from "../platform/peer-contracts.js";
 
 export interface SessionViewOptions {
 	readonly sessions: readonly RegistryProjection[];

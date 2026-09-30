@@ -1,6 +1,6 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { MAX_COMPACTION_HISTORY_PROMPT_CHARS } from "./workstream-context.js";
+import { MAX_COMPACTION_HISTORY_PROMPT_CHARS } from "../workstream/workstream-context.js";
 
 /** Boundary-only metadata for one compaction on the current session branch. */
 export interface ContextAwareSessionCompactionV1 {

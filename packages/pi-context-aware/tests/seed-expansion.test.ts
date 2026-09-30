@@ -6,9 +6,9 @@ import {
 	parseSeedExpansionResult,
 	seedExpansionPreview,
 	textFromResponseContent,
-} from "../seed-expansion.js";
+} from "../src/seed/seed-expansion.js";
 import { ambiguousItem3Tagged, clearChecklistItem3Tagged, legacyJsonProceed } from "./fixtures.js";
-import type { SeedExpansionClarify, SeedExpansionProceed, SeedExpansionResult } from "../seed-expansion.js";
+import type { SeedExpansionClarify, SeedExpansionProceed, SeedExpansionResult } from "../src/seed/seed-expansion.js";
 
 function requireProceed(result: SeedExpansionResult | null): SeedExpansionProceed {
 	assert.ok(result);

@@ -9,13 +9,13 @@ import {
 	type TerminalLocationAcknowledgement,
 	type WorktreeHandoff,
 	type WorkspaceLocation,
-} from "./peer-contracts.js";
-import { asPiSessionId, asTerminalId, type TerminalIdentity } from "./workstream-schema.js";
+} from "../platform/peer-contracts.js";
+import { asPiSessionId, asTerminalId, type TerminalIdentity } from "../workstream/workstream-schema.js";
 import {
 	appendWorkstreamSnapshot,
 	createWorkstreamSnapshot,
 	type AppendEntryApi,
-} from "./workstream-state.js";
+} from "../workstream/workstream-state.js";
 
 export interface LauncherHandoffInput extends Omit<WorktreeHandoff, "schemaVersion"> {
 	readonly requestedLocation?: WorkspaceLocation;

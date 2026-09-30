@@ -28,7 +28,7 @@ async function loadTerminalProjections(): Promise<CmuxProjectionModule | undefin
 	try {
 		// eslint-disable-next-line @typescript-eslint/ban-ts-comment
 		// @ts-ignore The implementation is intentionally absent in the semantic-red commit.
-		return await import("../terminal-projections.js") as unknown as CmuxProjectionModule;
+		return await import("../src/platform/terminal-projections.js") as unknown as CmuxProjectionModule;
 	} catch { return undefined; }
 }
 

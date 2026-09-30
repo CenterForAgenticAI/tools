@@ -14,7 +14,7 @@ import {
 	type ContextAwareHandoffNothingToCompactV1,
 	type ContextAwareServiceV1,
 	type ContextAwareSnapshotV1,
-} from "../context-service.js";
+} from "../src/context-service.js";
 
 function createEventBus(): EventBus {
 	const handlers = new Map<string, Set<(data: unknown) => void>>();

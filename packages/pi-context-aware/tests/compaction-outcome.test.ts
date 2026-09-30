@@ -10,7 +10,7 @@ import {
 	preflightCompaction,
 	recordRetainedSummary,
 	recordSummaryRetentionFailure,
-} from "../compaction-outcome.js";
+} from "../src/compaction/compaction-outcome.js";
 
 function contextWithManager(sessionManager: unknown): ExtensionContext {
 	return {

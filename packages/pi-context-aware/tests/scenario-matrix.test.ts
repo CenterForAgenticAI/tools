@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildAmbiguousProceedPrompt, parseSeedExpansionResult } from "../seed-expansion.js";
-import type { SeedExpansionClarify, SeedExpansionProceed, SeedExpansionResult } from "../seed-expansion.js";
+import { buildAmbiguousProceedPrompt, parseSeedExpansionResult } from "../src/seed/seed-expansion.js";
+import type { SeedExpansionClarify, SeedExpansionProceed, SeedExpansionResult } from "../src/seed/seed-expansion.js";
 import { ambiguousItem3Tagged, clearChecklistItem3Tagged } from "./fixtures.js";
 
 function requireProceed(result: SeedExpansionResult | null): SeedExpansionProceed {

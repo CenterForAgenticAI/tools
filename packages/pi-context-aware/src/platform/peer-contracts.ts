@@ -4,7 +4,7 @@ import {
 	WORKSTREAM_SCHEMA_VERSION,
 	type WorkstreamRef,
 	type WorkstreamStatus,
-} from "./workstream-schema.js";
+} from "../workstream/workstream-schema.js";
 
 export const INTERCOM_CONTRACT_VERSION = 1 as const;
 export const FOCUS_SEED_CONTRACT_VERSION = 1 as const;

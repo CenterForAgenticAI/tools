@@ -8,22 +8,22 @@ import {
 	preflightCompaction,
 	recordRetainedSummary,
 	recordSummaryRetentionFailure,
-} from "../compaction-outcome.js";
+} from "../src/compaction/compaction-outcome.js";
 import {
 	isCtxUsable,
 	readToolsExpanded,
 	sessionMetadataKey,
 	withLiveCtx,
-} from "../ctx-liveness.js";
+} from "../src/session/ctx-liveness.js";
 import {
 	isTransientFailure,
 	resolveTransientRetryPolicy,
 	runWithTransientRetryRecovery,
-} from "../transient-retry.js";
+} from "../src/compaction/transient-retry.js";
 import {
 	ContextOverflowRecoveryExhaustedError,
 	errorFromLlmResponse,
-} from "../overflow-recovery.js";
+} from "../src/compaction/overflow-recovery.js";
 
 function context(overrides: Record<string, unknown> = {}): ExtensionContext {
 	return {
@@ -238,7 +238,7 @@ test("compaction outcome no-op hooks are callable", () => {
 });
 
 test("compaction caller honours cancellation without recording proactive failure", async () => {
-	const extension = await import("../index.js");
+	const extension = await import("../src/index.js");
 	const handlers = new Map<string, (event: Record<string, unknown>, ctx: ExtensionContext) => unknown>();
 	const tools = new Map<string, unknown>();
 	const commands = new Map<string, unknown>();

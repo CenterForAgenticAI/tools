@@ -6,12 +6,12 @@ import {
 	detachWorkstream,
 	inheritWorkstream,
 	workstreamEntry,
-} from "../workstream-state.js";
+} from "../src/workstream/workstream-state.js";
 import {
 	replayWorkstreamEntries,
 	resolveWorkstreamInheritance,
-} from "../workstream-replay.js";
-import { WORKSTREAM_SCHEMA_VERSION, asPiSessionId, asWorkstreamId, type WorkstreamSnapshot } from "../workstream-schema.js";
+} from "../src/workstream/workstream-replay.js";
+import { WORKSTREAM_SCHEMA_VERSION, asPiSessionId, asWorkstreamId, type WorkstreamSnapshot } from "../src/workstream/workstream-schema.js";
 
 const now = "2026-07-17T00:00:00.000Z";
 function snapshot(revision: number, objective: string, eventId = `event-${revision}`, overrides: Partial<WorkstreamSnapshot> = {}): WorkstreamSnapshot {

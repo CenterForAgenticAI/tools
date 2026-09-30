@@ -9,7 +9,7 @@ import {
 	buildCacheSeedPreamble,
 	buildCacheSystemPromptBlock,
 	sendCacheNotification,
-} from "../cache-render.js";
+} from "../src/cache/cache-render.js";
 import {
 	MAX_CONTEXT_CACHE_LISTING_CHARS,
 	boundCacheDocuments,
@@ -22,8 +22,8 @@ import {
 	stripCachePlan,
 	writeManifest,
 	type CacheManifest,
-} from "../context-cache.js";
-import { DEFAULT_CONFIG, DEFAULT_CONTEXT_CACHE_CONFIG, type Config } from "../config-layers.js";
+} from "../src/cache/context-cache.js";
+import { DEFAULT_CONFIG, DEFAULT_CONTEXT_CACHE_CONFIG, type Config } from "../src/platform/config-layers.js";
 
 function config(overrides: Partial<Config["contextCache"]> = {}): Config {
 	return {

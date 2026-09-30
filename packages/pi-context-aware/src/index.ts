@@ -64,8 +64,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import type { Api, AssistantMessage, ImageContent, Message, Model, ProviderHeaders, TextContent } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { compatCanDispatch } from "./model-transport.js";
-import { decideBuiltinCompactionFallback, extrapolateBoundedInputTokens } from "./compaction-fallback-guard.js";
+import { compatCanDispatch } from "./platform/model-transport.js";
+import { decideBuiltinCompactionFallback, extrapolateBoundedInputTokens } from "./compaction/compaction-fallback-guard.js";
 import {
 	BorderedLoader,
 	calculateContextTokens,
@@ -101,9 +101,9 @@ import {
 	type SeedExpansionClarify,
 	type SeedExpansionOutcome,
 	type SeedExpansionProgress,
-} from "./seed-expansion.js";
-import { buildPreviewLines } from "./preview-lines.js";
-import { resolvePromptTemplateSeed, type PromptTemplateSeedResolution } from "./prompt-template-seed.js";
+} from "./seed/seed-expansion.js";
+import { buildPreviewLines } from "./platform/preview-lines.js";
+import { resolvePromptTemplateSeed, type PromptTemplateSeedResolution } from "./seed/prompt-template-seed.js";
 import {
 	ARTIFACT_GENERATION_SYSTEM,
 	CACHE_MANIFEST_FILE_NAME,
@@ -131,14 +131,14 @@ import {
 	writeManifest,
 	type CachePlanArtifact,
 	type CacheReadPool,
-} from "./context-cache.js";
+} from "./cache/context-cache.js";
 import {
 	buildCacheListingForPrompt,
 	buildCacheSeedPreamble,
 	buildCacheSystemPromptBlock,
 	findLatestCompactionCarrySelection,
 	sendCacheNotification,
-} from "./cache-render.js";
+} from "./cache/cache-render.js";
 import {
 	CONTEXT_AWARE_HANDOFF_DEFAULT_MAX_SEED_CHARACTERS,
 	CONTEXT_AWARE_HANDOFF_STATE_EVENT,
@@ -166,10 +166,10 @@ import {
 	contextBand,
 	URGENT_FRACTION,
 	WARN_FRACTION,
-} from "./context-telemetry.js";
-import { buildCheckinPrompt, type CheckinSnapshot } from "./checkin.js";
-import { arbitrateQueuedInteraction } from "./idle-arbitration.js";
-import { consumeFocusSeed } from "./focus-seed.js";
+} from "./platform/context-telemetry.js";
+import { buildCheckinPrompt, type CheckinSnapshot } from "./platform/checkin.js";
+import { arbitrateQueuedInteraction } from "./compaction/idle-arbitration.js";
+import { consumeFocusSeed } from "./workstream/focus-seed.js";
 import {
 	acceptSeedWithoutGuard,
 	createGeneratedSeedProvenance,
@@ -188,8 +188,8 @@ import {
 	type SeedAuthorityTrigger,
 	type SideEffectAuthorityChange,
 	type SideEffectAuthoritySurface,
-} from "./seed-authority.js";
-import { FOCUS_SEED_CHANNEL } from "./peer-contracts.js";
+} from "./seed/seed-authority.js";
+import { FOCUS_SEED_CHANNEL } from "./platform/peer-contracts.js";
 import {
 	SESSION_NAMING_ENTRY_TYPE,
 	SessionNamingController,
@@ -197,13 +197,13 @@ import {
 	resolveStartupNamingState,
 	turnsFromBranchEntries,
 	type SessionNamingState,
-} from "./session-naming.js";
+} from "./session/session-naming.js";
 import {
 	parseFocusCommand,
 	sessionFocus,
 	type FocusCommand,
 	type FocusResult,
-} from "./workstream-focus.js";
+} from "./workstream/workstream-focus.js";
 import {
 	activityTimeline,
 	buildAuthoritativeWorkstreamCompactionProjection,
@@ -215,35 +215,35 @@ import {
 	MAX_WORKSTREAM_CONTEXT_CHARS,
 	selectActiveWorkstream,
 	type WorkstreamCompactionProjection,
-} from "./workstream-context.js";
-import { replayWorkstreamEntries } from "./workstream-replay.js";
-import { redactPinnedVerbatimBlock, redactText } from "./workstream-safety.js";
-import { appendWorkstreamSnapshot } from "./workstream-state.js";
+} from "./workstream/workstream-context.js";
+import { replayWorkstreamEntries } from "./workstream/workstream-replay.js";
+import { redactPinnedVerbatimBlock, redactText } from "./workstream/workstream-safety.js";
+import { appendWorkstreamSnapshot } from "./workstream/workstream-state.js";
 import {
 	createRegistryProjection,
 	createSessionRegistry,
 	SESSION_REGISTRY_RETENTION_MS,
 	type SessionRegistry,
-} from "./session-registry.js";
+} from "./session/session-registry.js";
 import {
 	renderSessionsView,
 	requestSessionJump,
-} from "./sessions-view.js";
+} from "./session/sessions-view.js";
 import {
 	createCmuxProjectionAdapter,
 	CMUX_PING_TIMEOUT_MS,
 	type CmuxProjectionAdapter,
-} from "./terminal-projections.js";
+} from "./platform/terminal-projections.js";
 import {
 	consumeLauncherHandoff,
 	type LauncherChildLocation,
-} from "./launcher-handoff.js";
+} from "./seed/launcher-handoff.js";
 import {
 	recordSettledRunActivity,
 	type ActivityModelRegistry,
-} from "./workstream-activity.js";
-import { createWorkstreamDiagnostics, type WorkstreamDiagnostics } from "./workstream-diagnostics.js";
-import { parseWorkstreamSnapshot, type WorkstreamMutation, type WorkstreamRef, type WorkstreamSnapshot } from "./workstream-schema.js";
+} from "./workstream/workstream-activity.js";
+import { createWorkstreamDiagnostics, type WorkstreamDiagnostics } from "./workstream/workstream-diagnostics.js";
+import { parseWorkstreamSnapshot, type WorkstreamMutation, type WorkstreamRef, type WorkstreamSnapshot } from "./workstream/workstream-schema.js";
 
 // Hosts that seed a snapshot through SessionManager.appendCustomEntry can use
 // the same one-time redaction and bound check before writing the field.
@@ -253,16 +253,16 @@ import {
 	currentTasksWidgetLine,
 	registerSessionTasks,
 	type TasksRuntimeDeps,
-} from "./session-tasks-runtime.js";
-import { probeSessionBusy } from "./session-busy-probe.js";
-import { buildTasksContextEnvelope, tasksCompactionCarry, tasksSettleCorrection, tasksSettleReminder, type TasksAudience } from "./session-tasks-view.js";
+} from "./session-tasks/session-tasks-runtime.js";
+import { probeSessionBusy } from "./session/session-busy-probe.js";
+import { buildTasksContextEnvelope, tasksCompactionCarry, tasksSettleCorrection, tasksSettleReminder, type TasksAudience } from "./session-tasks/session-tasks-view.js";
 import {
 	createWorkstreamFocusWidget,
 	LEGACY_WORKSTREAM_FOCUS_WIDGET_KEY,
 	WORKSTREAM_FOCUS_WIDGET_KEY,
 	workstreamFocusWidgetText,
-} from "./workstream-widget.js";
-import { renderFocusView } from "./workstream-view.js";
+} from "./workstream/workstream-widget.js";
+import { renderFocusView } from "./workstream/workstream-view.js";
 import {
 	buildRecoveryReplacement,
 	describeHistoryRepairs,
@@ -270,30 +270,30 @@ import {
 	orphanedToolCallIdsFromError,
 	repairOrphanedToolResults,
 	type HistoryRepairResult,
-} from "./history-integrity.js";
+} from "./compaction/history-integrity.js";
 import {
 	ContextOverflowRecoveryExhaustedError,
 	errorFromLlmResponse,
 	reduceTextForOverflow,
 	reduceTextForOverflowRetry,
 	type ContextOverflowRecoveryEvent,
-} from "./overflow-recovery.js";
+} from "./compaction/overflow-recovery.js";
 import {
 	isAbortError,
 	resolveTransientRetryPolicy,
 	runWithTransientRetryRecovery,
-} from "./transient-retry.js";
+} from "./compaction/transient-retry.js";
 import {
 	isCtxUsable,
 	readRunInFlight,
 	readToolsExpanded,
 	sessionMetadataKey,
 	withLiveCtx,
-} from "./ctx-liveness.js";
+} from "./session/ctx-liveness.js";
 import {
 	decideCompactionCommit,
 	type CompactionCommitDecision,
-} from "./compaction-commit-guard.js";
+} from "./compaction/compaction-commit-guard.js";
 import {
 	classifyCompactionError,
 	clearRetainedSummariesForSession,
@@ -302,36 +302,36 @@ import {
 	lookupReusableSummaryWithBoundary,
 	preflightCompaction,
 	recordRetainedSummary,
-} from "./compaction-outcome.js";
+} from "./compaction/compaction-outcome.js";
 import {
 	collectCompactionHistory,
 	formatCompactionCountPrompt,
 	formatCompactionHistory,
 	type ContextAwareSessionCompactionV1,
-} from "./compaction-history.js";
+} from "./compaction/compaction-history.js";
 import {
 	GENERATION_PROTOCOL_OVERHEAD_TOKENS,
 	assessGenerationBudget,
 	isProactiveCompactionCheckpoint,
 	parseGenerationOutputReserve,
 	type GenerationBudgetAssessment,
-} from "./generation-budget.js";
+} from "./compaction/generation-budget.js";
 import {
 	appendWorkerCompactionForTurn,
 	appendWorkerCompactionSatisfiedForSession,
-} from "./worker-compaction-contract.js";
+} from "./compaction/worker-compaction-contract.js";
 import {
 	classifyRestartNotice,
 	formatRestartNotice,
 	resolveRestartNotice,
 	type PendingRestartNotice,
-} from "./restart-notice.js";
+} from "./session/restart-notice.js";
 import {
 	assessCompactionOwnership,
 	resolvePiAutoCompactionSetting,
 	type CompactionOwnershipAssessment,
 	type PiAutoCompactionSetting,
-} from "./compaction-ownership.js";
+} from "./compaction/compaction-ownership.js";
 import {
 	CONFIG_LAYERS,
 	CONFIG_POLICY_ENTRY_TYPE,
@@ -361,10 +361,10 @@ import {
 	type WorkstreamConfig,
 	type BusyProbeConfig,
 	type SessionNamingConfig,
-} from "./config-layers.js";
-import { answerRecall, recallSchema, type RecallCachePool } from "./recall.js";
+} from "./platform/config-layers.js";
+import { answerRecall, recallSchema, type RecallCachePool } from "./cache/recall.js";
 
-import { loadPiAiCompat } from "./pi-ai-compat.js";
+import { loadPiAiCompat } from "./platform/pi-ai-compat.js";
 
 /**
  * One dispatch contract covers all extension-owned model calls. Pi exposes
@@ -1461,6 +1461,20 @@ function cliConfigLayer(): ConfigLayerInput {
 	return configLayerFromValues("cli", cliConfigOverrides);
 }
 
+/**
+ * Whether the project at `cwd` sets `summarizer.enabled` in its own
+ * .pi/context-aware.json. Only then does the trust answer, which extension load
+ * does not have, change whether the handoff surfaces exist.
+ */
+function projectDeclaresSummarizerOwnership(cwd: string): boolean {
+	try {
+		const layer = projectConfigLayer(cwd, { trusted: true });
+		return layer?.values.has("summarizer.enabled") ?? false;
+	} catch {
+		return true;
+	}
+}
+
 /** Layers available without a session: everything except session and host policy. */
 function baseConfigLayers(cwd?: string, projectTrusted = true): ConfigLayerInput[] {
 	const project = projectConfigLayer(cwd, { trusted: projectTrusted });
@@ -2120,14 +2134,23 @@ function refreshStatus(ctx: ExtensionContext): void {
 	ctx.ui.setStatus("caair.context-aware/context-pressure", usage ? buildFooterStatusLine(usage) : undefined);
 }
 
-function buildContextUsageGuidanceBlock(): string {
+function buildContextUsageGuidanceBlock(compactionAvailable = true): string {
+	const pressureRules = compactionAvailable
+		? [
+			"OK: compact only at natural phase boundaries.",
+			"WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call compact_session at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer delegate with task_only/snippet clone_mode and concise collapsed results). Compact first for broad/full-context delegation.",
+			"URGENT: before nontrivial tool use, call compact_session unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.",
+		]
+		: [
+			"OK: no action needed.",
+			"WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, keep the next action small and reassess, or delegate bounded work with controlled context (prefer delegate with task_only/snippet clone_mode and concise collapsed results). Compaction is not available in this session.",
+			"URGENT: finish only the atomic edit or validation that would be unsafe to interrupt, keep every further action small, prefer bounded delegation, and tell the user that context is nearly full. Compaction is not available in this session.",
+		];
 	return `<context-awareness>
 Context-aware operating rule: messages delimited by <context-telemetry>...</context-telemetry> are extension-injected context-budget telemetry, not user messages or user requests. Never acknowledge, quote, explain, or apologize for a telemetry envelope in the user-facing response unless the user explicitly asks about it; silently use it only to decide context-management behavior. The envelope does not supersede the preceding user request or tool result.
 Envelope format: <context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">...</context-telemetry>, with a <pressure /> element containing band, rounded usage-percent, approximate-headroom, and an optional action.
 Bands: OK <${formatPercent(WARN_FRACTION)}, WARN >=${formatPercent(WARN_FRACTION)}, URGENT >=${formatPercent(URGENT_FRACTION)}.
-OK: compact only at natural phase boundaries.
-WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call compact_session at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer delegate with task_only/snippet clone_mode and concise collapsed results). Compact first for broad/full-context delegation.
-URGENT: before nontrivial tool use, call compact_session unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
+${pressureRules.join("\n")}
 Use search_prior_sessions early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
 </context-awareness>`;
 }
@@ -7506,7 +7529,7 @@ function queueCheckin(pi: ExtensionAPI, ctx: ExtensionContext): void {
 		return;
 	}
 	const sessionKey = sessionMetadataKey(ctx);
-	pendingCheckins.set(sessionKey, { prompt: buildCheckinPrompt(checkinSnapshot(ctx)) });
+	pendingCheckins.set(sessionKey, { prompt: buildCheckinPrompt(checkinSnapshot(ctx), { compactionAvailable: contextAwareSummarizerEnabled(readConfig(ctx)) }) });
 	ctx.ui.notify("Check-in queued; it will run when the current turn settles.", "info");
 	deliverPendingCheckin(pi, ctx);
 }
@@ -8745,6 +8768,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	let registerHandoffSurfaces: (ctx?: ExtensionContext) => void = () => {};
 	let disposeContextService = () => {};
 	let contextServiceAbortController: AbortController | undefined;
 
@@ -8755,6 +8779,7 @@ export default function (pi: ExtensionAPI) {
 		// them again at the first session boundary so both package and -e loading
 		// paths observe the same effective runtime configuration.
 		applyCliConfigOverrides(pi, { finalAttempt: true });
+		registerHandoffSurfaces(ctx);
 		piAutoCompactionSettingBySession.delete(ctx.sessionManager);
 		lastCompactionOwnershipStateBySession.delete(ctx.sessionManager);
 		const sessionKey = sessionMetadataKey(ctx);
@@ -9115,7 +9140,7 @@ export default function (pi: ExtensionAPI) {
 		// user has seen the clarification and is providing new input.
 		pendingClarification.delete(sessionKey);
 
-		let addition = buildContextUsageGuidanceBlock();
+		let addition = buildContextUsageGuidanceBlock(contextAwareSummarizerEnabled(config));
 		// Same audience split as the task list below: a dispatched session is told
 		// its objective belongs to the supervisor that sent it (#66).
 		const audience: TasksAudience = readConfig(ctx).sessionRole === "worker" ? "worker" : "foreground";
@@ -9184,7 +9209,7 @@ export default function (pi: ExtensionAPI) {
 		pendingRestartNotices.delete(sessionKey);
 		const restartMessage = restartNotice ? formatRestartNotice(restartNotice) : undefined;
 		if (u) {
-			const usageMessage = buildContextTelemetry(u);
+			const usageMessage = buildContextTelemetry(u, { compactionAvailable: contextAwareSummarizerEnabled(config) });
 			result.message = {
 				customType: "context-aware-usage-marker",
 				content: [tasksContextMessage, restartMessage, usageMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
@@ -9686,7 +9711,14 @@ export default function (pi: ExtensionAPI) {
 
 	// -- 4. Tool: compact_session -------------------------------------------
 
-	pi.registerTool({
+	// With the summarizer deferred to another owner the tool cannot succeed, so it is
+	// not offered at all. Session policy entries can still flip the setting at
+	// runtime; the execute guard below remains the backstop for that case.
+	// Whether the summarizer is deferred can depend on a trusted project's
+	// .pi/context-aware.json, which needs a session context (cwd and trust) that
+	// extension load does not have. Registration therefore happens in
+	// session_start through registerHandoffSurfaces.
+	const registerCompactSessionTool = (): void => pi.registerTool({
 		name: "compact_session",
 		label: "Compact + Hand Off",
 		description:
@@ -10034,7 +10066,7 @@ export default function (pi: ExtensionAPI) {
 
 	// -- 6. Command: /compact-then ------------------------------------------
 
-	pi.registerCommand("compact-then", {
+	const registerCompactThenCommand = (): void => pi.registerCommand("compact-then", {
 		description:
 			"Compact and start a new phase. Usage: /compact-then [<seed prompt> | /<prompt-template> <args>] [--model <provider/id>]. Loaded prompt templates are resolved before seed rewriting. With no seed, generates one per the configured mode (see /context-aware-mode). A selected model is applied after compaction and persists for later turns.",
 		handler: async (args, ctx) => {
@@ -10184,6 +10216,25 @@ export default function (pi: ExtensionAPI) {
 			}
 		},
 	});
+
+	/**
+	 * Offer compact_session and /compact-then unless the summarizer is deferred.
+	 * Pi cannot unregister either, so a deferred summarizer never registers them.
+	 *
+	 * Extension load has no session context, so it cannot see whether a project
+	 * is trusted. When the current project's .pi/context-aware.json sets
+	 * summarizer.enabled, the decision waits for session_start, which has the
+	 * trust answer. Otherwise the global and CLI layers are already decisive and
+	 * load registers immediately.
+	 */
+	let handoffSurfacesRegistered = false;
+	registerHandoffSurfaces = (ctx?: ExtensionContext): void => {
+		if (handoffSurfacesRegistered || !contextAwareSummarizerEnabled(readConfig(ctx))) return;
+		handoffSurfacesRegistered = true;
+		registerCompactSessionTool();
+		registerCompactThenCommand();
+	};
+	if (!projectDeclaresSummarizerOwnership(process.cwd())) registerHandoffSurfaces();
 
 	// -- 7. Command: /context-aware-mode ------------------------------------
 

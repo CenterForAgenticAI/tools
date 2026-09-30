@@ -14,7 +14,7 @@ import {
 	readDelegateRunState,
 	resolveAgentDir,
 	unattributableStaleMs,
-} from "../session-busy-probe.js";
+} from "../src/session/session-busy-probe.js";
 
 const SESSION = "01a02aac-a506-77ee-9944-dfb048b964d1";
 const OTHER = "01a0275b-2dcb-7ff4-b371-c6e8624834e8";

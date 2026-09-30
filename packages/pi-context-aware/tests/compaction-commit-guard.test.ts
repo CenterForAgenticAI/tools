@@ -6,7 +6,7 @@ import {
 	DEFAULT_COMMIT_DRAIN_TIMEOUT_MS,
 	decideCompactionCommit,
 	type CompactionCommitGuardHooks,
-} from "../compaction-commit-guard.js";
+} from "../src/compaction/compaction-commit-guard.js";
 
 interface Harness {
 	hooks: CompactionCommitGuardHooks;

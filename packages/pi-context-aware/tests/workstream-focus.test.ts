@@ -5,9 +5,9 @@ import {
 	sessionFocus,
 	type FocusCommand,
 	type FocusMutationOptions,
-} from "../workstream-focus.js";
-import { asPiSessionId, asWorkstreamId } from "../workstream-schema.js";
-import { createWorkstreamSnapshot } from "../workstream-state.js";
+} from "../src/workstream/workstream-focus.js";
+import { asPiSessionId, asWorkstreamId } from "../src/workstream/workstream-schema.js";
+import { createWorkstreamSnapshot } from "../src/workstream/workstream-state.js";
 
 const identity = {
 	workstreamId: asWorkstreamId("ws-focus"),

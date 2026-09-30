@@ -1,6 +1,6 @@
 /** Defensive, capability-gated terminal projections. Static executable/version discovery is adapter-lifetime cached; connectivity uses independent TTLs. This module never launches a terminal or builds shell commands. */
 
-import { redactText, sanitizeNotification, type SanitizedNotification } from "./workstream-safety.js";
+import { redactText, sanitizeNotification, type SanitizedNotification } from "../workstream/workstream-safety.js";
 
 export const CMUX_CONNECTED_TTL_MS = 15_000;
 export const CMUX_UNAVAILABLE_TTL_MS = 30_000;

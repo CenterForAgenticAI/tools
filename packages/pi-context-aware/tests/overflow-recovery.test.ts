@@ -8,7 +8,7 @@ import {
 	reduceTextForOverflowRetry,
 	runWithContextOverflowRecovery,
 	type ContextOverflowRecoveryEvent,
-} from "../overflow-recovery.js";
+} from "../src/compaction/overflow-recovery.js";
 
 function assistantMessage(overrides: Partial<AssistantMessage>): AssistantMessage {
 	return {

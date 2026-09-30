@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parseDelegationProgressFields } from "../.test-dist/session-tasks-contract.js";
+import { parseDelegationProgressFields } from "../.test-dist/src/session-tasks/session-tasks-contract.js";
 
 /**
  * Guards the seam between this package and pi-delegate.

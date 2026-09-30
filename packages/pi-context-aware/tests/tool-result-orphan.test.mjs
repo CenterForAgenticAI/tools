@@ -253,7 +253,7 @@ async function contextHook() {
 		setActiveTools() {},
 		appendEntry() {},
 	};
-	const extension = await import("../.test-dist/index.js");
+	const extension = await import("../.test-dist/src/index.js");
 	extension.default(api);
 	const handler = events.get("context")?.[0];
 	assert.ok(handler, "the extension must register a context hook");
@@ -334,7 +334,7 @@ test("reproduction: the pre-fix single-text-block replacement destroys the tool_
 });
 
 test("#10: a recovery replacement keeps the tool_use blocks of a message whose tool call is in flight", async () => {
-	const { buildRecoveryReplacement } = await import("../.test-dist/history-integrity.js");
+	const { buildRecoveryReplacement } = await import("../.test-dist/src/compaction/history-integrity.js");
 	const messages = controlHistory();
 	const carriesC = messages[4];
 	const replacement = buildRecoveryReplacement(carriesC, "[context-aware recovery] The transient cancellation response was discarded.");
@@ -353,7 +353,7 @@ test("#10: a recovery replacement keeps the tool_use blocks of a message whose t
 });
 
 test("#10: a replacement for a message with no tool calls still discards the transient response", async () => {
-	const { buildRecoveryReplacement } = await import("../.test-dist/history-integrity.js");
+	const { buildRecoveryReplacement } = await import("../.test-dist/src/compaction/history-integrity.js");
 	const original = assistant([{ type: "text", text: "half a sentence" }], "aborted");
 	const replacement = buildRecoveryReplacement(original, "[context-aware recovery] discarded");
 	assert.deepEqual(replacement.content, [{ type: "text", text: "[context-aware recovery] discarded" }]);

@@ -14,7 +14,7 @@
  * invisible to the session. A name is cosmetic.
  */
 
-import type { SessionNamingConfig } from "./config-layers.js";
+import type { SessionNamingConfig } from "../platform/config-layers.js";
 
 // ---------------------------------------------------------------------------
 // Name grammar

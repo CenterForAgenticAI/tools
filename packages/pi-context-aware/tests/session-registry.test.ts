@@ -8,8 +8,8 @@ import {
 	deriveProjectKey,
 	SESSION_REGISTRY_RETENTION_MS,
 	type SessionRegistryOptions,
-} from "../session-registry.js";
-import { REGISTRY_SCHEMA_VERSION, asPiSessionId, asWorkstreamId, type RegistryProjection } from "../workstream-schema.js";
+} from "../src/session/session-registry.js";
+import { REGISTRY_SCHEMA_VERSION, asPiSessionId, asWorkstreamId, type RegistryProjection } from "../src/workstream/workstream-schema.js";
 
 const now = "2026-07-20T00:00:00.000Z";
 

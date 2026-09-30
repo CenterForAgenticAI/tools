@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isCtxUsable } from "./ctx-liveness.js";
+import { isCtxUsable } from "../session/ctx-liveness.js";
 import { isTransientFailure } from "./transient-retry.js";
 
 const COMPACTION_CANCELLED_MESSAGE = "Compaction cancelled";

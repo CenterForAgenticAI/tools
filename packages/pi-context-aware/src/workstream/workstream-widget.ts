@@ -2,7 +2,7 @@
 
 import { truncateToVisualLines } from "@earendil-works/pi-coding-agent";
 
-import { isCtxInvalidationError } from "./ctx-liveness.js";
+import { isCtxInvalidationError } from "../session/ctx-liveness.js";
 import { redactText } from "./workstream-safety.js";
 import type { WorkstreamSnapshot } from "./workstream-schema.js";
 

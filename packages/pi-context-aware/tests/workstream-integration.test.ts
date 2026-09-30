@@ -5,10 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import process from "node:process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createLauncherHandoff } from "../launcher-handoff.js";
-import { replayWorkstreamEntries } from "../workstream-replay.js";
-import { createWorkstreamSnapshot, workstreamEntry } from "../workstream-state.js";
-import type { ActivityComplete } from "../workstream-activity.js";
+import { createLauncherHandoff } from "../src/seed/launcher-handoff.js";
+import { replayWorkstreamEntries } from "../src/workstream/workstream-replay.js";
+import { createWorkstreamSnapshot, workstreamEntry } from "../src/workstream/workstream-state.js";
+import type { ActivityComplete } from "../src/workstream/workstream-activity.js";
 
 interface Harness {
   readonly api: ExtensionAPI;
@@ -108,7 +108,7 @@ test("final integration registers and executes durable workstream lifecycle and 
   process.env.HOME = root;
   process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
   try {
-    const extension = await import(`../index.js?integration=${Date.now()}`);
+    const extension = await import(`../src/index.js?integration=${Date.now()}`);
     const harness = makeHarness();
     extension.default(harness.api);
     for (const eventName of ["session_start", "before_agent_start", "agent_settled", "session_before_compact", "session_shutdown"]) {
@@ -181,7 +181,7 @@ esac
   process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
   process.env.CMUX_BIN = cmuxBin;
   try {
-    const extension = await import(`../index.js?cmux-failure=${Date.now()}`);
+    const extension = await import(`../src/index.js?cmux-failure=${Date.now()}`);
     const harness = makeHarness();
     extension.default(harness.api);
     const snapshot = createWorkstreamSnapshot({
@@ -235,7 +235,7 @@ test("disabled cmux projections stay fail-open without a false degraded health d
   process.env.HOME = root;
   process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
   try {
-    const extension = await import(`../index.js?cmux-disabled=${Date.now()}`);
+    const extension = await import(`../src/index.js?cmux-disabled=${Date.now()}`);
     const harness = makeHarness();
     extension.default(harness.api);
     const snapshot = createWorkstreamSnapshot({
@@ -276,7 +276,7 @@ test("final integration consumes optional launcher handoff without owning launch
   process.env.HOME = root;
   process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
   try {
-    const extension = await import(`../index.js?launcher=${Date.now()}`);
+    const extension = await import(`../src/index.js?launcher=${Date.now()}`);
     const harness = makeHarness();
     extension.default(harness.api);
     const childEntries: unknown[] = [];
@@ -315,7 +315,7 @@ test("launcher acknowledgement failures degrade health without leaking secrets",
   process.env.HOME = root;
   process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
   try {
-    const extension = await import(`../index.js?launcher-failure=${Date.now()}`);
+    const extension = await import(`../src/index.js?launcher-failure=${Date.now()}`);
     const harness = makeHarness();
     extension.default(harness.api);
     const childEntries: unknown[] = [];
@@ -361,7 +361,7 @@ test("transcript authority suppresses a divergent launcher handoff", async () =>
   process.env.HOME = root;
   process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
   try {
-    const extension = await import(`../index.js?authority=${Date.now()}`);
+    const extension = await import(`../src/index.js?authority=${Date.now()}`);
     const harness = makeHarness();
     extension.default(harness.api);
     const authoritative = createWorkstreamSnapshot({

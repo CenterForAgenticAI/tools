@@ -4,7 +4,7 @@ import {
 	BUILTIN_COMPACTION_RESERVE_TOKENS,
 	decideBuiltinCompactionFallback,
 	extrapolateBoundedInputTokens,
-} from "../compaction-fallback-guard.js";
+} from "../src/compaction/compaction-fallback-guard.js";
 
 test("allows the built-in fallback when every request fits within the window minus reserve", () => {
 	const decision = decideBuiltinCompactionFallback({

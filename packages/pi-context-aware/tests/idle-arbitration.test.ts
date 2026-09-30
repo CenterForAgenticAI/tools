@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { arbitrateQueuedInteraction, mayRunQueuedInteraction } from "../idle-arbitration.js";
+import { arbitrateQueuedInteraction, mayRunQueuedInteraction } from "../src/compaction/idle-arbitration.js";
 
 test("queued interactions run at an idle boundary", () => {
 	assert.deepEqual(arbitrateQueuedInteraction({ isIdle: true }), { mayRun: true, waitFor: "none" });

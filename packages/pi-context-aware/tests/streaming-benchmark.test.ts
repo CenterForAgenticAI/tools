@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseSeedExpansionResult, seedExpansionPreview, type SeedExpansionProgress } from "../seed-expansion.js";
+import { parseSeedExpansionResult, seedExpansionPreview, type SeedExpansionProgress } from "../src/seed/seed-expansion.js";
 
 interface ReplayResult {
 	firstAnyDeltaIndex: number | null;

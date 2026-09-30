@@ -6,7 +6,7 @@ import * as path from "node:path";
 import {
 	assessCompactionOwnership,
 	resolvePiAutoCompactionSetting,
-} from "../compaction-ownership.js";
+} from "../src/compaction/compaction-ownership.js";
 
 function settingsFixture(): { root: string; cwd: string; agentDir: string } {
 	const root = path.join(os.tmpdir(), `context-aware-ownership-${Date.now()}-${Math.random().toString(36).slice(2)}`);

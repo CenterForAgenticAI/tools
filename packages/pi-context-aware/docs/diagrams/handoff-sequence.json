@@ -1,0 +1,54 @@
+{
+  "type": "sequence",
+  "title": "Compaction handoff sequence",
+  "description": "The agent gives context-aware a short seed, the extension asks the active model to rewrite it, and Pi compacts before context-aware delivers the next-phase prompt.",
+  "actors": [
+    {
+      "id": "agent",
+      "label": "Agent"
+    },
+    {
+      "id": "extension",
+      "label": "context-aware",
+      "kind": "primary"
+    },
+    {
+      "id": "model",
+      "label": "Active model",
+      "kind": "external"
+    },
+    {
+      "id": "pi",
+      "label": "Pi"
+    }
+  ],
+  "steps": [
+    {
+      "from": "agent",
+      "to": "extension",
+      "label": "compact_session(seed)"
+    },
+    {
+      "from": "extension",
+      "to": "model",
+      "label": "rewrite raw seed"
+    },
+    {
+      "from": "model",
+      "to": "extension",
+      "label": "self-contained prompt",
+      "style": "dashed"
+    },
+    {
+      "from": "extension",
+      "to": "pi",
+      "label": "compact(final seed)"
+    },
+    {
+      "from": "extension",
+      "to": "agent",
+      "label": "start next phase",
+      "style": "dashed"
+    }
+  ]
+}

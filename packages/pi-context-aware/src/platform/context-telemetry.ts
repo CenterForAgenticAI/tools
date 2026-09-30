@@ -20,11 +20,17 @@ function formatHeadroom(n: number): string {
 	return String(Math.max(0, Math.round(n)));
 }
 
-export function buildContextTelemetry(usage: ContextUsageTelemetry): string {
+export interface ContextTelemetryOptions {
+	/** False when this session cannot compact; the URGENT action then stops naming compaction. */
+	compactionAvailable?: boolean;
+}
+
+export function buildContextTelemetry(usage: ContextUsageTelemetry, options: ContextTelemetryOptions = {}): string {
 	const band = contextBand(usage.fraction);
 	const percent = Math.round(usage.fraction * 100);
 	const headroom = formatHeadroom(usage.headroom);
-	const action = band === "URGENT" ? "compact-before-tool" : band === "WARN" ? "gate-broad-work" : undefined;
+	const urgentAction = options.compactionAvailable === false ? "finish-atomic-work" : "compact-before-tool";
+	const action = band === "URGENT" ? urgentAction : band === "WARN" ? "gate-broad-work" : undefined;
 	const actionAttribute = action ? ` action="${action}"` : "";
 
 	return `<context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">

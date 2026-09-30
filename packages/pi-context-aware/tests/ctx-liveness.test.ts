@@ -5,7 +5,7 @@ import {
 	readToolsExpanded,
 	sessionMetadataKey,
 	withLiveCtx,
-} from "../ctx-liveness.js";
+} from "../src/session/ctx-liveness.js";
 
 function context(overrides: Record<string, unknown> = {}): ExtensionContext {
 	return {

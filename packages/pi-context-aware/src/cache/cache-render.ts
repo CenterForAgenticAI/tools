@@ -10,7 +10,7 @@ import {
 	sessionRoleBehaviour,
 	type Config,
 	type ContextCacheConfig,
-} from "./config-layers.js";
+} from "../platform/config-layers.js";
 import {
 	boundCacheDocuments,
 	boundCacheListingText,

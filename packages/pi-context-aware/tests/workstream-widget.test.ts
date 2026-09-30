@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 
 import { truncateToVisualLines } from "@earendil-works/pi-coding-agent";
 
-import { createWorkstreamSnapshot } from "../workstream-state.js";
+import { createWorkstreamSnapshot } from "../src/workstream/workstream-state.js";
 import {
 	createWorkstreamFocusWidget,
 	WORKSTREAM_FOCUS_COLLAPSED_LINES,
 	workstreamFocusWidgetText,
-} from "../workstream-widget.js";
+} from "../src/workstream/workstream-widget.js";
 
 function snapshot(overrides: Partial<Parameters<typeof createWorkstreamSnapshot>[0]> = {}) {
 	return createWorkstreamSnapshot({

@@ -6,8 +6,8 @@ import { readFileSync } from "node:fs";
 // from current durable state or the current compaction summary. Historical user
 // prompts are not an eligible fallback source anywhere in the extension.
 
-const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-const guardSource = readFileSync(new URL("../seed-authority.ts", import.meta.url), "utf8");
+const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+const guardSource = readFileSync(new URL("../src/seed/seed-authority.ts", import.meta.url), "utf8");
 
 /** Every `lastGroundedSeed(` reference that is neither a function definition nor a line comment. */
 function rawCallLines(text) {

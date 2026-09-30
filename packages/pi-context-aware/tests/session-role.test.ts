@@ -11,8 +11,8 @@ import {
 	resolveConfigLayers,
 	sessionRoleBehaviour,
 	type Config,
-} from "../config-layers.js";
-import { contextCacheDirectory } from "../context-cache.js";
+} from "../src/platform/config-layers.js";
+import { contextCacheDirectory } from "../src/cache/context-cache.js";
 
 // Issue #12: in a delegated worker session the extension must stop doing
 // foreground things — rewriting the task prompt with a model, auto-sending it,
@@ -98,7 +98,7 @@ test("a user cannot promote their own session out of the worker role", () => {
 
 async function withCacheFixture(
 	entries: unknown[],
-	run: (module: typeof import("../cache-render.js"), ctx: never, cacheDir: string, config: Config) => void | Promise<void>,
+	run: (module: typeof import("../src/cache/cache-render.js"), ctx: never, cacheDir: string, config: Config) => void | Promise<void>,
 ): Promise<void> {
 	const home = tmpDir();
 	const agentDir = path.join(home, "agent");
@@ -125,7 +125,7 @@ async function withCacheFixture(
 	process.env.HOME = home;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 	try {
-		const module = await import("../cache-render.js");
+		const module = await import("../src/cache/cache-render.js");
 		const config = resolveConfigLayers(readPolicyEntryLayers(entries)).config;
 		const ctx = {
 			hasUI: false,

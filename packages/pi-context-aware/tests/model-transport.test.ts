@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { compatCanDispatch } from "../model-transport.js";
+import { compatCanDispatch } from "../src/platform/model-transport.js";
 
 function model(api: string): Model<Api> {
 	return { provider: "p", id: "m", api } as unknown as Model<Api>;

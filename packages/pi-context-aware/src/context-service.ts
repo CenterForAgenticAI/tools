@@ -1,11 +1,11 @@
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { EventBus } from "@earendil-works/pi-coding-agent";
-import type { ContextPressureBand } from "./context-telemetry.js";
-import type { EffectiveAmbiguityMode } from "./seed-expansion.js";
-import type { ContextAwareSessionCompactionV1 } from "./compaction-history.js";
+import type { ContextPressureBand } from "./platform/context-telemetry.js";
+import type { EffectiveAmbiguityMode } from "./seed/seed-expansion.js";
+import type { ContextAwareSessionCompactionV1 } from "./compaction/compaction-history.js";
 
-export type { ContextAwareSessionCompactionV1 } from "./compaction-history.js";
+export type { ContextAwareSessionCompactionV1 } from "./compaction/compaction-history.js";
 
 export const CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION = 1 as const;
 export const CONTEXT_AWARE_SERVICE_DISCOVERY_EVENT = "context-aware:service:v1:discover";

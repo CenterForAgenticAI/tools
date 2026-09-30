@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MODEL_DISPATCH_DECISIONS } from "../index.js";
+import { MODEL_DISPATCH_DECISIONS } from "../src/index.js";
 
 test("model dispatch parity matrix covers every extension-owned call site", () => {
 	assert.deepEqual(

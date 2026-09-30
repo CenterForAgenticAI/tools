@@ -5,13 +5,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import process from "node:process";
 import type { EventBus, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { TASKS_ENTRY_TYPE, createTasksSnapshot, planTasks } from "../session-tasks.js";
+import { TASKS_ENTRY_TYPE, createTasksSnapshot, planTasks } from "../src/session-tasks/session-tasks.js";
 import {
 	classifyRestartNotice,
 	formatRestartNotice,
 	resolveRestartNotice,
 	type RestartNoticeEntry,
-} from "../restart-notice.js";
+} from "../src/session/restart-notice.js";
 
 const NOW = Date.parse("2026-08-04T12:00:00.000Z");
 
@@ -186,7 +186,7 @@ async function loadExtension(config: Record<string, unknown>, entryMinutesAgo = 
 	process.env.HOME = root;
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 	try {
-		const extension = await import(`../index.js?restart-notice=${config.restartNotice && JSON.stringify(config.restartNotice)}`);
+		const extension = await import(`../src/index.js?restart-notice=${config.restartNotice && JSON.stringify(config.restartNotice)}`);
 		const harness = createHarness();
 		extension.default(harness.api);
 		return { harness, ctx: createContext(root, [entry(entryMinutesAgo)], usageTelemetry), root };

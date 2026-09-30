@@ -1,6 +1,6 @@
 /** Consume a host focus declaration into transcript-authoritative workstream state. */
 
-import { parseFocusSeed, type FocusSeed } from "./peer-contracts.js";
+import { parseFocusSeed, type FocusSeed } from "../platform/peer-contracts.js";
 import { asPiSessionId } from "./workstream-schema.js";
 import {
 	appendWorkstreamSnapshot,

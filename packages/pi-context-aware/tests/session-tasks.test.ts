@@ -26,7 +26,7 @@ import {
 	activeTasks,
 	type Task,
 	type TaskStatus,
-} from "../session-tasks.js";
+} from "../src/session-tasks/session-tasks.js";
 
 // Issue #26. The list is a checklist, not a work graph: exactly one level of
 // sub-tasks, derived parent status, and a written reason whenever an actor

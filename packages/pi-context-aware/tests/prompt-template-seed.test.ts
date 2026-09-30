@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
-import { resolvePromptTemplateSeed } from "../prompt-template-seed.js";
+import { resolvePromptTemplateSeed } from "../src/seed/prompt-template-seed.js";
 
 function promptCommand(name: string, templatePath: string): SlashCommandInfo {
 	return {

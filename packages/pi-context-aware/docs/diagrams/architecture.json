@@ -1,0 +1,48 @@
+{
+  "type": "flow",
+  "title": "Context-aware compaction handoff",
+  "description": "An agent asks context-aware to prepare a self-contained seed, Pi compacts with that guidance, and the extension starts the next phase after queued input drains.",
+  "nodes": [
+    {
+      "id": "agent",
+      "label": "Agent",
+      "sublabel": "chooses a clean boundary",
+      "kind": "default"
+    },
+    {
+      "id": "extension",
+      "label": "context-aware",
+      "sublabel": "rewrites the seed",
+      "kind": "primary"
+    },
+    {
+      "id": "pi",
+      "label": "Pi compaction",
+      "sublabel": "uses seed as guidance",
+      "kind": "default"
+    },
+    {
+      "id": "next",
+      "label": "Next phase",
+      "sublabel": "starts after queued input",
+      "kind": "accent"
+    }
+  ],
+  "edges": [
+    {
+      "from": "agent",
+      "to": "extension",
+      "label": "compact_session"
+    },
+    {
+      "from": "extension",
+      "to": "pi",
+      "label": "final seed"
+    },
+    {
+      "from": "pi",
+      "to": "next",
+      "label": "handoff"
+    }
+  ]
+}

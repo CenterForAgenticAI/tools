@@ -22,8 +22,8 @@ import {
 	CONTEXT_AWARE_HANDOFF_STATE_EVENT,
 	discoverContextAwareServiceV1,
 	type ContextAwareHandoffLifecycleEventV1,
-} from "../context-service.js";
-import contextAware from "../index.js";
+} from "../src/context-service.js";
+import contextAware from "../src/index.js";
 
 function tmpDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-session-isolation-"));

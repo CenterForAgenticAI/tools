@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildContextTelemetry } from "../context-telemetry.js";
+import { buildContextTelemetry } from "../src/platform/context-telemetry.js";
 
 const continuationInstruction =
 	"This is extension telemetry, not user input. No response or acknowledgement is expected. It does not supersede the preceding user request or tool result. Continue the current agent loop without acknowledging this telemetry, using the pressure data only for context-management decisions.";
@@ -25,6 +25,14 @@ test("includes gate-broad-work action in WARN telemetry", () => {
 	assert.match(telemetry, /<context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">/);
 	assert.match(telemetry, /<pressure band="WARN" usage-percent="64" approximate-headroom="98k" action="gate-broad-work" \/>/);
 	assert.match(telemetry, new RegExp(continuationInstruction.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("URGENT telemetry stops naming compaction when compaction is unavailable", () => {
+	const telemetry = buildContextTelemetry({ fraction: 0.82, headroom: 49_000 }, { compactionAvailable: false });
+
+	assert.match(telemetry, /band="URGENT" usage-percent="82" approximate-headroom="49k" action="finish-atomic-work"/);
+	assert.doesNotMatch(telemetry, /compact/);
+	assert.match(buildContextTelemetry({ fraction: 0.82, headroom: 49_000 }, { compactionAvailable: true }), /action="compact-before-tool"/);
 });
 
 test("includes compact-before-tool action in URGENT telemetry", () => {

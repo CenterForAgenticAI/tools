@@ -17,7 +17,7 @@ const defaultDelegateRoots = [
 const delegateRoot = path.resolve(
 	process.env.PI_DELEGATE_ROOT ?? defaultDelegateRoots.find((candidate) => existsSync(candidate)) ?? defaultDelegateRoots[0],
 );
-const contextAware = path.resolve(import.meta.dirname, "..", "index.ts");
+const contextAware = path.resolve(import.meta.dirname, "..", "src", "index.ts");
 const requiredDelegateFiles = [
 	"src/agents.ts",
 	"src/delegate-runs.ts",

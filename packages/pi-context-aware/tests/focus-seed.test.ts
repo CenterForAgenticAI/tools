@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { FOCUS_SEED_CONTRACT_VERSION, parseFocusSeed, type FocusSeed } from "../peer-contracts.js";
-import { consumeFocusSeed } from "../focus-seed.js";
-import { parseWorkstreamSnapshot } from "../workstream-schema.js";
-import { WORKSTREAM_ENTRY_TYPE } from "../workstream-state.js";
+import { FOCUS_SEED_CONTRACT_VERSION, parseFocusSeed, type FocusSeed } from "../src/platform/peer-contracts.js";
+import { consumeFocusSeed } from "../src/workstream/focus-seed.js";
+import { parseWorkstreamSnapshot } from "../src/workstream/workstream-schema.js";
+import { WORKSTREAM_ENTRY_TYPE } from "../src/workstream/workstream-state.js";
 
 const now = new Date("2026-08-15T00:00:00.000Z");
 const seed: FocusSeed = {

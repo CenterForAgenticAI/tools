@@ -14,7 +14,7 @@ import {
 	type FocusSeed,
 	type IntercomMetadata,
 	type WorktreeHandoff,
-} from "../peer-contracts.js";
+} from "../src/platform/peer-contracts.js";
 
 const intercom: IntercomMetadata = {
 	schemaVersion: INTERCOM_CONTRACT_VERSION,

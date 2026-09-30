@@ -100,10 +100,23 @@ async function cleanup() {
 	}
 }
 
+/**
+ * The environment a test run inherits.
+ *
+ * PI_CODING_AGENT_DIR points Pi at a real agent profile. A run started from
+ * inside a Pi session (an agent running `npm test`) inherits it, and code that
+ * resolves its config directory from it then reads the operator's live
+ * context-aware.json instead of the fixture the test set up through HOME. That
+ * made four tests fail only inside an agent session. Tests that need the
+ * variable set it themselves, so dropping the inherited value is safe.
+ */
+const childEnv = { ...process.env };
+delete childEnv.PI_CODING_AGENT_DIR;
+
 const child = spawn(command, args, {
 	stdio: "inherit",
 	env: {
-		...process.env,
+		...childEnv,
 		TMPDIR: runRoot,
 		TMP: runRoot,
 		TEMP: runRoot,

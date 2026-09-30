@@ -4,8 +4,8 @@ import {
 	classifyOverlaps,
 	normalizeOverlapRef,
 	type OverlapCandidate,
-} from "../workstream-overlap.js";
-import { REGISTRY_SCHEMA_VERSION, asPiSessionId, asWorkstreamId } from "../workstream-schema.js";
+} from "../src/workstream/workstream-overlap.js";
+import { REGISTRY_SCHEMA_VERSION, asPiSessionId, asWorkstreamId } from "../src/workstream/workstream-schema.js";
 
 const timestamp = "2026-07-20T00:00:00.000Z";
 

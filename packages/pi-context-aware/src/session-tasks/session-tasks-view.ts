@@ -8,7 +8,7 @@
  * survive summarisation for the model to still see its tasks.
  */
 
-import { redactText } from "./workstream-safety.js";
+import { redactText } from "../workstream/workstream-safety.js";
 import {
 	activeTasks,
 	countTasks,

@@ -17,7 +17,7 @@ import {
 	type ActivityEvent,
 	type RegistryProjection,
 	type WorkstreamSnapshot,
-} from "../workstream-schema.js";
+} from "../src/workstream/workstream-schema.js";
 
 const identity = {
 	workstreamId: asWorkstreamId("ws-1"),

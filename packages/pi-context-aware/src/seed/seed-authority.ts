@@ -1,6 +1,6 @@
 /** Deterministic authority and provenance checks for generated compaction seeds. */
 
-import { redactText } from "./workstream-safety.js";
+import { redactText } from "../workstream/workstream-safety.js";
 
 export const GENERATED_SEED_FOLLOW_UP_ENTRY_TYPE = "context-aware.seed-follow-up.v1" as const;
 export const SEED_AUTHORITY_GUARD_IMPLEMENTATION_VERSION = "seed-authority-2" as const;

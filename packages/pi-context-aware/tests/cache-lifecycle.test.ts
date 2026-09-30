@@ -15,16 +15,16 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { contextCacheDirectory, legacySessionDirectoryName, migrationLedgerHas, promoteCacheFile, readManifest, readMigrationLedger, writeManifest } from "../context-cache.js";
-import { DEFAULT_CONFIG, DEFAULT_CONTEXT_CACHE_CONFIG, type Config, type ContextCacheConfig } from "../config-layers.js";
+import { contextCacheDirectory, legacySessionDirectoryName, migrationLedgerHas, promoteCacheFile, readManifest, readMigrationLedger, writeManifest } from "../src/cache/context-cache.js";
+import { DEFAULT_CONFIG, DEFAULT_CONTEXT_CACHE_CONFIG, type Config, type ContextCacheConfig } from "../src/platform/config-layers.js";
 import {
 	buildCacheListingForPrompt,
 	buildCacheSeedPreamble,
 	buildCacheSystemPromptBlock,
 	sendCacheNotification,
-} from "../cache-render.js";
-import { buildContextTelemetry } from "../context-telemetry.js";
-import contextAware from "../index.js";
+} from "../src/cache/cache-render.js";
+import { buildContextTelemetry } from "../src/platform/context-telemetry.js";
+import contextAware from "../src/index.js";
 
 const testAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-cache-agent-"));
 const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -121,7 +121,7 @@ function foregroundCacheConfig(overrides: Partial<ContextCacheConfig> = {}): Con
 
 /** Resolve the cache system-prompt block in a fresh Node process. */
 function renderCacheBlockInChildProcess(cacheDir: string): string {
-	const cacheRenderUrl = new URL("../cache-render.js", import.meta.url).href;
+	const cacheRenderUrl = new URL("../src/cache/cache-render.js", import.meta.url).href;
 	const script = `
 const { buildCacheSystemPromptBlock } = await import(${JSON.stringify(cacheRenderUrl)});
 const config = {

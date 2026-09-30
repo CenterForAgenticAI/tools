@@ -7,7 +7,7 @@ import {
 	isProactiveCompactionCheckpoint,
 	normalizeGenerationOutputReserve,
 	parseGenerationOutputReserve,
-} from "../generation-budget.js";
+} from "../src/compaction/generation-budget.js";
 
 test("marks the issue #5 reproduction unsafe before a 272k model turn", () => {
 	const budget = assessGenerationBudget({

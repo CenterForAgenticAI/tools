@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildCheckinPrompt } from "../checkin.js";
-import { asPiSessionId, asWorkstreamId } from "../workstream-schema.js";
+import { buildCheckinPrompt } from "../src/platform/checkin.js";
+import { asPiSessionId, asWorkstreamId } from "../src/workstream/workstream-schema.js";
 
 test("check-in prompt carries focus, task ids and context pressure", () => {
 	const prompt = buildCheckinPrompt({
@@ -43,6 +43,13 @@ test("check-in prompt carries focus, task ids and context pressure", () => {
 	assert.match(prompt, /Left/iu);
 	assert.match(prompt, /Record corrections.*session_focus \/ session_tasks/isu);
 	assert.match(prompt, /Continue or compact.*compact_session/isu);
+});
+
+test("check-in prompt drops compaction wording when compaction is unavailable", () => {
+	const prompt = buildCheckinPrompt({ focus: null, tasks: null, pressure: null }, { compactionAvailable: false });
+	assert.doesNotMatch(prompt, /compact_session|compact from this request/u);
+	assert.match(prompt, /Continue — say whether this is a clean phase boundary/u);
+	assert.match(prompt, /Compaction is not available in this session/u);
 });
 
 test("empty check-in prompt names the absent durable records and still asks for progress", () => {

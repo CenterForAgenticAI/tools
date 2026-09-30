@@ -36,7 +36,7 @@ import {
 	citedSourcePaths,
 	type RecallCachePool,
 	type RecallSession,
-} from "../recall.js";
+} from "../src/cache/recall.js";
 
 export interface RecallMeasureOptions {
 	readonly question: string;

@@ -12,7 +12,7 @@ import {
 	parseWorkerCompactionAdvisory,
 	type WorkerCompactionAdvisoryV1,
 	type WorkerCompactionSessionEntries,
-} from "../worker-compaction-contract.js";
+} from "../src/compaction/worker-compaction-contract.js";
 
 const observedAt = "2026-08-18T12:34:56.000Z";
 const usage = { tokens: 212_160, contextWindow: 272_000, fraction: 0.78 };

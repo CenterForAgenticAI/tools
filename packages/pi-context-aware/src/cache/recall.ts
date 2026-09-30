@@ -1,8 +1,8 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import * as path from "node:path";
 import { Type, type Static } from "typebox";
-import { frameCacheReference } from "./seed-authority.js";
-import { redactText } from "./workstream-safety.js";
+import { frameCacheReference } from "../seed/seed-authority.js";
+import { redactText } from "../workstream/workstream-safety.js";
 
 /** Public recall controls. Unknown properties are intentionally rejected. */
 export const recallSchema = Type.Object({

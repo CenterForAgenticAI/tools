@@ -1,5 +1,5 @@
 {
-  "version": "0.5.2",
+  "version": "0.5.4",
   "description": "Context-budget and compaction handoff support for pi: pressure markers, seed rewriting, proactive compaction, prior-session search, and context cache.",
   "type": "module",
   "main": "dist/index.js",
@@ -18,8 +18,8 @@
   },
   "files": [
     "dist",
+    "docs",
     "README.md",
-    "context-service.md",
     "LICENSE"
   ],
   "scripts": {

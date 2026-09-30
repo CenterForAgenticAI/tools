@@ -29,7 +29,7 @@ import {
 	parseSeedExpansionResult,
 	seedExpansionPreview,
 	textFromResponseContent,
-} from "../.test-dist/seed-expansion.js";
+} from "../.test-dist/src/seed/seed-expansion.js";
 
 const FIXTURES = [
 	{

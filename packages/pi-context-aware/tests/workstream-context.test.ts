@@ -11,9 +11,9 @@ import {
 	resolveAuthoritativeWorkstream,
 	selectActiveWorkstream,
 	selectRecentRelevantActivity,
-} from "../workstream-context.js";
-import { createWorkstreamSnapshot, workstreamEntry } from "../workstream-state.js";
-import { asPiSessionId, asWorkstreamId, type ActivityEvent, type WorkstreamSnapshot } from "../workstream-schema.js";
+} from "../src/workstream/workstream-context.js";
+import { createWorkstreamSnapshot, workstreamEntry } from "../src/workstream/workstream-state.js";
+import { asPiSessionId, asWorkstreamId, type ActivityEvent, type WorkstreamSnapshot } from "../src/workstream/workstream-schema.js";
 
 const now = "2026-07-20T00:00:00.000Z";
 

@@ -4,7 +4,7 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { CONFIG_POLICY_ENTRY_TYPE, configPolicyEntry } from "../config-layers.js";
+import { CONFIG_POLICY_ENTRY_TYPE, configPolicyEntry } from "../src/platform/config-layers.js";
 
 type Handler = (args: string, ctx: ExtensionContext) => void | Promise<void>;
 
@@ -58,7 +58,7 @@ let notificationsForContext: string[] = [];
 test("check-in acknowledges synchronously and replaces an earlier queued request", async () => {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "checkin-command-"));
 	const harness = fakePi();
-	const extension = await import("../index.js");
+	const extension = await import("../src/index.js");
 	extension.default(harness.api);
 	const idle = { value: false };
 	const entries: unknown[] = [];
@@ -84,7 +84,7 @@ test("check-in is not delivered when its authority marker cannot be persisted", 
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "checkin-marker-failure-"));
 	const harness = fakePi();
 	(harness.api as unknown as { appendEntry: () => void }).appendEntry = () => { throw new Error("marker unavailable"); };
-	const extension = await import("../index.js");
+	const extension = await import("../src/index.js");
 	extension.default(harness.api);
 	notificationsForContext = harness.notifications;
 	const ctx = context(home, "checkin-marker-failure", { value: true });
@@ -95,7 +95,7 @@ test("check-in is not delivered when its authority marker cannot be persisted", 
 test("worker sessions refuse to self-report", async () => {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "checkin-worker-"));
 	const harness = fakePi();
-	const extension = await import("../index.js");
+	const extension = await import("../src/index.js");
 	extension.default(harness.api);
 	const entries = [{
 		type: "custom",

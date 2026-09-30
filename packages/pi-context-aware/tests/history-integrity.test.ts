@@ -15,8 +15,8 @@ import {
 	isOrphanedToolResultRejection,
 	orphanedToolCallIdsFromError,
 	repairOrphanedToolResults,
-} from "../history-integrity.js";
-import { isTransientFailure } from "../transient-retry.js";
+} from "../src/compaction/history-integrity.js";
+import { isTransientFailure } from "../src/compaction/transient-retry.js";
 
 const CALL_A = "toolu_A";
 const CALL_B = "toolu_B";

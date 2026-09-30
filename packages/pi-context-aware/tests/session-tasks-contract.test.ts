@@ -10,8 +10,8 @@ import {
 	parseTasksProgressEvent,
 	parseTasksSeed,
 	renderSeedAsMarkdown,
-} from "../session-tasks-contract.js";
-import { parseTasksMarkdown } from "../session-tasks-view.js";
+} from "../src/session-tasks/session-tasks-contract.js";
+import { parseTasksMarkdown } from "../src/session-tasks/session-tasks-view.js";
 import {
 	MAX_SUBTASKS,
 	planTasks,
@@ -19,7 +19,7 @@ import {
 	createTasksSnapshot,
 	type NewTask,
 	type Task,
-} from "../session-tasks.js";
+} from "../src/session-tasks/session-tasks.js";
 
 // The contract ships before real use has stress-tested it, so these tests are
 // mostly about what happens when the other side is wrong: newer fields, unknown

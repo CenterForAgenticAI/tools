@@ -16,7 +16,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildPreviewLines, wrapPreviewHint } from "../preview-lines.js";
+import { buildPreviewLines, wrapPreviewHint } from "../src/platform/preview-lines.js";
 
 /**
  * Local width measurement. `@earendil-works/pi-tui` is not a dependency of

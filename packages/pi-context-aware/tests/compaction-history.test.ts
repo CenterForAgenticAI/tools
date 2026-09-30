@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as os from "node:os";
 import * as path from "node:path";
-import { collectCompactionHistory, formatCompactionCountPrompt, formatCompactionHistory } from "../compaction-history.js";
+import { collectCompactionHistory, formatCompactionCountPrompt, formatCompactionHistory } from "../src/compaction/compaction-history.js";
 
 function compaction(id: string, priorTranscriptPath: unknown = "~/session.jsonl", details: unknown = undefined): Record<string, unknown> {
 	return {

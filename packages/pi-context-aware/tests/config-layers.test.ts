@@ -18,7 +18,7 @@ import {
 	resolveConfigLayers,
 	type ConfigLayer,
 	type ConfigLayerInput,
-} from "../config-layers.js";
+} from "../src/platform/config-layers.js";
 
 function policyEntry(layer: "session" | "host", values: Record<string, unknown>, declaredBy?: string): unknown {
 	return {
