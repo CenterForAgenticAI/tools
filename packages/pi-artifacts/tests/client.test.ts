@@ -43,6 +43,15 @@ test("inline eligibility requires a kind-compatible text MIME", () => {
   assert.equal(isInlineSnapshot({ kind: "code", mime: "text/html" }), false);
 });
 
+test("publicUrl identifies an unreachable daemon instead of suggesting URL configuration", async () => {
+  const server = http.createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  const client = new ArtifactsClient({ host: "127.0.0.1", port });
+  await assert.rejects(() => client.publicUrl(), /daemon is down.*install.*serve/);
+});
+
 test("client registers files/content and drives artifact actions through the daemon", async () => {
   const srv = await listen();
   try {

@@ -5,5 +5,6 @@
   "provenance": "pi-artifacts template demonstration",
   "language": "en",
   "companionHref": "demo-detailed.html",
+  "audio": true,
   "companionLabel": "Open the detailed implementation notes"
 }

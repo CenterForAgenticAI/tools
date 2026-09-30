@@ -60,9 +60,9 @@ test("report templates and reader runtime expose the house-standard hooks", () =
   assert.match(narrative, /\{\{REPORT_READER\}\}/);
   assert.doesNotMatch(detailed, /\{\{REPORT_READER\}\}/);
   assert.match(narrative, /data-report-narrative/);
-  assert.match(narrative, /pi-artifacts narrative report template v1\.1\.0/);
+  assert.match(narrative, /pi-artifacts narrative report template v1\.2\.0/);
   assert.match(detailed, /pi-artifacts detailed report template v1\.1\.0/);
-  assert.match(combined, /pi-artifacts combined report template v1\.1\.0/);
+  assert.match(combined, /pi-artifacts combined report template v1\.2\.0/);
   assert.match(combined, /<main[^>]+data-report-narrative/);
   assert.match(combined, /id="report-evidence-pane"[^>]+hidden/);
   assert.match(combined, /aria-expanded="false" aria-controls="report-evidence-pane"/);
@@ -139,7 +139,7 @@ test("combined evidence skip link starts hidden and tracks pane visibility", () 
   assert.match(evidence, /pane\.hidden = true;\s*evidenceSkipLink\.hidden = true;/);
 });
 
-test("narrative generator emits valid self-contained HTML with inline reader assets", () => {
+test("narrative generator defaults to self-contained HTML without the audio reader", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-report-generator-"));
   const fixture = writeFixture(directory, `
 <p>Opening context for the report.</p>
@@ -170,7 +170,8 @@ test("narrative generator emits valid self-contained HTML with inline reader ass
   assert.match(html, /<li><a href="#first">First &amp; foremost<\/a><\/li>/);
   assert.match(html, /href="review-detailed\.html"/);
   assert.match(html, /pi-artifacts report styles \+ reader v1\.3\.0/);
-  assert.match(html, /pi-artifacts report reader v1\.3\.0/);
+  assert.doesNotMatch(html, /pi-artifacts report reader v1\.3\.0/);
+  assert.doesNotMatch(html, /audio reader/i);
   assert.match(html, /3 min read/);
   assert.match(html, /<section id="second">/);
   assert.match(html, /<\/body>\s*<\/html>\s*$/);
@@ -179,13 +180,114 @@ test("narrative generator emits valid self-contained HTML with inline reader ass
   assert.doesNotMatch(html, /<link\b[^>]*\bhref=/i);
   assert.doesNotMatch(html, /<(?:img|source|video|audio|iframe)\b[^>]*\bsrc=["']https?:\/\//i);
 
-  const inlineScript = html.match(/<script>\s*([\s\S]*?)\s*<\/script>/)?.[1];
-  assert.ok(inlineScript, "generated narrative should contain an inline reader script");
-  const syntax = spawnSync(process.execPath, ["--check", "--input-type=commonjs"], {
-    input: inlineScript,
-    encoding: "utf8",
+  assert.doesNotMatch(html, /<script>/);
+});
+
+test("audio metadata is strict and opt-in for narrative and combined reports", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-report-audio-"));
+  const body = `<section id="first"><h2>First</h2><p>Story.</p></section>`;
+  const evidencePath = path.join(directory, "evidence.html");
+  fs.writeFileSync(evidencePath, `<section id="evidence"><h2>Evidence</h2><p>Fact.</p></section>`);
+
+  const metadataFor = (kind: "narrative" | "combined", audio: boolean | undefined) => ({
+    title: `${kind} audio policy`,
+    date: "2026-08-05",
+    ...(kind === "narrative"
+      ? { companionHref: "detailed.html" }
+      : { evidenceMap: { first: ["evidence"] } }),
+    ...(audio === undefined ? {} : { audio }),
   });
-  assert.equal(syntax.status, 0, syntax.stderr);
+  const generate = (caseDirectory: string, kind: "narrative" | "combined", audio: boolean | undefined) => {
+    fs.mkdirSync(caseDirectory);
+    const fixture = writeFixture(caseDirectory, body, metadataFor(kind, audio));
+    const result = runGenerator([
+      "--kind", kind,
+      "--body", fixture.bodyPath,
+      ...(kind === "combined" ? ["--evidence", evidencePath] : []),
+      "--meta", fixture.metadataPath,
+      "--out", fixture.outputPath,
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    return fs.readFileSync(fixture.outputPath, "utf8");
+  };
+
+  for (const kind of ["narrative", "combined"] as const) {
+    const absentHtml = generate(path.join(directory, `${kind}-absent`), kind, undefined);
+    const falseHtml = generate(path.join(directory, `${kind}-false`), kind, false);
+    const trueHtml = generate(path.join(directory, `${kind}-true`), kind, true);
+
+    assert.equal(falseHtml, absentHtml, `${kind}: omitted and false audio must be byte-identical`);
+    for (const html of [absentHtml, falseHtml]) {
+      assert.doesNotMatch(html, /pi-artifacts report reader v1\.3\.0/);
+      assert.doesNotMatch(html, /speechSynthesis|optional audio reader/i);
+      assert.doesNotMatch(html, /<script>\s*<\/script>/, `${kind}: audio-off output must not retain an empty script wrapper`);
+    }
+    assert.match(trueHtml, /pi-artifacts report reader v1\.3\.0/);
+    assert.match(trueHtml, /optional audio reader supplements/i);
+    if (kind === "combined") {
+      assert.match(falseHtml, /pi-artifacts report evidence pane v1\.1\.0/);
+      assert.match(trueHtml, /pi-artifacts report evidence pane v1\.1\.0/);
+    } else {
+      assert.doesNotMatch(falseHtml, /<script>/);
+    }
+    const inlineScripts = [...trueHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]);
+    assert.equal(inlineScripts.length, kind === "combined" ? 2 : 1);
+    for (const inlineScript of inlineScripts) {
+      const syntax = spawnSync(process.execPath, ["--check", "--input-type=commonjs"], {
+        input: inlineScript,
+        encoding: "utf8",
+      });
+      assert.equal(syntax.status, 0, syntax.stderr);
+    }
+  }
+
+  const invalidValues: unknown[] = [null, "true", 1, [], {}];
+  for (const kind of ["narrative", "combined"] as const) {
+    for (const [index, audio] of invalidValues.entries()) {
+      const caseDirectory = path.join(directory, `${kind}-invalid-${index}`);
+      fs.mkdirSync(caseDirectory);
+      const fixture = writeFixture(caseDirectory, body, {
+        ...metadataFor(kind, undefined),
+        audio,
+      });
+      const result = runGenerator([
+        "--kind", kind,
+        "--body", fixture.bodyPath,
+        ...(kind === "combined" ? ["--evidence", evidencePath] : []),
+        "--meta", fixture.metadataPath,
+        "--out", fixture.outputPath,
+      ]);
+      assert.notEqual(result.status, 0, `${kind} accepted audio=${JSON.stringify(audio)}`);
+      assert.match(result.stderr, /metadata\.audio must be a boolean/);
+      assert.equal(fs.existsSync(fixture.outputPath), false);
+    }
+  }
+
+  for (const audio of [false, true]) {
+    const caseDirectory = path.join(directory, `detailed-${audio}`);
+    fs.mkdirSync(caseDirectory);
+    const fixture = writeFixture(caseDirectory, body, {
+      title: "Detailed audio policy",
+      date: "2026-08-05",
+      companionHref: "narrative.html",
+      audio,
+    });
+    const result = runGenerator([
+      "--kind", "detailed",
+      "--body", fixture.bodyPath,
+      "--meta", fixture.metadataPath,
+      "--out", fixture.outputPath,
+    ]);
+    if (audio) {
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /metadata\.audio is not supported for detailed reports/);
+      assert.equal(fs.existsSync(fixture.outputPath), false);
+    } else {
+      assert.equal(result.status, 0, result.stderr);
+      const html = fs.readFileSync(fixture.outputPath, "utf8");
+      assert.doesNotMatch(html, /pi-artifacts report reader|optional audio reader|<script>/i);
+    }
+  }
 });
 
 test("detailed generator uses the shared styles without adding the speech runtime", () => {
@@ -254,7 +356,8 @@ test("combined generator emits one self-contained narrative-first report with ma
   assert.match(html, /<section id="first">[\s\S]*?aria-label="Show evidence for: First finding">Evidence<\/button>/);
   assert.doesNotMatch(html, /data-narrative-section-id="unmapped"/);
   assert.match(html, /<section id="evidence-one">[\s\S]*?Detailed fact one\./);
-  assert.match(html, /pi-artifacts report reader v1\.3\.0/);
+  assert.doesNotMatch(html, /pi-artifacts report reader v1\.3\.0/);
+  assert.doesNotMatch(html, /audio reader/i);
   assert.match(html, /pi-artifacts report evidence pane v1\.1\.0/);
   assert.match(html, /event\.key\.toLowerCase\(\) !== "e"/);
   assert.match(html, /Toggle with <kbd>Alt<\/kbd> \+ <kbd>Shift<\/kbd> \+ <kbd>E<\/kbd>/);
@@ -279,7 +382,7 @@ test("combined generator emits one self-contained narrative-first report with ma
   assert.doesNotMatch(html, /<(?:img|source|video|audio|iframe)\b[^>]*\bsrc=["']https?:\/\//i);
 
   const inlineScripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]);
-  assert.equal(inlineScripts.length, 2);
+  assert.equal(inlineScripts.length, 1);
   for (const inlineScript of inlineScripts) {
     const syntax = spawnSync(process.execPath, ["--check", "--input-type=commonjs"], {
       input: inlineScript,
@@ -394,6 +497,7 @@ output #123 stays literal</code></pre>
   assert.match(html, /<a href="#kept">#123<\/a>/);
   assert.match(html, /<pre><code>command --issue #123\noutput #123 stays literal<\/code><\/pre>/);
   assert.match(html, /pi-artifacts GitLab references v1\.0\.0/);
+  assert.doesNotMatch(html, /pi-artifacts report reader v1\.3\.0/);
   assert.doesNotMatch(html, /<script\b[^>]*\bsrc=/i);
   assert.doesNotMatch(html, /<link\b[^>]*\bhref=/i);
   assert.doesNotMatch(html, /<(?:img|source|video|audio|iframe)\b[^>]*\bsrc=["']https?:\/\//i);
@@ -611,5 +715,54 @@ test("committed demonstration reports are reproducible", () => {
     if (example.kind === "combined") {
       assert.match(generated, /aria-label="Issue #123: Demonstrate report references without a network dependency — open"/);
     }
+  }
+});
+
+test("artifact-format guidance has one canonical table and optional small-output aids", () => {
+  const authoringPath = path.join(root, "skills", "pi-artifacts-authoring", "SKILL.md");
+  assert.ok(fs.existsSync(authoringPath), "the pi-artifacts-authoring skill must be bundled");
+  const authoring = fs.readFileSync(authoringPath, "utf8");
+  const markdownFiles = [path.join(root, "README.md")];
+  const collectMarkdown = (directory: string) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) collectMarkdown(entryPath);
+      else if (entry.isFile() && entry.name.endsWith(".md")) markdownFiles.push(entryPath);
+    }
+  };
+  collectMarkdown(path.join(root, "skills"));
+  const markdown = markdownFiles.map((file) => fs.readFileSync(file, "utf8"));
+  const tableHeader = "| Reader's next action | Family | Default form |";
+  assert.equal(markdown.filter((content) => content.includes(tableHeader)).length, 1);
+  const table = authoring.slice(authoring.indexOf(tableHeader)).split("\n\n", 1)[0];
+  const actionRows = table.split("\n").slice(2).map((row) => row.split("|")[1]?.trim());
+  assert.deepEqual(actionRows, ["Choose", "Understand", "Sort/find", "Compare", "Execute/resume", "Verify"]);
+  assert.match(authoring, /companion development-tools package|This package owns/i);
+  assert.match(authoring, /related work|project history/i);
+  assert.doesNotMatch(authoring, /(?:\bgitlab(?:-ssh)?\.(?!com\b)[a-z0-9-]+(?:\.[a-z0-9-]+)+|\b[\w.-]+\/[\w.-]+[#!]\d+\b|\b[a-z0-9-]+\.ts\.net\b)/i);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "README.md"), "utf8"), /@caair\/|(?:\bgitlab(?:-ssh)?\.(?!com\b)[a-z0-9-]+(?:\.[a-z0-9-]+)+|\b[\w.-]+\/[\w.-]+[#!]\d+\b|\b[a-z0-9-]+\.ts\.net\b)/i);
+  assert.match(authoring, /register it directly/i);
+
+  const aidLinks = [...authoring.matchAll(/\]\((aids\/[^)]+\.md)\)/g)].map((match) => match[1]);
+  assert.equal(aidLinks.length, 4);
+  for (const aidLink of aidLinks) {
+    const aidPath = path.resolve(path.dirname(authoringPath), aidLink);
+    assert.ok(fs.existsSync(aidPath), `${aidLink} must resolve`);
+    const aid = fs.readFileSync(aidPath, "utf8");
+    assert.match(aid, /Every section is optional\./);
+    assert.match(aid, /A small output is valid:/);
+    const sectionHeadings = [...aid.matchAll(/^## (.+)$/gm)].map((match) => match[1]);
+    assert.ok(sectionHeadings.length > 0, `${aidLink} must include optional sections`);
+    assert.ok(sectionHeadings.every((heading) => heading.startsWith("Optional:")), `${aidLink} must mark every section optional`);
+  }
+
+  for (const pointerPath of [
+    path.join(root, "README.md"),
+    path.join(root, "skills", "pi-artifacts", "SKILL.md"),
+    path.join(root, "skills", "pi-artifacts-reports", "SKILL.md"),
+  ]) {
+    const pointer = fs.readFileSync(pointerPath, "utf8");
+    assert.match(pointer, /pi-artifacts-authoring/);
+    assert.doesNotMatch(pointer, new RegExp(tableHeader.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });

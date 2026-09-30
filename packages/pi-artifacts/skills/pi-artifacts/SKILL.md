@@ -44,9 +44,11 @@ or files the user is actively editing. When unsure, ask — or skip it.
 
 Always give the user the returned **URL** so they can open it on any device.
 
-When agent-produced analysis needs both complete evidence and a human-readable, listenable companion,
-load the bundled **`pi-artifacts-reports`** skill and generate the standard narrative + detailed HTML
-pair before registering both files.
+Choose the format by the reader's next action. Load the bundled **`pi-artifacts-authoring`** skill
+for the one canonical decision guide and optional small-output Markdown aids. Markdown is the
+default; register it directly when no aid is needed. Use interactive HTML only for a demonstrated
+navigation, filtering, comparison, or media need. Load **`pi-artifacts-reports`** only for a deep
+technical audit whose readable prose must link to detailed findings.
 
 ## Print-friendly artifacts
 
@@ -338,10 +340,13 @@ links to `/applets` and shows a compact Applets section when manifests exist. Sc
 
 - Shell cannot find `pi-artifacts` from a source checkout → run `npm link`, or use
   `npm exec -- pi-artifacts <command>` from the checkout.
-- Tool/CLI says the daemon is down → on the Studio, start with `pi-artifacts install`
-  (one-time service + tailscale serve) or `pi-artifacts serve` (foreground). On a remote client,
-  verify the HTTPS remote config above and that the Studio is online. Logs on the Studio:
-  `~/.pi/artifacts/daemon.log`.
+- Tool/CLI says the daemon is down → on the store owner, run `pi-artifacts install`
+  (Linux systemd user service or macOS launchd service, plus Tailscale Serve), or
+  `pi-artifacts serve` (foreground). Linux logs: `journalctl --user -u pi-artifacts.service -n 50`.
+  macOS logs: `~/.pi/artifacts/daemon.log`. Linux needs a working systemd user manager;
+  after-logout/boot operation needs administrator-enabled user lingering.
+  On remote clients, verify the HTTPS transport config above and that the store owner is online.
+  Treat an install error as incomplete: fix startup before changing public URL settings.
 - Older inline artifacts that render as syntax-highlighted/plain text despite being Markdown or
   HTML can usually be repaired in place with `pi-artifacts repair-types --dry-run`, then
   `pi-artifacts repair-types --apply`. This updates metadata only; artifact IDs and blobs stay

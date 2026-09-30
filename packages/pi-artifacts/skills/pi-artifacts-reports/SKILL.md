@@ -1,20 +1,24 @@
 ---
 name: pi-artifacts-reports
 description: >
-  Create self-contained HTML analysis reports with the pi-artifacts house templates: a recommended
-  combined narrative-first report with synchronized evidence on demand, or standalone narrative and
-  detailed reports. Use when agent-produced analysis needs verifiable evidence and an accessible,
-  listenable explanation.
+  Create self-contained HTML analysis reports with the pi-artifacts house templates: a combined
+  narrative-first report with synchronized evidence on demand, or standalone narrative and detailed
+  reports. Use only for a deep technical audit whose readable explanation must link to detailed
+  findings. For other deliverables, choose a format with the pi-artifacts-authoring skill (Markdown
+  by default).
 ---
 
 # pi-artifacts narrative-first reports
 
-Use the combined report template by default when analysis has two valid reading modes:
+This is a specialized format, not the default output. Start with the **`pi-artifacts-authoring`**
+skill: most recommendations, experiment reports, runbooks, handoffs, and verification records are
+clearer as short Markdown. Use these templates only for a deep technical audit with two valid
+reading modes:
 
-1. a **narrative** that explains the result as a coherent story and can be read aloud by the browser;
+1. a **narrative** that explains the result as a coherent story;
 2. **evidence** with the complete raw observations, tables, code, uncertainty, and severity.
 
-The combined kind embeds both in one artifact. It opens narrative-first and reveals evidence on
+When both are needed, prefer the combined kind. It embeds both in one artifact. It opens narrative-first and reveals evidence on
 demand. This is more reliable than a generated pair because separately registered artifacts do not
 share sibling paths: their relative `companionHref` links can return 404. Use standalone
 `narrative` or `detailed` kinds only when one reading mode genuinely stands alone. Do not add an
@@ -33,7 +37,14 @@ Write for a person who wants the conclusion, the sequence of events, and the con
 - Keep paragraphs short enough to hear comfortably.
 - Map each section to relevant evidence when verification material exists.
 
-The generated narrative includes the dependency-free Web Speech API reader. It provides whole-report
+### Optional audio reader
+
+Generated reports have **no audio by default**. Set `"audio": true` in narrative or combined metadata
+only when a reader has asked to listen. The flag is rejected for detailed reports and must be a
+boolean. Regenerating is the only way to change an existing report; stored artifact versions keep
+their bytes, including any player they already embed.
+
+When enabled, the report embeds the dependency-free Web Speech API reader. It provides whole-report
 playback, per-section playback, read-from-here controls, pause/resume/stop, rate and voice choices,
 progress, follow-along highlighting, reduced-motion-aware scrolling, keyboard help, and a polite live
 status. It creates no player when speech synthesis is unavailable.
@@ -44,7 +55,8 @@ reloads, so a reader who never wants the player sees it once. Hiding never stops
 collapsed pill reports `Listening` or `Paused`, and the live status region stays outside the
 collapsed panel so a hidden player can still announce.
 
-The evidence pane is independent of this player and works even when the Web Speech API is absent.
+The evidence pane is independent of this player and works when audio is off or the Web Speech API is
+absent.
 It has three opening affordances: a mapped section's **Evidence** button, the header's global
 **Evidence** toggle, and `Alt+Shift+E` outside text-entry controls. The shortcut hint also appears in
 the evidence header, not only in audio help. The pane starts `hidden` on every page load, so it is
@@ -91,7 +103,7 @@ templates/report/
 ```
 
 Do not copy these assets into another project and edit them there. Use the generator so the output
-contains the current versioned CSS and reader runtime.
+contains the current versioned CSS and, when audio is enabled, the reader runtime.
 
 Author each body as an HTML fragment, not a complete document:
 
@@ -111,7 +123,8 @@ Author each body as an HTML fragment, not a complete document:
 
 Every section needs a unique, quoted `id` and a non-empty heading. IDs must also be unique across the
 two fragments in a combined report. The generator uses narrative IDs for the primary table of
-contents and audio section playback; evidence IDs go only into the evidence pane's table of contents.
+contents and, when audio is enabled, section playback; evidence IDs go only into the evidence pane's
+table of contents.
 
 Create combined metadata with an `evidenceMap`. Every key must name a narrative `<section id>` and
 every array value must name one or more evidence `<section id>` values. Omit a narrative section when
@@ -124,6 +137,7 @@ it has no evidence affordance.
   "date": "2026-08-05",
   "provenance": "Agent analysis of repository state at commit abc1234",
   "language": "en",
+  "audio": false,
   "evidenceMap": {
     "situation": ["event-log", "runtime-audit"],
     "consequence": ["findings-register"]
@@ -240,7 +254,8 @@ Each final report must work as one HTML file without the artifacts daemon or a n
 - Inline small images as `data:` URLs or use authored inline SVG.
 - Keep source citations readable in the document itself. A citation link may be useful online, but
   its label and surrounding text must still identify the source offline.
-- Prefer one combined artifact so registration cannot break a relative sibling link.
+- For a deep audit with linked prose and findings, use one combined artifact so registration cannot
+  break a relative sibling link.
 
 The generator rejects body scripts, remote CSS resources, non-inline resource attributes, and
 external companion links. It runs the same self-containment check over both combined fragments and
@@ -269,7 +284,8 @@ Before registering a report, confirm:
       also restores narrative scroll position.
 - [ ] Manual evidence scrolling and evidence table-of-contents choices turn follow off and announce
       the change through a polite live region.
-- [ ] The report does not autoplay. Playback starts only after a person activates a control.
+- [ ] Audio is omitted unless a reader asked for it (`"audio": true`). When present, it does not
+      autoplay; playback starts only after a person activates a control.
 - [ ] Every authored interactive control has an accessible name and works from the keyboard.
 - [ ] At 200% zoom, content remains readable without horizontal scrolling except inside deliberate
       table and code scrollers.
@@ -281,38 +297,47 @@ link text, table semantics, or alternative text.
 
 ## Browser verification
 
-Open the generated combined report in a current Chromium or Safari browser and check:
+Always open a generated combined report with default metadata in a current Chromium or Safari
+browser and verify:
+
+1. No audio player, **Listen** pill, **Read this section** button, empty reader script wrapper, or
+   claim that audio is present appears.
+2. The initial view is narrative-only; evidence is absent from the accessibility tree and tab order.
+3. Every mapped section has one **Evidence** button with the section title in its accessible name;
+   unmapped sections have no evidence button.
+4. Section buttons open the first mapped target and move focus to the pane. The global toggle uses
+   the visible mapped narrative section, then falls back to the first evidence section.
+5. Narrative scrolling follows mapped targets. A manual evidence scroll and an evidence table-of-
+   contents choice each turn follow off and produce a polite announcement; the follow control
+   resumes synchronization.
+6. Closing returns focus to the opening control. Below 62rem, **Back to the narrative** restores
+   narrative scroll and focus; at or above 62rem, both panes remain visible.
+7. A GitLab reference tooltip opens on hover and keyboard focus, closes on blur and Escape, flips
+   near viewport edges, and remains visible inside the evidence pane or a wide table scroller. The
+   native browser tooltip does not also appear.
+8. Print preview contains the narrative followed by every evidence section, with evidence controls
+   omitted.
+
+When `"audio": true` is set on either a standalone narrative or combined report, additionally verify:
 
 1. **Play** reads the title, description, and body. Pause, Resume, and Stop update state correctly.
-2. **Read this section** stops current speech and reads only that section.
-3. **Read from here** reads the selected section and every later section.
-4. Rate and voice choices survive a reload when storage is available.
-5. The voice list appears even when the browser loads voices after the page.
-6. Progress advances and the current passage is highlighted. Browsers without speech boundary
+2. **Read this section** stops current speech and reads only that section. **Read from here** reads
+   that section and every later section.
+3. Rate and voice choices survive a reload when storage is available, including when the browser
+   loads voices after the page.
+4. Progress advances and the current passage is highlighted. Browsers without speech boundary
    events still highlight the current paragraph.
-7. Follow-along scrolling becomes immediate, not smooth, when reduced motion is enabled.
-8. The Help dialog documents `Alt+Shift+Space`, `Alt+Shift+S`, `Alt+Shift+H`, and `Alt+Shift+L`.
-9. Navigating away cancels speech.
-10. With speech synthesis disabled or unavailable, no audio player or section audio buttons appear.
-11. **Hide** collapses the player to the `Listen` pill, moves focus to it, and persists the choice;
-    the pill restores the panel and returns focus to **Play**. `Alt+Shift+L` toggles both ways.
-12. Hiding mid-playback keeps the audio running and the pill shows the transport state.
-13. The initial view is narrative-only; evidence is absent from the accessibility tree and tab order.
-14. Every mapped section has one **Evidence** button with the section title in its accessible name;
-    unmapped sections have no evidence button.
-15. Section buttons open the first mapped target and move focus to the pane. The global toggle uses
-    the visible mapped narrative section, then falls back to the first evidence section.
-16. Narrative scrolling follows mapped targets. A manual evidence scroll and an evidence table-of-
-    contents choice each turn follow off and produce a polite announcement; the follow control
-    resumes synchronization.
-17. Closing returns focus to the opening control without changing active audio playback.
-18. Below 62rem, evidence replaces the narrative and **Back to the narrative** restores narrative
-    scroll and focus. At or above 62rem, both panes remain visible.
-19. A GitLab reference tooltip opens on hover and keyboard focus, closes on blur and Escape, flips
-    near viewport edges, and remains visible when its anchor is inside the evidence pane or a wide
-    table scroller. Confirm the native browser tooltip does not also appear.
-20. Print preview contains the narrative followed by every evidence section, with reader and evidence
-    controls omitted.
+5. Follow-along scrolling becomes immediate, not smooth, when reduced motion is enabled.
+6. The Help dialog documents `Alt+Shift+Space`, `Alt+Shift+S`, `Alt+Shift+H`, and `Alt+Shift+L`.
+7. Navigating away cancels speech. With speech synthesis unavailable, no player or section audio
+   buttons appear.
+8. **Hide** collapses the player to the `Listen` pill, moves focus to it, and persists the choice;
+   the pill restores the panel and returns focus to **Play**. Hiding during playback keeps audio
+   running and reports the transport state.
+9. Print preview omits the reader controls.
+
+For an audio-enabled combined report, also verify that opening, browsing, and closing evidence do
+not change playback. These evidence checks do not apply to a standalone narrative report.
 
 Voice availability and boundary events depend on the browser and operating system. Do not promise a
 specific installed voice or word-level boundary behavior.

@@ -733,6 +733,7 @@ export class ArtifactsClient {
   /** Canonical public URL reported by the connected serving daemon; never derived from transport. */
   async publicUrl(): Promise<string> {
     const health = await this.health();
+    if (!health) throw new Error(`artifact daemon is down or returned an invalid health response at ${this.base}; run \`pi-artifacts install\` or \`pi-artifacts serve\` on the store owner`);
     const value = health?.publicBaseUrl;
     if (typeof value === "string") return validatePublicBaseUrl(value)!;
     const resolution = health?.publicUrlResolution;

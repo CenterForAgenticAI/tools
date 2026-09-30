@@ -56,8 +56,11 @@ export function generateReport({
   const templatePath = path.join(templateDir, `${kind}-template.html`);
   const template = fs.readFileSync(templatePath, "utf8");
   const styles = fs.readFileSync(path.join(templateDir, "report-reader.css"), "utf8").trim();
-  const reader = kind === "narrative" || kind === "combined"
-    ? escapeInlineScript(fs.readFileSync(path.join(templateDir, "report-reader.js"), "utf8").trim())
+  const reader = normalized.audio
+    ? `<script>\n${escapeInlineScript(fs.readFileSync(path.join(templateDir, "report-reader.js"), "utf8").trim())}\n  </script>`
+    : "";
+  const readerNote = normalized.audio
+    ? "<p>The optional audio reader supplements the report’s semantic HTML and does not replace screen-reader access.</p>"
     : "";
   const evidenceRuntime = kind === "combined"
     ? escapeInlineScript(fs.readFileSync(path.join(templateDir, "report-evidence.js"), "utf8").trim())
@@ -78,6 +81,7 @@ export function generateReport({
     REPORT_TOC: makeTocFromSections(narrativeSections),
     REPORT_STYLES: styles,
     REPORT_READER: reader,
+    REPORT_READER_NOTE: readerNote,
     REPORT_BODY: renderedBody,
     REPORT_EVIDENCE: kind === "combined" ? renderedEvidence : "",
     REPORT_EVIDENCE_TOC: kind === "combined" ? makeTocFromSections(evidenceSections) : "",
@@ -212,6 +216,13 @@ function normalizeMetadata(metadata, kind) {
     || (kind === "detailed" ? "The complete evidence and raw analysis behind the narrative report." : "A human-readable analysis with detailed evidence available on demand.");
   const provenance = optionalString(metadata.provenance) || "Agent-produced analysis";
   const language = optionalString(metadata.language) || "en";
+  if (metadata.audio !== undefined && typeof metadata.audio !== "boolean") {
+    throw new Error("metadata.audio must be a boolean when provided");
+  }
+  if (metadata.audio === true && kind === "detailed") {
+    throw new Error("metadata.audio is not supported for detailed reports; use narrative or combined");
+  }
+  const audio = metadata.audio === true;
   if (!/^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(language)) {
     throw new Error("metadata.language must be a simple BCP 47 language tag, such as en or en-GB");
   }
@@ -232,7 +243,7 @@ function normalizeMetadata(metadata, kind) {
       || (kind === "narrative" ? "Open the detailed analysis" : "Read the narrative report");
   }
 
-  return { title, deck, provenance, language, dateIso, companionHref, companionLabel };
+  return { title, deck, provenance, language, dateIso, companionHref, companionLabel, audio };
 }
 
 function requiredString(value, label) {
@@ -379,7 +390,7 @@ function printUsage() {
 
 Metadata JSON:
   { "title": "…", "deck": "…", "date": "YYYY-MM-DD", "provenance": "…",
-    "language": "en", "companionHref": "sibling-report.html", "companionLabel": "…" }
+    "language": "en", "companionHref": "sibling-report.html", "companionLabel": "…", "audio": false }
 
 Combined metadata replaces companionHref with:
   { "evidenceMap": { "narrative-section-id": ["evidence-section-id"] } }

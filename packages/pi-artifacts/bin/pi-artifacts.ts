@@ -1,20 +1,13 @@
 #!/usr/bin/env node
 // pi-artifacts CLI — manage artifacts and the daemon from any shell.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { ArtifactsClient } from "../src/client.ts";
 import { loadConfig, HOME, ensureHome, APPLETS_DIR } from "../src/config.ts";
 import { TAILSCALE_EXECUTABLES } from "../src/public-url.ts";
 import { retrievalFailure } from "../src/retrieval.ts";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SERVER = path.join(__dirname, "..", "src", "server.ts");
-const NODE_TS_FLAGS = ["--experimental-strip-types", "--experimental-sqlite"];
-const LABEL = "com.pi.artifacts";
-const PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
+import { installUserService, uninstallUserService, waitForDaemon, NODE_TS_FLAGS, SERVER } from "../src/service.ts";
 
 function arg(flags: string[], argv: string[]): string | undefined {
   for (const f of flags) {
@@ -248,20 +241,20 @@ async function main() {
     }
 
     case "install": {
-      installLaunchd();
+      const cfg = loadConfig();
+      if (cfg.clientScheme !== "http" || !["127.0.0.1", "localhost", "::1"].includes(cfg.host)) die("install must run on the store owner with a loopback HTTP transport; remote clients do not need a service");
+      const service = installUserService();
+      console.log(`installed ${service.kind} user service: ${service.file}`);
       console.log("waiting for daemon…");
-      await sleep(1200);
-      const up = await new ArtifactsClient().isUp();
-      console.log(up ? "daemon: UP" : "daemon not responding yet (check logs at " + path.join(HOME, "daemon.log") + ")");
+      if (!(await waitForDaemon(() => client.isUp()))) die(`daemon did not become ready at ${client.base}; check ${service.logs}`);
+      console.log("daemon: UP");
       if (!has("--no-tailscale", argv)) await setupTailscale();
-      try { console.log("\nDone. Explorer: " + await new ArtifactsClient().publicUrl()); } catch (error) { console.log("\nDone. Public URL unavailable — " + (error instanceof Error ? error.message : String(error))); }
+      console.log("\nDone. Explorer: " + await client.publicUrl());
       return;
     }
     case "uninstall": {
-      try { spawnSync("launchctl", ["bootout", `gui/${process.getuid?.()}`, PLIST], { stdio: "ignore" }); } catch { /* launchctl may be unavailable or service may be absent */ }
-      try { spawnSync("launchctl", ["unload", PLIST], { stdio: "ignore" }); } catch { /* fallback unload is best-effort */ }
-      if (fs.existsSync(PLIST)) fs.unlinkSync(PLIST);
-      console.log("removed launchd service. (tailscale serve untouched — run `pi-artifacts tailscale-off` to reset)");
+      const service = uninstallUserService();
+      console.log(`removed ${service.kind} user service. (tailscale serve untouched)`);
       return;
     }
     case "tailscale": { await setupTailscale(); return; }
@@ -277,8 +270,8 @@ async function main() {
       console.log(`pi-artifacts — manage pi agent artifacts
 
   serve                 run the daemon in the foreground
-  install [--no-tailscale]  install launchd service + tailscale serve
-  uninstall             remove launchd service
+  install [--no-tailscale]  install user service (Linux/macOS) + tailscale serve
+  uninstall             remove user service (leave artifacts and Serve intact)
   status                show daemon status + URLs
   url                   print the public base URL
   add <file> [opts]     register a file (default: referenced)
@@ -306,52 +299,16 @@ store: ${HOME}`);
   }
 }
 
-function installLaunchd() {
-  ensureHome();
-  fs.mkdirSync(path.dirname(PLIST), { recursive: true });
-  const log = path.join(HOME, "daemon.log");
-  const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>${LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${process.execPath}</string>
-    ${NODE_TS_FLAGS.map((flag) => `<string>${flag}</string>`).join("\n    ")}
-    <string>${SERVER}</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PI_ARTIFACTS_HOME</key><string>${HOME}</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${log}</string>
-  <key>StandardErrorPath</key><string>${log}</string>
-</dict>
-</plist>`;
-  fs.writeFileSync(PLIST, plist);
-  const uid = process.getuid?.() ?? 0;
-  spawnSync("launchctl", ["bootout", `gui/${uid}/${LABEL}`], { stdio: "ignore" });
-  const r = spawnSync("launchctl", ["bootstrap", `gui/${uid}`, PLIST], { stdio: "inherit" });
-  if (r.status !== 0) {
-    // fallback for older launchctl
-    spawnSync("launchctl", ["load", "-w", PLIST], { stdio: "inherit" });
-  }
-  console.log("installed launchd service: " + PLIST);
-}
 
 async function setupTailscale() {
   const ts = findTailscale();
   const cfg = loadConfig();
   if (!ts) { console.log("tailscale CLI not found — skipping. Configure publicBaseUrl or install Tailscale Serve."); return; }
   console.log("configuring `tailscale serve` for port " + cfg.port + " …");
-  const r = spawnSync(ts, ["serve", "--bg", String(cfg.port)], { stdio: "inherit" });
-  if (r.status !== 0) { console.log("tailscale serve failed (is Tailscale running / are you logged in?)"); return; }
+  const r = spawnSync(ts, ["serve", "--bg", String(cfg.port)], { stdio: "inherit", timeout: 30_000 });
+  if (r.status !== 0 || r.error) throw new Error("tailscale serve failed (is Tailscale running / are you logged in?)" + (r.error ? ": " + r.error.message : ""));
   const client = new ArtifactsClient();
-  try { console.log("public URL: " + await client.publicUrl()); }
-  catch (error) { console.log("Serve configured; public URL unavailable — " + (error instanceof Error ? error.message : String(error))); }
+  console.log("public URL: " + await client.publicUrl());
 }
 
 async function gc() {
@@ -454,6 +411,5 @@ function dieRetrieval(code: string, message: string): never {
   process.exit(1);
 }
 function need<T>(v: T | undefined, msg: string): T { if (v == null) die(msg); return v; }
-function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 
 main().catch((e) => { console.error(String(e?.message || e)); process.exit(1); });

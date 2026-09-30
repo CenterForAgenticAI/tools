@@ -1,5 +1,5 @@
 {
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Central cross-device artifact registry, viewer, and lightweight applet host for pi session documents and browser-viewable media.",
   "type": "module",
   "bin": {

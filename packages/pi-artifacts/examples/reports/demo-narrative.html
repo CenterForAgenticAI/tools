@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="generator" content="pi-artifacts narrative report template v1.1.0" />
+  <meta name="generator" content="pi-artifacts narrative report template v1.2.0" />
   <meta name="description" content="A narrative tour of the reusable, self-contained report standard." />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; media-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'none'; base-uri 'none'" />
   <title>A report you can listen to</title>
@@ -1080,7 +1080,7 @@ body.report :focus-visible {
     </ol>
     </nav>
     <main class="report-main" id="main-content" tabindex="-1" data-report-narrative>
-<p>This short report demonstrates the house format for analysis that should be easy to read, scan, print, or hear. The same facts remain available as detailed evidence, but this narrative explains why they matter as a connected story.</p>
+<p>This short report demonstrates the house format for analysis that should be easy to read, scan, or print. The same facts remain available as detailed evidence, but this narrative explains why they matter as a connected story.</p>
 
 <section id="the-situation">
   <h2>The situation</h2>
@@ -1090,29 +1090,29 @@ body.report :focus-visible {
 
 <section id="what-changed">
   <h2>What changed</h2>
-  <p>pi-artifacts now owns one shared visual template and one dependency-free audio reader. Report authors supply a body fragment and a small metadata file. The generator adds the page structure, table of contents, print rules, light and dark colors, and inline reader assets. In the combined example, tracked work such as <a class="gl-ref gl-ref-issue gl-ref-state-open" href="https://gitlab.example.test/group/project/-/work_items/123" data-gl-ref="#123" data-gl-kind="issue" data-gl-state="open" aria-label="Issue #123: Demonstrate report references without a network dependency — open" title="Issue #123: Demonstrate report references without a network dependency — open"><svg class="gl-ref-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" stroke-width="2.5"/><circle cx="8" cy="8" r="1.25" fill="currentColor"/></svg><span class="gl-ref-text">#123</span><span class="gl-ref-tooltip" data-gl-tooltip-meta="Issue #123 · open" data-gl-tooltip-title="Demonstrate report references without a network dependency" aria-hidden="true"></span></a> becomes a self-contained reference with its title and state baked in.</p>
-  <p>The reader divides text into short passages before sending it to the browser’s speech engine. This prevents the long-utterance stall seen in Chromium. It also waits for asynchronously loaded voice lists, which is important in Safari.</p>
+  <p>pi-artifacts owns one shared visual template. Report authors supply a body fragment and a small metadata file. The generator adds the page structure, table of contents, print rules, and light and dark colors. In the combined example, tracked work such as <a class="gl-ref gl-ref-issue gl-ref-state-open" href="https://gitlab.example.test/group/project/-/work_items/123" data-gl-ref="#123" data-gl-kind="issue" data-gl-state="open" aria-label="Issue #123: Demonstrate report references without a network dependency — open" title="Issue #123: Demonstrate report references without a network dependency — open"><svg class="gl-ref-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" stroke-width="2.5"/><circle cx="8" cy="8" r="1.25" fill="currentColor"/></svg><span class="gl-ref-text">#123</span><span class="gl-ref-tooltip" data-gl-tooltip-meta="Issue #123 · open" data-gl-tooltip-title="Demonstrate report references without a network dependency" aria-hidden="true"></span></a> becomes a self-contained reference with its title and state baked in.</p>
 </section>
 
 <section id="what-it-means">
   <h2>What it means</h2>
   <p>Every generated report remains a single file. It has no font service, content delivery network, or remote script. A combined report embeds both narrative and evidence, so you can register, download, or open one artifact without relying on a sibling path.</p>
-  <p>The audio controls do not replace accessibility features. The prose remains normal text with a real heading hierarchy. A screen reader can ignore the player and navigate the document as usual. When browser speech is available, a listener can play the whole report, choose one section, or continue from any section.</p>
+  <p>The prose remains normal text with a real heading hierarchy, so a screen reader can navigate the document as usual. The report remains self-contained and works offline.</p>
 </section>
 
 <section id="what-happens-next">
   <h2>What happens next</h2>
-  <p>Report authors should start with the narrative and evidence body fragments in this directory. Generate the combined file, run the report smoke tests, and open it in a browser. Check that speech begins only after an explicit action, evidence opens to the mapped target, manual evidence browsing yields follow, focus returns on close, and reduced-motion preferences prevent smooth scrolling.</p>
+  <p>Report authors should start with the narrative and evidence body fragments in this directory. Generate the combined file, run the report smoke tests, and open it in a browser. Check that evidence opens to the mapped target, manual evidence browsing yields follow, focus returns on close, and reduced-motion preferences prevent smooth scrolling.</p>
   <p>That repeatable path turns an improvised output into a reliable reading experience.</p>
 </section>
     </main>
   </div>
   <footer class="report-footer">
     <div class="report-footer-inner">
-      <p>Generated with the pi-artifacts narrative report template v1.1.0. The audio reader supplements the report’s semantic HTML and does not replace screen-reader access.</p>
+      <p>Generated with the pi-artifacts narrative report template v1.2.0.</p>
+<p>The optional audio reader supplements the report’s semantic HTML and does not replace screen-reader access.</p>
     </div>
   </footer>
-  <script>
+<script>
 /* pi-artifacts report reader v1.3.0 */
 (() => {
   "use strict";

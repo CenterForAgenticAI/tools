@@ -8,7 +8,7 @@
       </thead>
       <tbody>
         <tr><td>Structure</td><td>Skip links, provenance, separate narrative and evidence contents, semantic sections, and one self-contained artifact</td><td><span class="severity severity-low">Ready</span></td></tr>
-        <tr><td>Audio</td><td>Native <code>speechSynthesis</code>, short utterance chunks, async voice loading, rate and voice preferences</td><td><span class="severity severity-low">Ready</span></td></tr>
+        <tr><td>Optional audio</td><td>Metadata opt-in for narrative and combined reports; no audio runtime by default</td><td><span class="severity severity-note">Opt-in</span></td></tr>
         <tr><td>Follow-along</td><td>Boundary ranges when supported, with current-paragraph fallback</td><td><span class="severity severity-note">Progressive</span></td></tr>
         <tr><td>Portability</td><td>CSS and JavaScript inlined into one generated HTML file</td><td><span class="severity severity-low">Ready</span></td></tr>
       </tbody>
@@ -31,7 +31,7 @@
   <h2>Verification notes</h2>
   <ul>
     <li><span class="severity severity-high">Required</span> Run <code>npm run check</code> before publishing a report-template change.</li>
-    <li><span class="severity severity-medium">Manual</span> Exercise speech playback in Chromium and Safari because operating-system voices differ.</li>
-    <li><span class="severity severity-note">Expected</span> The player is absent when the Web Speech API is unavailable.</li>
+    <li><span class="severity severity-medium">Manual</span> When audio is enabled, exercise speech playback in Chromium and Safari because operating-system voices differ.</li>
+    <li><span class="severity severity-note">Expected</span> Reports without audio opt-in contain no audio runtime.</li>
   </ul>
 </section>
