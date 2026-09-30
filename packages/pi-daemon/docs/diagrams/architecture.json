@@ -1,0 +1,66 @@
+{
+  "type": "flow",
+  "title": "How clients use pi-daemon",
+  "description": "A CLI or library client connects over a private Unix socket to one local daemon. The daemon hosts Pi sessions in process, keeps durable history in Pi session JSONL, and stores rebuildable operational indexes in SQLite.",
+  "nodes": [
+    {
+      "id": "client",
+      "label": "Client",
+      "sublabel": "CLI or client library",
+      "kind": "default"
+    },
+    {
+      "id": "daemon",
+      "label": "pi-daemon",
+      "sublabel": "leases, replay, lifecycle",
+      "tag": "Service",
+      "kind": "accent"
+    },
+    {
+      "id": "sdk",
+      "label": "Pi SDK",
+      "sublabel": "in-process sessions",
+      "kind": "external"
+    },
+    {
+      "id": "history",
+      "label": "Session JSONL",
+      "sublabel": "durable history",
+      "kind": "store"
+    },
+    {
+      "id": "registry",
+      "label": "SQLite index",
+      "sublabel": "rebuildable state",
+      "kind": "store"
+    }
+  ],
+  "edges": [
+    {
+      "from": "client",
+      "to": "daemon",
+      "label": "Unix socket"
+    },
+    {
+      "from": "daemon",
+      "to": "sdk",
+      "label": "host session"
+    },
+    {
+      "from": "sdk",
+      "to": "history",
+      "label": "commit"
+    },
+    {
+      "from": "daemon",
+      "to": "registry",
+      "label": "index"
+    },
+    {
+      "from": "daemon",
+      "to": "client",
+      "label": "replay and live",
+      "style": "dashed"
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 {
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Run headless pi agent sessions in-process with local socket clients, durable replay, live streaming, and explicit driver arbitration.",
   "type": "module",
   "bin": {
@@ -25,10 +25,13 @@
     "./protocol/protocol-1.0.schema.json": "./schema/protocol-1.0.schema.json"
   },
   "files": [
+    ".spec",
     "bin",
     "dist",
+    "docs",
     "src",
     "schema",
+    "CONTEXT.md",
     "LICENSE"
   ],
   "scripts": {
@@ -61,7 +64,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.87.1"
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@earendil-works/pi-tui": "0.87.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
