@@ -1,0 +1,62 @@
+{
+  "version": "0.2.0",
+  "description": "Agent-driven dynamic thinking effort scaling for pi: set_thinking_effort, status/bounds commands, and prompt guidance for adaptive reasoning depth.",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./integration-seam": "./integration-seam.ts"
+  },
+  "scripts": {
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test logic.test.ts test/*.test.ts",
+    "test:runtime": "node --import tsx --test logic.test.ts test/extension-registration.test.ts test/integration-seam.test.ts test/runtime-fail-closed.test.ts test/shortcut-resolution.test.ts test/thinking-policy.test.ts",
+    "coverage": "c8 --all --src . --include index.ts --include integration-seam.ts --include logic.ts --include thinking-policy.ts --exclude '*.test.ts' --exclude 'test/**' --exclude integration.test.ts --exclude eval.ts --reporter=text --reporter=lcov --reporter=cobertura --check-coverage --lines 95 --functions 100 --branches 80 --statements 95 npm test",
+    "coverage:runtime": "c8 --all --src . --include index.ts --include integration-seam.ts --include logic.ts --include thinking-policy.ts --exclude '*.test.ts' --exclude 'test/**' --exclude integration.test.ts --exclude eval.ts --reporter=text --reports-dir node_modules/.cache/c8-public --check-coverage --lines 95 --functions 100 --branches 80 --statements 95 npm run test:runtime",
+    "build": "tsc -p tsconfig.build.json",
+    "smoke:package": "node scripts/package-smoke.mjs",
+    "test:public": "npm run lint && npm run typecheck && npm run coverage:runtime && npm run build && npm run smoke:package",
+    "check": "npm run lint && npm run typecheck && npm run coverage && npm run build && npm run smoke:package",
+    "hooks:install": "node scripts/install-hooks.mjs"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "name": "@centerforagenticai/pi-adaptive-thinking",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/pi-adaptive-thinking"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/pi-adaptive-thinking#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^22.20.1",
+    "c8": "^11.0.0",
+    "eslint": "^9.39.5",
+    "globals": "^17.7.0",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.64.0",
+    "typebox": "1.3.6"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}

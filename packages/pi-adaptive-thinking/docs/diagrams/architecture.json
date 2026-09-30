@@ -1,0 +1,66 @@
+{
+  "type": "flow",
+  "title": "Adaptive thinking in one Pi session",
+  "description": "The agent, user, and inherited policy send bounded choices to adaptive-thinking. The extension checks the active model and updates the Pi session's thinking level, prompt guidance, and status.",
+  "nodes": [
+    {
+      "id": "agent",
+      "label": "Agent",
+      "sublabel": "calls set_thinking_effort",
+      "tag": "Pi session",
+      "kind": "default"
+    },
+    {
+      "id": "user",
+      "label": "User",
+      "sublabel": "commands and config",
+      "kind": "default"
+    },
+    {
+      "id": "policy",
+      "label": "Inherited policy",
+      "sublabel": "delegate or environment",
+      "kind": "external"
+    },
+    {
+      "id": "extension",
+      "label": "adaptive-thinking",
+      "sublabel": "checks bounds and model support",
+      "kind": "primary"
+    },
+    {
+      "id": "pi",
+      "label": "Pi session",
+      "sublabel": "level, prompt, status",
+      "kind": "accent"
+    }
+  ],
+  "edges": [
+    {
+      "from": "agent",
+      "to": "extension",
+      "label": "tool request"
+    },
+    {
+      "from": "user",
+      "to": "extension",
+      "label": "controls"
+    },
+    {
+      "from": "policy",
+      "to": "extension",
+      "label": "narrow bounds"
+    },
+    {
+      "from": "extension",
+      "to": "pi",
+      "label": "apply safe level"
+    },
+    {
+      "from": "pi",
+      "to": "extension",
+      "label": "events and model",
+      "style": "dashed"
+    }
+  ]
+}
