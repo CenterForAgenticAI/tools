@@ -1,0 +1,81 @@
+{
+  "type": "flow",
+  "title": "One daemon per machine, many Pi sessions",
+  "description": "Pi sessions create jobs through the extension. One central daemon per machine runs timers, polls and scripts, keeps jobs in a shared store, and hands finished results back to the session that owns them. External scripts call the daemon directly with a token.",
+  "nodes": [
+    {
+      "id": "agent",
+      "label": "Agent",
+      "sublabel": "calls the callbacks tool",
+      "tag": "Pi session",
+      "kind": "default"
+    },
+    {
+      "id": "ext",
+      "label": "Extension",
+      "sublabel": "tool, commands, claims deliveries",
+      "tag": "pi-callbacks",
+      "kind": "primary"
+    },
+    {
+      "id": "daemon",
+      "label": "Central daemon",
+      "sublabel": "127.0.0.1:47837",
+      "tag": "Process",
+      "kind": "primary"
+    },
+    {
+      "id": "store",
+      "label": "jobs.json",
+      "sublabel": "~/.pi/agent/callbacks",
+      "kind": "store"
+    },
+    {
+      "id": "script",
+      "label": "External script",
+      "sublabel": "posts a token",
+      "kind": "external"
+    },
+    {
+      "id": "watched",
+      "label": "Polled target",
+      "kind": "external",
+      "sublabel": "command, URL or pipeline"
+    }
+  ],
+  "edges": [
+    {
+      "from": "agent",
+      "to": "ext",
+      "label": "tool call"
+    },
+    {
+      "from": "ext",
+      "to": "daemon",
+      "label": "create job"
+    },
+    {
+      "from": "daemon",
+      "to": "store",
+      "label": "persist"
+    },
+    {
+      "from": "script",
+      "to": "daemon",
+      "label": "callback",
+      "style": "dashed"
+    },
+    {
+      "from": "daemon",
+      "to": "watched",
+      "label": "check",
+      "style": "dashed"
+    },
+    {
+      "from": "daemon",
+      "to": "ext",
+      "label": "delivery event",
+      "style": "dashed"
+    }
+  ]
+}

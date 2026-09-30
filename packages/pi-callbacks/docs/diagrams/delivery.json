@@ -1,0 +1,19 @@
+{
+  "type": "sequence",
+  "title": "How a finished job reaches a session",
+  "description": "The daemon writes a delivery event to the store. A target resolver picks a live session, and that session claims the event with a short lease before injecting it, so two sessions never consume the same event.",
+  "actors": [
+    { "id": "d", "label": "Daemon", "kind": "primary" },
+    { "id": "s", "label": "Store", "kind": "store" },
+    { "id": "e", "label": "Extension", "kind": "primary" },
+    { "id": "a", "label": "Agent" }
+  ],
+  "steps": [
+    { "from": "d", "to": "s", "label": "append delivery event" },
+    { "from": "e", "to": "s", "label": "drain: claim with lease" },
+    { "from": "s", "to": "e", "label": "event, if routed here", "style": "dashed" },
+    { "note": "Origin, latest-active, latest-active-cwd or session decides who may claim.", "over": ["s", "e"] },
+    { "from": "e", "to": "a", "label": "inject message" },
+    { "from": "e", "to": "s", "label": "mark delivered" }
+  ]
+}
