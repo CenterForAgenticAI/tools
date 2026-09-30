@@ -1,0 +1,92 @@
+{
+  "type": "flow",
+  "title": "How an ask reaches a human",
+  "description": "The agent calls ask; the tool normalises the questions, picks one answer surface from declared capability, and narrates the answers back. Only the dialogs and none surfaces exist today.",
+  "nodes": [
+    {
+      "id": "agent",
+      "label": "Agent",
+      "sublabel": "calls ask",
+      "tag": "Pi session",
+      "kind": "default"
+    },
+    {
+      "id": "tool",
+      "label": "ask tool",
+      "sublabel": "normalise, select, deadline, narrate",
+      "tag": "extension",
+      "kind": "primary"
+    },
+    {
+      "id": "contract",
+      "label": "Contract",
+      "sublabel": "types, normaliser, narrator",
+      "tag": "contract export",
+      "kind": "accent"
+    },
+    {
+      "id": "dialogs",
+      "label": "dialogs surface",
+      "sublabel": "select and input",
+      "tag": "Built",
+      "kind": "primary"
+    },
+    {
+      "id": "none",
+      "label": "none surface",
+      "sublabel": "answers are unavailable",
+      "tag": "Built",
+      "kind": "primary"
+    },
+    {
+      "id": "host",
+      "label": "host and TUI surfaces",
+      "sublabel": "not yet built",
+      "tag": "Planned",
+      "kind": "external"
+    },
+    {
+      "id": "human",
+      "label": "Human",
+      "sublabel": "TUI, rpc, pi-daemon, web hosts",
+      "kind": "external"
+    }
+  ],
+  "edges": [
+    {
+      "from": "agent",
+      "to": "tool",
+      "label": "questions"
+    },
+    {
+      "from": "tool",
+      "to": "contract",
+      "label": "uses"
+    },
+    {
+      "from": "tool",
+      "to": "dialogs",
+      "label": "UI present"
+    },
+    {
+      "from": "tool",
+      "to": "none",
+      "label": "no UI"
+    },
+    {
+      "from": "tool",
+      "to": "host",
+      "label": "later",
+      "style": "dashed"
+    },
+    {
+      "from": "dialogs",
+      "to": "human"
+    },
+    {
+      "from": "host",
+      "to": "human",
+      "style": "dashed"
+    }
+  ]
+}
