@@ -1,0 +1,65 @@
+{
+  "type": "flow",
+  "title": "pi-multi-account architecture",
+  "description": "Pi keeps credentials and retries while the extension selects account aliases, records sanitized observations, and sends one request to a reviewed provider transport.",
+  "nodes": [
+    {
+      "id": "pi",
+      "label": "Pi session",
+      "sublabel": "models, retries, events",
+      "kind": "default"
+    },
+    {
+      "id": "extension",
+      "label": "Multi-account extension",
+      "sublabel": "aliases, routing, continuation",
+      "kind": "accent"
+    },
+    {
+      "id": "auth",
+      "label": "Pi AuthStorage",
+      "sublabel": "credential owner",
+      "kind": "store"
+    },
+    {
+      "id": "history",
+      "label": "Bounded stores",
+      "sublabel": "usage, cost, diagnostics",
+      "kind": "store"
+    },
+    {
+      "id": "providers",
+      "label": "Provider APIs",
+      "sublabel": "Anthropic, OpenAI, Google",
+      "kind": "external"
+    }
+  ],
+  "edges": [
+    {
+      "from": "pi",
+      "to": "extension",
+      "label": "events and commands"
+    },
+    {
+      "from": "extension",
+      "to": "auth",
+      "label": "resolve alias credential"
+    },
+    {
+      "from": "extension",
+      "to": "history",
+      "label": "sanitized observations"
+    },
+    {
+      "from": "extension",
+      "to": "providers",
+      "label": "one request"
+    },
+    {
+      "from": "providers",
+      "to": "extension",
+      "label": "bounded status",
+      "style": "dashed"
+    }
+  ]
+}

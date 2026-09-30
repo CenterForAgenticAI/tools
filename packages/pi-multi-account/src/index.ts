@@ -1,8 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import type {
@@ -29,6 +28,10 @@ import {
 	createOpenAiAliasProviderConfig,
 	openaiPlatformModels,
 } from "./openai-adapter.js";
+import {
+	loadMaintainedCodexStream,
+	resolveInstalledPiAiVersion,
+} from "./pi-ai-entrypoints.js";
 import {
 	ALLOWED_FAMILIES,
 	DEFAULT_CONFIG,
@@ -405,6 +408,16 @@ function readInstalledDeclaration(targetPath: string): unknown {
 	}
 }
 
+/** The session's id, or undefined when the host context cannot supply one. */
+function readSessionId(ctx: ExtensionContext): string | undefined {
+	try {
+		const id = (ctx.sessionManager as { getSessionId?: () => unknown }).getSessionId?.();
+		return typeof id === "string" && id.length > 0 ? id : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** The complete declaration-gated startup seam, exported for causal registration contracts. */
 export function registerLogicalProviderAtMatchedStartup(input: {
 	pi: Parameters<typeof registerLogicalProviderForSession>[0];
@@ -413,6 +426,8 @@ export function registerLogicalProviderAtMatchedStartup(input: {
 	deps: LogicalProviderDeps;
 	attributionStoreFactory?: () => LogicalAttributionLifecycle;
 	registerLogicalApi?: LogicalApiRegistrar;
+	/** The registering session's id; routes `unified` calls back to their caller. */
+	sessionId?: string | undefined;
 }): {
 	status: ReturnType<typeof inspectInstalledDeclaration>;
 	expectedModels: ReturnType<typeof buildModelDeclaration>["models"];
@@ -424,6 +439,7 @@ export function registerLogicalProviderAtMatchedStartup(input: {
 		deps,
 		attributionStoreFactory,
 		registerLogicalApi,
+		sessionId,
 	} = input;
 	const expected = buildModelDeclaration(liveCatalogs);
 	const status = inspectInstalledDeclaration(installed, expected.models);
@@ -442,6 +458,7 @@ export function registerLogicalProviderAtMatchedStartup(input: {
 			expected.models,
 			attributedDeps,
 			registerLogicalApi,
+			sessionId === undefined ? {} : { sessionId },
 		);
 	}
 	return { status, expectedModels: expected.models };
@@ -1240,24 +1257,6 @@ function continuationReason(
 		default:
 			return undefined;
 	}
-}
-
-async function loadMaintainedCodexStream(): Promise<
-	NonNullable<ProviderConfig["streamSimple"]>
-> {
-	const publicRoot = await import("@earendil-works/pi-ai");
-	const compatibilityStream = (
-		publicRoot as unknown as Record<string, unknown>
-	)["streamSimpleOpenAICodexResponses"];
-	if (typeof compatibilityStream === "function") {
-		return compatibilityStream as NonNullable<ProviderConfig["streamSimple"]>;
-	}
-	const maintainedApi = await import(
-		"@earendil-works/pi-ai/api/openai-codex-responses"
-	);
-	return maintainedApi.streamSimple as unknown as NonNullable<
-		ProviderConfig["streamSimple"]
-	>;
 }
 
 /**
@@ -2064,50 +2063,6 @@ function cacheInheritedAccountGroupResolution(
 	return store.resolveAndCache({ sessionManager, cwd, config: {} });
 }
 
-
-/**
- * Resolves the actually-installed `@earendil-works/pi-ai` package version by
- * walking up from its resolved `providers/anthropic.models` module file to
- * the nearest `package.json` whose `name` matches. A local, bounded,
- * offline disk read -- never a network request -- so the report's recorded
- * pricing-method provenance names whichever pinned catalog this process
- * actually loaded instead of a hard-coded string that could drift from it.
- * Shares its shape with the standalone CLI's own offline resolver in
- * `standalone-cli.ts`; the two adapters read from different sources (a live
- * `ExtensionContext.modelRegistry` here, the pinned package directly there)
- * and so cannot share one function without coupling this extension entry
- * point to the separate standalone-CLI module.
- */
-function resolveInstalledPiAiVersion(): string {
-	try {
-		const moduleUrl = import.meta.resolve(
-			"@earendil-works/pi-ai/providers/anthropic.models",
-		);
-		let directory = dirname(fileURLToPath(moduleUrl));
-		for (let depth = 0; depth < 6; depth += 1) {
-			try {
-				const candidate = JSON.parse(
-					readFileSync(join(directory, "package.json"), "utf-8"),
-				) as { readonly name?: unknown; readonly version?: unknown };
-				if (
-					candidate.name === "@earendil-works/pi-ai" &&
-					typeof candidate.version === "string" &&
-					candidate.version.length > 0
-				) {
-					return `pi-ai@${candidate.version}`;
-				}
-			} catch {
-				// Keep walking toward the installed package root.
-			}
-			const parent = dirname(directory);
-			if (parent === directory) break;
-			directory = parent;
-		}
-	} catch {
-		// Resolution failure falls through to the bounded fallback below.
-	}
-	return "pi-ai@unknown";
-}
 
 /**
  * Builds the extension surfaces' live Pi-catalog snapshot from the session's
@@ -4531,6 +4486,8 @@ export const createMultiAccountExtension =
 						installed,
 						liveCatalogs,
 						registerLogicalApi,
+						// Optional routing key; an unreadable id must never block registration.
+						sessionId: readSessionId(startupContext),
 						attributionStoreFactory: () => {
 							const store = createAttributionStore({
 								onResponse: (route, response) => {

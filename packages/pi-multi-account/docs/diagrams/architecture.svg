@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 905.5 375" width="905.5" height="375" role="img" aria-labelledby="diagram-title diagram-description" font-family="'IBM Plex Sans','Helvetica Neue',Arial,sans-serif">
+<title id="diagram-title">pi-multi-account architecture</title>
+<desc id="diagram-description">Pi keeps credentials and retries while the extension selects account aliases, records sanitized observations, and sends one request to a reviewed provider transport.</desc>
+<rect x="0.5" y="0.5" width="904.5" height="374" rx="6" fill="#ffffff" stroke="#dce6f5"/>
+<text x="32" y="40" font-size="17" font-family="'Domine',Georgia,'Times New Roman',serif" fill="#010c3f">pi-multi-account architecture</text>
+<line x1="32" y1="54" x2="873.5" y2="54" stroke="#dce6f5"/>
+<defs><marker id="arrow-solid" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0.8 L8,4.5 L0,8.2 z" fill="#0464cd"/></marker><marker id="arrow-dashed" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0.8 L8,4.5 L0,8.2 z" fill="#7a869f"/></marker></defs>
+<path d="M189,193.5 C267.6,193.5 267.6,193.5 346.3,193.5" fill="none" stroke="#0464cd" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+<path d="M535.3,193.5 C628.4,193.5 628.4,110.5 721.5,110.5" fill="none" stroke="#0464cd" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+<path d="M535.3,193.5 C621.6,193.5 621.6,193.5 708,193.5" fill="none" stroke="#0464cd" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+<path d="M535.3,193.5 C618.9,193.5 618.9,276.5 702.5,276.5" fill="none" stroke="#0464cd" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+<path d="M788,305 L788,322 Q788,331 779,331 L449.8,331 Q440.8,331 440.8,322 L440.8,223" fill="none" stroke="#7a869f" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrow-dashed)"/>
+<rect x="32" y="165" width="157" height="57" rx="4" fill="#ffffff" stroke="#032c7b" stroke-width="1.5"/>
+<text x="110.5" y="190" font-size="13" font-weight="600" text-anchor="middle" fill="#010c3f">Pi session</text>
+<text x="110.5" y="208" font-size="11" text-anchor="middle" fill="#5b6478">models, retries, events</text>
+<rect x="346.3" y="165" width="189" height="57" rx="4" fill="#9fd47b" stroke="#032c7b" stroke-width="1.5"/>
+<text x="440.8" y="190" font-size="13" font-weight="600" text-anchor="middle" fill="#010c3f">Multi-account extension</text>
+<text x="440.8" y="208" font-size="11" text-anchor="middle" fill="#010c3f">aliases, routing, continuation</text>
+<rect x="721.5" y="82" width="133" height="57" rx="18" fill="#f0f5ff" stroke="#0464cd" stroke-width="1.5"/>
+<text x="788" y="107" font-size="13" font-weight="600" text-anchor="middle" fill="#010c3f">Pi AuthStorage</text>
+<text x="788" y="125" font-size="11" text-anchor="middle" fill="#5b6478">credential owner</text>
+<rect x="708" y="165" width="160" height="57" rx="18" fill="#f0f5ff" stroke="#0464cd" stroke-width="1.5"/>
+<text x="788" y="190" font-size="13" font-weight="600" text-anchor="middle" fill="#010c3f">Bounded stores</text>
+<text x="788" y="208" font-size="11" text-anchor="middle" fill="#5b6478">usage, cost, diagnostics</text>
+<rect x="702.5" y="248" width="171" height="57" rx="4" fill="#f7f7f7" stroke="#9a9a9a" stroke-width="1.3" stroke-dasharray="5 4"/>
+<text x="788" y="273" font-size="13" font-weight="600" text-anchor="middle" fill="#28303f">Provider APIs</text>
+<text x="788" y="291" font-size="11" text-anchor="middle" fill="#5b6478">Anthropic, OpenAI, Google</text>
+<rect x="203" y="184.5" width="129.3" height="18" rx="3" fill="#ffffff"/><text x="267.6" y="197.5" font-size="11" text-anchor="middle" fill="#28303f">events and commands</text>
+<rect x="558.8" y="143" width="139.2" height="18" rx="3" fill="#ffffff"/><text x="628.4" y="156" font-size="11" text-anchor="middle" fill="#28303f">resolve alias credential</text>
+<rect x="555.6" y="184.5" width="132.1" height="18" rx="3" fill="#ffffff"/><text x="621.6" y="197.5" font-size="11" text-anchor="middle" fill="#28303f">sanitized observations</text>
+<rect x="581.5" y="226" width="74.7" height="18" rx="3" fill="#ffffff"/><text x="618.9" y="239" font-size="11" text-anchor="middle" fill="#28303f">one request</text>
+<rect x="569.1" y="322" width="90.6" height="18" rx="3" fill="#ffffff"/><text x="614.4" y="335" font-size="11" text-anchor="middle" fill="#28303f">bounded status</text>
+<text x="873.5" y="361" font-size="9" letter-spacing="0.16em" text-anchor="end" fill="#9a9a9a">CAAIR</text>
+</svg>

@@ -12,15 +12,21 @@
  *
  * Catalog source is capture-or-compose: the live model registry's base `openai`
  * provider catalog when the host has registered it (the pinned Pi 0.84.4 ships
- * it), else the pinned `@earendil-works/pi-ai` `openaiProvider()` factory. Base
- * providers are only read, never mutated or re-registered.
+ * it), else the pinned `@earendil-works/pi-ai` built-in `openai` catalog (the
+ * same `OPENAI_MODELS` the `openaiProvider()` factory wraps). Base providers are
+ * only read, never mutated or re-registered.
+ *
+ * The built-in catalog is read through `@earendil-works/pi-ai/providers/all`,
+ * not `@earendil-works/pi-ai/providers/openai`: Pi's extension loader aliases
+ * only the pi-ai root, `/compat`, `/oauth` and `/providers/all`, so any other
+ * pi-ai subpath resolves under the aliased root file and fails extension load.
  */
 
 import type {
 	ProviderConfig,
 	ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { cloneProviderModelCatalog } from "./catalog-rebinding.js";
 
 /** pi-ai model API id for the OpenAI platform Responses API. */
@@ -45,7 +51,7 @@ export class OpenAiAdapterContractError extends Error {
 /**
  * Model configs for the OpenAI platform catalog, deeply isolated from any
  * registry-owned object. Prefers the live registry's base `openai` catalog;
- * falls back to the pinned pi-ai `openaiProvider()` factory when the host has
+ * falls back to the pinned pi-ai built-in `openai` catalog when the host has
  * not registered a base `openai` provider. The registry-owned `provider`
  * identity is stripped so the caller can re-point each model at the alias id.
  */
@@ -70,11 +76,15 @@ function tryCaptureRegistryModels(
 }
 
 function composeModelsFromFactory(): readonly ProviderModelConfig[] {
-	const provider = openaiProvider();
-	const models = provider.getModels();
-	if (models.length === 0) {
+	if (typeof getBuiltinModels !== "function") {
 		throw new OpenAiAdapterContractError(
-			"The pinned pi-ai openai provider factory yielded no models.",
+			"The pinned pi-ai providers/all entry no longer exports getBuiltinModels.",
+		);
+	}
+	const models: unknown = getBuiltinModels(OPENAI_BASE_PROVIDER);
+	if (!Array.isArray(models) || models.length === 0) {
+		throw new OpenAiAdapterContractError(
+			"The pinned pi-ai built-in openai catalog yielded no models.",
 		);
 	}
 	return models.map((model: unknown) => {

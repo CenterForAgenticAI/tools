@@ -573,6 +573,35 @@ function hasStreamResult(
 	return "result" in value && typeof value.result === "function";
 }
 
+const NO_ACTIVE_LOGICAL_SESSION_MESSAGE =
+	"No active unified logical provider session is available.";
+
+/** Terminal error stream for a call no live session can serve. */
+function noActiveLogicalSessionStream(modelId: string): AssistantMessageEventStream {
+	const stream = createAssistantMessageEventStream();
+	const error: AssistantMessage = {
+		role: "assistant",
+		content: [],
+		api: LOGICAL_PROVIDER_ID,
+		provider: LOGICAL_PROVIDER_ID,
+		model: modelId,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "error",
+		errorMessage: NO_ACTIVE_LOGICAL_SESSION_MESSAGE,
+		timestamp: Date.now(),
+	};
+	stream.push({ type: "error", reason: "error", error });
+	stream.end(error);
+	return stream;
+}
+
 function deferredLogicalProviderStream(
 	upstream: Promise<AsyncIterable<unknown>>,
 ): AssistantMessageEventStream {
@@ -650,13 +679,88 @@ export const LOGICAL_API_SOURCE_ID = "hyphagroup-pi-multi-account-unified";
  */
 export type LogicalApiRegistrar = (
 	logicalStream: NonNullable<ProviderConfig["streamSimple"]>,
+	sessionId?: string,
 ) => () => void;
 
 type LogicalStream = NonNullable<ProviderConfig["streamSimple"]>;
 
 interface LogicalApiStreamOwner {
 	readonly owner: symbol;
+	/** The registering session's id, when known; the key a caller routes by. */
+	readonly sessionId: string | undefined;
 	readonly stream: LogicalStream;
+}
+
+/**
+ * Every live session's own logical stream, process-wide.
+ *
+ * In-process delegate workers and forks share the foreground session's
+ * `ModelRuntime`, so a worker's `registerProvider("unified")` replaces the
+ * foreground's `streamSimple` in that shared map, and Pi never restores it when
+ * the worker ends. Every registered stream is therefore a router: it serves the
+ * session whose id the caller passed (`options.sessionId`, which Pi sets on every
+ * agent-loop request), and never a released session. Without this, a foreground
+ * turn after a worker ended ran through the worker's invalidated extension
+ * context and failed with Pi's stale-ctx error until restart.
+ *
+ * Held on `globalThis` because Pi loads each session's extension with
+ * `moduleCache: false`, so module-level state is not shared between sessions.
+ */
+const LIVE_LOGICAL_SESSIONS_KEY = Symbol.for(
+	"hyphagroup.pi-multi-account.unified-live-sessions",
+);
+
+function liveLogicalSessions(): LogicalApiStreamOwner[] {
+	const holder = globalThis as unknown as Record<
+		symbol,
+		LogicalApiStreamOwner[] | undefined
+	>;
+	let sessions = holder[LIVE_LOGICAL_SESSIONS_KEY];
+	if (sessions === undefined) {
+		sessions = [];
+		holder[LIVE_LOGICAL_SESSIONS_KEY] = sessions;
+	}
+	return sessions;
+}
+
+/** Test-only: forget every live session so suites cannot leak routing state. */
+export function resetLogicalSessionRoutingForTests(): void {
+	liveLogicalSessions().length = 0;
+}
+
+function callerSessionId(options: unknown): string | undefined {
+	if (typeof options !== "object" || options === null) return undefined;
+	const sessionId = (options as { sessionId?: unknown }).sessionId;
+	return typeof sessionId === "string" && sessionId.length > 0
+		? sessionId
+		: undefined;
+}
+
+/**
+ * Pick the live stream that should serve one call: the caller's own session when
+ * its id is known and live, else the preferred owner if still live, else the
+ * newest live session. Ids Pi generates per call (compaction summaries receive a
+ * fresh routing id) match no session and take the fallback.
+ */
+function selectLogicalSessionStream(
+	candidates: readonly LogicalApiStreamOwner[],
+	options: unknown,
+	preferredOwner?: symbol,
+): LogicalApiStreamOwner | undefined {
+	const sessionId = callerSessionId(options);
+	if (sessionId !== undefined) {
+		for (let index = candidates.length - 1; index >= 0; index -= 1) {
+			const candidate = candidates[index];
+			if (candidate?.sessionId === sessionId) return candidate;
+		}
+	}
+	if (preferredOwner !== undefined) {
+		const preferred = candidates.find(
+			(candidate) => candidate.owner === preferredOwner,
+		);
+		if (preferred !== undefined) return preferred;
+	}
+	return candidates.at(-1);
 }
 
 interface LogicalApiRegistryGeneration {
@@ -678,7 +782,10 @@ let currentLogicalApiGeneration: LogicalApiRegistryGeneration | undefined;
 function createLogicalApiRegistryGeneration(): LogicalApiRegistryGeneration {
 	const streams: LogicalApiStreamOwner[] = [];
 	const currentStream: LogicalStream = (model, context, options) => {
-		const active = streams.at(-1);
+		// Select from the process-global list, not this module instance's
+		// `streams`: each session loads its own module copy, so a sibling's
+		// generation would otherwise know only its own sessions.
+		const active = selectLogicalSessionStream(liveLogicalSessions(), options);
 		if (active === undefined) {
 			throw new Error("No active unified logical provider session is available.");
 		}
@@ -732,7 +839,7 @@ function acquireLogicalApiRegistryGeneration(): LogicalApiRegistryGeneration {
  */
 export function createLogicalApiRegistrarForFactoryGeneration(): LogicalApiRegistrar {
 	let factoryGeneration: LogicalApiRegistryGeneration | undefined;
-	return (logicalStream) => {
+	return (logicalStream, sessionId) => {
 		const registered = getApiProvider(LOGICAL_PROVIDER_ID);
 		const generation =
 			factoryGeneration !== undefined && registered === factoryGeneration.provider
@@ -741,7 +848,7 @@ export function createLogicalApiRegistrarForFactoryGeneration(): LogicalApiRegis
 		factoryGeneration = generation;
 
 		const owner = Symbol("logical-session-stream");
-		generation.streams.push({ owner, stream: logicalStream });
+		generation.streams.push({ owner, sessionId, stream: logicalStream });
 		let released = false;
 		return () => {
 			if (released) return;
@@ -760,6 +867,7 @@ function registerProjectedLogicalProvider(
 	models: ModelDeclarationRow[],
 	deps: LogicalProviderDeps,
 	registerLogicalApi: LogicalApiRegistrar,
+	sessionId?: string,
 ): () => void {
 	const provider = createLogicalProvider(deps);
 	const streamSimple: NonNullable<ProviderConfig["streamSimple"]> = (
@@ -770,12 +878,34 @@ function registerProjectedLogicalProvider(
 		deferredLogicalProviderStream(
 			Promise.resolve(provider.streamSimple(model, context, options)),
 		);
+	const ownEntry: LogicalApiStreamOwner = {
+		owner: Symbol("logical-session"),
+		sessionId,
+		stream: streamSimple,
+	};
+	// The host-map stream routes by caller rather than closing over this session:
+	// a sibling in-process session may later own this slot of the shared runtime.
+	const routedStreamSimple: NonNullable<ProviderConfig["streamSimple"]> = (
+		model,
+		context,
+		options,
+	) => {
+		const selected = selectLogicalSessionStream(
+			liveLogicalSessions(),
+			options,
+			ownEntry.owner,
+		);
+		// Never fall back to a released session: its dependencies may hold an
+		// invalidated extension context.
+		if (selected === undefined) return noActiveLogicalSessionStream(model.id);
+		return selected.stream(model, context, options);
+	};
 	const providerConfig: ProviderConfig = {
 		name: LOGICAL_PROVIDER_DISPLAY_NAME,
 		api: LOGICAL_PROVIDER_ID,
 		baseUrl: DECLARATION_BASE_URL,
 		models,
-		streamSimple,
+		streamSimple: routedStreamSimple,
 	};
 	// Activate the compat stream BEFORE publishing the host provider, and bind it
 	// to the exact same logical stream the host provider uses. A throwing registrar
@@ -784,16 +914,32 @@ function registerProjectedLogicalProvider(
 	// selection, failover, attribution, or request options. The registrar is
 	// deliberately NOT wrapped here: swallowing its failure would publish a host
 	// provider whose `unified` API cannot resolve.
-	const releaseLogicalStream = registerLogicalApi(streamSimple);
+	const releaseLogicalStream = registerLogicalApi(streamSimple, sessionId);
+	const live = liveLogicalSessions();
+	// A reload re-registers the same session id; its previous registration is dead.
+	if (sessionId !== undefined) {
+		for (let index = live.length - 1; index >= 0; index -= 1) {
+			if (live[index]?.sessionId === sessionId) live.splice(index, 1);
+		}
+	}
+	live.push(ownEntry);
+	let released = false;
+	const release = (): void => {
+		if (released) return;
+		released = true;
+		const index = live.indexOf(ownEntry);
+		if (index !== -1) live.splice(index, 1);
+		releaseLogicalStream();
+	};
 	try {
 		pi.registerProvider(LOGICAL_PROVIDER_ID, providerConfig);
 	} catch (error) {
 		// Remove only this failed session's stream. The process-global API entry is
 		// generation-owned and remains available to any preceding live session.
-		releaseLogicalStream();
+		release();
 		throw error;
 	}
-	return releaseLogicalStream;
+	return release;
 }
 
 function safeAttributionCall(call: () => void): void {
@@ -860,6 +1006,7 @@ export function registerLogicalProviderForSession(
 	projectedModels: unknown[],
 	deps: LogicalProviderDeps,
 	registerLogicalApi: LogicalApiRegistrar = registerLogicalApiWithCompat,
+	options: { readonly sessionId?: string } = {},
 ): LogicalProviderSessionRegistration {
 	const models = assertProjectedManagedModels(projectedModels);
 	const rawLifecycle: LogicalAttributionLifecycle = deps.attribution ?? {
@@ -882,6 +1029,7 @@ export function registerLogicalProviderForSession(
 			models,
 			sessionDeps,
 			registerLogicalApi,
+			options.sessionId,
 		);
 	} catch (error) {
 		// registerProjectedLogicalProvider already removed any activated session
