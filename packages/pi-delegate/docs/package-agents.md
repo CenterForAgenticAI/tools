@@ -43,8 +43,8 @@ The global baseline is applied before agent frontmatter and before durable `agen
 
 `extensionExclude` can opt a package agent out of a provider; the affected global-only `ext:` selector will warn and drop when that provider is absent or excluded. A selector repeated by package-agent frontmatter or a durable/invocation override remains explicit and fail-closed. Malformed, ambiguous, and provider-registration-failed selectors also remain hard errors.
 
-The `delegate` and `worker` definitions are the only builtins shipped by
-`pi-delegate`. Companion development-tool packages can ship `implementer`,
+The `delegate`, `worker`, and `publisher` definitions are the builtins shipped
+by `pi-delegate`. Companion development-tool packages can ship `implementer`,
 `integrator`, `planner`, `reviewer`, and `scout` workflow agents through this
 package scope.
 
@@ -75,17 +75,17 @@ directory you'll list in `pi-delegate.agents` below):
 ```markdown
 ---
 name: ts-implementer
-description: TypeScript implementer for graft work specs. Reads the codebase, makes surgical edits, runs validation.
+description: TypeScript implementer for delegated work specs. Reads the codebase, makes surgical edits, runs validation.
 model: anthropic/claude-sonnet-4
-skills: [graft-implement]
+skills: [implement, test-execution]
 tools: [read, bash, edit, write]
 ---
 
 # ts-implementer
 
-You are a TypeScript implementer dispatched by graft. Read the work
-spec at `.graft/work/<task>.yaml` and produce the smallest correct
-diff that satisfies the acceptance criteria.
+You are a TypeScript implementer. Follow the task brief supplied with the
+dispatch. Produce the smallest correct diff that satisfies its acceptance
+criteria.
 
 …
 ```

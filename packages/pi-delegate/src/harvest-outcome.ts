@@ -1,4 +1,5 @@
 import { isRefusalErrorMessage, type WorkerErrorKind } from "./refusal.js";
+import { DELEGATE_COMPLETE_CUSTOM_TYPE } from "./events.js";
 
 /** Minimal message surface needed to classify a worker transcript. */
 export interface HarvestMessage {
@@ -315,7 +316,7 @@ function authoritativeSelectionWindow(
 		const message = messages[i]!;
 		if (
 			messageRole(message) === "user" ||
-			(messageRole(message) === "custom" && message.customType === "delegate:complete")
+			(messageRole(message) === "custom" && message.customType === DELEGATE_COMPLETE_CUSTOM_TYPE)
 		) return messages.slice(i);
 	}
 	return messages;

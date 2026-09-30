@@ -1,5 +1,6 @@
 import type { RunResult } from "./fork-runner.js";
 import type { DelegateDispatchState } from "./runtime.js";
+import { DELEGATE_COMPLETE_CUSTOM_TYPE } from "./events.js";
 
 export const DELEGATE_USAGE_CUSTOM_TYPE = "pi-delegate:usage-rollup";
 export const DELEGATE_USAGE_SCHEMA_VERSION = 2 as const;
@@ -732,7 +733,7 @@ export function extractDelegateUsageRecordsFromEntries(entries: readonly any[]):
 			continue;
 		}
 
-		if (entry.type === "custom_message" && entry.customType === "delegate:complete") {
+		if (entry.type === "custom_message" && entry.customType === DELEGATE_COMPLETE_CUSTOM_TYPE) {
 			const rec = recordFromDetails(entry.details, "custom-message", entry.id);
 			if (rec) out.push(rec);
 			continue;
@@ -746,7 +747,7 @@ export function extractDelegateUsageRecordsFromEntries(entries: readonly any[]):
 			if (rec) out.push(rec);
 			continue;
 		}
-		if (message.role === "custom" && message.customType === "delegate:complete") {
+		if (message.role === "custom" && message.customType === DELEGATE_COMPLETE_CUSTOM_TYPE) {
 			const rec = recordFromDetails(message.details, "custom-message", entry.id);
 			if (rec) out.push(rec);
 		}

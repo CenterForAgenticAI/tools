@@ -7,12 +7,13 @@
  *
  * Modelled on pi-interactive-shell/background-widget.ts. The widget is
  * self-refreshing (10s elapsed-time tick) and invalidates on
- * `delegate:update` / `delegate:register` / `legacy.delegate.complete` / headline
+ * `delegate:update` / `delegate:register` / `delegate:complete` / headline
  * events. Terminal runs remain a render-only projection for fixed status-specific
  * windows, then an expiry timeout requests one final render. When no visible
  * rows remain, a current-session outcome summary may still be rendered.
  */
 
+import { DELEGATE_EVENTS } from "./events.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { getActivityHeadline, onActivityHeadlinesChanged } from "./activity-headlines.js";
@@ -1245,7 +1246,7 @@ export function setupStatusWidget(
 	unsubs.push(pi.events.on("delegate:prompt-resolved", () => requestRender()));
 	unsubs.push(pi.events.on("delegate:guidance-queued", () => requestRender()));
 	unsubs.push(pi.events.on("delegate:guidance-drained", () => requestRender()));
-	unsubs.push(pi.events.on("legacy.delegate.complete", () => requestRender()));
+	unsubs.push(pi.events.on(DELEGATE_EVENTS.complete, () => requestRender()));
 
 	const manageTimer = () => {
 		// Spec 0014 / REQ-OWN-1: only THIS session's own live entries may keep the

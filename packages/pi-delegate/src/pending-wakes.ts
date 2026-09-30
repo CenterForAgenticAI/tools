@@ -59,6 +59,7 @@ import {
 	unclaimPendingResult,
 } from "./detached-spawn.js";
 import { logDelegateDiagnostic } from "./diagnostics.js";
+import { DELEGATE_COMPLETE_CUSTOM_TYPE } from "./events.js";
 import { captureCurrentAsyncContext } from "./depth-guard.js";
 import { pidAlive } from "./event-bus.js";
 import {
@@ -91,9 +92,10 @@ import type { EscalationKind } from "./escalation-store.js";
 import type { WorkerErrorKind, WorkerFailureCause } from "./refusal.js";
 import { sanitizeRecoveryText, truncateRecoveryText } from "./fork-recovery.js";
 import { getDelegatePresentationTerminology } from "./footer-presentation.js";
-import { getProcessNonce } from "./process-identity.js";
+import { getProcessNonce, wakeOwnerAlive } from "./process-identity.js";
 import { getRun, listRuns, type RunLiveStatus } from "./runtime.js";
 import { buildRetryProjection, MAX_RETRY_PROJECTION_ENTRIES, RETRY_PROJECTION_USAGE_KEYS, type RetryProjectionFork } from "./retry-projection.js";
+import { controlHints, inheritModelInterfaceProbe, modelInterfaceFor, type DelegateModelInterface } from "./model-interface.js";
 
 export { getProcessNonce } from "./process-identity.js";
 
@@ -130,6 +132,7 @@ export function bindWakeSinkToCurrentContext(
 	}
 	const observer = wakeDeliveryObservers.get(sink);
 	if (observer) wakeDeliveryObservers.set(bound, observer);
+	inheritModelInterfaceProbe(sink, bound);
 	return bound;
 }
 
@@ -189,7 +192,7 @@ export function deliverWakeMessage(
 	// Only terminal completion wakes authorize a delegated coordinator's final
 	// synthesis turn. Early failure, escalation, and recovery wakes may trigger a
 	// turn, but must leave the completion gate parked for the terminal wake.
-	if (message.customType === "delegate:complete") {
+	if (message.customType === DELEGATE_COMPLETE_CUSTOM_TYPE) {
 		try {
 			wakeDeliveryObservers.get(sink)?.();
 		} catch {
@@ -304,7 +307,7 @@ export interface NotifyRunFailedInput {
 
 /** The exact `delegate:complete` custom message a completion wake sends. */
 export interface CompletionMessage {
-	customType: "delegate:complete";
+	customType: typeof DELEGATE_COMPLETE_CUSTOM_TYPE;
 	content: string;
 	display: true;
 	details: {
@@ -364,7 +367,7 @@ export function buildCompletionMessage(input: NotifyCompletionInput): Completion
 		? `[delegate runId=${runId} failed: ${error}]`
 		: `[delegate runId=${runId} completed]`;
 	return {
-		customType: "delegate:complete",
+		customType: DELEGATE_COMPLETE_CUSTOM_TYPE,
 		content: `${header}\n\nReturn one self-contained synthesis incorporating all relevant completed child results, including earlier results. Your next answer replaces earlier progress and addenda.\n\n${combinedContent || "(no output)"}`,
 		display: true,
 		details: {
@@ -516,14 +519,18 @@ function withoutLiveRecovery(input: NotifyRunFailedInput): NotifyRunFailedInput 
 	};
 }
 
-export function buildForkFailedMessage(input: NotifyRunFailedInput): RunFailedMessage {
+/**
+ * Build the early-failure wake. `modelInterface` is the receiving session's
+ * selected interface; it only changes the recovery call hint.
+ */
+export function buildForkFailedMessage(input: NotifyRunFailedInput, modelInterface: DelegateModelInterface = "native"): RunFailedMessage {
 	const bounded = boundFailureInput(input);
 	const detail = bounded.reason ? `: ${bounded.reason}` : "";
 	const terminology = getDelegatePresentationTerminology(bounded.mode);
 	const entryNoun = terminology.singular;
 	const identityKey = entryNoun;
 	const recoveryHint = bounded.recovery?.available === true
-		? `Recovery is available; call delegate_control action recover (strategy: ${bounded.recovery.strategy}). `
+		? `${controlHints(modelInterface).recover(bounded.recovery.strategy)} `
 		: "Recovery is not available for this failure. ";
 	const worktreeHint = bounded.worktreeDiff?.captureFailed === true
 		? `Worktree recovery: ${formatWorktreeCaptureFailureGuidance(bounded.worktreeDiff)} `
@@ -725,7 +732,7 @@ export function notifyForkFailed(
 		.digest("hex");
 	const keys = runFailureWakeKeys();
 	if (keys.has(key)) return "duplicate";
-	const message = buildForkFailedMessage(input);
+	const message = buildForkFailedMessage(input, modelInterfaceFor(sink));
 	const entryNoun = getDelegatePresentationTerminology(input.mode).singular;
 	try {
 		deliverWakeMessage(sink, message);
@@ -744,7 +751,10 @@ export function notifyForkFailed(
 		if (stale && live && live !== sink && liveOwnerMatches) {
 			try {
 				// A replacement module cannot access this module instance's descriptor.
-				deliverWakeMessage(live, buildForkFailedMessage(withoutLiveRecovery(input)));
+				// withoutLiveRecovery always renders "Recovery is not available", so
+				// today no control route is named here. The receiving session's
+				// interface is still passed so a future hint on this path follows it.
+				deliverWakeMessage(live, buildForkFailedMessage(withoutLiveRecovery(input), modelInterfaceFor(live)));
 				rememberRunFailureWakeKey(keys, key);
 				return "cross-boundary";
 			} catch {
@@ -1541,7 +1551,11 @@ export function deliverPendingDispatchWakes(
 	let delivered = 0;
 	for (const { file, record, fileDev, fileIno, revision } of pending) {
 		const ours = record.owningPid === process.pid && record.owningNonce === getProcessNonce();
-		const ownerAlive = pidAlive(record.owningPid);
+		const ownerAlive = wakeOwnerAlive(
+			{ pid: record.owningPid, nonce: record.owningNonce, sessionId: record.ownerSessionId },
+			opts?.currentSessionId,
+			pidAlive,
+		);
 		const hasSessionOwner = typeof record.ownerSessionId === "string" && record.ownerSessionId.length > 0;
 		if (hasSessionOwner && opts?.currentSessionId !== record.ownerSessionId) {
 			const canAdoptStaleEscalationOwner =
@@ -1607,7 +1621,7 @@ export function deliverPendingDispatchWakes(
 			if (record.kind === "escalation-pending") {
 				deliverWakeMessage(sink, buildEscalationPendingMessage(record.payload));
 			} else if (record.kind === "fork-failed") {
-				deliverWakeMessage(sink, buildForkFailedMessage(record.input));
+				deliverWakeMessage(sink, buildForkFailedMessage(record.input, modelInterfaceFor(sink)));
 			} else {
 				const effectiveInput: NotifyCompletionInput = {
 					...record.input,

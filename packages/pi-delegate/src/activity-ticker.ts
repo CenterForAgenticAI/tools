@@ -1,3 +1,4 @@
+import { DELEGATE_EVENTS } from "./events.js";
 import type { Api, Message, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ModelRegistry } from "@earendil-works/pi-coding-agent";
 
@@ -1162,7 +1163,7 @@ export function setupActivityTicker(
 	unsubs.push(pi.events.on("delegate:prompt-resolved", syncEvent));
 	unsubs.push(pi.events.on("delegate:guidance-queued", syncEvent));
 	unsubs.push(pi.events.on("delegate:guidance-drained", syncEvent));
-	unsubs.push(pi.events.on("legacy.delegate.complete", syncEvent));
+	unsubs.push(pi.events.on(DELEGATE_EVENTS.complete, syncEvent));
 
 	syncAll();
 

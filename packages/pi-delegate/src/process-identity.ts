@@ -157,6 +157,21 @@ export function verifyProcessIdentity(
 		: "mismatch";
 }
 
+/**
+ * Liveness of a wake owner. Sandboxed peers can share this pid, so a same-pid
+ * record from another generation is dead only when it is the current session's
+ * own predecessor.
+ */
+export function wakeOwnerAlive(
+	owner: { pid: number; nonce?: string; sessionId?: string },
+	currentSessionId: string | undefined,
+	pidAlive: (pid: number) => boolean,
+	nonce: string = getProcessNonce(),
+): boolean {
+	if (owner.pid !== process.pid) return pidAlive(owner.pid);
+	return owner.nonce === nonce || currentSessionId === undefined || owner.sessionId !== currentSessionId;
+}
+
 /** Reload-stable nonce shared by every module instance in this OS process. */
 export function getProcessNonce(): string {
 	const global = globalThis as Record<symbol, unknown>;

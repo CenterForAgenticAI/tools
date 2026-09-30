@@ -206,6 +206,7 @@ export async function runSavedChainCommand(
 	step: PreparedSavedChainRunStep,
 	chainDir: string,
 	signal?: AbortSignal,
+	onStarted?: () => void,
 ): Promise<SavedChainRunResult> {
 	const output: BoundedCapture = { chunks: [], bytes: 0, truncated: false };
 	const stdout: BoundedCapture = { chunks: [], bytes: 0, truncated: false };
@@ -313,6 +314,7 @@ export async function runSavedChainCommand(
 			captureChunk(stderr, chunk);
 			captureChunk(output, chunk);
 		});
+		child.once("spawn", () => onStarted?.());
 		child.once("error", (error) => {
 			if (finishTermination(null, null)) return;
 			const safeError = String(error instanceof Error ? error.message : error)

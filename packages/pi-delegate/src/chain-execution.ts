@@ -35,6 +35,7 @@
  */
 
 import * as fs from "node:fs";
+import { inputSha256 } from "./dispatch-evidence.js";
 import * as path from "node:path";
 import type {
 	AgentConfig,
@@ -724,8 +725,9 @@ async function runRunStep(
 	});
 
 	let outcome: Awaited<ReturnType<typeof runSavedChainCommand>>;
+	let commandStarted = false;
 	try {
-		outcome = await runSavedChainCommand(prepared, ctx.chainDir, chainEntrySignal(ctx, stepName));
+		outcome = await runSavedChainCommand(prepared, ctx.chainDir, chainEntrySignal(ctx, stepName), () => { commandStarted = true; });
 	} catch (error) {
 		const detail = (error instanceof Error ? error.message : String(error))
 			.replace(/\p{Cc}+/gu, " ")
@@ -753,6 +755,7 @@ async function runRunStep(
 		workerCwd: prepared.cwd,
 		transcript: [],
 		mutationReport: unavailableMutationReport("native run stages are not mutation-tracked"),
+		inputDigests: commandStarted ? [{ sequence: 0, algorithm: "sha256", digest: inputSha256(prepared.command) }] : [],
 		...(outcome.status === "completed" ? {} : { error: outcome.diagnostic }),
 		...(outcome.status === "aborted"
 			? { cancelReason: ctx.getCancelReason?.(stepName) ?? "user" }

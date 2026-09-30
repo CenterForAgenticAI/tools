@@ -14,6 +14,7 @@
  * the overlay body.
  */
 
+import { DELEGATE_EVENTS } from "./events.js";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, Focusable, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
@@ -919,7 +920,7 @@ export class TranscriptOverlay implements Component, Focusable {
 			};
 			this.unsubs.push(options.events.on("delegate:update", onAnyUpdate));
 			this.unsubs.push(options.events.on("delegate:register", onAnyUpdate));
-			this.unsubs.push(options.events.on("legacy.delegate.complete", onAnyUpdate));
+			this.unsubs.push(options.events.on(DELEGATE_EVENTS.complete, onAnyUpdate));
 			this.unsubs.push(
 				options.events.on("delegate:transcript-append", onTranscript),
 			);
@@ -938,8 +939,8 @@ export class TranscriptOverlay implements Component, Focusable {
 			this.unsubs.push(options.events.on("delegate:prompt-resolved", onTranscript));
 			this.unsubs.push(options.events.on("delegate:guidance-queued", onAnyUpdate));
 			this.unsubs.push(options.events.on("delegate:guidance-drained", onAnyUpdate));
-			this.unsubs.push(options.events.on("legacy.delegate.guidance_delivered", onTranscript));
-			this.unsubs.push(options.events.on("legacy.delegate.worker_notify", onTranscript));
+			this.unsubs.push(options.events.on(DELEGATE_EVENTS.guidanceDelivered, onTranscript));
+			this.unsubs.push(options.events.on(DELEGATE_EVENTS.workerNotify, onTranscript));
 		}
 
 		// Seed the live-entry latch from the mount-time snapshot so a single

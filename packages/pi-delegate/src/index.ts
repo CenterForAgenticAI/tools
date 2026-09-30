@@ -9,6 +9,7 @@
  * without polluting the main thread's history.
  */
 
+import { DELEGATE_COMPLETE_CUSTOM_TYPE, DELEGATE_EVENTS, emitDelegateEvent } from "./events.js";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -19,6 +20,9 @@ import {
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { Type, type TProperties, type TSchema, type TObject } from "@sinclair/typebox";
+import { DELEGATE_RUNTIME_CAPABILITIES } from "./runtime-contract.js";
+export * from "./runtime-contract.js";
+import { prepareRuntimeToolArguments, RuntimeBoundaryError } from "./runtime-boundary.js";
 import {
 	type AgentConfig,
 	type AgentScope,
@@ -30,6 +34,7 @@ import {
 } from "./agents.js";
 import { configuredPackageRoots } from "./configured-package-roots.js";
 import {
+	CONTROL_ROUTE,
 	forwardedParams,
 	isDelegatedWorkerEnv,
 	LEGACY_CONTROL_TOOL_NAMES,
@@ -40,6 +45,7 @@ import {
 import { type ControlVisibilityState, visibleControlTools } from "./control-visibility.js";
 import { resolveChildCwd } from "./cwd-resolution.js";
 import { DelegateParams as CanonicalDelegateParams, prepareArguments } from "./delegate-params.js";
+import { buildDispatchEvidence, daemonDispatchEntries, persistDispatchEvidence, projectDispatchSteps, readDispatchEvidence, type DispatchEvidence } from "./dispatch-evidence.js";
 import { compileDelegateRuns, hasSupervisedProgress, SUPERVISED_PROGRESS_WARNING } from "./delegate-runs.js";
 import { assertNoRemovedArtifactFieldsAtIngress } from "./delegate-normalize.js";
 export { normalizeDelegateParams } from "./delegate-normalize.js";
@@ -54,6 +60,7 @@ import {
 	type SessionActiveWorkQueryRegistryHandle,
 } from "./session-active-work-query.js";
 import { logDelegateDiagnostic } from "./diagnostics.js";
+import { createInvocationAuthority, assertInvocationPreparing, assertInvocationLaunch, acceptInvocation } from "./runtime-invocation.js";
 import {
 	appendCompletionUsageMetadata,
 	buildCompletionMessage,
@@ -77,6 +84,7 @@ import {
 	type NotifyCompletionInput,
 	type NotifyCompletionSink,
 } from "./pending-wakes.js";
+import { controlHints, modelInterfaceFor, setModelInterfaceProbe, type DelegateModelInterface } from "./model-interface.js";
 import { registerChildCompletionGate } from "./worker-session-lifecycle.js";
 import { handleManagementAction, ManagementConfigSchema } from "./agent-management.js";
 import {
@@ -140,6 +148,8 @@ import {
 	stripRemovedPlaneConfigKeys,
 } from "./config.js";
 import { setupDelegateOnly } from "./delegate-only/index.js";
+import { getActiveDelegateOnlyMode } from "./delegate-only/runtime-state.js";
+import { setupFabricAdapter, type DelegateFabricAdapter } from "./fabric-adapter.js";
 import { resolveDelegateOnlyDepth } from "./delegate-only/fork-policy.js";
 import { capDelegateOnlyResult } from "./delegate-only/result-caps.js";
 import {
@@ -229,10 +239,14 @@ import {
 	hasOwnedDaemonDriverRun,
 	isDaemonRequestError,
 	launchDaemonDriver,
+	DaemonLaunchError,
+	readDaemonDriverRecord,
+	reconcileDaemonPendingLaunch,
 	promptStatusDaemonDriver,
 	readDaemonDriverCfg,
 	recoverDaemonDriver,
 	replayDaemonDriver,
+	observeDaemonDriver,
 	statusDaemonDriver,
 	steerDaemonDriver,
 	type DaemonUiAnswer,
@@ -269,7 +283,7 @@ import {
 	sweepOldOrchestrateRoutes,
 	writeRouteRecord,
 } from "./control-route.js";
-import { captureProcessIdentity } from "./process-identity.js";
+import { captureProcessIdentity, wakeOwnerAlive } from "./process-identity.js";
 import {
 	formatUniformRunStatus,
 	isUniformRunLive,
@@ -335,6 +349,7 @@ import {
 	type RunLiveStatus,
 	type DelegateDispatchState,
 	getRun,
+	getRunSnapshot,
 	isLiveStatus,
 	hasLocalRunAuthority,
 	listPendingOrphanedDispatchWakes,
@@ -368,6 +383,9 @@ export {
 	DELEGATE_RUNTIME_API_HANDLE_KEY,
 } from "./runtime-api.js";
 export type {
+	DispatchAcceptance,
+	DispatchFailureEvidence,
+	DispatchStepEvidence,
 	DelegateRuntimeApiHandle,
 	DelegateRuntimeCancelRequest,
 	DelegateRuntimeClient,
@@ -376,6 +394,8 @@ export type {
 	DelegateRuntimeForkProvenance,
 	DelegateRuntimeForkReceipt,
 	DelegateRuntimeInputDigest,
+	DelegateRuntimeInvocationOptions,
+	DelegateRuntimeUpdate,
 	DelegateRuntimeReceipt,
 	DelegateRuntimeResult,
 	DelegateRuntimeSteerRequest,
@@ -387,6 +407,7 @@ import {
 	installDelegateRuntimeCore,
 	readDelegateRuntimeReceipt,
 	uninstallDelegateRuntimeCore,
+	publishDelegateRuntimeResult,
 } from "./runtime-api.js";
 import type { DelegateRuntimeToolResult } from "./runtime-api.js";
 import {
@@ -1336,13 +1357,33 @@ const DELEGATE_TOOL_PROMPT = {
 	promptGuidelines: [
 		"Prefer `delegate` to `subagent` for open-ended or iterative work.",
 		"Use `rounds`, `clone_mode` and `collapse_mode` only with `mode: 'supervised'`; solo rejects `rounds` and ignores the other two. Steering targets the supervisor `fork` in `mode: 'supervised'`, or an authenticated detached driver; direct workers, chain steps, and unknown in-process shapes reject steering. `clone_mode: 'task_only'` or `'snippet'` limits copied main context.",
-		"BACKGROUND AUTO-WAKE: solo and supervised background dispatches return immediately and wake you with full output when every run finishes. A driver returns after durable acceptance; use delegate_control prompt_status and result to resume it. Do NOT poll, sleep, or busy-wait; use `await:true` only for a required dependency.",
+		"BACKGROUND RESULTS: solo and supervised dispatches return immediately. If you keep working, check delegate_control(action=\"status\", runId) once at a natural checkpoint and use action=\"result\" for terminal runs. Otherwise the output wakes you when you would stop. A driver returns after durable acceptance; use delegate_control prompt_status and result to resume it. Never busy-poll or sleep; use `await:true` only for a required dependency.",
 		"TASK SEED: `handoff: {tasks}` reaches the worker before its first turn as a durable list when claimed, otherwise once as a prompt checklist; a driver seeds only its detached child, never the current main session.",
 		"STRUCTURED ESCALATION: strictly opt-in, independently per slot. Only effective `mode: 'local'` (set by `escalation: 'local'`) enables a slot and its decision, blocker, or amendment raise tools. Use it for bounded decisions beyond worker authority, blockage, or task/plan/spec amendments. Escalation-enabled slots must run in the background: `await:true` and `sync:true` are rejected.",
 	],
 	parameters: DelegateParams,
 } as const;
 export const DELEGATE_PROMPT_GUIDELINES = DELEGATE_TOOL_PROMPT.promptGuidelines;
+
+/** Native tools whose model advertisement the complete Fabric surface replaces (#568). */
+const FABRIC_COVERED_NATIVE_TOOLS: ReadonlySet<string> = new Set(["delegate", "delegate_control", "delegate_escalation"]);
+
+/**
+ * The exact prompt lines Pi renders for the native delegate tools: the
+ * `- delegate: <snippet>` tool line and one `- <guideline>` line per guideline,
+ * normalized as Pi normalizes them.
+ */
+function nativeFabricPromptLines(deferred: ReadonlyMap<string, Record<string, unknown>>): string[] {
+	const lines = [`- delegate: ${DELEGATE_TOOL_PROMPT.promptSnippet.replace(/\s+/g, " ").trim()}`];
+	const guidelines: unknown[] = [...DELEGATE_TOOL_PROMPT.promptGuidelines];
+	for (const name of ["delegate_control", "delegate_escalation"]) {
+		const definition = deferred.get(name);
+		if (Array.isArray(definition?.promptGuidelines)) guidelines.push(...definition.promptGuidelines);
+		if (typeof definition?.promptSnippet === "string") lines.push(`- ${name}: ${definition.promptSnippet.replace(/\s+/g, " ").trim()}`);
+	}
+	for (const guideline of guidelines) if (typeof guideline === "string" && guideline.trim()) lines.push(`- ${guideline.trim()}`);
+	return lines;
+}
 
 /** Re-exported for compatibility with existing callers and tests. */
 export { resolveChildCwd };
@@ -1743,7 +1784,7 @@ export interface PumpRunsArgs {
 	/**
 	 * Phase 3a.2 — called when a round's `message_subagent` prepended
 	 * pending guidance. The runtime layer uses it to push a synthetic
-	 * transcript entry + emit `legacy.delegate.guidance_delivered`.
+	 * transcript entry + emit `delegate:guidance-delivered`.
 	 */
 	onGuidanceDelivered?: (forkName: string, messages: string[]) => void;
 	/**
@@ -2060,7 +2101,7 @@ function formatRecoveryBanner(
 	return `[delegate ${mode} runId=${runId} — ${recoveredCount}, ${totalCount}${counts ? ` (${counts})` : ""}]`;
 }
 
-function buildSyncOrphanRecoveryMessage(run: DelegateDispatchState): SyncOrphanRecoveryMessage | undefined {
+function buildSyncOrphanRecoveryMessage(run: DelegateDispatchState, modelInterface: DelegateModelInterface = "native"): SyncOrphanRecoveryMessage | undefined {
 	if (!run.finalResult || run.finalResult.length === 0) return undefined;
 	const recovery = summarizeRecoveryProvenance(run);
 	if (!recovery) return undefined;
@@ -2071,7 +2112,7 @@ function buildSyncOrphanRecoveryMessage(run: DelegateDispatchState): SyncOrphanR
 			`${formatRecoveryBanner(run.runId, recovery, { sync: true })}\n\n` +
 			`[delegate sync runId=${run.runId} recovered after parent session restart]\n\n` +
 			`The original foreground delegate(sync:true) tool call did not return before its parent runtime disappeared. ` +
-			`Recovered durable run-entry output is below; the run remains available via delegate_control(action="result", runId).\n\n` +
+			`Recovered durable run-entry output is below; ${controlHints(modelInterface).retainedResult()}\n\n` +
 			(combinedContent || "(no output)"),
 		display: true,
 		details: {
@@ -2135,7 +2176,7 @@ export function deliverSyncOrphanRecoveries(
 			continue;
 		}
 		const deliveredRun = observation.deliveredRun;
-		const message = buildSyncOrphanRecoveryMessage(deliveredRun);
+		const message = buildSyncOrphanRecoveryMessage(deliveredRun, modelInterfaceFor(sink));
 		if (!message) continue;
 		try {
 			deliverWakeMessage(sink, message);
@@ -2307,7 +2348,11 @@ export function deliverPendingOrchestrateResults(
 			}
 			if (!exactOwner) {
 				const ours = owner.ownerPid === process.pid && owner.ownerNonce === getProcessNonce();
-				const ownerAlive = pidAlive(owner.ownerPid);
+				const ownerAlive = wakeOwnerAlive(
+					{ pid: owner.ownerPid, nonce: owner.ownerNonce, sessionId: owner.ownerSessionId },
+					opts?.currentSessionId,
+					pidAlive,
+				);
 				if (!ours && ownerAlive) {
 					logDelegateDiagnostic(
 						`pending driver result skipped: foreign live owner session=${owner.ownerSessionId} ` +
@@ -2357,12 +2402,12 @@ export function deliverPendingOrchestrateResults(
 				: `[delegate driver runId=${runId} failed]`;
 			const body = result.status === "done"
 				? result.output || "(no output)"
-				: `Failure details are available through delegate_control(action="result", runId="${runId}").`;
+				: controlHints(modelInterfaceFor(sink)).failureDetails(runId);
 			const usage = result.usage ? delegateUsageFromAggregate(result.usage) : undefined;
 			deliverWakeMessage(
 				sink,
 				{
-					customType: "delegate:complete",
+					customType: DELEGATE_COMPLETE_CUSTOM_TYPE,
 					content: `${header}\n\n${body}`,
 					display: true,
 					details: {
@@ -2761,7 +2806,7 @@ export async function executeOrchestrateShape(args: ExecuteOrchestrateShapeArgs)
 					type: "text",
 					text: plannedModels.failure.message,
 				}],
-				details: { forks: [], runId, mode: "driver" },
+				details: { forks: [], runId, mode: "driver", errorCode: "model-unavailable" },
 				isError: true,
 			};
 		}
@@ -2778,6 +2823,7 @@ export async function executeOrchestrateShape(args: ExecuteOrchestrateShapeArgs)
 		});
 	}
 
+	assertInvocationPreparing();
 	const optionalGlobalExtensionSelectorKeys = getOptionalGlobalExtensionSelectorKeys(surface);
 	const cfg: OrchestrateCfg = {
 		mode: "driver",
@@ -2836,7 +2882,7 @@ export async function executeOrchestrateShape(args: ExecuteOrchestrateShapeArgs)
 					type: "text" as const,
 					text:
 						`Dispatched driver runId=${runId} (agent=${agent.name}) through pi-daemon. ` +
-						"The prompt is durably accepted and continues without this client; use delegate_control for status, result, and control.",
+						controlHints(modelInterfaceFor(pi)).daemonDriverAccepted(),
 				}],
 				details: {
 					dispatched: true,
@@ -2849,6 +2895,7 @@ export async function executeOrchestrateShape(args: ExecuteOrchestrateShapeArgs)
 					effectiveMax: childFrame.effectiveMax,
 					daemonSessionId: launched.locator.daemonSessionId,
 					promptId: launched.locator.promptId,
+					idempotencyKey: launched.locator.idempotencyKey,
 					controlAvailable: true,
 				},
 			}),
@@ -2859,7 +2906,7 @@ export async function executeOrchestrateShape(args: ExecuteOrchestrateShapeArgs)
 						? `${error.code}: ${error.message}${error.details === undefined ? "" : ` (${JSON.stringify(error.details)})`}`
 						: error instanceof Error ? error.message : String(error)}`,
 				}],
-				details: { forks: [], runId, mode: "driver" },
+				details: { forks: [], runId, mode: "driver", ...(error instanceof DaemonLaunchError ? { dispatchFailure: { acceptance: error.acceptance, stage: error.stage, cleanup: "not-requested", terminalConfirmed: false, recovery: { runId, action: "recover-pending-launch" } } } : {}) },
 				isError: true,
 			}),
 		);
@@ -2940,15 +2987,17 @@ export async function executeOrchestrateShape(args: ExecuteOrchestrateShapeArgs)
 	// persisted: the run still executes, but it is uncontrollable (a later-turn
 	// steer/cancel has no credential to authenticate with). REQ-CTRL-3 — this is
 	// a control credential, so the failure is surfaced, NOT silently swallowed.
+	// Control hints follow the dispatching session's selected interface (#568).
+	const hints = controlHints(modelInterfaceFor(pi));
 	const degradedNote = routeWrite.ok
 		? ""
-		: ` WARNING: control credential could not be persisted (${routeWrite.error}); this run is RUNNING but UNCONTROLLABLE — delegate_control(action="steer"/"cancel") will be unavailable for it.`;
+		: ` WARNING: control credential could not be persisted (${routeWrite.error}); this run is RUNNING but UNCONTROLLABLE — ${hints.uncontrollableDriver()}`;
 	const text =
 		`Dispatched driver runId=${runId} (agent=${agent.name}, pid=${pid}) as a DETACHED child process. ` +
 		"It drives the pipeline to completion and a new turn will be triggered automatically with the " +
 		"collapsed summary when it finishes — do not poll or sleep. The child is immune to this session's " +
 		"reload / rotate / compact / shutdown. Live state is visible in the delegate overlay and via " +
-		"delegate_control(action=\"status\", runId); delegate health reports detached counts separately." +
+		hints.detachedDriverStatus() +
 		degradedNote;
 	return {
 		content: [{ type: "text", text }],
@@ -3001,6 +3050,16 @@ export interface ExecuteChainShapeArgs {
 	getWorkerToolDefinitions?: (names: readonly string[]) => readonly ToolDefinition[];
 	/** Default-on per-entry failure wake; false preserves aggregate-only behavior. */
 	notifyOnFailure?: boolean;
+}
+
+function assertInvocationLaunchOrTerminalize(cwd: string, admitted?: DelegateDispatchState): void {
+	try { assertInvocationLaunch(); }
+	catch (error) {
+		// A retry reservation has already committed. Keep its identity and publish a
+		// terminal setup failure; never launch it under a replacement session.
+		if (admitted && admitted.completedAt === undefined) completeRun(admitted.runId, finalizePrelaunchFailures(admitted, "Invoking session replaced before launch", cwd));
+		throw error;
+	}
 }
 
 export async function executeChainShape(args: ExecuteChainShapeArgs): Promise<{
@@ -3074,7 +3133,10 @@ export async function executeChainShape(args: ExecuteChainShapeArgs): Promise<{
 			abortChain(why);
 		},
 	};
+	assertInvocationPreparing();
 	registerRun(runState);
+	acceptInvocation({ runId, transport: "in-process", state: "accepted" });
+	assertInvocationLaunchOrTerminalize(ctx.cwd, runState);
 
 	const onForkRuntimeUpdate = (forkName: string, patch: Partial<RunLiveState>) => {
 		chainEntryAbortController(forkName);
@@ -3230,7 +3292,7 @@ export async function executeChainShape(args: ExecuteChainShapeArgs): Promise<{
 		);
 	const text =
 		`Dispatched chain runId=${runId} with ${args.steps.length} step(s). ` +
-		"A new turn will be triggered automatically with the full output when the chain completes — do not poll or sleep.";
+		controlHints(modelInterfaceFor(pi)).checkpointResult();
 	return {
 		content: [{ type: "text", text }],
 		details: {
@@ -3288,6 +3350,8 @@ export interface ExecuteDirectShapeArgs {
 	 * run state so `delegate_recover` can find them without an explicit seam.
 	 */
 	recoveryDescriptors?: Map<string, RunRecoveryDescriptor>;
+	/** Persist the resolved plan only after locked retry admission. */
+	dispatchEvidence?: DispatchEvidence;
 }
 
 function retryAdmissionRejection(error: unknown): {
@@ -3366,7 +3430,9 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 			delete fork.attempt;
 		}
 		try {
+			assertInvocationPreparing();
 			registerRunWithRetryClaims(provisional.runState, retryClaims);
+			acceptInvocation({ runId, transport: "in-process", state: "accepted" });
 		} catch (error) {
 			const rejection = retryAdmissionRejection(error);
 			if (rejection) return rejection;
@@ -3376,6 +3442,16 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 		for (const task of tasks) task.attempt = preRegisteredRunState.forks[task.name]?.attempt ?? 1;
 	}
 
+	if (args.dispatchEvidence) {
+		try {
+			await persistDispatchEvidence(args.agentDir, args.dispatchEvidence);
+		} catch (error) {
+			if (preRegisteredRunState) completeRun(runId, finalizePrelaunchFailures(preRegisteredRunState, diagnosticErrorText(error), executionCwd));
+			return { content: [{ type: "text", text: `delegate input evidence unavailable: ${diagnosticErrorText(error)}` }], details: { forks: [], errorCode: "input-unreadable" }, isError: true };
+		}
+	}
+
+	assertInvocationLaunchOrTerminalize(executionCwd, preRegisteredRunState);
 	// Only an admitted invocation may migrate legacy config or emit parser
 	// diagnostics. Rejected retry claims return before this disk-writing call.
 	config = loadConfig(args.agentDir);
@@ -3512,9 +3588,12 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 		runState.recoveryDescriptors = args.recoveryDescriptors;
 	}
 	if (retryClaims.length === 0) {
+		assertInvocationPreparing();
 		registerRun(runState);
+		acceptInvocation({ runId, transport: "in-process", state: "accepted" });
 	}
 
+	assertInvocationLaunchOrTerminalize(executionCwd, runState);
 	// #287 — the solo wall-clock budget is armed inside `runDirectWorker`, not
 	// here. Review of the first revision found that an after-gated dispatch
 	// compiles to `chain`, which builds its own DirectRequest and never reached
@@ -3610,6 +3689,7 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 			tasks.map((task) => [task.name, () => runState.forks[task.name]?.cancelReason]),
 		),
 		getFailureRecovery: getDirectFailureRecovery,
+		resolveModelInterface: () => modelInterfaceFor(pi),
 		resolveIntercomBridgeForTask: (task: DirectTaskInput, effectiveCwd: string) =>
 			resolveIntercomBridgeWithPolicy({
 				config,
@@ -3711,7 +3791,7 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 		: "";
 	const text =
 		`Dispatched runId=${runId} with ${taskNames.length} ${directTerminology.plural}: ${taskNames.join(", ")}. ` +
-		`A new turn will be triggered automatically with the full output when all ${directTerminology.plural} complete — do not poll or sleep.` +
+		controlHints(modelInterfaceFor(pi)).checkpointResult() +
 		budgetAck;
 	return {
 		content: [{ type: "text", text }],
@@ -3768,14 +3848,14 @@ function resolveSlotEscalationPolicy(args: {
 	});
 }
 
-function escalationPreflightError(error: unknown): {
+function escalationPreflightError(error: unknown, errorCode = "invalid-request"): {
 	content: Array<{ type: "text"; text: string }>;
-	details: { forks: RunResultDetails[] };
+	details: { forks: RunResultDetails[]; errorCode: string };
 	isError: true;
 } {
 	return {
 		content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-		details: { forks: [] },
+		details: { forks: [], errorCode },
 		isError: true,
 	};
 }
@@ -3785,7 +3865,25 @@ function projectTrustPreflight(
 	ctx: Pick<ExtensionContext, "isProjectTrusted">,
 ): ReturnType<typeof escalationPreflightError> | undefined {
 	const message = projectAgentTrustError(agents, ctx.isProjectTrusted?.() === true);
-	return message ? escalationPreflightError(new Error(message)) : undefined;
+	return message ? escalationPreflightError(new Error(message), "authorization-denied") : undefined;
+}
+
+/**
+ * Nested-caller refusal with its structured failure class. Agent-policy denials
+ * remain uncoded core errors; every writable-root confinement refusal (including
+ * a read-only caller's child-authority refusal) is `invalid-confinement`.
+ */
+function nestedDelegateRefusal(
+	policy: ReturnType<typeof nestedDelegatePolicyForApi>,
+	shape: Parameters<typeof validateNestedDelegateConfinement>[1],
+	params: unknown,
+	cwd: string,
+): { content: Array<{ type: "text"; text: string }>; details: { forks: []; errorCode?: "invalid-confinement" }; isError: true } | undefined {
+	const agentPolicyError = validateNestedDelegateAgentPolicy(policy, shape, params);
+	if (agentPolicyError) return { content: [{ type: "text", text: agentPolicyError }], details: { forks: [] }, isError: true };
+	const confinementError = validateNestedDelegateConfinement(policy, shape, params, cwd);
+	if (confinementError) return { content: [{ type: "text", text: confinementError }], details: { forks: [], errorCode: "invalid-confinement" }, isError: true };
+	return undefined;
 }
 
 function validateReadOnlySlots(params: Record<string, unknown>, shape: string): string | undefined {
@@ -3895,6 +3993,11 @@ export default function (pi: ExtensionAPI) {
 	// bundled pi-delegate skill is therefore supplied only here, once, so a
 	// filtered path cannot lose to an earlier same-name package resource.
 	pi.on("resources_discover", async (event, ctx) => {
+		// Pi emits resources_discover after every session_start handler has run
+		// (startup, reload, session replacement), so a startup delivery deferred
+		// for Fabric (CR-FABRIC-STARTUP-WAKE-NATIVE) is rendered with Fabric's
+		// selection settled. A no-op when nothing is deferred.
+		flushStartupDelivery("resources_discover");
 		const skillPath = await resolveSkillResource({
 			reason: event.reason,
 			cwd: event.cwd,
@@ -3915,7 +4018,30 @@ export default function (pi: ExtensionAPI) {
 	const toolHost = pi as unknown as {
 		registerTool: (definition: unknown) => void;
 	};
-	const registerRuntimeTool = (definition: { name: string; execute: RuntimeToolExecute } & Record<string, unknown>) => {
+	const validatedTool = (definition: { name: string; parameters: TSchema; execute: RuntimeToolExecute } & Record<string, unknown>) => {
+		const execute: RuntimeToolExecute = async (id, input, signal, update, ctx) => {
+			try {
+				if (definition.name === "delegate" && input && ["create", "update", "delete", "canonicalize"].includes(String(input.action)) && isDelegateOwnedExtensionApi(pi)) throw new RuntimeBoundaryError("authorization-denied", `delegate: nested delegate workers cannot run management mutation action '${input.action}'. Agent/chain definition changes must be made from the foreground or driver session.`);
+				const params = prepareRuntimeToolArguments(definition.name, definition.parameters, input, {
+					control: workerControlGrants("delegate_control", process.env, exactSessionId(ctx as ExtensionContext)),
+					escalation: workerControlGrants("delegate_escalation", process.env, exactSessionId(ctx as ExtensionContext)),
+					workerDenied: isDelegatedWorkerEnv(process.env, { lineageDepth: currentLineageFrame()?.depth }),
+				});
+				const result = await definition.execute(id, params, signal, update, ctx);
+				if (!result.isError) return result;
+				const details = result.details && typeof result.details === "object" ? Object.fromEntries(Object.entries(result.details)) : {};
+				if ((definition.name === CONTROL_ROUTE.status || definition.name === "delegate_control" && params.action === "status") && details.degraded === true && Array.isArray(details.dispatches) || definition.name === "delegate" && Array.isArray(details.forks) || typeof details.errorCode === "string" || typeof details.status === "string" && details.status.startsWith("terminal-")) return result;
+				const errorCode = details.unsupported === true ? "unsupported-capability" : details.notFound === true ? "not-found" : details.status === "unavailable" || details.reason !== undefined ? "control-unavailable" : definition.name === "delegate" && params.action !== undefined ? (params.action === "canonicalize" && params.chainName !== undefined ? "unsupported-capability" : "invalid-request") : LEGACY_CONTROL_TOOL_NAMES.has(definition.name) ? "control-unavailable" : "core-error";
+				return { ...result, details: { ...details, errorCode } };
+			} catch (error) {
+				if (!(error instanceof RuntimeBoundaryError)) throw error;
+				return { isError: true, content: [{ type: "text", text: error.message }], details: { errorCode: error.code, ...(definition.name === "delegate" ? { forks: [] } : {}) } };
+			}
+		};
+		return { ...definition, execute };
+	};
+	const registerRuntimeTool = (definition: { name: string; parameters: TSchema; execute: RuntimeToolExecute } & Record<string, unknown>) => {
+		definition = validatedTool(definition);
 		runtimeToolExecutors.set(definition.name, definition.execute);
 		// The consolidated surface (#265) keeps every legacy executor as an
 		// internal invoke key — the runtime API calls these by name, and they
@@ -3948,8 +4074,9 @@ export default function (pi: ExtensionAPI) {
 		setActiveTools: (names: string[]) => void;
 	}>;
 	const registerDeferredTool = (
-		definition: { name: string; execute: RuntimeToolExecute } & Record<string, unknown>,
+		definition: { name: string; parameters: TSchema; execute: RuntimeToolExecute } & Record<string, unknown>,
 	) => {
+		definition = validatedTool(definition);
 		// The executor is available to the runtime API from the start; only the
 		// model-visible registration waits.
 		runtimeToolExecutors.set(definition.name, definition.execute);
@@ -4009,6 +4136,7 @@ export default function (pi: ExtensionAPI) {
 	let currentForegroundSessionId: string | undefined;
 	let currentForegroundContext: ExtensionContext | undefined;
 	let recoveryAuthorityEpoch = 0;
+	const invocationAuthority = createInvocationAuthority();
 	const deliveredEscalationHops = new Set<string>();
 	let escalationDeliveryTail: Promise<void> = Promise.resolve();
 
@@ -4056,6 +4184,14 @@ export default function (pi: ExtensionAPI) {
 			return undefined;
 		}
 	};
+
+	const hasRuntimeControlOwner = (run: DelegateDispatchState, callerSessionId: string | undefined): boolean =>
+		run.ownerSessionId === undefined || (run.ownerSessionId === callerSessionId &&
+			(currentForegroundSessionId === undefined || run.ownerSessionId === currentForegroundSessionId));
+
+	// Detached route secrets require the actual caller to own the live foreground.
+	const detachedControlCaller = (callerSessionId: string | undefined): string | undefined =>
+		callerSessionId !== undefined && callerSessionId === currentForegroundSessionId ? callerSessionId : undefined;
 
 	const assertDaemonDriverControlAuthority = (
 		cfg: OrchestrateCfg,
@@ -4245,6 +4381,7 @@ export default function (pi: ExtensionAPI) {
 		ctx: any,
 		recoveryAuthorityGuard?: () => void,
 	) => {
+		assertInvocationPreparing();
 		recoveryAuthorityGuard?.();
 		// Pi supplies a fresh ExtensionContext for each callback. Capture stable
 		// session identity plus the lifecycle epoch before any asynchronous work.
@@ -4398,23 +4535,8 @@ export default function (pi: ExtensionAPI) {
 		const nestedCallerPolicy = nestedDelegatePolicyForApi(pi);
 		const nestedDelegateInitialError = shape === "chain-by-name"
 			? undefined
-			: validateNestedDelegateAgentPolicy(
-				nestedCallerPolicy,
-				shape,
-				params,
-			) ?? validateNestedDelegateConfinement(
-				nestedCallerPolicy,
-				shape,
-				params,
-				ctx.cwd,
-			);
-		if (nestedDelegateInitialError) {
-			return {
-				content: [{ type: "text" as const, text: nestedDelegateInitialError }],
-				details: { forks: [] },
-				isError: true,
-			};
-		}
+			: nestedDelegateRefusal(nestedCallerPolicy, shape, params, ctx.cwd);
+		if (nestedDelegateInitialError) return nestedDelegateInitialError;
 
 		// Nested workers receive `delegate` only through an explicit opt-in policy.
 		// Keep agent/chain file mutation as a foreground/orchestrator surface: a
@@ -4493,7 +4615,9 @@ export default function (pi: ExtensionAPI) {
 									: resolution.message,
 						},
 					],
-					details: { forks: [] },
+					// A missing root or referenced chain is a lookup failure, not
+					// a malformed composition (cycle / empty reference).
+					details: { forks: [], ...(resolution.code === "not-found" ? { errorCode: "not-found" } : {}) },
 					isError: true,
 				};
 			}
@@ -4526,22 +4650,18 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		const nestedDelegateError = validateNestedDelegateAgentPolicy(
-			nestedCallerPolicy,
-			shape,
-			params,
-		) ?? validateNestedDelegateConfinement(
-			nestedCallerPolicy,
-			shape,
-			params,
-			ctx.cwd,
-		);
-		if (nestedDelegateError) {
-			return {
-				content: [{ type: "text" as const, text: nestedDelegateError }],
-				details: { forks: [] },
-				isError: true,
-			};
+		const nestedDelegateError = nestedDelegateRefusal(nestedCallerPolicy, shape, params, ctx.cwd);
+		if (nestedDelegateError) return nestedDelegateError;
+
+		// Capture only the plan resolved by this handler, including saved command
+		// stages. Admission failures here happen before worker/prompt creation.
+		let dispatchEvidence: DispatchEvidence;
+		try {
+			dispatchEvidence = await buildDispatchEvidence(deriveRunId(toolCallId), params, ctx.cwd, shape);
+			if (shape === "chain" || shape === "orchestrate") await persistDispatchEvidence(getAgentDir(), dispatchEvidence);
+		} catch (error) {
+			return { content: [{ type: "text" as const, text: `delegate input evidence unavailable: ${error instanceof Error ? error.message : String(error)}` }],
+				details: { forks: [], errorCode: "input-unreadable" }, isError: true };
 		}
 
 		// ── Orchestrate shape (spec 0005) ──────────────────────────────────
@@ -4635,7 +4755,7 @@ export default function (pi: ExtensionAPI) {
 									: ""),
 						},
 					],
-					details: { forks: [] },
+					details: { forks: [], errorCode: "unknown-agent" },
 					isError: true,
 				};
 			}
@@ -4757,7 +4877,7 @@ export default function (pi: ExtensionAPI) {
 									: ""),
 						},
 					],
-					details: { forks: [] },
+					details: { forks: [], errorCode: "unknown-agent" },
 					isError: true,
 				};
 			}
@@ -4835,7 +4955,7 @@ export default function (pi: ExtensionAPI) {
 			if (plannedModels.kind === "failure") {
 				return {
 					content: [{ type: "text" as const, text: plannedModels.failure.message }],
-					details: { forks: [] as RunResult[] },
+					details: { forks: [] as RunResult[], errorCode: "model-unavailable" },
 					isError: true,
 				};
 			}
@@ -4854,6 +4974,7 @@ export default function (pi: ExtensionAPI) {
 				Math.min(params.concurrency ?? DEFAULT_CONCURRENCY, expanded.length),
 			);
 		{
+				assertInvocationPreparing();
 				recoveryAuthorityGuard?.();
 				const directNotifyOnFailure = params.notifyOnFailure ?? config.notifyOnFailure ?? true;
 				const directRecoveryAuthority = resolveRecoveryDispatchAuthority(
@@ -4926,6 +5047,7 @@ export default function (pi: ExtensionAPI) {
 					}));
 				}
 				return executeDirectShape({
+					dispatchEvidence,
 					pi,
 					mode: shape,
 					tasks: expanded,
@@ -5082,7 +5204,7 @@ export default function (pi: ExtensionAPI) {
 								: ""),
 					},
 				],
-				details: { forks: [] },
+				details: { forks: [], errorCode: "unknown-agent" },
 				isError: true,
 			};
 		}
@@ -5246,7 +5368,7 @@ export default function (pi: ExtensionAPI) {
 		if (plannedModels.kind === "failure") {
 			return {
 				content: [{ type: "text" as const, text: plannedModels.failure.message }],
-				details: { forks: [] as RunResult[] },
+				details: { forks: [] as RunResult[], errorCode: "model-unavailable" },
 				isError: true,
 			};
 		}
@@ -5307,7 +5429,9 @@ export default function (pi: ExtensionAPI) {
 				cancel: () => Promise.reject(new Error("cancel wired below")),
 			};
 			try {
+				assertInvocationPreparing();
 				registerRunWithRetryClaims(preRegisteredRunState, retryClaims);
+				acceptInvocation({ runId, transport: "in-process", state: "accepted" });
 			} catch (error) {
 				const rejection = retryAdmissionRejection(error);
 				if (rejection) return rejection;
@@ -5315,6 +5439,13 @@ export default function (pi: ExtensionAPI) {
 			}
 			for (const request of resolvedReqs) request.attempt = preRegisteredRunState.forks[request.name]?.attempt ?? 1;
 		}
+		try {
+			await persistDispatchEvidence(getAgentDir(), dispatchEvidence);
+		} catch (error) {
+			if (preRegisteredRunState) completeRun(runId, finalizePrelaunchFailures(preRegisteredRunState, diagnosticErrorText(error), ctx.cwd));
+			return { content: [{ type: "text" as const, text: `delegate input evidence unavailable: ${diagnosticErrorText(error)}` }], details: { forks: [], errorCode: "input-unreadable" }, isError: true };
+		}
+		assertInvocationLaunchOrTerminalize(ctx.cwd, preRegisteredRunState);
 		// A retry rejection returns above, before this accepted-call migration.
 		config = loadConfig(getAgentDir());
 		preflightSummaryModels(
@@ -5447,6 +5578,7 @@ export default function (pi: ExtensionAPI) {
 		// dispatches keep the original "pending".
 		const detached = !effectiveSync;
 		const initialRunStatus: RunLiveStatus = detached ? "constructing" : "pending";
+		assertInvocationPreparing();
 		recoveryAuthorityGuard?.();
 		const runState: DelegateDispatchState = preRegisteredRunState ?? {
 			runId,
@@ -5692,9 +5824,12 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (retryClaims.length === 0) {
+			assertInvocationPreparing();
 			registerRun(runState);
+			acceptInvocation({ runId, transport: "in-process", state: "accepted" });
 		}
 
+		assertInvocationLaunchOrTerminalize(ctx.cwd, runState);
 		// Build per-entry worker UI contexts for interactive entries.
 		const buildWorkerUIContextForFork = (forkName: string) => {
 			const req = resolvedReqs.find((r) => r.name === forkName);
@@ -5861,7 +5996,7 @@ export default function (pi: ExtensionAPI) {
 					});
 				}
 				try {
-					pi.events.emit("legacy.delegate.guidance_delivered", {
+					emitDelegateEvent((channel, data) => pi.events.emit(channel, data), DELEGATE_EVENTS.guidanceDelivered, {
 						runId,
 						forkName,
 						count: messages.length,
@@ -6013,7 +6148,7 @@ export default function (pi: ExtensionAPI) {
 			: "";
 		const dispatchText =
 			`Dispatched runId=${runId} with ${entryNames.length} ${supervisedTerminology.plural}: ${entryNames.join(", ")}. ` +
-			`A new turn will be triggered automatically with the full output when all ${supervisedTerminology.plural} complete — do not poll or sleep.` +
+			controlHints(modelInterfaceFor(pi)).checkpointResult() +
 			budgetAck;
 		return {
 			content: [{ type: "text", text: supervisedProgressWarning ? `${SUPERVISED_PROGRESS_WARNING}\n\n${dispatchText}` : dispatchText }],
@@ -6113,7 +6248,7 @@ export default function (pi: ExtensionAPI) {
 	// method would otherwise crash the whole extension at load; degrading to
 	// pi-core's default rendering (the pre-#451 expanded view) is the safe fallback.
 	if (typeof pi.registerMessageRenderer === "function") {
-		pi.registerMessageRenderer("delegate:complete", (message, options, theme) =>
+		pi.registerMessageRenderer(DELEGATE_COMPLETE_CUSTOM_TYPE, (message, options, theme) =>
 			renderDelegateCompletionMessage(message, options, theme),
 		);
 		pi.registerMessageRenderer("delegate:sync-orphan-recovery", (message, options, theme) =>
@@ -6193,6 +6328,7 @@ export default function (pi: ExtensionAPI) {
 				...(params.customInstruction !== undefined ? { customInstruction: params.customInstruction } : {}),
 				...(params.note !== undefined ? { note: params.note } : {}),
 				...(params.onBehalfOfUser !== undefined ? { onBehalfOfUser: params.onBehalfOfUser } : {}),
+				modelInterface: modelInterfaceFor(pi),
 				claimedBy: `originator-agent:${currentForegroundSessionId ?? `pid-${process.pid}`}`,
 			});
 			return {
@@ -6369,12 +6505,12 @@ export default function (pi: ExtensionAPI) {
 					// but their live control closures are owned by another session. Treat
 					// them as not in-process here so we never call the default hydrated
 					// stubs. Terminal records still resolve for the friendly no-op surface.
-					return run && (run.completedAt || hasLocalRunAuthority(run))
+					return run && hasRuntimeControlOwner(run, exactSessionId(ctx)) && (run.completedAt || hasLocalRunAuthority(run))
 						? (run as InProcessRunRef)
 						: undefined;
 				},
 				hasInMemoryRun: (id) => getRun(id) !== undefined,
-				currentSessionId: currentForegroundSessionId ?? resolveOwnerSessionId(undefined),
+				currentSessionId: detachedControlCaller(exactSessionId(ctx)),
 				agentDir: getAgentDir(),
 			});
 			if (handle.kind === "unavailable") {
@@ -6477,7 +6613,8 @@ export default function (pi: ExtensionAPI) {
 					: "only explicit supervised forks support steering";
 				return {
 					content: [{ type: "text" as const, text: `Cannot steer ${terminology.singular} in runId=${params.runId}: ${reason}.` }],
-					details: { runId: params.runId, unsupported: true },
+					// The operation exists; this run cannot accept it.
+					details: { runId: params.runId, unsupported: true, errorCode: "control-unavailable" },
 					isError: true,
 				};
 			}
@@ -6533,7 +6670,7 @@ export default function (pi: ExtensionAPI) {
 			if (terminology.singular === "run") {
 				return {
 					content: [{ type: "text" as const, text: `Cannot steer ${terminology.singular} in runId=${params.runId}: shape is unknown.` }],
-					details: { runId: params.runId, unsupported: true },
+					details: { runId: params.runId, unsupported: true, errorCode: "control-unavailable" },
 					isError: true,
 				};
 			}
@@ -6729,12 +6866,12 @@ export default function (pi: ExtensionAPI) {
 					// but their live control closures are owned by another session. Treat
 					// them as not in-process here so we never call the default hydrated
 					// stubs. Terminal records still resolve for the friendly no-op surface.
-					return run && (run.completedAt || hasLocalRunAuthority(run))
+					return run && hasRuntimeControlOwner(run, callerSessionId) && (run.completedAt || hasLocalRunAuthority(run))
 						? (run as InProcessRunRef)
 						: undefined;
 				},
 				hasInMemoryRun: (id) => getRun(id) !== undefined,
-				currentSessionId: currentForegroundSessionId ?? resolveOwnerSessionId(undefined),
+				currentSessionId: detachedControlCaller(callerSessionId),
 				agentDir: getAgentDir(),
 			});
 			if (handle.kind === "unavailable") {
@@ -6917,7 +7054,7 @@ export default function (pi: ExtensionAPI) {
 						text: `Cancelled ${target} in runId=${params.runId}: ${note}.${cancelAliasNote}`,
 					},
 				],
-				details: { runId: params.runId, forkName: cancelForkName },
+				details: { runId: params.runId, forkName: cancelForkName, cancelled: true },
 			};
 		},
 	};
@@ -6950,7 +7087,7 @@ export default function (pi: ExtensionAPI) {
 		],
 		parameters: Type.Object({
 			runId: Type.String({ description: "The runId from the failure wake." }),
-			forkName: Type.String({ description: "The failed entry name, or the display label of exactly one recoverable entry; healthy siblings are untouched." }),
+			forkName: Type.Optional(Type.String({ description: "The failed entry name; omit for daemon driver recovery." })),
 			strategy: Type.Optional(Type.Union([
 				Type.Literal("auto"),
 				Type.Literal("fresh"),
@@ -6960,11 +7097,15 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params: any, _signal, _onUpdate, ctx) {
 			const daemonCfg = typeof params.runId === "string"
-				? readDaemonDriverCfg(getAgentDir(), params.runId)
+				? readDaemonDriverRecord(getAgentDir(), params.runId)
 				: undefined;
 			if (daemonCfg) {
 				try {
 					assertDaemonDriverControlAuthority(daemonCfg, exactSessionId(ctx as ExtensionContext));
+					if (!daemonCfg.daemonLocator) {
+						const reconciled = await reconcileDaemonPendingLaunch(getAgentDir(), params.runId);
+						return { content: [{ type: "text" as const, text: `Recovered daemon prompt identity for runId=${params.runId}; no prompt submitted.` }], details: { runId: params.runId, mode: "driver", status: "reconciled", promptId: reconciled.daemonLocator!.promptId } };
+					}
 					const recovered = await recoverDaemonDriver(getAgentDir(), params.runId);
 					return {
 						content: [{ type: "text" as const, text: `Recovered interrupted daemon driver runId=${params.runId}.` }],
@@ -6973,7 +7114,7 @@ export default function (pi: ExtensionAPI) {
 				} catch (error) {
 					return {
 						content: [{ type: "text" as const, text: `Cannot recover daemon driver runId=${params.runId}: ${error instanceof Error ? error.message : String(error)}` }],
-						details: { runId: params.runId, mode: "driver", status: "unavailable" },
+						details: { runId: params.runId, mode: "driver", status: "unavailable", errorCode: "control-unavailable" },
 						isError: true,
 					};
 				}
@@ -7276,14 +7417,16 @@ export default function (pi: ExtensionAPI) {
 		retryMetadataIncomplete?: boolean;
 		retryMetadataTruncated?: boolean;
 		diagnostics?: Record<string, unknown>;
+		/** Structured runtime failure class; clients never parse the prose. */
+		errorCode?: string;
 	}
-	registerRuntimeTool({
+	const delegateResultTool = {
 		name: "delegate_result",
 		label: "Delegate Result",
 		description:
 			"Retrieve the result of a previously dispatched delegate batch. Normally invoked automatically by delegate when the batch completes; you usually don't need to call it yourself.",
 		promptGuidelines: [
-			"Dispatched delegate runs auto-deliver results to you as a new turn when they complete — you do NOT need to fetch them. Only call this to re-read results from a previously completed runId you need to reference again.",
+			"Call once for a terminal run. Never loop or sleep waiting for one.",
 		],
 		parameters: Type.Object({
 			runId: Type.String({
@@ -7298,13 +7441,14 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_toolCallId, params: any) {
-			if (readDaemonDriverCfg(getAgentDir(), params.runId)) {
+			const daemonRecord = readDaemonDriverRecord(getAgentDir(), params.runId);
+			if (daemonRecord) {
 				try {
 					const replayed = await replayDaemonDriver(getAgentDir(), params.runId);
 					if (replayed.status.state === "pending" || replayed.status.state === "unknown") {
 						return {
 							content: [{ type: "text" as const, text: `runId=${params.runId} is still in progress.` }],
-							details: { runId: params.runId, mode: "driver", status: "in-progress", promptStatus: replayed.status },
+							details: { runId: params.runId, mode: "driver", status: "in-progress", promptStatus: replayed.status, forks: daemonDispatchEntries(readDaemonDriverRecord(getAgentDir(), params.runId), replayed.status.state) },
 						};
 					}
 					const failed = replayed.status.state === "failed" || replayed.status.state === "aborted";
@@ -7316,6 +7460,8 @@ export default function (pi: ExtensionAPI) {
 							status: failed ? "terminal-failed" : "terminal-done",
 							promptStatus: replayed.status,
 							cursor: replayed.locator.cursor,
+							acceptance: { runId: params.runId, transport: "daemon", state: "accepted", daemonSessionId: replayed.locator.daemonSessionId, promptId: replayed.locator.promptId, idempotencyKey: replayed.locator.idempotencyKey },
+							forks: daemonDispatchEntries(readDaemonDriverRecord(getAgentDir(), params.runId), replayed.status.state),
 						},
 						isError: failed,
 					};
@@ -7360,11 +7506,12 @@ export default function (pi: ExtensionAPI) {
 							text: `Unknown runId=${params.runId}. Dispatched in-process runs are kept only for the lifetime of this session; detached driver runs are read from their on-disk records.`,
 						},
 					],
-					details: {} as DelegateResultDetails,
+					details: { errorCode: "not-found" } as DelegateResultDetails,
 					isError: true,
 				};
 			}
 			const resolvedShape = inProcessResultShape(resolved);
+			const dispatchEvidence = readDispatchEvidence(getAgentDir(), params.runId);
 			if (resolved.pending) {
 				const childlogPath = resolved.details?.childlogPath;
 				return {
@@ -7380,6 +7527,7 @@ export default function (pi: ExtensionAPI) {
 						...(resolvedShape !== undefined ? { shape: resolvedShape } : {}),
 						...(resolved.shape === "driver" ? { mode: "driver" } : {}),
 						status: "in-progress",
+						...(dispatchEvidence ? { steps: projectDispatchSteps(dispatchEvidence.steps, getRunSnapshot(params.runId), [], false) } : {}),
 						...(resolved.details?.retry ? { retry: resolved.details.retry } : {}),
 						...(resolved.details?.retryMetadataIncomplete ? { retryMetadataIncomplete: true } : {}),
 						...(resolved.details?.retryMetadataTruncated ? { retryMetadataTruncated: true } : {}),
@@ -7402,6 +7550,7 @@ export default function (pi: ExtensionAPI) {
 					...(resolvedShape !== undefined ? { shape: resolvedShape } : {}),
 					...(resolved.shape === "driver" ? { mode: "driver" } : {}),
 					status: resolved.state,
+					...(dispatchEvidence ? { steps: projectDispatchSteps(dispatchEvidence.steps, getRunSnapshot(params.runId), resolved.forks ?? [], true) } : {}),
 					...(resolved.recovery
 						? {
 							recovered: true as const,
@@ -7421,7 +7570,8 @@ export default function (pi: ExtensionAPI) {
 				isError: resolved.state === "terminal-failed",
 			};
 		},
-	});
+	};
+	registerRuntimeTool(delegateResultTool);
 
 	// ───────────────────────────────────────────────────────────────────────────────────
 	// delegate_status — list active/completed runs with brief live state.
@@ -7453,7 +7603,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"List the status of dispatched delegate runs in this session. Pass a runId to scope to one run; omit to list all.",
 		promptGuidelines: [
-			"Do NOT use this to poll for completion. Dispatched runs automatically wake you with a new turn containing full results when they finish. Only use delegate_status when the user asks about run progress, or to inspect metadata of a specific run. Never loop or repeatedly call this waiting for a run to complete.",
+			"Never loop or repeatedly call this waiting for a run to complete.",
 		],
 		parameters: Type.Object({
 			runId: Type.Optional(
@@ -7482,6 +7632,7 @@ export default function (pi: ExtensionAPI) {
 					statusDaemonDriver(agentDir, runId),
 					promptStatusDaemonDriver(agentDir, runId),
 				]);
+				const evidence = readDispatchEvidence(agentDir, runId);
 				const state = promptStatus.state === "pending" || promptStatus.state === "unknown"
 					? "running"
 					: promptStatus.state === "settled" ? "terminal-done" : "terminal-failed";
@@ -7492,6 +7643,7 @@ export default function (pi: ExtensionAPI) {
 					source: "detached",
 					details: {
 						promptStatus,
+						...(evidence ? { steps: projectDispatchSteps(evidence.steps, undefined, daemonDispatchEntries(readDaemonDriverRecord(agentDir, runId), promptStatus.state), state.startsWith("terminal-")) } : {}),
 						pendingQuestions: daemonStatus.session.pendingQuestions,
 						observedPhase: daemonStatus.session.observedPhase,
 						attention: daemonStatus.session.attention,
@@ -7500,7 +7652,7 @@ export default function (pi: ExtensionAPI) {
 					},
 				};
 			};
-			if (params.runId && readDaemonDriverCfg(agentDir, params.runId)) {
+			if (params.runId && readDaemonDriverRecord(agentDir, params.runId)) {
 				try {
 					const status = await readDaemonUniformStatus(params.runId);
 					return {
@@ -7565,7 +7717,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!params.runId) {
 				statuses = await Promise.all(statuses.map(async (status) => {
-					const daemonCfg = readDaemonDriverCfg(agentDir, status.runId);
+					const daemonCfg = readDaemonDriverRecord(agentDir, status.runId);
 					if (!daemonCfg) return status;
 					try {
 						return await readDaemonUniformStatus(status.runId);
@@ -7587,6 +7739,13 @@ export default function (pi: ExtensionAPI) {
 					...(degraded ? { isError: true } : {}),
 				};
 			}
+			statuses = statuses.map((status) => {
+				const evidence = readDispatchEvidence(agentDir, status.runId);
+				if (!evidence || status.details.steps) return status;
+				return { ...status, details: { ...status.details,
+					steps: projectDispatchSteps(evidence.steps, getRunSnapshot(status.runId), [], status.state.startsWith("terminal-")),
+				} };
+			});
 			const now = Date.now();
 			const lines = statuses.map((s) => formatUniformRunStatus(s, now));
 			if (degraded) {
@@ -7683,7 +7842,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Inspect and control dispatched delegate runs. action: status (list runs) | result (re-read a completed run) | prompt_status (read a daemon prompt outcome) | steer (guide a supervised fork or authenticated detached driver) | follow_up (queue daemon guidance) | ui_answer (answer a correlated daemon question) | cancel (stop direct worker, supervised fork, chain step, or authenticated detached driver under existing authorization rules) | recover (recover a failed worker entry or interrupted daemon driver).",
 		promptGuidelines: [
-			"Solo and supervised background runs wake you automatically with their results. A daemon driver is resumed explicitly with prompt_status and result. Do NOT poll with action:\"status\" — use it when the user asks about progress, or to inspect a specific run.",
+			"Solo and supervised results wake you when you would otherwise stop. While working, check action:\"status\" once at a natural checkpoint and use action:\"result\" for terminal runs. A daemon driver is resumed explicitly with prompt_status and result. Never busy-poll.",
 			"Status is a one-off diagnostic: its surfaced last-activity silence (`last activity <N>s ago`) is runtime/channel activity. Silence is evidence, not proof, of a stall.",
 			"Prefer action:\"steer\" or checking context over action:\"cancel\": cancellation is destructive and loses the entry's in-flight state, while steering course-corrects it.",
 		],
@@ -7873,20 +8032,43 @@ export default function (pi: ExtensionAPI) {
 		return { inProcessRunCount, durableRunCount, pendingRecoveryCount, heldEscalationCount };
 	};
 
+	// Optional Fabric adapter (#568). Assigned below, once the visibility
+	// machinery exists; until then, and whenever Fabric is not the selected
+	// interface, native advertisement is exactly the pre-#568 behavior.
+	const fabric: { adapter?: DelegateFabricAdapter } = {};
+	// Native names this instance removed from the active set for Fabric mode, so
+	// restoration re-adds exactly those and never a name another owner hid.
+	const fabricSuppressedTools = new Set<string>();
 	const assertControlVisibility = (): void => {
 		try {
 			// pi's active-tool accessors are optional capability probes rather than
 			// guaranteed API, so they are read through a narrow structural type
 			// instead of `any`.
 			const wanted = visibleControlTools(readControlVisibilityState());
-			if (wanted.length === 0) return;
+			const fabricSelected = fabric.adapter?.selected() === true;
+			if (wanted.length === 0 && !fabricSelected && fabricSuppressedTools.size === 0) return;
 			// Registration is what actually advertises a tool; the union then keeps
-			// it active alongside whatever else is registered.
-			revealDeferredTools(wanted);
+			// it active alongside whatever else is registered. Registration also
+			// keeps a state-gated tool reachable through Fabric's capture while
+			// Fabric mode withholds it from the model.
+			if (wanted.length > 0) revealDeferredTools(wanted);
 			const active = toolRegistry.getActiveTools?.();
 			if (!Array.isArray(active)) return;
-			const next = [...new Set([...active, ...wanted])];
-			if (next.length !== active.length) toolRegistry.setActiveTools?.(next);
+			let next: string[];
+			if (fabricSelected) {
+				// The ready Fabric surface covers every native capability, so the
+				// native delegate tools stop being advertised. They stay registered.
+				next = active.filter((name) => {
+					if (!FABRIC_COVERED_NATIVE_TOOLS.has(name)) return true;
+					fabricSuppressedTools.add(name);
+					return false;
+				});
+				for (const name of wanted) fabricSuppressedTools.add(name);
+			} else {
+				next = [...new Set([...active, ...fabricSuppressedTools, ...wanted])];
+				fabricSuppressedTools.clear();
+			}
+			if (next.length !== active.length || next.some((name, index) => name !== active[index])) toolRegistry.setActiveTools?.(next);
 		} catch {
 			/* visibility is best-effort; never break a turn over it */
 		}
@@ -7921,7 +8103,7 @@ export default function (pi: ExtensionAPI) {
 	// fabricating run state. Used by the test harness in place of a
 	// registration back door, and harmless in production: it reveals exactly
 	// what the state-based path would.
-	pi.events.on("delegate:reveal-control-tools", () => {
+	pi.events.on(DELEGATE_EVENTS.revealControlTools, () => {
 		revealDeferredTools(["delegate_control", "delegate_escalation"]);
 	});
 
@@ -7934,25 +8116,79 @@ export default function (pi: ExtensionAPI) {
 	// authority, detached routing, status projection, and cancellation remain
 	// owned by the same production closures as the LLM-facing tools.
 	const runtimeCore: Parameters<typeof installDelegateRuntimeCore>[0] & object = {
-		invoke: async (name, params, ctx) => {
+		capabilities: DELEGATE_RUNTIME_CAPABILITIES,
+		sharedPreparation: true,
+		bindContext: (ctx) => invocationAuthority.bind(ctx),
+		observeDetached: async (runId, invocation) => {
+			if (!readDaemonDriverRecord(getAgentDir(), runId)) return false;
+			await observeDaemonDriver(getAgentDir(), runId, invocation);
+			return true;
+		},
+		inspectWait: (runId, ctx) => {
+			prepareRuntimeToolArguments(CONTROL_ROUTE.status, Type.Object({ runId: Type.String() }), { runId }, { control: workerControlGrants("delegate_control", process.env, exactSessionId(ctx)), workerDenied: false });
+			if (readDaemonDriverRecord(getAgentDir(), runId)) return runtimeToolExecutors.get(CONTROL_ROUTE.status)!("wait-inspect", { runId, tail: false }, undefined, undefined, ctx);
+			const status = resolveRunStatus(getAgentDir(), runId, undefined, { includeTail: false });
+			return { details: { dispatches: status ? [status] : [], runs: status ? [status] : [] } };
+		},
+		observe: (runId, invocation, ctx) => {
+			if (ctx) prepareRuntimeToolArguments(CONTROL_ROUTE.status, Type.Object({ runId: Type.String() }), { runId }, { control: workerControlGrants("delegate_control", process.env, exactSessionId(ctx)), workerDenied: false });
+			const update = (payload: unknown) => {
+				if (!payload || typeof payload !== "object" || !("runId" in payload) || payload.runId !== runId) return;
+				const run = getRun(runId);
+				if (!run) return;
+				if (run.completedAt !== undefined) {
+					const state = resolveRunStatus(getAgentDir(), runId)!.state;
+					invocation.update({ kind: "terminal", runId, state });
+				} else invocation.update({ kind: "progress", runId, forks: Object.values(run.forks).map((fork) => ({ name: fork.name, agent: fork.agent, status: fork.status, currentRound: fork.currentRound, maxRounds: fork.maxRounds })) });
+			};
+			const disposers = [DELEGATE_EVENTS.register, DELEGATE_EVENTS.update, DELEGATE_EVENTS.complete].map((channel) => pi.events.on(channel, update));
+			return () => { for (const dispose of disposers) dispose(); };
+		},
+		invoke: async (name, params, ctx, invocation) => {
 			const execute = runtimeToolExecutors.get(name);
 			if (!execute) throw new Error(`pi-delegate runtime handler is unavailable: ${name}`);
 			const toolCallId = `runtime-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-			return execute(
-				toolCallId,
-				params,
-				new AbortController().signal,
-				() => {},
-				ctx,
-			);
+			invocation?.assertPreparing();
+			if (invocation && name === "delegate") invocation.own(runtimeCore.observe!(deriveRunId(toolCallId), invocation));
+			try {
+				const result = await execute(toolCallId, params, invocation?.signal, undefined, ctx);
+				if (invocation && name === "delegate" && result.details && typeof result.details === "object" && "mode" in result.details && result.details.mode === "driver") {
+					const detail = result.details as Record<string, unknown>;
+					if (result.isError && !detail.dispatchFailure) invocation.assertPreparing();
+					if (!result.isError && typeof detail.runId === "string") {
+						void observeDaemonDriver(getAgentDir(), detail.runId, invocation).catch(() => {
+							invocation.dispose();
+							logDelegateDiagnostic("runtime API daemon observation failed; use status/harvest for the accepted run", { agentDir: getAgentDir(), level: "warn" });
+						});
+					}
+				}
+				return result;
+			} catch (error) {
+				// Normalize pre-acceptance warmup aborts, but never replace accepted/uncertain evidence.
+				invocation?.assertPreparing();
+				throw error;
+			}
 		},
 	};
+	// Optional Fabric adapter (#568): subscribes to Fabric discovery at load and
+	// offers the provider at each foreground session_start, after the core.
+	fabric.adapter = setupFabricAdapter(pi, {
+		isForeground: () => !shouldSkipForegroundLifecycleForDelegateOwnedApi(pi),
+		nativeSurfaceRequired: () => getActiveDelegateOnlyMode() !== undefined,
+		coreCapabilities: () => (currentForegroundContext === undefined ? [] : runtimeCore.capabilities ?? []),
+		nativePromptLines: () => nativeFabricPromptLines(deferredToolDefinitions),
+		onSurfaceChange: () => assertControlVisibility(),
+		diagnose: (message) => logDelegateDiagnostic(message, { agentDir: getAgentDir(), level: "warn" }),
+	});
+	// Wakes and results that name a control route follow the same selection as
+	// the Fabric-mode instructions and native suppression.
+	setModelInterfaceProbe(pi, () => (fabric.adapter?.selected() === true ? "fabric" : "native"));
 	// The core is installed from the foreground `session_start` below, never at
 	// load. Pi loads a separate module instance for every in-process worker
 	// session, and those instances skip foreground lifecycle. Installing at load
 	// would let each worker copy take over the process-global runtime API handle
 	// and leave it bound to a disposed instance.
-	pi.events.on("legacy.delegate.complete", (payload: unknown) => {
+	pi.events.on(DELEGATE_EVENTS.complete, (payload: unknown) => {
 		const runId = payload && typeof payload === "object" && "runId" in payload
 			? (payload as { runId?: unknown }).runId
 			: undefined;
@@ -8096,6 +8332,22 @@ export default function (pi: ExtensionAPI) {
 	// session_start with the fresh ctx (the underlying interval lives on a
 	// globalThis slot so a moduleCache:false reload replaces, never stacks).
 	let maintenanceHandle: MaintenanceHandle | null = null;
+	// CR-FABRIC-STARTUP-WAKE-NATIVE: startup deliveries deferred while a loaded
+	// Fabric host may still select its interface from its own session_start.
+	// Bound to the session_start epoch: a shutdown or a later start drops it,
+	// and the durable pending state is picked up by the next start instead.
+	let pendingStartupDelivery: { epoch: number; run: () => void } | undefined;
+	const flushStartupDelivery = (trigger: "resources_discover" | "turn_start"): void => {
+		const pending = pendingStartupDelivery;
+		pendingStartupDelivery = undefined;
+		if (pending === undefined || pending.epoch !== recoveryAuthorityEpoch) return;
+		// One line per session start that deferred: records which lifecycle point
+		// settled the Fabric selection, and that the deferred legs ran only once.
+		logDelegateDiagnostic(`deferred startup deliveries ran (trigger=${trigger})`, {
+			agentDir: getAgentDir(), level: "log",
+		});
+		pending.run();
+	};
 	// pi-delegate's install root (the directory above src/) — retained as a
 	// `PI_SUBAGENT_RUNTIME_ROOT` compatibility hook for older
 	// pi-prompt-template-model installations. PTM 0.11 resolves agent and
@@ -8106,21 +8358,20 @@ export default function (pi: ExtensionAPI) {
 		if (shouldSkipForegroundLifecycleForDelegateOwnedApi(pi)) return;
 		const delegateChild = process.env.PI_DELEGATE_CHILD === "1";
 		recoveryAuthorityEpoch++;
+		invocationAuthority.replace(undefined);
 		// A second start in this module is a replacement boundary even when Pi
 		// reuses the same durable session id. Live recovery closures never cross it.
 		if (currentForegroundContext !== undefined) invalidateOwnedRecoveryDescriptors();
 		currentForegroundContext = ctx;
+		invocationAuthority.replace(ctx);
 		// Publish the runtime API for this foreground instance. Workers returned
 		// above, so only a real foreground session ever owns the handle.
 		installDelegateRuntimeCore(runtimeCore);
+		// Offer the Fabric provider only after the core it calls is live.
+		fabric.adapter?.sessionStart(ctx);
 		// Capture the real foreground session id for live recovery, pending-failure
 		// ownership, and in-process escalation routing. Missing identity fails
-		// closed for those capabilities. Bare detached steer/cancel resolution
-		// applies its separate pid fallback at the call site so this variable never
-		// mistakes process identity for recovery-session authority.
-		// Recovery authority requires a real exact session id. The pid fallback
-		// remains available at detached-control call sites, but is never accepted
-		// as evidence that an in-memory recovery descriptor survived replacement.
+		// closed, including detached control: a process id is not caller authority.
 		// A delegate-owned child receives the trusted owner from the internal
 		// child-spawn field. Never substitute the child session id for it.
 		currentForegroundSessionId = delegateChild
@@ -8171,7 +8422,11 @@ export default function (pi: ExtensionAPI) {
 		// after runtime configuration/hydration has completed.
 		sessionActiveWorkQueryRegistryHandle?.dispose();
 		sessionActiveWorkQueryRegistryHandle = null;
-		configureRuntimePersistence(getAgentDir(), { hydrate: true, markActiveAsOrphaned: true });
+		configureRuntimePersistence(getAgentDir(), {
+			hydrate: true,
+			markActiveAsOrphaned: true,
+			currentSessionId: currentForegroundSessionId,
+		});
 		sessionActiveWorkQueryRegistryHandle = installSessionActiveWorkQueryRegistry(
 			pi.events,
 			currentForegroundSessionId,
@@ -8209,68 +8464,87 @@ export default function (pi: ExtensionAPI) {
 				{ agentDir: getAgentDir() },
 			);
 		}
-		// GitLab #34 — sync orphan handoff: after runtime hydrate terminalizes a
-		// dead-owner `sync:true` run, surface any per-entry outputs that were durably
-		// recorded before the parent tool call disappeared. This is intentionally
-		// distinct from normal dispatch completion wakes.
-		try {
-			deliverSyncOrphanRecoveries(pi, currentForegroundSessionId, getAgentDir());
-		} catch (err) {
-			logDelegateDiagnostic(
-				`sync orphan recovery failed at startup: ${(err as Error)?.message ?? err}`,
-				{ agentDir: getAgentDir(), level: "warn" },
-			);
-		}
-		// #523 — a hydrate-orphaned `sync:false` run has no pump left to send its
-		// completion wake; tell the owning session once that the run died.
-		try {
-			deliverOrphanedDispatchWakes(pi, currentForegroundSessionId, getAgentDir());
-		} catch (err) {
-			logDelegateDiagnostic(
-				`orphaned dispatch handoff failed at startup: ${(err as Error)?.message ?? err}`,
-				{ agentDir: getAgentDir(), level: "warn" },
-			);
-		}
-		// Hydrate-and-deliver (spec 0005, node A / REQ-ORCH-6): deliver any
-		// detached orchestrate child that finished while the foreground was gone.
-		// Reads result FILES (no captured in-process `pi` ctx) and wakes the
-		// foreground once per pending result.
-		try {
-			reconcileDeadDetachedOrchestrators(getAgentDir());
-			deliverPendingOrchestrateResults(pi, getAgentDir(), {
-				currentSessionId: currentForegroundSessionId,
-			});
-		} catch (err) {
-			logDelegateDiagnostic(
-				`hydrate-and-deliver failed at startup: ${(err as Error)?.message ?? err}`,
-				{ agentDir: getAgentDir(), level: "warn" },
-			);
-		}
-		// Issue #2 — redeliver dropped dispatch wakes (supervised/chain/direct
-		// runs whose completion bounced off a stale ctx AND missed the live-sink
-		// retry). Same file-based at-least-once discipline as the orchestrate
-		// leg above; owner-scoped (this pid+nonce, or a dead owner).
-		// Escalation wakes use the same claim/consume discipline as completion
-		// wakes, but re-read canonical holder state before choosing UI, root
-		// agent, or a live in-process mid-level channel (invariant 5). Keep the
-		// lifecycle callback synchronous: UI/status setup below must not wait on a
-		// prompt, while the promise chain preserves escalation-before-generic wake
-		// consumption.
-		queueEscalationService(pi, { advance: true, label: "startup" });
-		// Issue #14 — age-based retention for completed runs (7d default), at
-		// startup after hydrate…
-		try {
-			const swept = sweepOldCompletedRuns();
-			if (swept > 0) {
-				logDelegateDiagnostic(`startup sweep removed ${swept} completed run(s) past retention`, {
-					agentDir: getAgentDir(), level: "log",
-				});
+		// CR-FABRIC-STARTUP-WAKE-NATIVE: the deliveries below can name control
+		// routes, and that wording follows the Fabric selection. When pi-delegate
+		// loads before Fabric, Fabric selects its interface from its own
+		// session_start, which runs after this handler. While a loaded Fabric host
+		// has not selected yet, defer them until every session_start handler has
+		// run (flushStartupDelivery). Without a Fabric host they run here, in the
+		// same order as before. The startup retention sweep is the last step, so
+		// it follows the deliveries in both paths.
+		const deliverStartupRecoveries = (): void => {
+			// GitLab #34 — sync orphan handoff: after runtime hydrate terminalizes a
+			// dead-owner `sync:true` run, surface any per-entry outputs that were durably
+			// recorded before the parent tool call disappeared. This is intentionally
+			// distinct from normal dispatch completion wakes.
+			try {
+				deliverSyncOrphanRecoveries(pi, currentForegroundSessionId, getAgentDir());
+			} catch (err) {
+				logDelegateDiagnostic(
+					`sync orphan recovery failed at startup: ${(err as Error)?.message ?? err}`,
+					{ agentDir: getAgentDir(), level: "warn" },
+				);
 			}
-		} catch (err) {
-			logDelegateDiagnostic(
-				`startup completed-run sweep failed: ${(err as Error)?.message ?? err}`,
-				{ agentDir: getAgentDir(), level: "warn" },
-			);
+			// #523 — a hydrate-orphaned `sync:false` run has no pump left to send its
+			// completion wake; tell the owning session once that the run died.
+			try {
+				deliverOrphanedDispatchWakes(pi, currentForegroundSessionId, getAgentDir());
+			} catch (err) {
+				logDelegateDiagnostic(
+					`orphaned dispatch handoff failed at startup: ${(err as Error)?.message ?? err}`,
+					{ agentDir: getAgentDir(), level: "warn" },
+				);
+			}
+			// Hydrate-and-deliver (spec 0005, node A / REQ-ORCH-6): deliver any
+			// detached orchestrate child that finished while the foreground was gone.
+			// Reads result FILES (no captured in-process `pi` ctx) and wakes the
+			// foreground once per pending result.
+			try {
+				reconcileDeadDetachedOrchestrators(getAgentDir());
+				deliverPendingOrchestrateResults(pi, getAgentDir(), {
+					currentSessionId: currentForegroundSessionId,
+				});
+			} catch (err) {
+				logDelegateDiagnostic(
+					`hydrate-and-deliver failed at startup: ${(err as Error)?.message ?? err}`,
+					{ agentDir: getAgentDir(), level: "warn" },
+				);
+			}
+			// Issue #2 — redeliver dropped dispatch wakes (supervised/chain/direct
+			// runs whose completion bounced off a stale ctx AND missed the live-sink
+			// retry). Same file-based at-least-once discipline as the orchestrate
+			// leg above; owner-scoped (this pid+nonce, or a dead owner).
+			// Escalation wakes use the same claim/consume discipline as completion
+			// wakes, but re-read canonical holder state before choosing UI, root
+			// agent, or a live in-process mid-level channel (invariant 5). Keep the
+			// lifecycle callback synchronous: UI/status setup below must not wait on a
+			// prompt, while the promise chain preserves escalation-before-generic wake
+			// consumption.
+			queueEscalationService(pi, { advance: true, label: "startup" });
+			// Issue #14 — age-based retention for completed runs (7d default), at
+			// startup after hydrate. It runs after the deliveries above because it
+			// ignores unsurfaced recovery state: an aged sync-orphan recovery or
+			// orphaned-dispatch wake must be shown before its run is swept
+			// (CR-FABRIC-STARTUP-SWEEP-BEFORE-DEFERRED-DELIVERY).
+			try {
+				const swept = sweepOldCompletedRuns();
+				if (swept > 0) {
+					logDelegateDiagnostic(`startup sweep removed ${swept} completed run(s) past retention`, {
+						agentDir: getAgentDir(), level: "log",
+					});
+				}
+			} catch (err) {
+				logDelegateDiagnostic(
+					`startup completed-run sweep failed: ${(err as Error)?.message ?? err}`,
+					{ agentDir: getAgentDir(), level: "warn" },
+				);
+			}
+		};
+		if (fabric.adapter?.selectionPending() === true) {
+			pendingStartupDelivery = { epoch: recoveryAuthorityEpoch, run: deliverStartupRecoveries };
+		} else {
+			pendingStartupDelivery = undefined;
+			deliverStartupRecoveries();
 		}
 		// …and the periodic maintenance interval: redeliver pending orchestrate
 		// results + dropped dispatch wakes every tick (~45s — closes the
@@ -8378,6 +8652,8 @@ export default function (pi: ExtensionAPI) {
 				.map((run) => run.runId)
 				.filter((runId) => readDelegateRuntimeReceipt(getAgentDir(), runId) !== undefined);
 		recoveryAuthorityEpoch++;
+		pendingStartupDelivery = undefined;
+		invocationAuthority.replace(undefined);
 		recoveryTerminalObservations.clear();
 		// Issue #2 — drop the live-wake-sink registration if it is still OURS
 		// (a successor session's fresh registration is never clobbered). This
@@ -8433,15 +8709,14 @@ export default function (pi: ExtensionAPI) {
 				reason: "Escalation cancelled because the root session shut down.",
 			});
 		}
-		// Publish result.json for receipted runs this shutdown aborted, while the
-		// core is still installed. Pi awaits session_shutdown handlers before it
-		// invalidates the session. A failure is logged, never thrown: shutdown
-		// must complete.
+		// Public clients are already invalidated. Publish result.json for the local
+		// receipted runs this shutdown aborted through the same internal handler
+		// used by control/result and runtime harvest, without rebinding a client.
+		// A failure is logged, never thrown: shutdown must complete.
 		if (shutdownContext !== undefined) {
-			const client = createDelegateRuntimeClient({ context: shutdownContext, agentDir: getAgentDir() });
 			for (const runId of receiptedActiveRunIds) {
 				try {
-					await client.harvest(runId);
+					publishDelegateRuntimeResult(getAgentDir(), runId, await delegateResultTool.execute(`shutdown-${runId}`, { runId }));
 				} catch (error) {
 					logDelegateDiagnostic(
 						`runtime API shutdown publication failed runId=${diagnosticIdentityText(runId)}: ${diagnosticErrorText(error)}`,
@@ -8452,6 +8727,9 @@ export default function (pi: ExtensionAPI) {
 		}
 		currentForegroundContext = undefined;
 		currentForegroundSessionId = undefined;
+		// Keep fabricSuppressedTools: if Pi reuses this tool registry, the next
+		// reconciliation restores exactly those names.
+		fabric.adapter?.sessionShutdown();
 		// Withdraw the runtime API last: the registered handlers it invokes are
 		// about to be invalidated, and a retained client must fail closed with
 		// core-unavailable rather than reach them. Only this instance's core is
@@ -8462,6 +8740,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("turn_start", (_event, _ctx) => {
 		if (shouldSkipForegroundLifecycleForDelegateOwnedApi(pi)) return;
 		if (process.env.PI_DELEGATE_CHILD === "1") return;
+		// Fallback for a host that emits no resources_discover after session_start.
+		flushStartupDelivery("turn_start");
 		// A dispatch completion is delivered as a fresh foreground turn. Refresh
 		// from the now-current session entries as well as runtime events so the
 		// footer survives missed/stale delegate:* notifications and Pi UI resets.

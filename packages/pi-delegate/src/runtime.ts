@@ -16,6 +16,7 @@
  * out.
  */
 
+import { DELEGATE_EVENTS, emitDelegateEvent } from "./events.js";
 import { lstatSync } from "node:fs";
 import * as path from "node:path";
 import type { AgentSource } from "./agents.js";
@@ -812,6 +813,7 @@ const MAX_PERSISTED_RUN_BYTES = 4 * 1024 * 1024;
 
 let runtimeStatePath: string | undefined;
 let runtimeAgentDir: string | undefined;
+let runtimePersistenceSessionId: string | undefined;
 let persistenceHydrated = false;
 let runtimeProcessIdentityDependencies: Partial<ProcessIdentityDependencies> | undefined;
 
@@ -875,9 +877,9 @@ function runtimeOwnerDisposition(
 ): RuntimeOwnerDisposition {
 	// The reload-stable nonce proves ownership inside this exact OS process even
 	// when Linux birth/boot evidence is unavailable (for example on macOS).
-	// A changed nonce is only stale when the caller is classifying a persisted
-	// record during hydration; ordinary maintenance must not revoke a live
-	// predecessor that may still own its closures.
+	// A changed nonce is stale only when the caller has proven this session's
+	// lineage during hydration or its subsequent durable merge. Ordinary
+	// maintenance must not revoke a live predecessor's closures.
 	if (owner.owningPid === process.pid) {
 		if (!isValidProcessNonce(owner.owningNonce)) return "unproven";
 		if (owner.owningNonce === getProcessNonce()) return "local";
@@ -887,6 +889,19 @@ function runtimeOwnerDisposition(
 	if (verdict === "absent" || verdict === "mismatch") return "stale";
 	if (verdict === "unproven") return "unproven";
 	return "foreign";
+}
+
+/** Is the run owned by `sessionId`, directly or through its root run? */
+function isSessionLineage(
+	run: Pick<DelegateDispatchState, "runId" | "rootRunId" | "ownerSessionId">,
+	sessionId: string | undefined,
+	persistedById: ReadonlyMap<string, PersistedRunState>,
+): boolean {
+	if (!sessionId) return false;
+	if (run.ownerSessionId === sessionId) return true;
+	const rootRunId = run.rootRunId;
+	if (rootRunId === undefined || rootRunId === run.runId) return false;
+	return (persistedById.get(rootRunId) ?? runs.get(rootRunId))?.ownerSessionId === sessionId;
 }
 
 function ownerIdentityDiagnostic(disposition: RuntimeOwnerDisposition): string {
@@ -1538,12 +1553,16 @@ export function resolveRuntimeStatePath(agentDir: string): string {
  */
 export function configureRuntimePersistence(
 	agentDir: string | undefined,
-	opts: { hydrate?: boolean; markActiveAsOrphaned?: boolean } = {},
+	opts: { hydrate?: boolean; markActiveAsOrphaned?: boolean; currentSessionId?: string } = {},
 ): void {
 	runtimeStatePath = agentDir ? resolveRuntimeStatePath(agentDir) : undefined;
 	runtimeAgentDir = agentDir;
+	runtimePersistenceSessionId = opts.currentSessionId;
 	if (opts.hydrate ?? true) {
-		hydrateRuntimeState({ markActiveAsOrphaned: opts.markActiveAsOrphaned ?? true });
+		hydrateRuntimeState({
+			markActiveAsOrphaned: opts.markActiveAsOrphaned ?? true,
+			currentSessionId: opts.currentSessionId,
+		});
 	}
 }
 
@@ -3698,7 +3717,11 @@ function persistRuntimeStateNow(
 			return;
 		}
 		const diskById = new Map(diskRuns.map((r) => [r.runId, r]));
-		const diskOwnerById = new Map(diskRuns.map((run) => [run.runId, runtimeOwnerDisposition(run)]));
+		const persistenceOwner = (run: PersistedRunState) =>
+			runtimeOwnerDisposition(run, {
+				changedLocalNonceIsStale: isSessionLineage(run, runtimePersistenceSessionId, diskById),
+			});
+		const diskOwnerById = new Map(diskRuns.map((run) => [run.runId, persistenceOwner(run)]));
 		const diskRetentionGroups = buildRetryRetentionGroups(diskById);
 		const merged = new Map<string, PersistedRunState>();
 		for (const run of keep) {
@@ -3706,9 +3729,14 @@ function persistRuntimeStateNow(
 			const disk = diskById.get(run.runId);
 			mergeCommittedRetryFields(run, disk);
 			const sanitized = sanitizeRunForPersistence(run);
-			const memoryOwner = runtimeOwnerDisposition(sanitized);
+			const memoryOwner = persistenceOwner(sanitized);
 			const diskOwner = disk ? diskOwnerById.get(disk.runId) : undefined;
 			const wasHydrated = hydratedRunIds.has(sanitized.runId);
+			if (wasHydrated && memoryOwner !== "local" && disk && !sameOwner(sanitized, disk)) {
+				// A newer owner generation replaced the hydrated record on disk.
+				merged.set(sanitized.runId, disk);
+				continue;
+			}
 
 			// A durable matching-foreign or unproven generation is protected from
 			// non-local memory. This also handles an owner generation updated on disk
@@ -3827,7 +3855,7 @@ function persistRuntimeStateNow(
 		const retentionGraph = new Map(merged);
 		const completedById = new Map(completedCandidates.map((run) => [run.runId, run]));
 		const completedOwnerById = new Map(
-			completedCandidates.map((run) => [run.runId, runtimeOwnerDisposition(run)]),
+			completedCandidates.map((run) => [run.runId, persistenceOwner(run)]),
 		);
 		const ownerProtectedRunIds = new Set(
 			completedCandidates
@@ -3925,8 +3953,9 @@ function persistRuntimeStateNow(
  * `delegate_status` / `delegate_result`.
  */
 export function hydrateRuntimeState(
-	opts: { markActiveAsOrphaned?: boolean } = {},
+	opts: { markActiveAsOrphaned?: boolean; currentSessionId?: string } = {},
 ): number {
+	runtimePersistenceSessionId = opts.currentSessionId;
 	if (!runtimeStatePath) {
 		persistenceHydrated = true;
 		return 0;
@@ -3983,6 +4012,7 @@ export function hydrateRuntimeState(
 		);
 	}
 	let count = 0;
+	const persistedById = new Map(persistedRuns.filter((saved) => saved?.runId).map((saved) => [saved.runId, saved]));
 	for (const saved of persistedRuns) {
 		if (!saved?.runId || runs.has(saved.runId)) continue;
 		const run = runtimeRunFromPersisted(saved);
@@ -4006,9 +4036,13 @@ export function hydrateRuntimeState(
 		// A matching foreign generation may still own live closures. A matching
 		// current generation has lost this module instance's closures and follows the
 		// reload orphan path. Proven stale generations are also terminalized. Partial,
-		// legacy, or unreadable identity is unproven and remains untouched.
+		// legacy, or unreadable identity is unproven and remains untouched. Every
+		// sandboxed Pi can share this pid in its own namespace, so a changed nonce
+		// proves only the current session's own predecessor stale.
 		if ((opts.markActiveAsOrphaned ?? true) && !run.completedAt) {
-			const owner = runtimeOwnerDisposition(run, { changedLocalNonceIsStale: true });
+			const owner = runtimeOwnerDisposition(run, {
+				changedLocalNonceIsStale: isSessionLineage(run, opts.currentSessionId, persistedById),
+			});
 			if (owner === "local" || owner === "stale") {
 				// #465/#470 — a completed result may be durable only in the per-run
 				// sidecar when the shared flush degraded under lock contention before
@@ -5925,7 +5959,7 @@ export function completeRun(runId: string, finalResult: RunResult[]): boolean {
 	}
 	// Drain any prompts still blocking the worker — all entries in the run.
 	drainPendingPrompts(runId, undefined);
-	emit("legacy.delegate.complete", { runId, finalResult: storedResults.map((result) => projectRunResult(result)) });
+	emitDelegateEvent(emit, DELEGATE_EVENTS.complete, { runId, finalResult: storedResults.map((result) => projectRunResult(result)) });
 	return true;
 }
 
@@ -6071,6 +6105,7 @@ export function __resetRuntimeForTests(): void {
 	emitter = undefined;
 	runtimeStatePath = undefined;
 	runtimeAgentDir = undefined;
+	runtimePersistenceSessionId = undefined;
 	persistenceHydrated = false;
 	recoveryDeliveryObservations = new WeakSet<object>();
 	runtimeProcessIdentityDependencies = undefined;

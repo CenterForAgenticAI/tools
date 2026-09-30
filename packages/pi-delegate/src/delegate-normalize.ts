@@ -50,7 +50,13 @@ const CANONICAL_RUN_KEY_BY_RUNTIME: Record<string, string> = Object.fromEntries(
 /** Canonical dispatch argument normalizer. It never mutates its input. */
 export function normalizeDelegateParams(input: unknown): JsonObject {
 	if (!isRecord(input)) return input as JsonObject;
+	// Check the original grammar before aliasing/flattening can erase group keys.
+	assertParallelGroupFields(input);
 	const value = normalizeObject(input);
+	// Providers sometimes encode supported array parameters as JSON strings.
+	// Recover runs just like agents/tasks/chain, before the canonical shape test.
+	const runs = parseArray(value.runs);
+	if (runs) value.runs = runs;
 	assertNoRemovedArtifactFieldsAtIngress(value);
 	if (value.action !== undefined) return value;
 
@@ -97,6 +103,19 @@ function normalizeCanonical(value: JsonObject): JsonObject {
 	// A canonical dispatch's top-level `task` is the shared task for entries that
 	// omit one, not a legacy `agent`+`task` selector, so it must survive.
 	return { ...withoutSelectors(value, { keepTask: true }), runs };
+}
+
+/** Parallel groups have their own grammar; they are not worker entries. */
+function assertParallelGroupFields(input: JsonObject): void {
+	const chain = parseArray(input.chain);
+	if (!chain) return;
+	for (const [index, step] of chain.entries()) {
+		if (!isRecord(step) || !Object.hasOwn(step, "parallel")) continue;
+		for (const key of Object.keys(step)) {
+			if (!["parallel", "concurrency", "failFast", "worktree"].includes(key)) throw new TypeError(`chain[${index}]: unknown field ${key}`);
+		}
+		if (!Array.isArray(step.parallel)) throw new TypeError(`chain[${index}].parallel must be an array`);
+	}
 }
 
 function normalizeInlineChain(value: JsonObject, chain: unknown[]): JsonObject {

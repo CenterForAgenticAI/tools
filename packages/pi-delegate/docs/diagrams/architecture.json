@@ -1,0 +1,20 @@
+{
+  "type": "flow",
+  "title": "pi-delegate architecture",
+  "description": "A Pi session asks pi-delegate to start worker, supervised, or durable driver runs; pi-delegate stores bounded state and delivers each completed result to the owning session.",
+  "nodes": [
+    { "id": "pi", "label": "Pi session", "sublabel": "tools and slash commands", "kind": "default" },
+    { "id": "delegate", "label": "pi-delegate", "sublabel": "dispatch, supervise, control", "kind": "primary" },
+    { "id": "workers", "label": "Worker sessions", "sublabel": "solo, supervised, chain", "kind": "accent" },
+    { "id": "daemon", "label": "pi-daemon", "sublabel": "durable driver host", "kind": "external" },
+    { "id": "state", "label": "Run state", "sublabel": "bounded local records", "kind": "store" }
+  ],
+  "edges": [
+    { "from": "pi", "to": "delegate", "label": "dispatch" },
+    { "from": "delegate", "to": "workers", "label": "start work" },
+    { "from": "delegate", "to": "daemon", "label": "host driver" },
+    { "from": "delegate", "to": "state", "label": "persist" },
+    { "from": "workers", "to": "pi", "label": "result or wake", "style": "dashed" },
+    { "from": "daemon", "to": "pi", "label": "durable result", "style": "dashed" }
+  ]
+}

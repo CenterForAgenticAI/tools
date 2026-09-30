@@ -15,6 +15,7 @@ assert.deepEqual(Object.keys(manifest.peerDependencies ?? {}).sort(), [
   "@earendil-works/pi-ai",
   "@earendil-works/pi-coding-agent",
   "@earendil-works/pi-tui",
+  "@sinclair/typebox",
 ]);
 
 for (const entries of Object.values(manifest.pi ?? {})) {
@@ -24,11 +25,14 @@ for (const entries of Object.values(manifest.pi ?? {})) {
 const runtime = await import(pathToFileURL(path.join(root, "dist", "index.js")).href);
 const escalations = await import(pathToFileURL(path.join(root, "dist", "escalation-api.js")).href);
 const skillResource = await import(pathToFileURL(path.join(root, "dist", "skill-resource.js")).href);
+const events = await import(pathToFileURL(path.join(root, "dist", "events.js")).href);
 assert.equal(typeof runtime.delegateFromCli, "function");
 assert.equal(typeof runtime.hasActiveDelegateWork, "function");
 assert.equal(typeof escalations.inspectEscalations, "function");
 assert.equal(typeof escalations.resolveOperatorEscalation, "function");
 assert.equal(typeof skillResource.resolveSkillResource, "function");
 assert.equal(typeof skillResource.bundledSkillPath, "function");
+assert.equal(events.DELEGATE_EVENTS.complete, "delegate:complete");
+assert.equal(typeof events.emitDelegateEvent, "function");
 
 console.log("public release smoke passed");

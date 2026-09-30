@@ -1,8 +1,8 @@
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { normalizeDelegateParams } from "./delegate-normalize.js";
-import { compileDelegateRuns, validateRuns } from "./delegate-runs.js";
-import { ManagementConfigSchema } from "./agent-management.js";
+import { compileDelegateRuns, validateRuns, UnsupportedRunOptionError } from "./delegate-runs.js";
+import { ManagementConfigSchema, RuntimeManagementSchema } from "./agent-management.js";
 import { validateWorkerArtifactName } from "./artifact-workspace.js";
 import { HARD_MAX_DEPTH } from "./depth-guard.js";
 import { MAX_TIMEOUT_MS } from "./fork-timeout.js";
@@ -202,6 +202,8 @@ export const DelegateParamsInternal = Type.Object({
 	action: Type.Optional(Type.String()),
 	agent_scope: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("project"), Type.Literal("both")])),
 	config: Type.Optional(Type.Composite([ManagementConfigSchema], { additionalProperties: true })),
+	clone_mode: Type.Optional(runCoreProperties.clone_mode),
+	task_delivery: Type.Optional(runCoreProperties.task_delivery),
 	maxSubagentDepth: Type.Optional(Type.Integer({ minimum: 0, maximum: HARD_MAX_DEPTH })),
 	max_rounds: Type.Optional(Type.Integer({ minimum: 1 })),
 	skill: Type.Optional(skill),
@@ -229,10 +231,36 @@ export const DelegateParamsInternal = Type.Object({
 
 export type DelegateParamsValue = Static<typeof DelegateParamsInternal>;
 
+/** Validate legacy field ownership without compiling away native execution semantics. */
+export function prepareRuntimeDispatchArguments(input: Record<string, unknown>): Record<string, unknown> {
+ const normalized = normalizeDelegateParams(input);
+ if (input.runs !== undefined || normalized.action !== undefined) return prepareArguments(normalized);
+ const unknown = firstUnknown(normalized, DelegateParamsInternal, "");
+ if (unknown) throw new Error(unknown);
+ const runs = Array.isArray(normalized.runs) ? normalized.runs : [];
+ if ((normalized.worktree === true || runs.some(run => run.worktree === true)) && runs.some(run => Array.isArray(run.reads) && run.reads.length > 0)) {
+  throw new UnsupportedRunOptionError("worktree-reads", "reads is not supported with worktree: true; copy inputs with a worktreeSetupHook or drop worktree isolation");
+ }
+ const legacy: Record<string, unknown> = {};
+ const keys = new Set([...Object.keys(DelegateParamsInternal.properties), ...Object.keys(DelegateParamsInternal.properties.runs.items.properties), "agent", "agents", "tasks", "orchestrate", "chainName", "sync", "checklist"]);
+ for (const key of keys) if (input[key] !== undefined) legacy[key] = Value.Clone(input[key]);
+ return legacy;
+}
+
 export function prepareArguments(input: unknown): Record<string, unknown> {
 	const normalized = normalizeDelegateParams(input);
 	if (!normalized || typeof normalized !== "object") throw new Error("delegate arguments must be an object");
-	if ((normalized as Record<string, unknown>).action !== undefined) return normalized as Record<string, unknown>;
+	if ((normalized as Record<string, unknown>).action !== undefined) {
+		const management: Record<string, unknown> = {};
+		for (const key of Object.keys(RuntimeManagementSchema.properties)) if ((normalized as Record<string, unknown>)[key] !== undefined) management[key] = (normalized as Record<string, unknown>)[key];
+		if (!Value.Check(RuntimeManagementSchema, management)) throw new Error("Invalid management request");
+		if (management.config !== undefined) {
+			const config = typeof management.config === "string" ? JSON.parse(management.config) : management.config;
+			if (!Value.Check(ManagementConfigSchema, config)) throw new Error("Invalid management config");
+			management.config = Value.Clone(config);
+		}
+		return management;
+	}
 	const converted = Value.Convert(DelegateParamsInternal, normalized);
 	const error = firstUnknown(converted, DelegateParamsInternal, "");
 	if (error) throw new Error(error);

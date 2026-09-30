@@ -17,6 +17,7 @@
  * command-guard's auto-deny.
  */
 
+import { DELEGATE_EVENTS, emitDelegateEvent } from "./events.js";
 import type {
 	ExtensionAPI,
 	ExtensionUIContext,
@@ -97,7 +98,7 @@ export function buildNoUIContext(): ExtensionUIContext {
 export interface RoutedUIContextDeps {
 	runId: string;
 	forkName: string;
-	/** Event emitter for `legacy.delegate.worker_notify`. Optional in tests. */
+	/** Event emitter for `delegate:worker-notify`. Optional in tests. */
 	pi?: Pick<ExtensionAPI, "events">;
 	/** Override for unit tests; defaults to `DEFAULT_WORKER_PROMPT_TIMEOUT_MS`. */
 	timeoutMs?: number;
@@ -117,7 +118,7 @@ export interface RoutedUIContextDeps {
  * three blocking methods (`confirm`, `select`, `input`) register a
  * pending prompt in the runtime and await its resolution; an auto-deny
  * timer races the user answer so the worker never hangs indefinitely.
- * `notify` emits `legacy.delegate.worker_notify` for the overlay
+ * `notify` emits `delegate:worker-notify` for the overlay
  * transcript. Every other method is a no-op — widgets, editor surface,
  * theme, etc. are main-agent concerns and must not leak into the worker.
  */
@@ -204,12 +205,15 @@ export function buildRoutedUIContext(deps: RoutedUIContextDeps): ExtensionUICont
 
 	base.notify = (msg: string, kind?: "info" | "warning" | "error") => {
 		try {
-			pi?.events.emit("legacy.delegate.worker_notify", {
-				runId,
-				forkName,
-				message: msg,
-				kind: kind ?? "info",
-			});
+			const events = pi?.events;
+			if (events) {
+				emitDelegateEvent((channel, data) => events.emit(channel, data), DELEGATE_EVENTS.workerNotify, {
+					runId,
+					forkName,
+					message: msg,
+					kind: kind ?? "info",
+				});
+			}
 		} catch {
 			/* emitter failures must not break worker tools. */
 		}

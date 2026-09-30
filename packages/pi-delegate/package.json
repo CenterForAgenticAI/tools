@@ -1,5 +1,5 @@
 {
-  "version": "0.8.3",
+  "version": "0.9.0",
   "description": "Multi-shape pi subagent delegation: supervised forks, direct workers, chain steps, detached drivers, steering, and worktree isolation.",
   "type": "module",
   "main": "dist/index.js",
@@ -9,6 +9,16 @@
       "types": "./dist/escalation-api.d.ts",
       "import": "./dist/escalation-api.js",
       "default": "./dist/escalation-api.js"
+    },
+    "./events": {
+      "types": "./dist/events.d.ts",
+      "import": "./dist/events.js",
+      "default": "./dist/events.js"
+    },
+    "./fabric": {
+      "types": "./dist/fabric-adapter.d.ts",
+      "import": "./dist/fabric-adapter.js",
+      "default": "./dist/fabric-adapter.js"
     },
     ".": {
       "types": "./dist/index.d.ts",
@@ -52,15 +62,18 @@
     "smoke": "node scripts/with-temp-root.mjs tsx scripts/smoke.ts",
     "smoke:pack": "node scripts/with-temp-root.mjs node scripts/smoke-package-import.mjs",
     "release": "node scripts/release.mjs",
-    "model:difftest": "node scripts/with-temp-root.mjs bash .graft/models/pi-delegate/oracle/compare.sh",
-    "quality": "npm run check:sdk-config && npm run lint && npm run lint:budget && npm run typecheck && npm run typecheck:tests && npm run test:hooks && npm run coverage && npm run smoke && npm run smoke:pack",
-    "check": "npm run lint && npm run typecheck && npm run typecheck:tests && npm run test:affected",
+    "model:difftest": "node scripts/with-temp-root.mjs bash .spec/model/oracle/compare.sh",
+    "model:difftest:bend": "MODEL_BACKEND=bend node scripts/with-temp-root.mjs bash .spec/model/oracle/compare.sh",
+    "model:layout": "node scripts/check-model-layout.mjs",
+    "quality": "npm run model:layout && npm run check:sdk-config && npm run lint && npm run lint:budget && npm run typecheck && npm run typecheck:tests && npm run test:hooks && npm run coverage && npm run smoke && npm run smoke:pack",
+    "check": "npm run model:layout && npm run lint && npm run typecheck && npm run typecheck:tests && npm run test:affected",
     "check:ci": "npm run quality",
     "hooks:install": "sh scripts/install-git-hooks.sh",
     "test:hooks": "node scripts/with-temp-root.mjs sh scripts/test-autobuild-hooks.sh",
     "compact-state": "tsx scripts/compact-run-state.ts",
     "measure:tool-surface": "node --import tsx scripts/measure-tool-surface.mjs",
-    "lint:budget": "node scripts/lint-budget.mjs"
+    "lint:budget": "node scripts/lint-budget.mjs",
+    "model:check-axioms": "python3 .spec/model/tests/check-all-axioms.py && python3 .spec/model/tests/test-check-all-axioms.py"
   },
   "engines": {
     "node": ">=22.19"
@@ -90,14 +103,12 @@
   "publishConfig": {
     "access": "public"
   },
-  "dependencies": {
-    "@sinclair/typebox": "^0.34.0"
-  },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.84.2",
     "@earendil-works/pi-coding-agent": "0.84.2",
     "@earendil-works/pi-tui": "0.84.2",
     "@eslint/js": "^10.0.1",
+    "@sinclair/typebox": "^0.34.0",
     "c8": "^11.0.0",
     "eslint": "^10.7.0",
     "tsx": "^4.19.0",
@@ -107,6 +118,7 @@
   "peerDependencies": {
     "@earendil-works/pi-ai": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1",
     "@earendil-works/pi-coding-agent": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1",
-    "@earendil-works/pi-tui": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1"
+    "@earendil-works/pi-tui": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1",
+    "@sinclair/typebox": "*"
   }
 }

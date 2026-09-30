@@ -377,7 +377,9 @@ function compileLayers(runs: CanonicalRun[], task: string | undefined, groupOpti
 			...toLegacySlot(run, ["group_concurrency", "group_failFast"]),
 			task: run.after === undefined ? (run.task ?? task) : (run.task ?? "{previous}"),
 		}));
-		if (steps.length === 1) return steps[0];
+		// A counted singleton is still a parallel layer; sequential execution
+		// does not expand count and would silently drop requested workers.
+		if (steps.length === 1 && !(typeof layer[0].count === "number" && layer[0].count > 1)) return steps[0];
 		const group: JsonObject = { parallel: steps };
 		// A legacy group's own controls travel on its member runs and win, so two
 		// groups in one chain keep distinct policy. A canonical dispatch has no

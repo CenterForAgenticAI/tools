@@ -798,6 +798,7 @@ const SAFE_CHILDLOG_REASONS = new Set(["agent_end", "process_exit", "stalled"]);
 
 interface ChildLogProjection {
 	tail?: string;
+	truncated: boolean;
 	lastActivityAt?: number;
 	startupPhase: DetachedStartupPhase;
 	stderrPresent: boolean;
@@ -844,7 +845,7 @@ function boundChildLogLines(lines: string[], maxBytes: number, maxLines: number)
 	return kept.join("\n");
 }
 
-function readChildLogBytes(file: string, maxBytes: number): string | undefined {
+function readChildLogBytes(file: string, maxBytes: number): { text: string; truncated: boolean } | undefined {
 	let fd: number | undefined;
 	try {
 		const size = fs.statSync(file).size;
@@ -858,7 +859,7 @@ function readChildLogBytes(file: string, maxBytes: number): string | undefined {
 			const newline = raw.indexOf("\n");
 			raw = newline >= 0 ? raw.slice(newline + 1) : "";
 		}
-		return raw;
+		return { text: raw, truncated: start > 0 };
 	} catch {
 		return undefined;
 	} finally {
@@ -971,7 +972,7 @@ export function readChildLogProjection(
 	let stderrPresent = false;
 	let stderrTruncated = false;
 	let exitProvenance: DetachedExitProvenance = "none";
-	for (const rawLine of raw.split("\n")) {
+	for (const rawLine of raw.text.split("\n")) {
 		if (!rawLine) continue;
 		const match = /^\[([^\]]+)\] (.*)$/.exec(rawLine);
 		if (!match) continue;
@@ -992,8 +993,10 @@ export function readChildLogProjection(
 		}
 		if (projected.line) lines.push(`[${match[1]}] ${projected.line}`);
 	}
+	const tail = maxLines > 0 ? boundChildLogLines(lines, maxBytes, maxLines) : "";
 	return {
-		...(maxLines > 0 ? { tail: boundChildLogLines(lines, maxBytes, maxLines) } : { tail: "" }),
+		tail,
+		truncated: raw.truncated || tail !== lines.join("\n"),
 		...(lastActivityAt !== undefined ? { lastActivityAt } : {}),
 		startupPhase: phase,
 		stderrPresent,
@@ -1071,6 +1074,7 @@ function detachedDiagnostics(
 					stderrTruncated: projection.stderrTruncated,
 					exitProvenance,
 					childlogTail: projection.tail ?? "",
+					childlogTailTruncated: projection.truncated,
 				}
 			: { exitProvenance }),
 	};

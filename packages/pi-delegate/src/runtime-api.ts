@@ -12,8 +12,16 @@
  * running extension.
  */
 
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { runtimeOperations, resolveRuntimeForkName } from "./runtime-operations.js";
+import { RuntimeStatusSchema, RuntimeSteerSchema, RuntimeCancelSchema, assertRuntimeCorrespondence, RuntimeResultContractError, decodeRuntimeResult, type DelegateRuntimeCapability, type DelegateRuntimeStatus, type DelegateRuntimeControlResult } from "./runtime-contract.js";
+export * from "./runtime-contract.js";
+import type { RuntimeToolName } from "./runtime-boundary.js";
+import { RuntimeInvocation, withRuntimeInvocation, type RuntimeContextBinding, type DelegateRuntimeInvocationOptions } from "./runtime-invocation.js";
+export type { DelegateRuntimeInvocationOptions, DelegateRuntimeUpdate } from "./runtime-invocation.js";
+import { logDelegateDiagnostic } from "./diagnostics.js";
+import { readDaemonDriverCfg } from "./daemon-driver.js";
+import { daemonDispatchEntries, projectDispatchSteps, digestDispatchInputs, readDispatchEvidence, type DispatchAcceptance, type DispatchFailureEvidence, type DispatchInputDigest, type DispatchStepEvidence } from "./dispatch-evidence.js";
+export type { DispatchAcceptance, DispatchFailureEvidence, DispatchStepEvidence } from "./dispatch-evidence.js";
 import * as path from "node:path";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { CancelReason, DelegateDispatchSnapshot } from "./runtime.js";
@@ -21,8 +29,7 @@ import { getRunSnapshot } from "./runtime.js";
 import { isSafeRunId } from "./run-id.js";
 import { readJsonFile, replaceJsonFile, resolveDelegateStateDir } from "./state-io.js";
 import { normalizeDelegateParams } from "./delegate-normalize.js";
-import { openWorkerArtifact } from "./artifact-workspace.js";
-import { prepareArguments } from "./delegate-params.js";
+import { prepareArguments, prepareRuntimeDispatchArguments } from "./delegate-params.js";
 import { compileDelegateRuns, UnsupportedRunOptionError } from "./delegate-runs.js";
 import { resolveEffectiveCwd } from "./cwd-resolution.js";
 
@@ -30,7 +37,12 @@ export const DELEGATE_RUNTIME_ENVELOPE_VERSION = 1 as const;
 
 export type DelegateRuntimeErrorCode =
 	| "core-unavailable"
+	| "context-unavailable"
+	| "stale-context"
+	| "invocation-aborted"
+	| "unsupported-capability"
 	| "invalid-request"
+	| "authorization-denied"
 	| "unsupported-option"
 	| "input-unreadable"
 	| "unknown-agent"
@@ -46,18 +58,14 @@ export class DelegateRuntimeError extends Error {
 		readonly code: DelegateRuntimeErrorCode,
 		message: string,
 		readonly cause?: unknown,
+		readonly evidence?: DispatchFailureEvidence,
 	) {
 		super(message);
 		this.name = "DelegateRuntimeError";
 	}
 }
 
-export interface DelegateRuntimeInputDigest {
-	kind: "task" | "read" | "checklist" | "focus";
-	name: string;
-	algorithm: "sha256";
-	digest: string;
-}
+export type DelegateRuntimeInputDigest = DispatchInputDigest;
 
 export interface DelegateRuntimeRunReceipt {
 	name: string;
@@ -84,6 +92,9 @@ export interface DelegateRuntimeReceipt {
 	runId: string;
 	createdAt: string;
 	shape: string;
+	acceptance?: DispatchAcceptance;
+	inputDigests?: DispatchInputDigest[];
+	steps?: DispatchStepEvidence[];
 	/** Stable runtime-API field retained as `forks`; entries are runs. */
 	forks: DelegateRuntimeRunReceipt[];
 	receiptPath: string;
@@ -115,11 +126,21 @@ export interface DelegateRuntimeResult {
 	observedAt: string;
 	terminal: boolean;
 	provenance: DelegateRuntimeRunProvenance[];
+	acceptance?: DispatchAcceptance;
+	inputDigests?: DispatchInputDigest[];
+	steps?: DispatchStepEvidence[];
+	content?: Array<{ type: string; text?: string }>;
 	result: unknown;
 	resultPath: string;
 }
 
 export interface DelegateRuntimeDispatchRequest extends Record<string, unknown> {
+	/** Canonical entries; legacy spellings remain accepted by normalization. */
+	runs?: import("./delegate-runs.js").CanonicalRun[];
+	agent?: string;
+	task?: string;
+	chain?: string | Array<Record<string, unknown>>;
+	chainName?: string;
 	/** Unsupported legacy claim: pi-delegate does not enforce edit intent. */
 	edit?: never;
 }
@@ -150,14 +171,24 @@ export interface DelegateRuntimeToolResult {
 }
 
 interface InstalledRuntimeCore {
+	capabilities?: readonly DelegateRuntimeCapability[];
+	bindContext?(context: ExtensionContext): RuntimeContextBinding;
+	observe?(runId: string, invocation: RuntimeInvocation, context?: ExtensionContext): () => void;
+	inspectWait?(runId: string, context: ExtensionContext): DelegateRuntimeToolResult | Promise<DelegateRuntimeToolResult>;
+	observeDetached?(runId: string, invocation: RuntimeInvocation): Promise<boolean>;
+	/** Native handler owns lookup, input preflight and evidence preparation. */
+	sharedPreparation?: true;
 	invoke(
-		name: "delegate" | "delegate_status" | "delegate_result" | "delegate_steer" | "delegate_cancel",
+		name: RuntimeToolName,
 		params: Record<string, unknown>,
 		ctx: ExtensionContext,
+		invocation?: RuntimeInvocation,
 	): Promise<DelegateRuntimeToolResult>;
 }
 
 let installedCore: InstalledRuntimeCore | undefined;
+const activeInvocations = new Set<RuntimeInvocation>();
+function disposeInvocations(): void { for (const invocation of activeInvocations) invocation.dispose(); }
 
 /**
  * Process-global key for the live runtime API handle.
@@ -197,6 +228,7 @@ export function installDelegateRuntimeCore(core: InstalledRuntimeCore | undefine
 		if (installedCore !== undefined) uninstallDelegateRuntimeCore(installedCore);
 		return;
 	}
+	if (installedCore !== core) disposeInvocations();
 	installedCore = core;
 	(globalThis as Record<symbol, unknown>)[DELEGATE_RUNTIME_API_HANDLE_KEY] = runtimeApiHandle;
 }
@@ -208,13 +240,10 @@ export function installDelegateRuntimeCore(core: InstalledRuntimeCore | undefine
  */
 export function uninstallDelegateRuntimeCore(core: InstalledRuntimeCore): void {
 	if (installedCore !== core) return;
+	disposeInvocations();
 	installedCore = undefined;
 	const slot = globalThis as Record<symbol, unknown>;
 	if (slot[DELEGATE_RUNTIME_API_HANDLE_KEY] === runtimeApiHandle) delete slot[DELEGATE_RUNTIME_API_HANDLE_KEY];
-}
-
-function sha256(value: string): string {
-	return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function receiptDir(agentDir: string, runId: string): string {
@@ -237,76 +266,17 @@ function stringArray(value: unknown): string[] | undefined {
 	return strings.length > 0 ? strings : undefined;
 }
 
+/** Compatibility for old installed cores: declared inputs only, never execution planning. */
 function slotsForRequest(request: DelegateRuntimeDispatchRequest): Array<Record<string, unknown>> {
-	const expand = (slots: Array<Record<string, unknown>>): Array<Record<string, unknown>> => {
-		const used = new Set<string>();
-		return slots.flatMap((slot, slotIndex) => {
-			const count = typeof slot.count === "number" && Number.isInteger(slot.count) && slot.count > 0 ? slot.count : 1;
-			return Array.from({ length: count }, (_, index) => {
-				const copy = { ...slot };
-				const base = typeof copy.name === "string" ? copy.name : `${String(copy.agent ?? "run")}${slotIndex + 1}`;
-				const name = index === 0 && !used.has(base) ? base : `${base}#${index + 1}`;
-				copy.name = name; used.add(name); return copy;
-			});
-		});
-	};
-	if (Array.isArray(request.runs)) return expand(request.runs as Array<Record<string, unknown>>);
-	if (Array.isArray(request.agents)) return expand(request.agents as Array<Record<string, unknown>>);
-	if (Array.isArray(request.tasks)) return expand(request.tasks as Array<Record<string, unknown>>);
-	if (typeof request.agent === "string" && typeof request.task === "string") return [{ ...request, name: request.name ?? request.agent }];
+	if (Array.isArray(request.runs)) return request.runs;
+	if (Array.isArray(request.agents)) return request.agents;
+	if (Array.isArray(request.tasks)) return request.tasks;
+	if (typeof request.agent === "string" && typeof request.task === "string") return [request];
 	return [];
 }
 
-async function digestSlotInputs(slot: Record<string, unknown>, baseCwd: string): Promise<DelegateRuntimeInputDigest[]> {
-	const digests: DelegateRuntimeInputDigest[] = [];
-	if (typeof slot.task === "string") {
-		digests.push({ kind: "task", name: "task", algorithm: "sha256", digest: sha256(slot.task) });
-	}
-	const reads = Array.isArray(slot.reads) ? slot.reads : [];
-	for (const read of reads) {
-		if (typeof read === "string") {
-			const absolute = path.resolve(baseCwd, read);
-			const digest = createHash("sha256").update(readFileSync(absolute)).digest("hex");
-			digests.push({ kind: "read", name: read, algorithm: "sha256", digest });
-			continue;
-		}
-		// Use the same pin-aware reader admission as execution. Successful opening
-		// recomputes and verifies the exact payload digest before this receipt trusts
-		// the manifest-bound SHA-256.
-		const opened = await openWorkerArtifact(read);
-		try {
-			digests.push({ kind: "read", name: opened.artifactRef.artifactName, algorithm: "sha256", digest: opened.artifactRef.sha256 });
-		} finally {
-			await opened.release();
-		}
-	}
-	const checklist = slot.handoff && typeof slot.handoff === "object"
-		? (slot.handoff as Record<string, unknown>).tasks
-		: slot.checklist;
-	if (checklist !== undefined) {
-		digests.push({
-			kind: "checklist",
-			name: "checklist",
-			algorithm: "sha256",
-			digest: sha256(JSON.stringify(checklist)),
-		});
-	}
-	const handoff = slot.handoff && typeof slot.handoff === "object"
-		? (slot.handoff as Record<string, unknown>)
-		: undefined;
-	const focus = handoff?.focus ?? slot.focus;
-	if (focus !== undefined) {
-		digests.push({
-			kind: "focus",
-			name: "focus",
-			algorithm: "sha256",
-			// Hash the caller's own namespace bytes. Do not use the derived worker
-			// seed, whose boundaries and provenance are added after this point.
-			digest: sha256(JSON.stringify(focus)),
-		});
-	}
-	return digests;
-}
+const digestSlotInputs = digestDispatchInputs;
+
 
 function runReceipt(
 	runState: DelegateDispatchSnapshot["forks"][string],
@@ -359,6 +329,7 @@ function buildReceipt(
 	};
 }
 
+
 function requireCore(): InstalledRuntimeCore {
 	if (!installedCore) {
 		throw new DelegateRuntimeError(
@@ -369,20 +340,13 @@ function requireCore(): InstalledRuntimeCore {
 	return installedCore;
 }
 
-function errorCodeForMessage(message: string): DelegateRuntimeErrorCode {
-	if (/unknown agent/i.test(message)) return "unknown-agent";
-	if (/(?:model.*(?:unavailable|not found|resolve)|resolve.*model|unresolvable model)/i.test(message)) return "model-unavailable";
-	if (/confin|writable root|write guard/i.test(message)) return "invalid-confinement";
-	if (/unknown runId|no run found|not found/i.test(message)) return "not-found";
-	if (/cannot (?:steer|cancel)|credential-unavailable|uncontrollable/i.test(message)) return "control-unavailable";
-	return "core-error";
-}
-
 function requireSuccessful(result: DelegateRuntimeToolResult, operation: string): DelegateRuntimeToolResult {
 	if (!result.isError) return result;
 	const message = result.content?.find((item) => item.type === "text")?.text;
+	const code = recordDetails(result.details).errorCode;
+	if (code === "input-unreadable" || code === "invalid-request" || code === "authorization-denied" || code === "unsupported-option" || code === "unsupported-capability" || code === "control-unavailable" || code === "not-found" || code === "unknown-agent" || code === "model-unavailable" || code === "invalid-confinement") throw new DelegateRuntimeError(code, `${operation} failed${message ? `: ${message}` : ""}`);
 	const fullMessage = `${operation} failed${message ? `: ${message}` : ""}`;
-	throw new DelegateRuntimeError(errorCodeForMessage(fullMessage), fullMessage);
+	throw new DelegateRuntimeError("core-error", fullMessage);
 }
 
 function recordDetails(value: unknown): Record<string, unknown> {
@@ -391,20 +355,24 @@ function recordDetails(value: unknown): Record<string, unknown> {
 		: {};
 }
 
-export interface DelegateRuntimeClient {
-	dispatch(request: DelegateRuntimeDispatchRequest): Promise<DelegateRuntimeReceipt>;
-	direct(request: DelegateRuntimeDispatchRequest): Promise<DelegateRuntimeReceipt>;
-	managed(request: DelegateRuntimeDispatchRequest): Promise<DelegateRuntimeReceipt>;
-	status(runId: string): Promise<unknown>;
-	harvest(runId: string): Promise<DelegateRuntimeResult>;
-	steer(request: DelegateRuntimeSteerRequest): Promise<unknown>;
-	cancel(request: DelegateRuntimeCancelRequest): Promise<unknown>;
+export interface DelegateRuntimeClient extends ReturnType<typeof runtimeOperations> {
+	readonly capabilities: readonly DelegateRuntimeCapability[];
+	/** Canonical entry point. The request selects the execution mode. */
+	dispatch(request: DelegateRuntimeDispatchRequest, options?: DelegateRuntimeInvocationOptions): Promise<DelegateRuntimeReceipt>;
+	/** @deprecated Use {@link DelegateRuntimeClient.dispatch | dispatch()}. Literal alias; does not force solo mode. */
+	direct(request: DelegateRuntimeDispatchRequest, options?: DelegateRuntimeInvocationOptions): Promise<DelegateRuntimeReceipt>;
+	/** @deprecated Use {@link DelegateRuntimeClient.dispatch | dispatch()}. Literal alias; does not force supervised mode. */
+	managed(request: DelegateRuntimeDispatchRequest, options?: DelegateRuntimeInvocationOptions): Promise<DelegateRuntimeReceipt>;
+	status(runId: string, options?: DelegateRuntimeInvocationOptions): Promise<DelegateRuntimeStatus>;
+	harvest(runId: string, options?: DelegateRuntimeInvocationOptions): Promise<DelegateRuntimeResult>;
+	steer(request: DelegateRuntimeSteerRequest, options?: DelegateRuntimeInvocationOptions): Promise<DelegateRuntimeControlResult>;
+	cancel(request: DelegateRuntimeCancelRequest, options?: DelegateRuntimeInvocationOptions): Promise<DelegateRuntimeControlResult>;
 }
 
 /**
  * Construct a client bound to one live extension context.
  *
- * This deliberately exposes no wait, poll, loop, retry, or sequencing method.
+ * Wait is bounded observation; dispatch always returns accepted receipts immediately.
  */
 export function createDelegateRuntimeClient(options: {
 	context: ExtensionContext;
@@ -412,7 +380,45 @@ export function createDelegateRuntimeClient(options: {
 }): DelegateRuntimeClient {
 	const { context } = options;
 	const agentDir = options.agentDir ?? getAgentDir();
-	const dispatch = async (request: DelegateRuntimeDispatchRequest): Promise<DelegateRuntimeReceipt> => {
+	const core = installedCore;
+	let binding: RuntimeContextBinding | undefined;
+	let bindingError: unknown;
+	try {
+		if (!core) requireCore();
+		if (typeof core?.bindContext !== "function" || typeof core.observe !== "function") throw new DelegateRuntimeError("unsupported-capability", "Installed core does not support invocation lifecycle");
+		const bound = core.bindContext(context);
+		binding = {
+			assertCurrent() {
+				if (!installedCore) throw new DelegateRuntimeError("core-unavailable", "Runtime core is no longer installed");
+				if (installedCore !== core) throw new DelegateRuntimeError("stale-context", "Runtime client belongs to a replaced core");
+				bound.assertCurrent();
+			},
+			onInvalidate: (callback) => bound.onInvalidate(callback),
+		};
+	} catch (error) { bindingError = error; }
+	const invoke = async <T>(options: DelegateRuntimeInvocationOptions | undefined, retain: boolean, operation: (invocation: RuntimeInvocation) => Promise<T>): Promise<T> => {
+		if (options !== undefined && (options === null || typeof options !== "object" || (options.signal !== undefined && !(options.signal instanceof AbortSignal)) || (options.onUpdate !== undefined && typeof options.onUpdate !== "function"))) throw new DelegateRuntimeError("invalid-request", "Invocation options require an AbortSignal and/or onUpdate function");
+		requireCore();
+		if (installedCore !== core) throw new DelegateRuntimeError("stale-context", "Runtime client belongs to a replaced core");
+		if (bindingError) throw bindingError;
+		const invocation = new RuntimeInvocation(binding!, options, () => logDelegateDiagnostic("runtime API observer threw; observation detached", { agentDir, level: "warn" }));
+		activeInvocations.add(invocation);
+		invocation.own(() => { activeInvocations.delete(invocation); });
+		try { return await withRuntimeInvocation(invocation, () => operation(invocation)); }
+		catch (error) {
+			invocation.dispose();
+			const acceptance = invocation.acceptance;
+			if (acceptance && !(error instanceof DelegateRuntimeError && error.evidence)) {
+				throw new DelegateRuntimeError("provenance-unavailable", "Accepted invocation failed; inspect the existing run rather than redispatching", error,
+					{ acceptance, stage: "metadata", cleanup: "not-requested", terminalConfirmed: false, recovery: { runId: acceptance.runId, action: "status-and-harvest" } });
+			}
+			if (error instanceof DelegateRuntimeError) throw error;
+			throw new DelegateRuntimeError(error instanceof RuntimeResultContractError ? "unsupported-capability" : "core-error", error instanceof Error ? error.message : "Runtime operation failed", error);
+		}
+		finally { if (!retain) invocation.dispose(); }
+	};
+	const dispatch = (request: DelegateRuntimeDispatchRequest, options?: DelegateRuntimeInvocationOptions): Promise<DelegateRuntimeReceipt> => invoke(options, Boolean(options?.onUpdate), async (invocation) => {
+		if (Object.prototype.hasOwnProperty.call(request, "action")) throw new DelegateRuntimeError("invalid-request", "Use manage() or health() for explicit management operations");
 		if (Object.prototype.hasOwnProperty.call(request, "edit")) {
 			throw new DelegateRuntimeError(
 				"unsupported-option",
@@ -421,7 +427,7 @@ export function createDelegateRuntimeClient(options: {
 		}
 		let canonical: Record<string, unknown>;
 		try {
-			canonical = prepareArguments(normalizeDelegateParams(request));
+			canonical = core!.sharedPreparation === true ? normalizeDelegateParams(prepareRuntimeDispatchArguments(request)) : prepareArguments(normalizeDelegateParams(request));
 		} catch (error) {
 			// A well-formed request naming an unsupported option combination (for
 			// example `reads` with `worktree: true`) keeps its precise code. Schema
@@ -432,8 +438,9 @@ export function createDelegateRuntimeClient(options: {
 			}
 			throw new DelegateRuntimeError("invalid-request", `delegate runtime dispatch request is invalid: ${error instanceof Error ? error.message : String(error)}`, error);
 		}
-		const slots = slotsForRequest(canonical as DelegateRuntimeDispatchRequest);
-		if (slots.length === 0) {
+		const sharedPreparation = core!.sharedPreparation === true;
+		const slots = sharedPreparation ? [] : slotsForRequest(canonical as DelegateRuntimeDispatchRequest);
+		if (!sharedPreparation && slots.length === 0 && typeof canonical.chain !== "string" && typeof canonical.chainName !== "string") {
 			throw new DelegateRuntimeError(
 				"invalid-request",
 				"delegate runtime dispatch accepts exactly one direct `{agent, task}`, `tasks`, or managed `agents` shape",
@@ -455,121 +462,99 @@ export function createDelegateRuntimeClient(options: {
 				);
 			}
 		}
-		const params = { ...compileDelegateRuns(canonical), await: false } as Record<string, unknown>;
-		const raw = requireSuccessful(await requireCore().invoke("delegate", params, context), "dispatch");
+		const driver = Array.isArray(canonical.runs) && canonical.runs.some((run) => recordDetails(run).mode === "driver");
+		// Drivers are intrinsically asynchronous and reject even await:false.
+		const params = { ...(sharedPreparation ? prepareRuntimeDispatchArguments(request) : compileDelegateRuns(canonical)), ...(driver ? {} : { await: false }) } as Record<string, unknown>;
+		invocation.assertPreparing();
+		const raw = await core!.invoke("delegate", params, context, invocation);
+		const detail = recordDetails(raw.details);
+		if (raw.isError && detail.dispatchFailure) {
+			throw new DelegateRuntimeError("provenance-unavailable", raw.content?.[0]?.text ?? "daemon submission failed", undefined, detail.dispatchFailure as DispatchFailureEvidence);
+		}
+		if (raw.isError && invocation.acceptance) {
+			const acceptance = invocation.acceptance;
+			throw new DelegateRuntimeError("provenance-unavailable", "Accepted run preparation failed; inspect the existing run rather than redispatching", undefined,
+				{ acceptance, stage: "metadata", cleanup: "not-requested", terminalConfirmed: false, recovery: { runId: acceptance.runId, action: "status-and-harvest" } });
+		}
+		requireSuccessful(raw, "dispatch");
 		const runId = recordDetails(raw.details).runId;
 		if (typeof runId !== "string") {
 			throw new DelegateRuntimeError("provenance-unavailable", "dispatch failed: core returned no durable runId");
 		}
-		const run = getRunSnapshot(runId);
-		if (!run) {
-			throw new DelegateRuntimeError(
-				"provenance-unavailable",
-				`dispatch failed: runId=${runId} was not durably registered`,
-			);
-		}
-		const receipt = buildReceipt(agentDir, run, canonical as DelegateRuntimeDispatchRequest, inputDigests);
+		const acceptance: DispatchAcceptance = {
+			runId, transport: detail.mode === "driver" ? "daemon" : "in-process", state: "accepted",
+			...(typeof detail.daemonSessionId === "string" ? { daemonSessionId: detail.daemonSessionId } : {}),
+			...(typeof detail.promptId === "string" ? { promptId: detail.promptId } : {}),
+			...(typeof detail.idempotencyKey === "string" ? { idempotencyKey: detail.idempotencyKey } : {}),
+		};
+		invocation.accept(acceptance);
+		let stage: "metadata" | "receipt" = "metadata";
 		try {
-			replaceJsonFile(receipt.receiptPath, receipt);
-		} catch (error) {
-			// Dispatch has already registered the run. If provenance publication
-			// fails, revoke the unreceipted work before withholding its handle.
-			try {
-				await requireCore().invoke("delegate_cancel", { runId, reason: "runtime receipt publication failed" }, context);
-			} catch {
-				// Preserve the publication error; cancellation is best-effort but the
-				// caller still receives a stable fail-closed classification.
+			const run = getRunSnapshot(runId);
+			const evidence = readDispatchEvidence(agentDir, runId);
+			if (sharedPreparation && !evidence) throw new Error("shared dispatch evidence unavailable");
+			if (!run && !(detail.accepted === true && acceptance.transport === "daemon" && acceptance.promptId)) throw new Error("accepted run metadata unavailable");
+			const receipt: DelegateRuntimeReceipt = run
+				? buildReceipt(agentDir, run, canonical as DelegateRuntimeDispatchRequest, inputDigests)
+				: { schema: "pi-delegate.runtime-receipt", version: 1, runId,
+					createdAt: evidence?.createdAt ?? new Date().toISOString(), shape: evidence?.shape ?? "driver",
+					forks: [], receiptPath: resolveDelegateRuntimeReceiptPath(agentDir, runId), resultPath: resolveDelegateRuntimeResultPath(agentDir, runId) };
+			receipt.acceptance = acceptance;
+			if (evidence) {
+				receipt.inputDigests = evidence.inputDigests;
+				receipt.steps = projectDispatchSteps(evidence.steps, run, daemonDispatchEntries(readDaemonDriverCfg(agentDir, runId)), Boolean(run?.completedAt));
+				receipt.forks = evidence.steps.map((step) => {
+					const live = run?.forks[step.name];
+					return live ? runReceipt(live, undefined, step.inputDigests) : { name: step.name, agent: step.agent, maxRounds: 1, inputDigests: step.inputDigests };
+				});
 			}
-			throw new DelegateRuntimeError(
-				"provenance-unavailable",
-				`dispatch cancelled because its durable receipt could not be published: ${error instanceof Error ? error.message : String(error)}`,
-				error,
-			);
+			stage = "receipt";
+			replaceJsonFile(receipt.receiptPath, receipt);
+			// Completion can precede receipt publication. Its earlier event could not see a receipt.
+			if (run?.completedAt !== undefined) {
+				try { publishDelegateRuntimeResult(agentDir, runId, await core!.invoke("delegate_result", { runId }, context)); }
+				catch { logDelegateDiagnostic("runtime API fast terminal publication failed; use harvest", { agentDir, level: "warn" }); }
+			}
+			return receipt;
+		} catch (error) {
+			let cleanup: DispatchFailureEvidence["cleanup"] = "unknown";
+			try {
+				const cancelled = await core!.invoke("delegate_cancel", { runId, reason: "runtime evidence publication failed" }, context);
+				cleanup = cancelled.isError ? "rejected" : "acknowledged";
+			} catch { /* Cancellation outcome is unknown, not rolled back. */ }
+			throw new DelegateRuntimeError("provenance-unavailable",
+				`Accepted runId=${runId}; ${stage} publication failed. Cancellation ${cleanup}; terminal outcome unconfirmed. Recover by status/harvest, not redispatch.`, error,
+				{ acceptance, stage, cleanup, terminalConfirmed: false, recovery: { runId, action: "status-and-harvest" } });
 		}
-		return receipt;
-	};
+	});
 
 	return {
+		...runtimeOperations({ agentDir, binding: () => binding!, invoke, call: (name, params, invocation) => core!.invoke(name, params, context, invocation), observe: (runId, invocation) => core!.observe!(runId, invocation, context), observeDetached: (runId, invocation) => core?.observeDetached?.(runId, invocation) ?? Promise.resolve(false), inspectWait: runId => { if (!core?.inspectWait) throw new DelegateRuntimeError("unsupported-capability", "Installed core lacks read-only wait inspection"); return core.inspectWait(runId, context); }, require: requireSuccessful, supports: capability => core?.capabilities?.includes(capability) === true }),
+		capabilities: Object.freeze([...(core?.capabilities ?? [])]),
 		dispatch,
 		direct: dispatch,
 		managed: dispatch,
-		async status(runId) {
-			const raw = requireSuccessful(
-				await requireCore().invoke("delegate_status", { runId }, context),
-				"status",
-			);
-			return raw.details;
-		},
-		async harvest(runId) {
-			const raw = await requireCore().invoke("delegate_result", { runId }, context);
-			const details = recordDetails(raw.details);
-			// Terminal failures are valid judged outcomes and the production tool
-			// deliberately marks them isError. Only reject an error that carries no
-			// typed run result to persist.
-			if (raw.isError && (typeof details.runId !== "string" || typeof details.status !== "string")) {
-				requireSuccessful(raw, "harvest");
-			}
-			const state = typeof details.status === "string" ? details.status : "unknown";
-			const receiptRead = readJsonFile(resolveDelegateRuntimeReceiptPath(agentDir, runId));
-			const receipt = receiptRead.kind === "ok" ? receiptRead.value as DelegateRuntimeReceipt : undefined;
-			const run = getRunSnapshot(runId);
-			const runEntries = Array.isArray(details.forks) ? details.forks as Array<Record<string, unknown>> : [];
-			const receiptByName = new Map((receipt?.forks ?? []).map((item) => [item.name, item]));
-			const provenance = runEntries.map((entry, index): DelegateRuntimeRunProvenance => {
-				const live = run?.forks[String(entry.name)];
-				const runReceiptData = receiptByName.get(String(entry.name)) ?? receipt?.forks[index];
-				const startedAtMs = live?.startedAt ?? live?.startedAtMs;
-				const endedAtMs = live?.endedAt;
-				return {
-					name: String(entry.name),
-					agent: String(entry.agent),
-					...(typeof entry.workerModel === "string" ? { resolvedModel: entry.workerModel } : {}),
-					...(typeof entry.workerCwd === "string" ? { workerCwd: entry.workerCwd } : {}),
-					...(typeof entry.workerSessionFile === "string" ? { workerSessionFile: entry.workerSessionFile } : {}),
-					status: String(entry.status),
-					...(startedAtMs ? { startedAt: new Date(startedAtMs).toISOString() } : {}),
-					...(endedAtMs ? { finishedAt: new Date(endedAtMs).toISOString() } : {}),
-					...(startedAtMs && endedAtMs ? { durationMs: Math.max(0, endedAtMs - startedAtMs) } : {}),
-					inputDigests: runReceiptData?.inputDigests ?? [],
-					actualInputDigests: Array.isArray(entry.inputDigests)
-						? entry.inputDigests.filter((digest): digest is { sequence: number; algorithm: "sha256"; digest: string } =>
-							Boolean(digest) && typeof digest === "object" &&
-							typeof (digest as Record<string, unknown>).sequence === "number" &&
-							(digest as Record<string, unknown>).algorithm === "sha256" &&
-							typeof (digest as Record<string, unknown>).digest === "string")
-						: [],
-				};
-			});
-			const terminal = state.startsWith("terminal-");
-			const resultPath = resolveDelegateRuntimeResultPath(agentDir, runId);
-			const envelope: DelegateRuntimeResult = {
-				schema: "pi-delegate.runtime-result",
-				version: DELEGATE_RUNTIME_ENVELOPE_VERSION,
-				runId,
-				state,
-				observedAt: new Date().toISOString(),
-				terminal,
-				provenance,
-				result: details,
-				resultPath,
-			};
-			replaceJsonFile(resultPath, envelope);
-			return envelope;
-		},
-		async steer(request) {
-			const raw = requireSuccessful(
-				await requireCore().invoke("delegate_steer", { ...request }, context),
-				"steer",
-			);
-			return raw.details;
-		},
-		async cancel(request) {
-			const raw = requireSuccessful(
-				await requireCore().invoke("delegate_cancel", { ...request }, context),
-				"cancel",
-			);
-			return raw.details;
-		},
+		status: (runId, options) => invoke(options, false, async (invocation) => {
+			if (!isSafeRunId(runId)) throw new DelegateRuntimeError("invalid-request", "status requires a safe runId; use listRuns() to enumerate");
+			const result = decodeRuntimeResult(RuntimeStatusSchema, requireSuccessful(await core!.invoke("delegate_status", { runId }, context, invocation), "status").details);
+			for (const run of result.dispatches) assertRuntimeCorrespondence({ runId }, run);
+			return result;
+		}),
+		harvest: (runId, options) => invoke(options, false, async (invocation) => {
+			return publishDelegateRuntimeResult(agentDir, runId, await core!.invoke("delegate_result", { runId }, context, invocation));
+		}),
+		steer: (request, options) => invoke(options, false, async (invocation) => {
+			const forkName = resolveRuntimeForkName("steer", request.runId, request.forkName);
+			const result = decodeRuntimeResult(RuntimeSteerSchema, requireSuccessful(await core!.invoke("delegate_steer", { runId: request.runId, forkName: request.forkName, message: request.message, deliverAs: request.deliverAs, targetLineagePath: request.targetLineagePath, capToken: request.capToken }, context, invocation), "steer").details);
+			assertRuntimeCorrespondence({ runId: request.runId, targetLineagePath: request.targetLineagePath, forkName: result.forkName === undefined && (result.alreadyTerminal || result.requestId || result.mode === "driver") ? undefined : forkName }, result);
+			return result;
+		}),
+		cancel: (request, options) => invoke(options, false, async (invocation) => {
+			const forkName = resolveRuntimeForkName("cancel", request.runId, request.forkName);
+			const result = decodeRuntimeResult(RuntimeCancelSchema, requireSuccessful(await core!.invoke("delegate_cancel", { runId: request.runId, forkName: request.forkName, reason: request.reason, targetLineagePath: request.targetLineagePath, capToken: request.capToken }, context, invocation), "cancel").details);
+			assertRuntimeCorrespondence({ runId: request.runId, targetLineagePath: request.targetLineagePath, forkName: result.forkName === undefined && (result.alreadyTerminal || result.requestId || result.mode === "driver") ? undefined : forkName }, result);
+			return result;
+		}),
 	};
 }
 
@@ -586,3 +571,69 @@ export function readDelegateRuntimeResult(agentDir: string, runId: string): Dele
 }
 
 export type { CancelReason };
+
+/** Internal publication seam: callers must invoke the authorized result handler first. */
+export function publishDelegateRuntimeResult(agentDir: string, runId: string, raw: DelegateRuntimeToolResult): DelegateRuntimeResult {
+	const details = recordDetails(raw.details);
+	// Terminal failures are valid judged outcomes and the production tool
+	// deliberately marks them isError. Only reject an error that carries no
+	// typed run result to persist.
+	if (raw.isError && (typeof details.runId !== "string" || typeof details.status !== "string")) {
+		requireSuccessful(raw, "harvest");
+	}
+	// Validate before reading or replacing requested-run evidence. A core response
+	// is not authority to relabel another run's outcome as this one.
+	assertRuntimeCorrespondence({ runId }, details);
+	if (typeof details.status !== "string" || !details.status.trim()) throw new RuntimeResultContractError("Missing harvest status");
+	if (details.acceptance !== undefined) assertRuntimeCorrespondence({ runId }, details.acceptance);
+	const state = details.status;
+	const receiptRead = readJsonFile(resolveDelegateRuntimeReceiptPath(agentDir, runId));
+	const receipt = receiptRead.kind === "ok" ? receiptRead.value as DelegateRuntimeReceipt : undefined;
+	const run = getRunSnapshot(runId);
+	const runEntries = Array.isArray(details.forks) ? details.forks as Array<Record<string, unknown>> : [];
+	const receiptByName = new Map((receipt?.forks ?? []).map((item) => [item.name, item]));
+	const provenance = runEntries.map((entry, index): DelegateRuntimeRunProvenance => {
+		const live = run?.forks[String(entry.name)];
+		const runReceiptData = receiptByName.get(String(entry.name)) ?? receipt?.forks[index];
+		const startedAtMs = live?.startedAt ?? live?.startedAtMs;
+		const endedAtMs = live?.endedAt;
+		return {
+			name: String(entry.name),
+			agent: String(entry.agent),
+			...(typeof entry.workerModel === "string" ? { resolvedModel: entry.workerModel } : {}),
+			...(typeof entry.workerCwd === "string" ? { workerCwd: entry.workerCwd } : {}),
+			...(typeof entry.workerSessionFile === "string" ? { workerSessionFile: entry.workerSessionFile } : {}),
+			status: String(entry.status),
+			...(startedAtMs ? { startedAt: new Date(startedAtMs).toISOString() } : {}),
+			...(endedAtMs ? { finishedAt: new Date(endedAtMs).toISOString() } : {}),
+			...(startedAtMs && endedAtMs ? { durationMs: Math.max(0, endedAtMs - startedAtMs) } : {}),
+			inputDigests: runReceiptData?.inputDigests ?? [],
+			actualInputDigests: Array.isArray(entry.inputDigests)
+				? entry.inputDigests.filter((digest): digest is { sequence: number; algorithm: "sha256"; digest: string } =>
+					Boolean(digest) && typeof digest === "object" &&
+					typeof (digest as Record<string, unknown>).sequence === "number" &&
+					(digest as Record<string, unknown>).algorithm === "sha256" &&
+					typeof (digest as Record<string, unknown>).digest === "string")
+				: [],
+		};
+	});
+	const terminal = state.startsWith("terminal-");
+	const resultPath = resolveDelegateRuntimeResultPath(agentDir, runId);
+	const envelope: DelegateRuntimeResult = {
+		schema: "pi-delegate.runtime-result",
+		version: DELEGATE_RUNTIME_ENVELOPE_VERSION,
+		runId,
+		state,
+		observedAt: new Date().toISOString(),
+		terminal,
+		provenance,
+		...(receipt?.acceptance || details.acceptance ? { acceptance: receipt?.acceptance ?? details.acceptance as DispatchAcceptance } : {}),
+		...(receipt?.inputDigests ? { inputDigests: receipt.inputDigests } : {}),
+		steps: projectDispatchSteps(readDispatchEvidence(agentDir, runId)?.steps ?? receipt?.steps ?? [], run, runEntries, terminal),
+		...(raw.content ? { content: raw.content.map((item) => ({ type: item.type, ...(typeof item.text === "string" ? { text: item.text } : {}) })) } : {}),
+		result: details,
+		resultPath,
+	};
+	replaceJsonFile(resultPath, envelope);
+	return envelope;
+}

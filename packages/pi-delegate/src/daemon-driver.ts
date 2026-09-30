@@ -1,4 +1,6 @@
 import * as fs from "node:fs";
+import { assertInvocationPreparing, acceptInvocation, type RuntimeInvocation } from "./runtime-invocation.js";
+import type { DispatchAcceptance } from "./dispatch-evidence.js";
 import * as path from "node:path";
 
 import type {
@@ -68,6 +70,12 @@ async function boundedDaemonOperation<T>(label: string, operation: Promise<T>): 
 	}
 }
 
+export class DaemonLaunchError extends Error {
+	constructor(message: string, readonly acceptance: DispatchAcceptance, readonly stage: "submission" | "locator", cause?: unknown) {
+		super(message, { cause });
+		this.name = "DaemonLaunchError";
+	}
+}
 export interface DaemonDriverLaunchResult {
 	runId: string;
 	locator: DaemonRunLocator;
@@ -251,6 +259,31 @@ function advanceDaemonCursor(
 	});
 }
 
+/** Includes uncertain submissions so restart discovery never hides a pending claim. */
+export function readDaemonDriverRecord(agentDir: string, runId: string): OrchestrateCfg | undefined {
+	if (!isSafeRunId(runId)) return undefined;
+	const cfg = readOrchestrateCfg(agentDir, runId);
+	return cfg && isDaemonConnectionRecord(cfg.daemonConnection) &&
+		(isDaemonRunLocator(cfg.daemonLocator) || isDaemonPendingLaunchRecord(cfg.daemonPendingLaunch)) ? cfg : undefined;
+}
+
+/** Read-only claim lookup, then locator repair. This path never submits a prompt. */
+export async function reconcileDaemonPendingLaunch(agentDir: string, runId: string, environment: NodeJS.ProcessEnv = process.env, connect: typeof connectDaemonLazy = connectDaemonLazy): Promise<OrchestrateCfg> {
+	const cfg = readDaemonDriverRecord(agentDir, runId);
+	if (!cfg) throw new Error(`no daemon driver claim for runId=${runId}`);
+	if (isDaemonRunLocator(cfg.daemonLocator)) return cfg;
+	const pending = cfg.daemonPendingLaunch!;
+	const client = await connect(connectOptions(cfg.daemonConnection!, environment, true));
+	try {
+		const status = await boundedDaemonOperation("pending prompt_status", client.promptStatus(pending.daemonSessionId, { idempotencyKey: pending.idempotencyKey }));
+		if (status.state === "unknown" || !("promptId" in status) || !status.promptId) throw new Error(`daemon claim remains uncertain for runId=${runId}; no prompt was submitted by recovery`);
+		const current = await boundedDaemonOperation("pending session status", client.request("status", {}, pending.daemonSessionId));
+		if (!("session" in current)) throw new Error("daemon returned global status during pending recovery");
+		const locator: DaemonRunLocator = { daemonSessionId: pending.daemonSessionId, idempotencyKey: pending.idempotencyKey, promptId: status.promptId, cursor: pending.cursor, generation: current.session.generation };
+		persistDaemonCfg(cfg, locator, cfg.daemonConnection!);
+		return { ...cfg, daemonLocator: locator };
+	} finally { client.close(); }
+}
 export function readDaemonDriverCfg(agentDir: string, runId: string): OrchestrateCfg | undefined {
 	if (!isSafeRunId(runId)) return undefined;
 	const read = readJsonFile(cfgFile(agentDir, runId));
@@ -276,7 +309,7 @@ export function hasOwnedDaemonDriverRun(
 			if (++inspected > 4096) return false;
 			if (!entry.isFile() || !entry.name.endsWith(".cfg.json")) continue;
 			const runId = entry.name.slice(0, -".cfg.json".length);
-			const cfg = readDaemonDriverCfg(agentDir, runId);
+			const cfg = readDaemonDriverRecord(agentDir, runId);
 			if (cfg?.ownerSessionId === ownerSessionId) return true;
 		}
 		return false;
@@ -352,7 +385,9 @@ function promptIdFromResult(result: OperationResult<"prompt">): string | undefin
 export async function launchDaemonDriver(
 	cfg: OrchestrateCfg,
 	environment: NodeJS.ProcessEnv = process.env,
+	connect: typeof connectDaemonLazy = connectDaemonLazy,
 ): Promise<DaemonDriverLaunchResult> {
+	assertInvocationPreparing();
 	const existing = readDaemonDriverCfg(cfg.agentDir, cfg.runId);
 	const recordedCfg = readOrchestrateCfg(cfg.agentDir, cfg.runId);
 	const pending = isDaemonPendingLaunchRecord(recordedCfg?.daemonPendingLaunch)
@@ -368,24 +403,27 @@ export async function launchDaemonDriver(
 	const connection = existing?.daemonConnection
 		?? (isDaemonConnectionRecord(recordedCfg?.daemonConnection) ? recordedCfg.daemonConnection : undefined)
 		?? connectionRecordFromEnvironment(cfg.agentDir, environment);
-	const client = await connectDaemonLazy(connectOptions(connection, environment, true));
+	let client: DaemonClient;
+	try {
+		client = await connect(connectOptions(connection, environment, true));
+	} catch (error) {
+		if (existing || pending) throw new DaemonLaunchError("Could not reconnect to the persisted daemon claim; do not redispatch.", {
+			runId: cfg.runId, transport: "daemon", state: existing ? "accepted" : "uncertain", daemonSessionId, idempotencyKey,
+			...(existing?.daemonLocator ? { promptId: existing.daemonLocator.promptId } : {}),
+		}, "submission", error);
+		throw error;
+	}
 	let attachment: DaemonAttachment | undefined;
 	let lease: DaemonLease | undefined;
 	let stage = "open/create";
+	let submitted = false;
+	let acceptedLocator: DaemonRunLocator | undefined = existing?.daemonLocator;
 	try {
 		const opened = await boundedDaemonOperation(
 			"open/create",
 			openOrCreateSession(client, durableCfg, daemonSessionId),
 		);
 		const processedCursor = existing?.daemonLocator?.cursor ?? pending?.cursor ?? opened.session.cursor;
-		if (existing === undefined) {
-			stage = "persist pending launch";
-			persistDaemonPendingCfg(
-				durableCfg,
-				{ daemonSessionId, idempotencyKey, cursor: processedCursor },
-				connection,
-			);
-		}
 		const promptLookup = existing?.daemonLocator !== undefined
 			? { promptId: existing.daemonLocator.promptId }
 			: pending !== undefined ? { idempotencyKey } : undefined;
@@ -406,6 +444,7 @@ export async function launchDaemonDriver(
 					cursor: processedCursor,
 					generation: opened.session.generation,
 				};
+				acceptedLocator = locator;
 				stage = "persist locator";
 				persistDaemonCfg(durableCfg, locator, connection);
 				return {
@@ -415,6 +454,7 @@ export async function launchDaemonDriver(
 					disposition: "known",
 				};
 			}
+			throw new Error("Persisted prompt claim is unresolved; recover it by idempotency key, never redispatch.");
 		}
 		stage = "attach";
 		attachment = await boundedDaemonOperation(
@@ -435,7 +475,12 @@ export async function launchDaemonDriver(
 			"lease",
 			attachment.acquireLease(generation, { ttlMs: DEFAULT_LEASE_TTL_MS }),
 		);
+		assertInvocationPreparing();
+		stage = "persist pending launch";
+		persistDaemonPendingCfg(durableCfg, { daemonSessionId, idempotencyKey, cursor: processedCursor }, connection);
+		assertInvocationPreparing();
 		stage = "prompt";
+		submitted = true;
 		const prompt = await boundedDaemonOperation(
 			"prompt",
 			lease.prompt({
@@ -456,6 +501,8 @@ export async function launchDaemonDriver(
 			cursor: processedCursor,
 			generation: prompt.outcome === "accepted" ? prompt.generation : generation,
 		};
+		acceptedLocator = locator;
+		acceptInvocation({ runId: cfg.runId, transport: "daemon", state: "accepted", daemonSessionId, promptId, idempotencyKey });
 		stage = "persist locator";
 		persistDaemonCfg(durableCfg, locator, connection);
 		return {
@@ -468,6 +515,12 @@ export async function launchDaemonDriver(
 		const detail = isDaemonRequestError(error)
 			? `${error.code}: ${error.message}`
 			: error instanceof Error ? error.message : String(error);
+		if (error instanceof DaemonLaunchError) throw error;
+		if (submitted || acceptedLocator || pending) throw new DaemonLaunchError(`${stage} failed: ${detail}`, {
+			runId: cfg.runId, transport: "daemon", state: acceptedLocator ? "accepted" : "uncertain", daemonSessionId, idempotencyKey,
+			...(acceptedLocator ? { promptId: acceptedLocator.promptId } : {}),
+		}, acceptedLocator ? "locator" : "submission", error);
+		assertInvocationPreparing();
 		throw new Error(`${stage} failed: ${detail}`, { cause: error });
 	} finally {
 		if (lease && !lease.released) {
@@ -506,6 +559,54 @@ function nextFrame(iterator: AsyncIterator<StreamFrame>): Promise<IteratorResult
 			},
 		);
 	});
+}
+
+/** Read-only live observation. No lease, prompt, wake, cancellation, or durable cursor mutation. */
+export async function observeDaemonDriver(
+	agentDir: string,
+	runId: string,
+	invocation: RuntimeInvocation,
+	environment: NodeJS.ProcessEnv = process.env,
+	connect: typeof connectDaemonLazy = connectDaemonLazy,
+): Promise<void> {
+	if (!invocation.observing) return;
+	const cfg = readDaemonDriverCfg(agentDir, runId);
+	if (!cfg?.daemonLocator || !cfg.daemonConnection) throw new Error("Accepted daemon observation requires a durable locator");
+	const locator = cfg.daemonLocator;
+	const client = await connect(connectOptions(cfg.daemonConnection, environment, false));
+	let attachment: DaemonAttachment | undefined;
+	let cleaned = false;
+	const cleanup = () => {
+		if (cleaned) return;
+		cleaned = true;
+		if (attachment) void boundedDaemonOperation("observe detach", attachment.detach()).catch(() => undefined).finally(() => client.close());
+		else client.close();
+	};
+	invocation.own(cleanup);
+	if (!invocation.observing) return;
+	try {
+		attachment = await boundedDaemonOperation("observe attach", client.attach(locator.daemonSessionId, { fromCursor: locator.cursor, live: true }));
+		if (cleaned) { await attachment.detach().catch(() => undefined); return; }
+		if (!invocation.observing) return;
+		const update = async () => {
+			const status = await boundedDaemonOperation("observe prompt_status", client.promptStatus(locator.daemonSessionId, { promptId: locator.promptId }));
+			if (isTerminalPromptStatus(status)) {
+				invocation.update({ kind: "terminal", runId, state: status.state === "failed" || status.state === "aborted" ? "terminal-failed" : "terminal-done" });
+			} else invocation.update({ kind: "progress", runId, forks: [{ name: cfg.entryName ?? cfg.agentName, agent: cfg.agentName, status: status.state }] });
+		};
+		// Subscribe first, then query: a terminal transition between launch and attach is not missed.
+		await update();
+		if (!invocation.observing) return;
+		for await (const frame of attachment) {
+			if (!invocation.observing) break;
+			if (frame.kind === "entry") await attachment.acknowledge(frame);
+			await update();
+			if (!invocation.observing) break;
+		}
+	} finally {
+		cleanup();
+		invocation.dispose();
+	}
 }
 
 interface CollectedReplay {
@@ -551,7 +652,7 @@ export async function replayDaemonDriver(
 	runId: string,
 	environment: NodeJS.ProcessEnv = process.env,
 ): Promise<DaemonDriverReplayResult> {
-	const cfg = readDaemonDriverCfg(agentDir, runId);
+	const cfg = await reconcileDaemonPendingLaunch(agentDir, runId, environment);
 	if (!cfg || !cfg.daemonLocator || !cfg.daemonConnection) {
 		throw new Error(`no daemon driver locator for runId=${runId}`);
 	}
@@ -587,7 +688,7 @@ async function connectRecordedDriver(
 	runId: string,
 	environment: NodeJS.ProcessEnv,
 ): Promise<{ cfg: OrchestrateCfg; client: DaemonClient; locator: DaemonRunLocator }> {
-	const cfg = readDaemonDriverCfg(agentDir, runId);
+	const cfg = await reconcileDaemonPendingLaunch(agentDir, runId, environment);
 	if (!cfg || !cfg.daemonLocator || !cfg.daemonConnection) {
 		throw new Error(`no daemon driver locator for runId=${runId}`);
 	}

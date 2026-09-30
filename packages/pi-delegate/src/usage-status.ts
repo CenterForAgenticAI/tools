@@ -1,3 +1,4 @@
+import { DELEGATE_EVENTS } from "./events.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isOwnedByThisProcess, listRuns } from "./runtime.js";
 import {
@@ -119,7 +120,7 @@ export function setupUsageFooterStatus(pi: ExtensionAPI, ctx: any): UsageStatusH
 	const unsubs: Array<() => void> = [];
 	unsubs.push(pi.events.on("delegate:register", requestUpdate));
 	unsubs.push(pi.events.on("delegate:update", requestUpdate));
-	unsubs.push(pi.events.on("legacy.delegate.complete", requestUpdate));
+	unsubs.push(pi.events.on(DELEGATE_EVENTS.complete, requestUpdate));
 	unsubs.push(pi.events.on("delegate:transcript-append", requestUpdate));
 
 	apply();

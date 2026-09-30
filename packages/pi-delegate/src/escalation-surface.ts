@@ -17,7 +17,9 @@ import {
 } from "./config.js";
 import { claimPendingResult, consumePendingResult, unclaimPendingResult } from "./detached-spawn.js";
 import { authorityDecides } from "./escalation-chain.js";
+import { controlHints, type DelegateModelInterface } from "./model-interface.js";
 import { passEscalation } from "./escalation-runtime.js";
+import { wakeOwnerAlive } from "./process-identity.js";
 import {
 	claimEscalation,
 	ESCALATION_OUTCOME_VERSION,
@@ -345,6 +347,8 @@ export function resolveHeldEscalation(args: {
 	leaseMs?: number;
 	onBehalfOfUser?: boolean;
 	deps?: Partial<EscalationSurfaceDeps>;
+	/** The calling session's selected interface; only changes the pass-up hint. */
+	modelInterface?: DelegateModelInterface;
 }): EscalationSurfaceResult {
 	const deps = depsFor(args.deps);
 	const located = locateRequest(args.agentDir, args.requestId, args.rootRunId, deps);
@@ -365,7 +369,7 @@ export function resolveHeldEscalation(args: {
 	}
 	if (isRoot && !authorityDecides(deps.config(args.agentDir).authority, request.kind, request.category)) {
 		return errorResult(
-			`The root agent lacks declared authority to resolve ${request.kind} escalation ${request.requestId}. Use \`delegate_escalation\` with action "pass_up" to pass it to the operator.`,
+			`The root agent lacks declared authority to resolve ${request.kind} escalation ${request.requestId}. ${controlHints(args.modelInterface).escalationPassUp()}`,
 			"authority-refused",
 			{ rootRunId, requestId: request.requestId, kind: request.kind, category: request.category },
 		);
@@ -840,7 +844,12 @@ export async function redeliverEscalationWakes(args: {
 		if (pending.record.kind !== "escalation-pending") continue;
 		const record = pending.record as PendingEscalationWakeRecord;
 		const ours = record.owningPid === process.pid && record.owningNonce === nonce;
-		const ownerAlive = isPidAlive(record.owningPid);
+		const ownerAlive = wakeOwnerAlive(
+			{ pid: record.owningPid, nonce: record.owningNonce, sessionId: record.ownerSessionId },
+			args.currentSessionId,
+			isPidAlive,
+			nonce,
+		);
 		const sameSession = args.currentSessionId !== undefined && record.ownerSessionId === args.currentSessionId;
 		const adoptable = args.currentSessionId !== undefined && args.currentSessionId.length > 0 && (ours || !ownerAlive);
 		if ((!sameSession && !adoptable) || (!ours && ownerAlive)) {

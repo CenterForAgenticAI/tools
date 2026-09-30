@@ -62,7 +62,7 @@ export type EscalationAction = (typeof ESCALATION_ACTIONS)[number];
  * indefinitely as `tools:` allowlist aliases, so an agent definition written
  * against the old surface keeps working without an edit.
  */
-export const CONTROL_ROUTE: Record<ControlAction, string> = {
+export const CONTROL_ROUTE = {
 	status: "delegate_status",
 	result: "delegate_result",
 	prompt_status: "delegate_prompt_status",
@@ -71,13 +71,13 @@ export const CONTROL_ROUTE: Record<ControlAction, string> = {
 	ui_answer: "delegate_ui_answer",
 	cancel: "delegate_cancel",
 	recover: "delegate_recover",
-};
+} as const satisfies Record<ControlAction, string>;
 
-export const ESCALATION_ROUTE: Record<EscalationAction, string> = {
+export const ESCALATION_ROUTE = {
 	list: "delegate_escalations",
 	resolve: "delegate_resolve_escalation",
 	pass_up: "delegate_escalate",
-};
+} as const satisfies Record<EscalationAction, string>;
 
 /**
  * The eleven legacy tool names the two action tools replace.

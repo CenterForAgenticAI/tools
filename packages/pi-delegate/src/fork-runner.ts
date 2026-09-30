@@ -1830,6 +1830,7 @@ async function runForkInner(
 		attemptedModels = plannedModels.kind === "planned"
 			? [...modelCursor!.attemptedRefs]
 			: [...plannedModels.failure.attemptedRefs];
+		result.attemptedModels = [...attemptedModels];
 		return choice;
 	};
 
@@ -1857,6 +1858,9 @@ async function runForkInner(
 		}
 		currentWorkerModel = choice.model;
 		workerModelRef = choice.canonicalRef;
+		// Same contract as the direct runner: the result carries the model that
+		// actually served the worker, so harvest provenance can report it.
+		result.workerModel = workerModelRef;
 	};
 
 	const buildWorkerTranscript = (): TranscriptEntry[] => {
@@ -2812,6 +2816,7 @@ async function runForkInner(
 				if (fctx.sessionRefs) fctx.sessionRefs.worker = successor.session;
 				if (modelChoice) {
 					workerModelRef = modelChoice.canonicalRef;
+					result.workerModel = workerModelRef;
 				}
 				// Publication precedes predecessor disposal; prompt only after the
 				// old runtime is stale and its resources are fully owned/disposed.
@@ -3096,6 +3101,7 @@ async function runForkInner(
 				) return;
 				currentWorkerModel = modelChoice.model;
 				workerModelRef = modelChoice.canonicalRef;
+				result.workerModel = workerModelRef;
 			};
 			let newMessages: readonly AgentMessage[];
 			try {

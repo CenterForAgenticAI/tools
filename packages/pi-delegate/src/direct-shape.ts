@@ -38,6 +38,7 @@ import { formatForkWarningLines } from "./fork-warnings.js";
 import { renderPromptRepairReport } from "./prompt-repair-seam.js";
 import { runFailureReasonFor } from "./pending-wakes.js";
 import type { RunFailureReason, RunFailureRecovery } from "./pending-wakes.js";
+import { controlHints, type DelegateModelInterface } from "./model-interface.js";
 import type { ModelRuntimeLike } from "./sdk-model-runtime.js";
 import type { EffectiveEscalationPolicy } from "./escalation-policy.js";
 import type { ResolvedRunTimeoutPolicy } from "./fork-timeout.js";
@@ -354,6 +355,7 @@ export function buildDirectCombinedContent(
 	results: Array<RunResult & { outputFile?: { absolutePath: string }; activeToolNames?: string[] }>,
 	worktreeSuffix: string,
 	recoveryByWorker?: ReadonlyMap<string, RunFailureRecovery>,
+	modelInterface: DelegateModelInterface = "native",
 ): string {
 	let body: string;
 	const renderOne = (r: typeof results[number]) => {
@@ -365,7 +367,7 @@ export function buildDirectCombinedContent(
 		const recovery = r.status === "failed" ? recoveryByWorker?.get(r.name) : undefined;
 		if (recovery) {
 			lines.push(recovery.available
-				? `Recovery is available; call delegate_control action recover (strategy: ${recovery.strategy}).`
+				? controlHints(modelInterface).recover(recovery.strategy)
 				: "Recovery is not available for this failure.");
 		}
 		if (r.policyRefusals?.length) {
@@ -453,6 +455,8 @@ export async function pumpDirectWorkers(args: {
 		forkName: string,
 		patch: Pick<RunLiveState, "status"> & { reason?: RunFailureReason; recovery?: RunFailureRecovery; worktreeDiff?: WorktreeDiff },
 	) => boolean | void;
+	/** The receiving session's selected interface, read when the result is built. */
+	resolveModelInterface?: () => DelegateModelInterface;
 	/** Resolve the live recovery verdict for a direct worker failure. */
 	getFailureRecovery?: (forkName: string) => RunFailureRecovery | undefined;
 	onForkTranscriptEntry?: (forkName: string, entry: any) => void;
@@ -723,7 +727,7 @@ export async function pumpDirectWorkers(args: {
 	}
 
 	const anyFailed = finalResults.some((r) => r.status !== "completed");
-	const combinedContent = buildDirectCombinedContent(finalResults, worktreeSuffix, recoveryByWorker);
+	const combinedContent = buildDirectCombinedContent(finalResults, worktreeSuffix, recoveryByWorker, args.resolveModelInterface?.() ?? "native");
 	return { finalResults, worktreeDiffs, worktreeSuffix, combinedContent, anyFailed };
 }
 

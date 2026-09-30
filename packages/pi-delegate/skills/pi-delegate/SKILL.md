@@ -414,21 +414,15 @@ Driver runs cannot use `retryOf`; recover them through the control route.
 
 - **Background** (default for every ordinary dispatch): the tool returns immediately
   with `runId` + run names; runs execute in the background; the main agent keeps
-  working. Combined output arrives later as a `custom_message` that
-  **automatically triggers a new turn** — you do NOT need to poll, sleep, or
-  check status. Just continue with other work or let your turn end; the results
-  will wake you up.
+  working. Combined output arrives later as a `custom_message` that wakes you
+  when you would otherwise stop. Do NOT poll or sleep; one status check at a
+  natural checkpoint is fine. Otherwise continue with other work or let your
+  turn end.
 - **`await: true`**: the tool blocks until all runs finish and returns the
   combined output as the current tool result. Use this explicit dependency
   barrier only when the next action requires the answer and blocking the normal
   conversational path for run-control instructions is acceptable. `sync: true` is
   a deprecated compatibility alias.
-
-**⚠️ Anti-pattern: polling / sleeping after dispatch.**
-Do NOT call `delegate_control(action="status")` in a loop waiting for completion. Do NOT use
-`bash sleep N && echo done`. Do NOT busy-wait. The dispatch mechanism handles
-notification automatically — a new agent turn is triggered with the full
-output the moment all runs finish.
 
 ### Early failure wakes and recovery (default-on)
 
@@ -781,9 +775,9 @@ delegate({ worktree: true, runs: [
 
 ## Gotchas
 
-- **Never poll or sleep after dispatching.** Dispatch mode auto-triggers a new
-  turn with results. Calling `delegate_control(action="status")` in a loop or `bash sleep` wastes
-  tokens and time.
+- **Never poll or sleep after dispatching.** Results wake you when you would
+  otherwise stop. A single `delegate_control(action="status")` check at a natural
+  checkpoint is fine; a status loop or `bash sleep` wastes tokens and time.
 - `clone_mode: "full"` copies the entire main-thread history into the fork.
   Cheap mid-session delegations should use `snippet` or `task_only`.
 - Fork-clone needs the main agent's model configured in `ModelRegistry` —

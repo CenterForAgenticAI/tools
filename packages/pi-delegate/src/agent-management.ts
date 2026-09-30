@@ -204,6 +204,15 @@ export const ManagementConfigSchema = Type.Object({
 
 export type ManagementConfig = Static<typeof ManagementConfigSchema>;
 
+export const RuntimeManagementSchema = Type.Object({
+ action: Type.Union(["list", "get", "create", "update", "delete", "canonicalize", "health"].map((action) => Type.Literal(action))),
+ agent: Type.Optional(Type.String({ minLength: 1 })),
+ chainName: Type.Optional(Type.String({ minLength: 1 })),
+ agent_scope: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("project"), Type.Literal("both")])),
+ config: Type.Optional(Type.Unknown()),
+}, { additionalProperties: false });
+
+
 export interface ManagementParams {
 	action?: string;
 	agent?: string;
@@ -212,6 +221,42 @@ export interface ManagementParams {
 	config?: unknown;
 }
 
+export interface ManagementDefinition {
+ kind: "agent" | "chain";
+ name: string;
+ description: string;
+ source: string;
+ filePath: string;
+ config: ManagementConfig;
+ envKeys?: string[];
+}
+function agentDefinition(agent: AgentConfig): ManagementDefinition {
+ const config: ManagementConfig = { name: agent.name, description: agent.description, systemPrompt: agent.systemPrompt,
+  model: agent.model, tools: [...(agent.tools ?? []), ...(agent.mcpDirectTools ?? []).map(tool => `mcp:${tool}`)], systemPromptMode: agent.systemPromptMode,
+  inheritProjectContext: agent.inheritProjectContext, inheritSkills: agent.inheritSkills, skills: agent.skills,
+  fallbackModels: agent.fallbackModels, extensions: agent.extensions, extensionInclude: agent.extensionInclude,
+  extensionExclude: agent.extensionExclude, thinking: agent.thinking, thinkingMin: agent.thinkingMin, thinkingMax: agent.thinkingMax,
+  defaultMaxRounds: agent.defaultMaxRounds, stopConditionHint: agent.stopConditionHint, collapseMode: agent.collapseMode,
+  summaryModel: agent.summaryModel, reads: agent.defaultReads, progress: agent.defaultProgress, artifact: agent.artifact,
+  interactive: agent.interactive, maxSubagentDepth: agent.maxSubagentDepth, allowNestedDelegate: agent.allowNestedDelegate,
+  nestedDelegateAgents: agent.nestedDelegateAgents, maxDurationMs: agent.maxDurationMs, windDownGraceMs: agent.windDownGraceMs,
+  ...(agent.escalation ? { escalation: {
+   mode: agent.escalation.mode, intermediate: agent.escalation.intermediate,
+   hopTimeoutMs: agent.escalation.hopTimeoutMs, ...(agent.escalation.holdStrategy === "hold-open" ? { holdStrategy: agent.escalation.holdStrategy } : {}),
+   timeoutMs: agent.escalation.timeoutMs, timeoutBehavior: agent.escalation.timeoutBehavior,
+   ...(agent.escalation.authority ? { authority: { decision: agent.escalation.authority.decision, blocker: agent.escalation.authority.blocker, amendment: agent.escalation.authority.amendment, tags: agent.escalation.authority.tags } } : {}),
+  } } : {}),
+ };
+ return { kind: "agent", name: agent.name, description: agent.description, source: agent.source, filePath: agent.filePath, config, ...(agent.env ? { envKeys: Object.keys(agent.env).sort() } : {}) };
+}
+function chainDefinition(chain: ChainFileConfig): ManagementDefinition {
+ const steps = chain.steps.map(step => {
+  if (isChainReferenceStepFileConfig(step)) return { chain: step.chain, task: step.task };
+  if (isChainRunStepFileConfig(step)) return { run: step.run, command: step.command, cwd: step.cwd, timeoutMs: step.timeoutMs };
+  return { agent: step.agent, task: step.task, artifact: step.artifact, reads: step.reads, model: step.model, thinking: step.thinking, thinkingMin: step.thinkingMin, thinkingMax: step.thinkingMax, skills: step.skills, progress: step.progress };
+ });
+ return { kind: "chain", name: chain.name, description: chain.description, source: chain.source, filePath: chain.filePath, config: { name: chain.name, description: chain.description, steps }, envKeys: [...new Set(chain.steps.flatMap(step => Object.keys(step.env ?? {})))].sort() };
+}
 export interface AgentManagementResult {
 	text: string;
 	isError?: boolean;
@@ -222,6 +267,7 @@ export interface AgentManagementResult {
 	 */
 	details?: {
 		action: ManagementAction;
+		definitions?: ManagementDefinition[];
 		agent?: string;
 		chainName?: string;
 		filePath?: string;
@@ -1292,6 +1338,7 @@ export function handleList(params: ManagementParams, ctx: ManagementContext): Ag
 	}
 	return ok(lines.join("\n"), {
 		action: "list",
+		definitions: [...agents.map(agentDefinition), ...chains.map(chainDefinition)],
 		...(d.warnings.length ? { warnings: d.warnings } : {}),
 	});
 }
@@ -1302,8 +1349,9 @@ export function handleGet(params: ManagementParams, ctx: ManagementContext): Age
 	const discovery = discoverAgentsAll(ctx.cwd, ctx.discoveryOptions);
 	const discoveryWarnings = discovery.warnings;
 	const blocks: string[] = [];
+	const definitions: ManagementDefinition[] = [];
 	let anyFound = false;
-	type GetCandidate = { name: string; source: AgentSource; render: () => string };
+	type GetCandidate = { name: string; source: AgentSource; render: () => string; definition: ManagementDefinition };
 	const queries: Array<{ label: "Agent" | "Chain"; name: string; candidates: GetCandidate[] }> = [];
 	if (params.agent) {
 		queries.push({
@@ -1313,6 +1361,7 @@ export function handleGet(params: ManagementParams, ctx: ManagementContext): Age
 				name: agent.name,
 				source: agent.source,
 				render: () => formatAgentDetail(agent),
+				definition: agentDefinition(agent),
 			})),
 		});
 	}
@@ -1324,6 +1373,7 @@ export function handleGet(params: ManagementParams, ctx: ManagementContext): Age
 				name: chain.name,
 				source: chain.source,
 				render: () => formatChainDetail(chain),
+				definition: chainDefinition(chain),
 			})),
 		});
 	}
@@ -1338,6 +1388,7 @@ export function handleGet(params: ManagementParams, ctx: ManagementContext): Age
 		if (matches.length) {
 			anyFound = true;
 			blocks.push(...matches.map((candidate) => candidate.render()));
+			definitions.push(...matches.map((candidate) => candidate.definition));
 			continue;
 		}
 		const available = [...new Set(visible.map((candidate) => candidate.name))]
@@ -1347,7 +1398,7 @@ export function handleGet(params: ManagementParams, ctx: ManagementContext): Age
 	}
 	const text = blocks.join("\n\n") + warningText(discoveryWarnings);
 	return anyFound
-		? ok(text, { action: "get", ...(discoveryWarnings.length ? { warnings: discoveryWarnings } : {}) })
+		? ok(text, { action: "get", definitions, ...(discoveryWarnings.length ? { warnings: discoveryWarnings } : {}) })
 		: err(text, { action: "get", ...(discoveryWarnings.length ? { warnings: discoveryWarnings } : {}) });
 }
 
