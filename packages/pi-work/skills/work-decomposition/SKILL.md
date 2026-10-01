@@ -48,7 +48,14 @@ work:
 ```
 
 `timeout_ms` is optional command evidence: an integer from 1,000 to
-3,600,000 milliseconds (one hour); omitting it keeps the 30,000 ms default.
+3,600,000 milliseconds (one hour); omitting it keeps the 30,000 ms default. `inherit_env: [VARIABLE_NAME]`
+optionally passes named host variables to command evidence; it is capped at 32
+unique portable names of at most 128 characters, excludes verifier controls, and
+redacts exact inherited values from rendered output, details, failures, and cache.
+Unset names, values shorter than 8 characters, and output floors that contain
+or are contained in an inherited value fail closed by name. A command can
+transform or transmit a secret despite redaction: only inherit secrets into
+commands you trust.
 The validator rejects unknown keys and lifecycle fields. The following are
 non-negotiable:
 
@@ -265,9 +272,10 @@ commands or establish any green evidence.
 
 - `work_status --refresh` is blocked in v1 because the verify barrel exposes no
   authority constructor. The status surface is a concurrent v1 lane and may not
-  be registered in the host you are using; when present, `work_status` cannot
-  report `verified-this-session`. A cache hit is a record, not a green. Use the
-  exact wording `observed green; not verified this session` for a cached pass,
+  be registered in the host you are using; when present, `work_status` reports
+  `verified-this-session` only after this process runs `work_verify` against the
+  exact source, worktree, and commit. A cache hit is a record, not a green. Use
+  the exact wording `observed green; not verified this session` for a cached pass,
   and never use `verified`, `done`, or `green` as a gate for it.
 - `agent` evidence is a typed `agent-unavailable` failure, not a skipped check.
   The pi-work trusted adapter for pi-delegate's required programmatic-client

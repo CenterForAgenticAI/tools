@@ -1,5 +1,5 @@
 {
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Structured workspec authoring, verification, and plan compilation for pi.",
   "keywords": [
     "pi-package"
@@ -18,6 +18,7 @@
   "files": [
     "dist",
     "README.md",
+    "docs",
     "skills",
     "LICENSE"
   ],

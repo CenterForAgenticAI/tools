@@ -116,7 +116,7 @@ test("cache decoder rejects forged green records and tree disagreement", () => {
 	const incomplete = structuredClone(base) as Record<string, unknown>;
 	const incompleteRecord = incomplete.record as Record<string, unknown>;
 	incompleteRecord.outcome = "failed";
-	incompleteRecord.criteria = [{ outcome: "failed", criterion: { id: "c1", statement: "no" }, attempt: { kind: "command", evidence: { kind: "command", run: "false", expect: { exit: 0 } }, startedAt: "2026-01-01", finishedAt: "2026-01-01", tree }, failures: [{ code: "exit-mismatch", message: "no", expected: 0, actual: 1 }] }];
+	incompleteRecord.criteria = [{ outcome: "failed", criterion: { id: "c1", statement: "no" }, attempt: { kind: "command", evidence: { kind: "command", run: "false", expect: { exit: 0, output_includes: "signal" } }, startedAt: "2026-01-01", finishedAt: "2026-01-01", tree }, failures: [{ code: "exit-mismatch", message: "no", expected: 0, actual: 1 }] }];
 	incompleteRecord.checklist = { outcome: "incomplete", items: [], failures: [{ code: "checklist-accounting", message: "missing" }], tree };
 	const decodedFailure = decodeVerificationCacheUpdate(incomplete);
 	assert.ok(decodedFailure);

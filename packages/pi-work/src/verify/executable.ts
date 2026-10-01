@@ -1,6 +1,8 @@
 import { access, realpath } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
+import { isEnvironmentVariableList } from "../schema/environment.js";
+import { inheritedValuesSnapshot, type InheritedValuesSnapshot } from "./output.js";
 
 export type VerifierExecutable = "git" | "sh" | "systemd-run" | "systemctl";
 
@@ -45,6 +47,26 @@ export function captureSystemdEnvironment(): NodeJS.ProcessEnv {
 		if (value !== undefined) environment[name] = value;
 	}
 	return environment;
+}
+
+/** Copy only declared variables into the command launcher; do not inherit arbitrary host settings. */
+export function captureEvidenceEnvironment(names: unknown, snapshot?: InheritedValuesSnapshot): { environment: NodeJS.ProcessEnv; inherited: InheritedValuesSnapshot; missing: readonly string[]; short: readonly string[]; valid: boolean } {
+	const environment = captureSystemdEnvironment();
+	if (!isEnvironmentVariableList(names)) return { environment, inherited: inheritedValuesSnapshot([]), missing: [], short: [], valid: false };
+	const values: string[] = [];
+	const named: Record<string, string> = {};
+	const missing: string[] = [];
+	const short: string[] = [];
+	for (const name of names ?? []) {
+		const value = snapshot === undefined ? process.env[name] : snapshot.named[name];
+		if (value === undefined) missing.push(name);
+		else {
+			if (value.length > 0) { values.push(value); named[name] = value; }
+			if (value.length < 8) short.push(name);
+			else environment[name] = value;
+		}
+	}
+	return { environment, inherited: inheritedValuesSnapshot(values, named), missing, short, valid: true };
 }
 
 /** Fallback PATH for the authored command, which is evidence rather than verifier authority. */

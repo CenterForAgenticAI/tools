@@ -1,6 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import path from "node:path";
+import os from "node:os";
 
 import { runGit } from "../git.js";
 import { resolveVerifierExecutable, ExecutableResolutionError } from "./executable.js";
@@ -10,6 +11,7 @@ export interface TreeSnapshot {
 	identity: TreeIdentity;
 	clean: boolean;
 	gitPath: string;
+	excludesFile?: string;
 }
 
 export type TreeCheck = { ok: true; snapshot: TreeSnapshot } | { ok: false; failure: VerificationFailure };
@@ -23,25 +25,49 @@ export type TreeMonitor = {
 	stop: () => void;
 } | { ok: false; failure: VerificationFailure };
 
-async function gitStatus(gitPath: string, worktreePath: string, environment: NodeJS.ProcessEnv): Promise<{ hasChanges: boolean; hasTrackedChanges: boolean }> {
-	let incompleteLine = "";
-	let hasChanges = false;
+const DIRTY_PATH_LIMIT = 10;
+
+function gitArgs(excludesFile: string | undefined, args: string[]): string[] {
+	return excludesFile === undefined ? args : ["-c", `core.excludesFile=${excludesFile}`, ...args];
+}
+
+/** Resolve only the user's global ignore file; other global Git settings stay disabled. */
+async function resolveUserExcludes(gitPath: string, worktreePath: string): Promise<string> {
+	const home = process.env.HOME || os.homedir();
+	const xdg = process.env.XDG_CONFIG_HOME;
+	const configHome = xdg && path.isAbsolute(xdg) ? xdg : path.join(home, ".config");
+	const fallback = path.join(configHome, "git", "ignore");
+	const environment: NodeJS.ProcessEnv = { HOME: home, GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig") };
+	if (xdg !== undefined) environment.XDG_CONFIG_HOME = xdg;
+	const result = await runGit(gitPath, worktreePath, ["config", "--global", "--path", "--get", "--default", fallback, "core.excludesFile"], { environment });
+	const configured = result.stdout.trim();
+	return path.isAbsolute(configured) ? configured : path.resolve(home, configured);
+}
+
+async function gitStatus(gitPath: string, worktreePath: string, excludesFile: string): Promise<{ hasChanges: boolean; hasTrackedChanges: boolean; paths: string[]; count: number }> {
+	let incomplete = "";
 	let hasTrackedChanges = false;
-	const inspectLine = (line: string): void => {
-		if (line.length === 0) return;
-		hasChanges = true;
-		if (!line.startsWith("?? ")) hasTrackedChanges = true;
+	let count = 0;
+	const paths: string[] = [];
+	let skipRenameSource = false;
+	const inspectEntry = (entry: string): void => {
+		if (skipRenameSource) { skipRenameSource = false; return; }
+		if (entry.length < 4) throw new Error("git status returned an invalid record");
+		count += 1;
+		if (entry.slice(0, 2) !== "??") hasTrackedChanges = true;
+		if (paths.length < DIRTY_PATH_LIMIT) paths.push(entry.slice(3));
+		if (/[RC]/.test(entry.slice(0, 2))) skipRenameSource = true;
 	};
-	await runGit(gitPath, worktreePath, ["status", "--porcelain=v1", "--untracked-files=all"], {
-		environment,
+	await runGit(gitPath, worktreePath, gitArgs(excludesFile, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]), {
+		environment: {},
 		onStdout(chunk) {
-			const lines = `${incompleteLine}${chunk}`.split(/\r?\n/);
-			incompleteLine = lines.pop() ?? "";
-			for (const line of lines) inspectLine(line);
+			const entries = `${incomplete}${chunk}`.split("\0");
+			incomplete = entries.pop() ?? "";
+			for (const entry of entries) inspectEntry(entry);
 		},
 	});
-	inspectLine(incompleteLine);
-	return { hasChanges, hasTrackedChanges };
+	if (incomplete.length > 0 || skipRenameSource) throw new Error("git status returned an unterminated record");
+	return { hasChanges: count > 0, hasTrackedChanges, paths, count };
 }
 
 function failure(code: VerificationFailure["code"], message: string): VerificationFailure {
@@ -50,7 +76,7 @@ function failure(code: VerificationFailure["code"], message: string): Verificati
 }
 
 /** Resolve and freeze the explicit target worktree and expected commit. */
-export async function inspectTree(worktreePath: string, expectedCommit: string, options: { allowUntracked?: boolean } = {}): Promise<TreeCheck> {
+export async function inspectTree(worktreePath: string, expectedCommit: string, options: { allowUntracked?: boolean; excludesFile?: string | undefined } = {}): Promise<TreeCheck> {
 	if (worktreePath.length === 0 || expectedCommit.length === 0) {
 		return { ok: false, failure: failure("tree-identity-unavailable", "worktreePath and expectedCommit are required") };
 	}
@@ -68,16 +94,23 @@ export async function inspectTree(worktreePath: string, expectedCommit: string, 
 		return { ok: false, failure: failure("tree-identity-unavailable", `cannot resolve worktree: ${error instanceof Error ? error.message : String(error)}`) };
 	}
 	try {
-		const environment: NodeJS.ProcessEnv = {};
-		const rootResult = await runGit(gitPath, canonicalInput, ["rev-parse", "--show-toplevel"], { environment });
+		const excludesFile = options.excludesFile ?? await resolveUserExcludes(gitPath, canonicalInput);
+		// Status can invoke a configured clean/process filter for attributed files.
+		// Filter names are arbitrary, so fail closed rather than attempting to
+		// override a guessed set of local commands.
+		const localConfig = await runGit(gitPath, canonicalInput, ["config", "--local", "--includes", "--name-only", "--list"], { environment: {} });
+		if (localConfig.stdout.split("\n").some((name) => /^filter\..+\.(?:clean|smudge|process)$/i.test(name))) {
+			return { ok: false, failure: failure("tree-identity-unavailable", "repository-local Git filters cannot run during verifier tree inspection") };
+		}
+		const rootResult = await runGit(gitPath, canonicalInput, gitArgs(excludesFile, ["rev-parse", "--show-toplevel"]), { environment: {} });
 		const root = await realpath(rootResult.stdout.trim());
 		if (root !== canonicalInput) {
 			return { ok: false, failure: failure("tree-identity-unavailable", `target is not the worktree root: ${canonicalInput}`) };
 		}
 		const [headResult, expectedResult, status] = await Promise.all([
-			runGit(gitPath, root, ["rev-parse", "HEAD^{commit}"], { environment }),
-			runGit(gitPath, root, ["rev-parse", `${expectedCommit}^{commit}`], { environment }),
-			gitStatus(gitPath, root, environment),
+			runGit(gitPath, root, gitArgs(excludesFile, ["rev-parse", "HEAD^{commit}"]), { environment: {} }),
+			runGit(gitPath, root, gitArgs(excludesFile, [`rev-parse`, `${expectedCommit}^{commit}`]), { environment: {} }),
+			gitStatus(gitPath, root, excludesFile),
 		]);
 		const head = headResult.stdout.trim();
 		const expected = expectedResult.stdout.trim();
@@ -85,9 +118,9 @@ export async function inspectTree(worktreePath: string, expectedCommit: string, 
 			return { ok: false, failure: { code: "tree-mismatch", message: `expected ${expected}, found ${head}`, expected, actual: head } };
 		}
 		if (status.hasTrackedChanges || (!options.allowUntracked && status.hasChanges)) {
-			return { ok: false, failure: { code: "tree-dirty", message: "target worktree is not clean" } };
+			return { ok: false, failure: { code: "tree-dirty", message: `target worktree is not clean: ${status.paths.map((name) => JSON.stringify(name)).join(", ")}${status.count > status.paths.length ? ` (and ${status.count - status.paths.length} more; ${status.count} total)` : ""}` } };
 		}
-		return { ok: true, snapshot: { identity: { kind: "git", worktreePath: root, resolvedCommit: head }, clean: true, gitPath } };
+		return { ok: true, snapshot: { identity: { kind: "git", worktreePath: root, resolvedCommit: head }, clean: true, gitPath, excludesFile } };
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
 		return { ok: false, failure: failure("tree-identity-unavailable", `git identity probe failed: ${detail}`) };
@@ -96,12 +129,12 @@ export async function inspectTree(worktreePath: string, expectedCommit: string, 
 
 /** Verify that no tracked/untracked mutation or commit movement occurred. */
 export async function verifyTreeUnchanged(snapshot: TreeSnapshot): Promise<TreeCheck> {
-	const current = await inspectTree(snapshot.identity.worktreePath, snapshot.identity.resolvedCommit, { allowUntracked: true });
+	const current = await inspectTree(snapshot.identity.worktreePath, snapshot.identity.resolvedCommit, { allowUntracked: true, excludesFile: snapshot.excludesFile });
 	if (!current.ok) {
 		if (current.failure.code === "tree-dirty") return current;
 		return { ok: false, failure: { code: "tree-changed", message: current.failure.message } };
 	}
-	if (current.snapshot.identity.worktreePath !== snapshot.identity.worktreePath || current.snapshot.identity.resolvedCommit !== snapshot.identity.resolvedCommit || current.snapshot.gitPath !== snapshot.gitPath) {
+	if (current.snapshot.identity.worktreePath !== snapshot.identity.worktreePath || current.snapshot.identity.resolvedCommit !== snapshot.identity.resolvedCommit || current.snapshot.gitPath !== snapshot.gitPath || current.snapshot.excludesFile !== snapshot.excludesFile) {
 		return { ok: false, failure: { code: "tree-changed", message: "target tree identity changed" } };
 	}
 	return current;
@@ -127,7 +160,7 @@ export async function monitorTree(snapshot: TreeSnapshot): Promise<TreeMonitor> 
 	};
 	let incompletePath = "";
 	try {
-		await runGit(gitPath, snapshot.identity.worktreePath, ["ls-files", "-z"], {
+		await runGit(gitPath, snapshot.identity.worktreePath, gitArgs(snapshot.excludesFile, ["ls-files", "-z"]), {
 			environment: {},
 			onStdout(chunk) {
 				const paths = `${incompletePath}${chunk}`.split("\0");

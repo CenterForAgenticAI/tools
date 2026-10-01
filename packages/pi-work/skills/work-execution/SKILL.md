@@ -68,13 +68,19 @@ remediation, but a review result cannot mint verification authority.
 
 `work_status --refresh` is blocked in v1. Its refresh path returns a typed
 blocked result because the verify barrel deliberately exposes no authority
-constructor. Therefore `work_status` can never report `verified-this-session` in
-v1. The provenance vocabulary is explicit: `verified-this-session`,
+constructor. Refresh cannot run evidence for you. Run `work_verify` first, then
+`work_status`: a node this process verified against the current source, tree,
+qualified address, and criterion contract may reach `done` and unlock its
+dependents. That is the only route; a cache hit remains observational.
+
+The provenance vocabulary is explicit: `verified-this-session`,
 `failed-this-session`, `observed-green-not-verified-this-session`,
 `observed-failure-not-verified-this-session`, `stale-observation`,
-`conflicting-observation`, and `unverified`. The status surface can only report
-observation, stale, conflict, or unverified states because refresh is blocked.
-Those reports cannot open a done gate or satisfy a dependency. Do not import a
+`conflicting-observation`, and `unverified`. Cached, replayed, or another
+session’s results cannot open a done gate or satisfy a dependency. A `done`
+node reports whether its command evidence ran under systemd-scope or the
+weaker process-group containment (where a descendant calling setsid may
+survive). Do not import a
 private verifier, call a tool wrapper as an authority shortcut, or reconstruct a
 verifier in a status consumer. Run `work_verify` through its real authority
 path, and retain the explicit tree/commit in the evidence.
@@ -97,7 +103,7 @@ work_plan({
 - `briefPath` and `briefSha256`;
 - delegate `agent`, optional `skills` and `model`, `reads`, and `task`;
 - `writableRoots` when `touches` exists;
-- `confineWrites: true`, `escalation: "local"`, and `worktree`; and
+- `confineWrites: true`, `escalation: "off"`, and `worktree`; and
 - a `touch-overlap` advisory when selected scopes overlap.
 
 `touches` becomes delegate `writableRoots`, but the current pi-delegate
@@ -194,7 +200,7 @@ delegate({
   model: plan.delegate.model,
   writableRoots: plan.delegate.writableRoots,
   confineWrites: true,
-  escalation: "local",
+  escalation: "off",
   worktree: false,
   await: false,
 })
@@ -209,8 +215,15 @@ caller-managed persistent worktrees, then dispatch each lane with
 apply the captured temporary diff before verification; do not call that diff a
 receipt of integrated work.
 
-Keep `await: false` (or omit it) when escalation is enabled: pi-delegate
-rejects `await: true` and `sync: true` for an escalation-enabled slot.
+`work_plan` and `work_dispatch` set `escalation: "off"` deliberately. A solo run's
+escalations route root originator then user, and the root only holds authority
+through the dispatcher's global pi-delegate escalation config, which a dispatch
+cannot set; with `"local"` and the built-in config every blocker went straight
+to the operator. With `"off"` the worker has no raise tools, so a blocker or a
+needed scope change comes back in its result, to you.
+Keep `await: false` (or omit it) anyway, and also whenever you opt a manual
+`delegate` call into `escalation: "local"`: pi-delegate rejects `await: true` and
+`sync: true` for an escalation-enabled slot.
 Background delivery is the real completion path. Do not poll or sleep; use the
 wake or a normal later turn to inspect the result.
 
@@ -276,9 +289,15 @@ surface, checked against its `src/escalation-tools.ts`, `src/index.ts`, and
 
 ### A. Raise from the worker
 
+A worker dispatched by `work_dispatch` (or from a `work_plan` receipt) runs with
+`escalation: "off"` and has no `escalate_*` tools. It stops before writing
+outside `touches` and reports the needed change in its result; you then amend the
+node yourself. The raise flow below applies only to a manual `delegate` call you
+opt into `escalation: "local"`.
+
 1. Stop before writing outside the declared scope.
 2. Ensure the worker slot was enabled with effective `escalation: "local"`.
-   `work_plan` places this on its delegate invocation.
+   `work_plan` does not set this; pass it on your own `delegate` call.
 3. Call the real amendment raise tool:
 
    ```text
@@ -418,8 +437,9 @@ If a reviewer rejects:
 6. When the budget is exhausted, raise a typed escalation to the user. Do not
    attempt an N+1th silent retry.
 
-The current public `work_plan` tool accepts only `path` and `nodeAddresses`; do
-not invent a `remediation` parameter. The plan module's real assembler exposes
+The public `work_plan` tool accepts `path`, `nodeAddresses`, and optional
+`responseOffset`/`responseSnapshot` for snapshot-bound pagination; do not invent
+a `remediation` parameter. The plan module's real assembler exposes
 the `renderRemediationBrief` projection, but if the host cannot call that
 projection, preserve the structured rejection data and report the missing
 wiring rather than writing a substitute brief that claims lossless assembly.

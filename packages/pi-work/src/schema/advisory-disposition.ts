@@ -21,8 +21,10 @@ export interface DispositionOutcome {
 /**
  * Annotate accepted advisories and reject dispositions that overreach.
  *
- * Three rules, all of them fail-loud rather than fail-quiet:
+ * Four rules, all of them fail-loud rather than fail-quiet:
  *
+ * - A repeated code-target pair is an error, and no entry in that ambiguous pair is
+ *   accepted.
  * - A disposition naming a warning attaches its reason to that warning. The warning
  *   is still reported; it is marked accepted, never dropped.
  * - A disposition naming an error is itself an error. Accepting an error is the
@@ -35,10 +37,43 @@ export function applyAdvisoryDispositions(spec: Workspec, findings: readonly Fin
 	const dispositions = spec.advisory_dispositions ?? [];
 	if (dispositions.length === 0) return { findings };
 
+	// Keep code and target as separate map keys. Both are caller-authored strings, so
+	// concatenating them would let separator characters make distinct pairs collide.
+	const indexesByPair = new Map<string, Map<string, number[]>>();
+	for (const [index, disposition] of dispositions.entries()) {
+		let indexesByTarget = indexesByPair.get(disposition.code);
+		if (indexesByTarget === undefined) {
+			indexesByTarget = new Map();
+			indexesByPair.set(disposition.code, indexesByTarget);
+		}
+		const indexes = indexesByTarget.get(disposition.target) ?? [];
+		indexes.push(index);
+		indexesByTarget.set(disposition.target, indexes);
+	}
+	const indexesFor = (disposition: AdvisoryDisposition): readonly number[] => indexesByPair.get(disposition.code)?.get(disposition.target) ?? [];
+
 	const extra: Finding[] = [];
+	for (const [code, indexesByTarget] of indexesByPair) {
+		for (const [target, indexes] of indexesByTarget) {
+			const [originalIndex, ...duplicateIndexes] = indexes;
+			if (originalIndex === undefined) continue;
+			for (const duplicateIndex of duplicateIndexes) {
+				extra.push({
+					code: "duplicate-advisory-disposition",
+					severity: "error",
+					path: ["advisory_dispositions", duplicateIndex],
+					dispositionCode: code,
+					target,
+					relatedPaths: [["advisory_dispositions", originalIndex]],
+					message: `advisory_dispositions[${duplicateIndex}] duplicates advisory_dispositions[${originalIndex}] for ${code} and ${target}; remove or combine the repeated acceptance`,
+				});
+			}
+		}
+	}
+
 	const annotated = findings.map((finding) => {
 		if (finding.severity !== "warning") return finding;
-		const disposition = dispositions.find((candidate) => matches(finding, candidate));
+		const disposition = dispositions.find((candidate) => matches(finding, candidate) && indexesFor(candidate).length === 1);
 		if (!disposition) return finding;
 		return { ...finding, disposition: { reason: disposition.reason, authority: disposition.authority, at: disposition.at } };
 	});

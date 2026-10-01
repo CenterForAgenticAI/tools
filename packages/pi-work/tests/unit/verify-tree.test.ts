@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { rm, chmod, mkdtemp, mkdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { removeTempTree } from "../helpers/temp-tree.ts";
 
 import { inspectTree, monitorTree, resolveSpecPath, verifyTreeUnchanged } from "../../src/verify/tree.ts";
 import { runCommand } from "../../src/verify/command.ts";
@@ -38,8 +39,43 @@ test("tree identity rejects missing, non-repository, nested, and mismatched targ
 	const mismatch = await inspectTree(fixture.root, fixture.commit);
 	assert.equal(mismatch.ok, false);
 	if (!mismatch.ok) assert.equal(mismatch.failure.code, "tree-mismatch");
-	await rm(directory, { recursive: true, force: true });
-	await rm(fixture.root, { recursive: true, force: true });
+	await removeTempTree(directory);
+	await removeTempTree(fixture.root);
+});
+
+test("tree inspection does not execute repo-local fsmonitor", async () => {
+	const fixture = await repo();
+	const marker = path.join(fixture.root, "fsmonitor-ran");
+	const monitor = path.join(fixture.root, "fsmonitor.sh");
+	try {
+		await writeFile(monitor, '#!/bin/sh\nprintf ran > ' + JSON.stringify(marker) + '\n');
+		await chmod(monitor, 0o755);
+		await execFileAsync("git", ["config", "--local", "core.fsmonitor", monitor], { cwd: fixture.root });
+		const inspected = await inspectTree(fixture.root, fixture.commit, { allowUntracked: true });
+		assert.equal(inspected.ok, true);
+		await assert.rejects(readFile(marker, "utf8"), { code: "ENOENT" });
+	} finally {
+		await removeTempTree(fixture.root);
+	}
+});
+
+test("tree inspection refuses a repo-local clean filter before it can run", async () => {
+	const fixture = await repo();
+	const marker = path.join(fixture.root, "filter-ran");
+	const filter = path.join(fixture.root, "filter.sh");
+	try {
+		await writeFile(filter, '#!/bin/sh\nprintf ran > ' + JSON.stringify(marker) + '\ncat\n');
+		await chmod(filter, 0o755);
+		await writeFile(path.join(fixture.root, ".gitattributes"), "tracked filter=attack\n");
+		await execFileAsync("git", ["add", ".gitattributes"], { cwd: fixture.root });
+		await execFileAsync("git", ["-c", "user.name=pi-work", "-c", "user.email=pi-work@example.invalid", "commit", "-qm", "attributes"], { cwd: fixture.root });
+		const commit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: fixture.root })).stdout.trim();
+		await execFileAsync("git", ["config", "--local", "filter.attack.clean", filter], { cwd: fixture.root });
+		const inspected = await inspectTree(fixture.root, commit, { allowUntracked: true });
+		assert.equal(inspected.ok, false);
+		if (!inspected.ok) assert.match(inspected.failure.message, /repository-local Git filters/);
+		await assert.rejects(readFile(marker, "utf8"), { code: "ENOENT" });
+	} finally { await removeTempTree(fixture.root); }
 });
 
 test("tree monitor launches git from the selected worktree", async () => {
@@ -53,7 +89,7 @@ test("tree monitor launches git from the selected worktree", async () => {
 	assert.equal(monitor.ok, true);
 	if (monitor.ok) monitor.stop();
 	assert.equal(await readFile(observedCwdPath, "utf8"), canonicalRoot);
-	await rm(fixture.root, { recursive: true, force: true });
+	await removeTempTree(fixture.root);
 });
 
 test("tree monitor streams tracked manifests larger than the former fixed buffer", async () => {
@@ -64,7 +100,7 @@ test("tree monitor streams tracked manifests larger than the former fixed buffer
 	const monitor = await monitorTree({ identity: { kind: "git", worktreePath: fixture.root, resolvedCommit: fixture.commit }, clean: true, gitPath: fakeGitPath });
 	assert.equal(monitor.ok, true);
 	if (monitor.ok) monitor.stop();
-	await rm(fixture.root, { recursive: true, force: true });
+	await removeTempTree(fixture.root);
 });
 
 test("tree identity streams status output larger than the former fixed buffer", async () => {
@@ -74,8 +110,13 @@ test("tree identity streams status output larger than the former fixed buffer", 
 	await Promise.all(Array.from({ length: 3_000 }, (_, index) => writeFile(path.join(untrackedDirectory, `${index.toString().padStart(4, "0")}-${"x".repeat(80)}`), "")));
 	const checked = await inspectTree(fixture.root, fixture.commit);
 	assert.equal(checked.ok, false);
-	if (!checked.ok) assert.equal(checked.failure.code, "tree-dirty");
-	await rm(fixture.root, { recursive: true, force: true });
+	if (!checked.ok) {
+		assert.equal(checked.failure.code, "tree-dirty");
+		assert.match(checked.failure.message, /untracked\/0000-/);
+		assert.match(checked.failure.message, /2990 more; 3000 total/);
+		assert.ok(checked.failure.message.length < 1400);
+	}
+	await removeTempTree(fixture.root);
 });
 
 test("tree identity is canonical, explicit, and clean", async () => {
@@ -95,7 +136,7 @@ test("tree identity is canonical, explicit, and clean", async () => {
 	}
 	const nested = await inspectTree(path.join(fixture.root, "missing"), fixture.commit);
 	assert.equal(nested.ok, false);
-	await rm(fixture.root, { recursive: true, force: true });
+	await removeTempTree(fixture.root);
 });
 
 test("command cwd follows the selected tree when two repositories differ", async () => {
@@ -107,16 +148,75 @@ test("command cwd follows the selected tree when two repositories differ", async
 	const secondResult = await runCommand({ evidence: { kind: "command", run: "cat tracked", expect: { exit: 0, output_includes: "second" } }, tree: { kind: "git", worktreePath: second.root, resolvedCommit: second.commit } }, deterministicCommandOptions());
 	assert.equal(firstResult.outcome, "observed");
 	assert.equal(secondResult.outcome, "observed");
-	await rm(first.root, { recursive: true, force: true });
-	await rm(second.root, { recursive: true, force: true });
+	await removeTempTree(first.root);
+	await removeTempTree(second.root);
 });
 
+test("dirty failures name bounded paths without truncating a stream mid-record", async () => {
+	const fixture = await repo();
+	const odd = "a\nquoted\tname";
+	await writeFile(path.join(fixture.root, odd), "untracked");
+	const dirty = await inspectTree(fixture.root, fixture.commit);
+	assert.equal(dirty.ok, false);
+	if (!dirty.ok) {
+		assert.equal(dirty.failure.code, "tree-dirty");
+		assert.ok(dirty.failure.message.includes(JSON.stringify(odd)));
+	}
+	await removeTempTree(fixture.root);
+});
+
+test("only the global excludes file crosses into isolated verifier Git calls", async () => {
+	const fixture = await repo();
+	const home = await mkdtemp(path.join(os.tmpdir(), "pi-work-git-home-"));
+	const xdg = path.join(home, "xdg");
+	await mkdir(path.join(xdg, "git"), { recursive: true });
+	const ignore = path.join(xdg, "git", "ignored");
+	const monitorMarker = path.join(home, "fsmonitor-ran");
+	const monitor = path.join(home, "fsmonitor.sh");
+	await writeFile(ignore, "private-artifact\n");
+	await writeFile(monitor, `#!/bin/sh\ntouch ${JSON.stringify(monitorMarker)}\nexit 1\n`);
+	await chmod(monitor, 0o755);
+	await writeFile(path.join(home, ".gitconfig"), `[core]\n\texcludesFile = ${ignore}\n\tfsmonitor = ${monitor}\n\tbare = true\n`);
+	await writeFile(path.join(fixture.root, "private-artifact"), "private");
+	const originalHome = process.env.HOME;
+	const originalXdg = process.env.XDG_CONFIG_HOME;
+	process.env.HOME = home;
+	process.env.XDG_CONFIG_HOME = xdg;
+	try {
+		const clean = await inspectTree(fixture.root, fixture.commit);
+		assert.equal(clean.ok, true, JSON.stringify(clean));
+		if (clean.ok) {
+			const watched = await monitorTree(clean.snapshot);
+			assert.equal(watched.ok, true);
+			if (watched.ok) watched.stop();
+			assert.equal((await verifyTreeUnchanged(clean.snapshot)).ok, true);
+		}
+		assert.equal(await readFile(monitorMarker).then(() => true, () => false), false, "global fsmonitor must not run");
+		await writeFile(path.join(fixture.root, "real-untracked"), "visible");
+		const dirty = await inspectTree(fixture.root, fixture.commit);
+		assert.equal(dirty.ok, false);
+		if (!dirty.ok) {
+			assert.equal(dirty.failure.code, "tree-dirty");
+			assert.match(dirty.failure.message, /real-untracked/);
+			assert.ok(!dirty.failure.message.includes("private-artifact"));
+		}
+		await rm(path.join(home, ".gitconfig"));
+		await rm(path.join(fixture.root, "real-untracked"));
+		await writeFile(path.join(xdg, "git", "ignore"), "private-artifact\n");
+		assert.equal((await inspectTree(fixture.root, fixture.commit)).ok, true, "XDG fallback must be honored");
+	} finally {
+		if (originalHome === undefined) delete process.env.HOME; else process.env.HOME = originalHome;
+		if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = originalXdg;
+		await removeTempTree(fixture.root);
+		await removeTempTree(home);
+	}
+});
 test("tree identity rejects dirty and moved trees", async () => {
 	const fixture = await repo();
 	const clean = await inspectTree(fixture.root, fixture.commit);
 	assert.equal(clean.ok, true);
 	if (!clean.ok) {
-		await rm(fixture.root, { recursive: true, force: true });
+		await removeTempTree(fixture.root);
 		return;
 	}
 	await writeFile(path.join(fixture.root, "untracked"), "dirty\n");
@@ -128,5 +228,5 @@ test("tree identity rejects dirty and moved trees", async () => {
 	const moved = await verifyTreeUnchanged({ identity: { kind: "git", worktreePath: fixture.root, resolvedCommit: fixture.commit }, clean: true, gitPath: clean.snapshot.gitPath });
 	assert.equal(moved.ok, false);
 	if (!moved.ok) assert.equal(moved.failure.code, "tree-dirty");
-	await rm(fixture.root, { recursive: true, force: true });
+	await removeTempTree(fixture.root);
 });

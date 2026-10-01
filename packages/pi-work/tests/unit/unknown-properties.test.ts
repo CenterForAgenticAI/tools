@@ -53,6 +53,32 @@ test("unknown-property walker reports every closed-schema key through arrays, un
 	}
 });
 
+test("command evidence accepts named environment and timeout at every depth but rejects unknown keys", () => {
+	const command = (extra?: boolean) => ({
+		kind: "command",
+		run: "printf ok",
+		inherit_env: ["CI_TOKEN"],
+		timeout_ms: 1_000,
+		expect: { exit: 0, output_includes: "ok", ...(extra ? { unexpected: true } : {}) },
+		...(extra ? { unexpected: true } : {}),
+	});
+	const value = {
+		title: "T", description: "D", intent: "I",
+		work: [{
+			id: "parent", task: "Parent",
+			acceptance: [{ id: "A", statement: "ran", evidence: command() }],
+			work: [{
+				id: "child", task: "Child",
+				acceptance: [{ id: "B", statement: "ran", evidence: command(true) }],
+			}],
+		}],
+	};
+	assert.deepEqual(unknownPropertyFindings(WorkspecSchema, value).map((finding) => finding.path), [
+		["work", 0, "work", 0, "acceptance", 0, "evidence", "unexpected"],
+		["work", 0, "work", 0, "acceptance", 0, "evidence", "expect", "unexpected"],
+	]);
+});
+
 test("unknown-property walker resolves JSON pointers and deduplicates overlapping closed schemas", () => {
 	const closed = {
 		type: "object",

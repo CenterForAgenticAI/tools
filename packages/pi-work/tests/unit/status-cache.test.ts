@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { deriveStatus } from "../../src/status/index.ts";
+import { workStatusTool } from "../../src/tools/work-status.ts";
+import { forgetSessionVerifications } from "../../src/status/session-verification.ts";
 import {
 	decodeStatusCache,
 	emptyStatusCache,
@@ -94,7 +96,8 @@ test("cache decoding is strict and deletion-safe", async () => {
 	try {
 		const cache = emptyStatusCache(path.join(root, "spec.yaml"));
 		assert.equal(sameTreeIdentity({ kind: "git", worktreePath: root, resolvedCommit: "a".repeat(40) }, { kind: "git", worktreePath: root, resolvedCommit: "a".repeat(40) }), true);
-		assert.equal(statusCachePath(root, path.join(root, "spec.yaml")).startsWith(path.join(root, ".work", ".cache")), true);
+		const canonicalRoot = await realpath(root);
+		assert.equal(statusCachePath(root, path.join(root, "spec.yaml")).startsWith(path.join(canonicalRoot, "..", ".pi-work-status-cache", path.basename(canonicalRoot))), true);
 		assert.ok(decodeStatusCache(null).findings.some((finding) => finding.code === "malformed-cache"));
 		assert.ok(decodeStatusCache({ version: 99 }).findings.some((finding) => finding.code === "unsupported-cache-version"));
 		assert.ok(decodeStatusCache({ ...cache, lifecycle: "done" }).findings.some((finding) => finding.code === "malformed-cache"));
@@ -377,6 +380,118 @@ test("cache binding findings cover source, address, and review conflicts", async
 		const staleReview = { ...base, review: { [key]: { ...review, tree: { ...tree, resolvedCommit: "0".repeat(40) } } } };
 		assert.equal(deriveStatus({ source, specPath: path.join(fixture.root, "spec.yaml"), tree, cache: staleReview }).details.nodes.find((node) => node.nodeId === "node")?.review, "not-configured");
 	} finally {
+		await rm(fixture.root, { recursive: true, force: true });
+	}
+});
+
+test("work_status redacts cached dispatch values and keys before returning either output surface", async () => {
+	const name = "PI_WORK_STATUS_DISPATCH_SECRET";
+	const secret = "dispatch-secret-value-882191";
+	const source = SPEC.replace("          run: printf dependent\n", `          run: printf dependent\n          inherit_env: [${name}]\n`);
+	const fixture = await repo(source);
+	const previous = process.env[name];
+	try {
+		const specPath = path.join(fixture.root, "spec.yaml");
+		const runId = `run-${secret}`;
+		const entry = dispatchEntry(fixture.root, fixture.commit, runId);
+		const contaminated: StatusCacheDispatchEntry = {
+			...entry,
+			forkName: `fork-${secret}`,
+			branch: `branch-${secret}`,
+			briefPath: path.join(fixture.root, `brief-${secret}.md`),
+			receiptPath: path.join(fixture.root, `receipt-${secret}.json`),
+			resultPath: path.join(fixture.root, `result-${secret}.json`),
+			slot: {
+				...entry.slot,
+				agent: `agent-${secret}`,
+				workerCwd: path.join(fixture.root, secret),
+				branch: `worker-${secret}`,
+				cloneMode: `clone-${secret}`,
+				collapseMode: `collapse-${secret}`,
+				requestedModel: `model-${secret}`,
+				resolvedModel: `resolved-${secret}`,
+				skills: [`skill-${secret}`],
+				inputDigests: [{ kind: "read", name: `input-${secret}`, algorithm: "sha256", digest: entry.briefSha256 }],
+			},
+		};
+		const cachePath = statusCachePath(fixture.root, specPath);
+		await mkdir(path.dirname(cachePath), { recursive: true });
+		const second = { ...dispatchEntry(fixture.root, fixture.commit, `run-${secret}-second`), forkName: `other-${secret}` };
+		await writeFile(cachePath, JSON.stringify({ ...emptyStatusCache(specPath), dispatch: { [runId]: contaminated, [second.runId]: second } }));
+		process.env[name] = secret;
+		forgetSessionVerifications();
+		const result = await workStatusTool.execute("test", { path: "spec.yaml", worktreePath: fixture.root, expectedCommit: fixture.commit }, undefined, undefined, {} as never);
+		const details = result.details as import("../../src/status/types.ts").WorkStatusDetails;
+		assert.equal(details.nodes[0]?.dispatches.length, 2, "both valid cached dispatches must survive classification and redaction");
+		assert.equal(Object.keys(details.dispatch).length, 2);
+		const text = result.content[0];
+		assert.equal(text?.type, "text");
+		assert.deepEqual({
+			detailsContainsSecret: JSON.stringify(details).includes(secret),
+			renderedContainsSecret: text?.type === "text" && text.text.includes(secret),
+		}, { detailsContainsSecret: false, renderedContainsSecret: false }, "cached dispatch strings must not survive in details or rendered text");
+	} finally {
+		if (previous === undefined) delete process.env[name]; else process.env[name] = previous;
+		forgetSessionVerifications();
+		await rm(fixture.root, { recursive: true, force: true });
+	}
+});
+
+test("dispatch reporting is unchanged when the spec has no inherited values", async () => {
+	const fixture = await repo();
+	try {
+		const specPath = path.join(fixture.root, "spec.yaml");
+		const entry = dispatchEntry(fixture.root, fixture.commit, "run-ordinary");
+		const cachePath = statusCachePath(fixture.root, specPath);
+		await mkdir(path.dirname(cachePath), { recursive: true });
+		await writeFile(cachePath, JSON.stringify({ ...emptyStatusCache(specPath), dispatch: { [entry.runId]: entry } }));
+		forgetSessionVerifications();
+		const result = await workStatusTool.execute("test", { path: "spec.yaml", worktreePath: fixture.root, expectedCommit: fixture.commit }, undefined, undefined, {} as never);
+		const details = result.details as import("../../src/status/types.ts").WorkStatusDetails;
+		assert.deepEqual(details.dispatch, { [entry.runId]: entry });
+		assert.deepEqual(details.nodes[0]?.dispatches, [entry]);
+		const text = result.content[0];
+		assert.equal(text?.type, "text");
+		if (text?.type === "text") assert.ok(text.text.includes(`run ${entry.runId}/${entry.forkName}`));
+	} finally {
+		forgetSessionVerifications();
+		await rm(fixture.root, { recursive: true, force: true });
+	}
+});
+
+test("work_status redacts all decoded proof strings against today's spec-wide inherited values", async () => {
+	const name = "PI_WORK_STATUS_OBSERVATION_SECRET";
+	const secret = "status-secret-value-7719944";
+	const source = SPEC.replace("          run: printf dependent\n", `          run: printf dependent\n          inherit_env: [${name}]\n`);
+	const fixture = await repo(source);
+	const previous = process.env[name];
+	try {
+		const specPath = path.join(fixture.root, "spec.yaml");
+		const cache = await observedCache(fixture.root, fixture.commit);
+		const key = addressKey(["node"]);
+		const entry = cache.verification[key]!;
+		const proof = entry.update.record.criteria[0]!;
+		assert.equal(proof.outcome, "passed");
+		assert.equal(proof.proof.kind, "command-proof");
+		const contaminated = structuredClone(cache);
+		const rawProof = (contaminated.verification[key]!.update.record.criteria[0] as typeof proof).proof as typeof proof.proof & { untrackedPaths: string[]; stdout: string };
+		rawProof.untrackedPaths = [`ignored/${secret}`];
+		rawProof.stdout = `observed ${secret}`;
+		const cachePath = statusCachePath(fixture.root, specPath);
+		await mkdir(path.dirname(cachePath), { recursive: true });
+		await writeFile(cachePath, JSON.stringify(contaminated));
+		process.env[name] = secret;
+		forgetSessionVerifications();
+		const result = await workStatusTool.execute("test", { path: "spec.yaml", worktreePath: fixture.root, expectedCommit: fixture.commit }, undefined, undefined, {} as never);
+		const details = result.details as import("../../src/status/types.ts").WorkStatusDetails;
+		assert.equal(details.nodes[0]?.verification, "observed-green-not-verified-this-session");
+		assert.equal(JSON.stringify(details).includes(secret), false, "status details must not retain cached strings");
+		const text = result.content[0];
+		assert.equal(text?.type, "text");
+		if (text?.type === "text") assert.equal(text.text.includes(secret), false, "rendered status must not retain cached strings");
+	} finally {
+		if (previous === undefined) delete process.env[name]; else process.env[name] = previous;
+		forgetSessionVerifications();
 		await rm(fixture.root, { recursive: true, force: true });
 	}
 });

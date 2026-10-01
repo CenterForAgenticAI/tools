@@ -1,0 +1,72 @@
+{
+  "type": "flow",
+  "title": "pi-work plans and proves one work graph",
+  "description": "A Pi session uses pi-work to read and write workspec files, inspect a Git worktree, and hand one compiled node to pi-delegate for isolated worker execution.",
+  "nodes": [
+    {
+      "id": "session",
+      "label": "Session agent",
+      "sublabel": "chooses the next action",
+      "tag": "Pi",
+      "kind": "default"
+    },
+    {
+      "id": "extension",
+      "label": "pi-work",
+      "sublabel": "author, plan, verify",
+      "tag": "Extension",
+      "kind": "accent"
+    },
+    {
+      "id": "files",
+      "label": ".work files",
+      "sublabel": "drafts, specs, derived cache",
+      "kind": "store"
+    },
+    {
+      "id": "tree",
+      "label": "Git worktree",
+      "sublabel": "work products and evidence",
+      "kind": "store"
+    },
+    {
+      "id": "delegate",
+      "label": "pi-delegate",
+      "sublabel": "dispatch and isolation",
+      "kind": "external"
+    },
+    {
+      "id": "worker",
+      "label": "Worker",
+      "sublabel": "implements one node",
+      "kind": "external"
+    }
+  ],
+  "edges": [
+    {
+      "from": "session",
+      "to": "extension",
+      "label": "tool or command"
+    },
+    {
+      "from": "extension",
+      "to": "files",
+      "label": "read and write"
+    },
+    {
+      "from": "extension",
+      "to": "tree",
+      "label": "inspect and verify"
+    },
+    {
+      "from": "extension",
+      "to": "delegate",
+      "label": "dispatch one node"
+    },
+    {
+      "from": "delegate",
+      "to": "worker",
+      "label": "run"
+    }
+  ]
+}

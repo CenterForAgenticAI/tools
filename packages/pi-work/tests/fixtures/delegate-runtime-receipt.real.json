@@ -1,0 +1,62 @@
+{
+  "schema": "pi-delegate.runtime-receipt",
+  "version": 1,
+  "runId": "runtime-1790822241670-w7xqun3g",
+  "createdAt": "2026-10-01T02:37:21.702Z",
+  "shape": "direct",
+  "forks": [
+    {
+      "name": "lane",
+      "agent": "worker",
+      "workerCwd": "/var/folders/7j/q9l9536173lfyk3s5p0fr8dm0000gq/T/rcpt-ZKwIQn",
+      "maxRounds": 1,
+      "collapseMode": "final_output",
+      "confineWrites": true,
+      "requestedModel": "mock-worker/mock-worker-model",
+      "resolvedModel": "mock-worker/mock-worker-model",
+      "inputDigests": [
+        {
+          "kind": "task",
+          "name": "task",
+          "algorithm": "sha256",
+          "digest": "f51c362d5cc7defb17b2b1290bb8e9b5a4d7e1319f85b90741ff3f8578fc6bba"
+        }
+      ]
+    }
+  ],
+  "receiptPath": "/var/folders/7j/q9l9536173lfyk3s5p0fr8dm0000gq/T/rcpt-ZKwIQn/extensions/pi-delegate/runtime-api/runtime-1790822241670-w7xqun3g/receipt.json",
+  "resultPath": "/var/folders/7j/q9l9536173lfyk3s5p0fr8dm0000gq/T/rcpt-ZKwIQn/extensions/pi-delegate/runtime-api/runtime-1790822241670-w7xqun3g/result.json",
+  "acceptance": {
+    "runId": "runtime-1790822241670-w7xqun3g",
+    "transport": "in-process",
+    "state": "accepted"
+  },
+  "inputDigests": [
+    {
+      "kind": "task",
+      "name": "task",
+      "algorithm": "sha256",
+      "digest": "f51c362d5cc7defb17b2b1290bb8e9b5a4d7e1319f85b90741ff3f8578fc6bba"
+    }
+  ],
+  "steps": [
+    {
+      "id": "lane",
+      "name": "lane",
+      "agent": "worker",
+      "kind": "worker",
+      "stepIndex": 0,
+      "dependsOn": [],
+      "state": "planned",
+      "inputDigests": [
+        {
+          "kind": "task",
+          "name": "task",
+          "algorithm": "sha256",
+          "digest": "f51c362d5cc7defb17b2b1290bb8e9b5a4d7e1319f85b90741ff3f8578fc6bba"
+        }
+      ],
+      "actualInputDigests": []
+    }
+  ]
+}

@@ -1,11 +1,12 @@
 import { REGION_MARKERS } from "./regions.js";
 import type { DecisionEntry, PromotionFinding, SourceRegion } from "./types.js";
 
-export const DECISIONS_FORMAT = `A column-zero ATX heading ending with ${REGION_MARKERS.decisions}, followed by zero or more top-level Markdown bullets of the exact form - <id>: <question>. IDs match [A-Za-z0-9][A-Za-z0-9._-]* and are unique. Indented lines continue the question until the fields begin. Each bullet then requires exactly one indented 'tripwire: <when it must be answered>' line and exactly one indented 'decides: <who answers it>' line. The region ends at the next same-or-higher heading.`;
+export const DECISIONS_FORMAT = `A column-zero ATX heading ending with ${REGION_MARKERS.decisions}, followed by zero or more top-level Markdown bullets of the exact form - <id>: <question>. IDs match [A-Za-z0-9][A-Za-z0-9._-]* and are unique. Indented prose continues the question until the fields begin, but an indented line starting with a field-shaped key matching [A-Za-z0-9_-]+ followed by a colon and whitespace is not prose: only tripwire and decides are allowed. Each bullet then requires exactly one indented 'tripwire: <when it must be answered>' line and exactly one indented 'decides: <who answers it>' line. The region ends at the next same-or-higher heading.`;
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const BULLET = /^- ([^:]+): (.*)$/;
 const FIELD = /^(tripwire|decides): (.*)$/;
+const FIELD_SHAPED = /^([A-Za-z0-9_-]+):\s/;
 
 type FieldName = "tripwire" | "decides";
 
@@ -109,6 +110,11 @@ export function validateDecisions(region: SourceRegion, sourcePath: string): { o
 		}
 		const field = FIELD.exec(indented);
 		if (!field) {
+			const fieldShaped = FIELD_SHAPED.exec(indented);
+			if (fieldShaped && fieldShaped[1] !== "tripwire" && fieldShaped[1] !== "decides") {
+				findings.push(decisionsFinding(sourcePath, "decisions-malformed", `Line ${lineNumber} declares unknown decision field '${fieldShaped[1]}'; only tripwire and decides are allowed.`, lineNumber, current.id));
+				continue;
+			}
 			// Indented prose extends the question, as it does for a criterion statement,
 			// so a decision keeps the context its author wrote. It is only allowed before
 			// the fields: after them it is ambiguous which value it continues.

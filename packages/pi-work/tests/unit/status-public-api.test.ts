@@ -425,6 +425,7 @@ test("cache source module pins the complete runtime export inventory with one bo
 		"sameTreeIdentity",
 		"statusCachePath",
 		"writeDispatchCacheEntry",
+		"writeVerificationCacheEntry",
 	].sort());
 	assert.equal(cache.STATUS_CACHE_DISPATCH_WRITE_MAX_ATTEMPTS, 8);
 	assert.equal(cache.STATUS_CACHE_READBACK_RESIDUAL, "readback-may-precede-later-overwrite");
@@ -452,7 +453,9 @@ test("refresh is a typed blocked result and does not invent a trusted result", a
 		assert.equal(result.status, "blocked");
 		if (result.status === "blocked") {
 			assert.equal(result.ran, false);
-			assert.match(result.message, /public verification barrel/);
+			assert.match(result.message, /use work_verify/);
+			assert.doesNotMatch(result.message, /barrel|production-authority/, "the message must not leak internals");
+			assert.equal(result.code, "refresh-authority-unavailable", "the finding code is unchanged");
 			assert.equal(result.requires.length, 3);
 		}
 	} finally {

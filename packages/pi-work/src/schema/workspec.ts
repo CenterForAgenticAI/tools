@@ -1,8 +1,11 @@
 import { Type, type Static } from "typebox";
 
+import { MAX_ENVIRONMENT_VARIABLE_NAME_LENGTH, MAX_INHERITED_ENVIRONMENT_VARIABLES } from "./environment.js";
+
 const nonEmpty = { minLength: 1 } as const;
 const closed = { additionalProperties: false } as const;
 const agentInputPathFormat = "agent-input-path";
+const environmentVariableFormat = "environment-variable";
 
 export const LinkSchema = Type.Object({
 	url: Type.String(nonEmpty),
@@ -61,6 +64,7 @@ export const CommandExpectationSchema = Type.Object({
 export const CommandEvidenceSchema = Type.Object({
 	kind: Type.Literal("command"),
 	run: Type.String(nonEmpty),
+	inherit_env: Type.Optional(Type.Array(Type.String({ ...nonEmpty, maxLength: MAX_ENVIRONMENT_VARIABLE_NAME_LENGTH, format: environmentVariableFormat }), { minItems: 1, maxItems: MAX_INHERITED_ENVIRONMENT_VARIABLES, uniqueItems: true })),
 	expect: CommandExpectationSchema,
 	timeout_ms: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 3_600_000 })),
 }, closed);

@@ -68,8 +68,10 @@ async function loadInput(root: string, authoredPath: string, maxBytes: number): 
 	if (path.isAbsolute(authoredPath)) return { ok: false, failure: failure("input-path-escape", "agent input must be relative to the target worktree", authoredPath) };
 	const candidate = path.resolve(root, authoredPath);
 	try {
+		// Compare canonical filesystem identities (e.g. /var and /private/var on macOS).
+		const canonicalRoot = await realpath(root);
 		const canonicalPath = await realpath(candidate);
-		if (!isPathInside(root, canonicalPath)) return { ok: false, failure: failure("input-path-escape", "agent input resolves outside the target worktree", authoredPath) };
+		if (!isPathInside(canonicalRoot, canonicalPath)) return { ok: false, failure: failure("input-path-escape", "agent input resolves outside the target worktree", authoredPath) };
 		const info = await stat(canonicalPath);
 		if (!info.isFile()) return { ok: false, failure: failure("input-not-file", "agent input is not a regular file", authoredPath) };
 		if (info.size > maxBytes) return { ok: false, failure: failure("input-too-large", `agent input exceeds ${maxBytes} bytes`, authoredPath) };

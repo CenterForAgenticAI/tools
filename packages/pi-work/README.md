@@ -1,124 +1,54 @@
-# pi-work
+# @centerforagenticai/pi-work
 
-pi-work is a pi extension for structured workspec authoring, verification, and
-plan compilation. A workspec describes agent-directed work and its done
-criteria; pi-work owns that shape and the checks that establish completion.
-Execution judgment remains with the session agent, and execution mechanics are
-delegated to pi-delegate. pi-work owns no scheduler, daemon, or state plane.
+**Kind:** extension · **Status:** experimental · **Pi:** ^0.85.1 · **Node:** >=22.19
 
-**Status: v1 surface complete; the bootstrap dogfood is unfinished.** The seven
-tools, five commands, and three skills below are registered and working. What
-remains is finishing rather than designing: the open issues, and driving the
-project's own bootstrap spec to green (#8).
+Structured workspec authoring, verification, and plan compilation for Pi. A
+workspec is a YAML description of agent-directed work and its completion
+criteria.
 
 ## What it does
 
-Author a workspec, decompose it deliberately, execute it node by node, and
-judge the result against evidence that fails closed. A check that did not run
-did not pass.
+pi-work helps an agent turn an outcome into a checked graph of work. It owns the
+workspec format and the evidence used to establish completion. The agent in the
+current Pi session still decides what runs next, while pi-delegate owns worker
+execution.
 
-Every design choice traces to an ADR under `.spec/decisions/` or to one of the
-eight anti-goals in `.spec/postmortem.md`, drawn from two predecessors that
-failed in understood ways. The constraints that carry the most weight:
+- Draft and promote a workspec without losing its criteria.
+- Validate the graph, dependencies, write scope, and evidence declarations.
+- Derive node state from source files and evidence instead of storing status in
+  the workspec.
+- Compile ready nodes into worker briefs and dispatch exactly one node per call.
+- Verify declared evidence against a named Git tree; report failure instead of guessing when a kind is unavailable.
 
-- **No status field in a spec.** Progress is derived, never set. The git commit
-  is the approval record.
-- **One authority per fact.** The cache is derived, loses to its sources on
-  conflict, and is safe to delete.
-- **Handoffs are lossless or they are bugs.** One total contract assembler
-  renders every worker brief and review contract, so a dropped field is a build
-  failure rather than a hope.
-- **No surface without a live consumer.** Speculative generality is what made
-  the predecessors unmaintainable.
+A failed or unexecuted check does not pass. Detailed evidence rules are in
+[docs/EVIDENCE.md](docs/EVIDENCE.md).
 
-Evidence comes in three kinds and none is privileged, because nothing here
-assumes the work product is code: `command` (run plus expected exit and
-output), `agent` (a rubric judged over named inputs), and `user` (an explicit
-human confirmation captured through the session). Command evidence may set
-`timeout_ms` to an integer from 1,000 through 3,600,000 milliseconds (one
-hour). When absent, `work_verify` allows 30,000 milliseconds; invalid values
-are rejected, not clamped. Put `timeout_ms` alongside `run` and `expect` in
-the criterion's `evidence` object. For example:
+## How it fits
 
-```yaml
-evidence:
-  kind: command
-  run: npm run check
-  expect:
-    exit: 0
-    output_includes: "check passed"
-  timeout_ms: 180000
-```
+![How pi-work fits between a session and delegated work](docs/diagrams/architecture.svg)
 
-A Markdown draft's criteria are preserved verbatim in the promoted skeleton;
-`work_promote` does not create evidence objects. Specify the timeout in the
-workspec criterion when decomposing that skeleton.
+The agent running the Pi session calls pi-work tools and commands. pi-work reads
+and writes Markdown drafts, YAML workspecs, and a cache under `.work/` that it
+can rebuild from those sources. It checks
+evidence in the target Git worktree. For execution, `work_dispatch` asks the
+loaded pi-delegate runtime to dispatch one node; pi-delegate then owns the
+worker, isolation, escalation, and result handling. pi-work has no scheduler,
+daemon, or persistent run-state service.
 
-`work_verify` runs command evidence in a Linux systemd user scope
-(`KillMode=control-group`) or, on macOS, in a new process group. On macOS it
-cleans and checks the group even after a successful command, before reporting
-a pass. If a descendant detaches with `setsid` or a double fork but keeps the
-command's output pipes open, verification detects that escape and fails. A
-descendant that detaches fully, including from those pipes, may survive; the
-operator accepted that limit. Other platforms fail closed. Command proofs
-record `containment` as `systemd-scope` or `process-group`. Older stored
-proofs without the field are interpreted as Linux systemd-scope observations
-and do not regain verification authority.
+## Install and enable
 
-### Tools
+<a id="installing-pi-work"></a>
 
-| Tool | Does |
-|---|---|
-| `work_validate` | Parse and validate a spec; typed findings plus advisory lints |
-| `work_promote` | Draft → spec, carrying the criteria block verbatim |
-| `work_amend_criterion` | Change one criterion as an append-only recorded act |
-| `work_status` | Derive per-node state: done, ready, blocked, or needs-decision |
-| `work_plan` | Compile a ready node into a brief and return a receipt |
-| `work_dispatch` | Perform exactly one delegate dispatch; record the receipt |
-| `work_verify` | Execute a node's evidence fail-closed in a named tree |
-
-### Commands
-
-`/work-draft`, `/work-promote`, `/work-decompose`, `/work-status`, `/work-next`.
-Commands may be interactive; tools never are.
-
-`/work-status --refresh` returns a typed blocked result in v1: the public
-verification barrel exposes no authority constructor, so status cannot produce a
-trusted current-session result. Run `work_verify` for that.
-
-### Skills
-
-`work-authoring` (drafting method), `work-decomposition` (granularity, criterion
-homes, honest `touches` scoping), and `work-execution` (ready set → plan →
-dispatch → verify).
-
-### Paths are relative by design
-
-Every path-taking tool resolves its input against a confinement root and
-**rejects an absolute path** rather than rewriting it. Pass a path relative to
-the root.
-
-## Installing pi-work
-
-### Install from npm
+pi-work is opt-in per project. Install the npm package into the consuming
+project's `.pi/settings.json`:
 
 ```sh
-pi install npm:@centerforagenticai/pi-work
+cd <project>
+pi install npm:@centerforagenticai/pi-work -l
 ```
 
-This installs the pi-work extension and its three skills.
-pi-work is **opt-in per project**. Do not add it to `~/.pi/agent/settings.json`.
-
-A globally installed pi-work loads into every pi session on the machine. Its
-seven tools land in every tool list, and its three skills land in every
-session's `<available_skills>` block carrying descriptions that read as
-directives — `work-authoring` says "Use this before turning a conversation,
-issue, or design into a markdown draft". Agents then reach for workspecs in
-projects that never adopted them. That has happened.
-
-### Opt a project in
-
-Create `.pi/settings.json` in the consuming project:
+For an unpublished checkout, add its absolute path instead, merging it into any
+existing `packages` array:
 
 ```json
 {
@@ -126,149 +56,99 @@ Create `.pi/settings.json` in the consuming project:
 }
 ```
 
-Use an **absolute path** in a consuming project. Relative paths in project
-settings resolve against `<project>/.pi`, so a session started in a linked
-worktree resolves them inside `<project>/.worktrees/<id>/`, where the package is
-absent and silently contributes nothing.
-
-Merge into an existing `packages` array rather than overwriting the file, and
-note that project settings apply only once the project is trusted.
-
-### This repository is the exception
-
-`.pi/settings.json` here is committed and uses a relative path:
-
-```json
-{
-  "packages": [".."]
-}
-```
-
-`..` resolves to the checkout that holds the settings file, so a session started
-in a linked worktree of this repository loads that worktree's own copy. That is
-what you want while developing it — provided that worktree's `dist/` is built.
-See [Keeping `dist/` current](#keeping-dist-current-optional-git-hooks).
-
-### Verify
+Restart Pi, then verify the package is listed under `Project packages`:
 
 ```sh
-cd <project>
-pi list          # pi-work must be listed under "Project packages"
+pi list
 ```
 
-Extensions are resolved when the pi process starts. A session already running
-keeps its old set until pi restarts.
+It needs Pi `^0.85.1` and Node `>=22.19`. Read
+[docs/INSTALLING.md](docs/INSTALLING.md) for npm installation, linked worktrees,
+one-run loading, and limiting which package resources load.
 
-### Load it once without installing
+## Surface
+
+| Kind | Name | Purpose |
+| --- | --- | --- |
+| Tool | `work_validate` | Parse and validate a workspec; return typed findings and advisory lints. |
+| Tool | `work_promote` | Promote a Markdown draft to a YAML workspec while preserving criteria. |
+| Tool | `work_amend_criterion` | Change one criterion through an append-only recorded amendment. |
+| Tool | `work_status` | Derive each node as done, ready, blocked, or needing a decision. |
+| Tool | `work_plan` | Compile ready node addresses into plans that point to stored worker briefs, without dispatching. |
+| Tool | `work_dispatch` | Compile and submit exactly one node through pi-delegate, or return the plan without claiming dispatch occurred. |
+| Tool | `work_verify` | Verify a node's declared evidence in a named Git tree. |
+| Commands | `/work-draft`, `/work-promote`, `/work-decompose` | Guide authoring, promotion, and decomposition. |
+| Commands | `/work-status`, `/work-next` | Show derived state or hand off one ready round. |
+| Skill | `work-authoring` | Draft an outcome and observable criteria. |
+| Skill | `work-decomposition` | Assign node boundaries, dependencies, proof, and write scopes. |
+| Skill | `work-execution` | Plan, dispatch, verify, and remediate ready work. |
+
+Paths passed to tools are relative to the allowed base directory for that call.
+Absolute paths are rejected rather than rewritten.
+
+## Configuration
+
+The extension reads no package-specific settings. Loading it through the
+project's `.pi/settings.json` enables all seven tools and discovers all three
+skills. The workspec itself carries node, worker, evidence, and write-scope
+settings; see the [design record] for the schema and decisions.
+
+<a id="keeping-dist-current-optional-git-hooks"></a>
+
+Development hooks are optional. `npm run hooks:install` installs all tracked
+hooks. `sh scripts/install-git-hooks.sh --build-only` installs only the four
+`dist/` rebuild hooks. Their controls are:
+
+| Setting | Effect |
+| --- | --- |
+| `git config piwork.autobuild true` | Rebuild in linked worktrees too. |
+| `git config piwork.autobuild false` | Disable automatic rebuilds. |
+| `PI_WORK_NO_AUTOBUILD=1 git commit` | Skip the rebuild for one command. |
+
+The full hook behaviour is in [docs/INSTALLING.md](docs/INSTALLING.md).
+
+## When it runs
+
+pi-work runs only when an agent or person invokes one of its tools or slash
+commands. It registers no Pi lifecycle event handlers and starts no background
+process. `work_dispatch` performs at most one pi-delegate dispatch per call; it
+never waits, sequences, retries, or polls. `work_verify` runs only the evidence
+declared for the selected node.
+
+## Develop
+
+Use an isolated worktree because Pi sessions load compiled code from `dist/`.
+Give the worktree its own `node_modules`; do not link dependencies back to a
+shared checkout.
 
 ```sh
-pi -e /absolute/path/to/pi-work
+git clone https://github.com/CenterForAgenticAI/tools.git
+cd tools/packages/pi-work
+npm ci
+env NPM_CONFIG_USERCONFIG=/dev/null npm run check
 ```
 
-Loads the package for that run only and writes nothing to settings.
+The gate runs lint, source and test typechecks, hook tests, the compiled
+JavaScript tests with coverage, the production build, and the package smoke.
+The package smoke must run after the build because the published extension entry
+is `./dist/index.js`.
 
-### Narrowing instead of removing
+## Documentation
 
-A project entry whose identity matches a global one replaces it; for a local
-path the identity is the resolved absolute path. Two ways to keep a global
-install but reduce what it contributes to one project:
-
-```jsonc
-// .pi/settings.json — load the extension, drop the skills and prompts
-{ "packages": [{ "source": "/absolute/path/to/pi-work", "skills": [], "prompts": [] }] }
-```
-
-```jsonc
-// .pi/settings.json — a delta over the global entry rather than a replacement
-{ "packages": [{ "source": "/absolute/path/to/pi-work", "autoload": false, "skills": ["-skills/work-authoring"] }] }
-```
-
-`[]` loads none of that resource type, `!glob` excludes matches, and `+path` /
-`-path` are exact paths relative to the package root. `pi config -l` edits the
-same settings interactively.
-
-## Requirements and setup
-
-- Node.js 22.19 or newer
-- npm
-
-Install dependencies and run the aggregate gate:
-
-```sh
-npm install
-npm run check
-```
-
-`npm run check` runs lint, strict source and test typechecks, the compiled
-JavaScript test suite with c8 coverage, the production build, and the package
-smoke. `npm test` compiles `src/` and `tests/` into `.test-dist/` before running
-only the emitted `.js` tests. Focused commands are available as
-`npm run lint`, `npm run typecheck`, `npm run typecheck:tests`,
-`npm run test:compile`, `npm run test:run`, and `npm run build`.
-
-The package smoke must run after a build. pi's local directory loader does not
-run npm lifecycle hooks, so `npm run smoke:package` fails clearly when the
-compiled `dist/` entry is absent. The manifest deliberately points
-`pi.extensions` at `./dist/index.js`: `src/` is not published, and a manifest
-entry for an absent file can otherwise be silently dropped by local discovery.
-
-## Keeping `dist/` current (optional git hooks)
-
-A pi session loads this package and runs the compiled `dist/` of one checkout.
-Pulling `main` updates `src/` but leaves `dist/` at the previous commit, so
-sessions keep running old code until someone remembers to build.
-
-Four tracked hooks under `.githooks/` close that window. They rebuild `dist/`
-after `git commit`, `git merge`/`git pull`, `git rebase`/`git commit --amend`,
-and a branch `git checkout`, but only when the incoming commits touched `src/`,
-`tsconfig.build.json`, or `package.json`.
-
-Installing them is opt-in; nothing runs during `npm install` or `npm ci`:
-
-```sh
-npm run hooks:install                          # every tracked hook
-sh scripts/install-git-hooks.sh --build-only   # only the four rebuild hooks
-```
-
-`--build-only` writes shims into the shared hooks directory and leaves
-`core.hooksPath` alone, which matters because `core.hooksPath` is
-all-or-nothing across every linked worktree.
-
-The hooks never fail the git command that invoked them: a failed build is
-reported loudly and `dist/` is left stale rather than blocking a checkout.
-They rebuild in the main checkout only, they skip a rebuild already in flight,
-and they never run `npm install`. To change that:
-
-```sh
-git config piwork.autobuild true    # rebuild in this linked worktree too
-git config piwork.autobuild false   # never rebuild, anywhere
-PI_WORK_NO_AUTOBUILD=1 git commit   # skip the rebuild for one command
-```
-
-`npm run test:hooks` proves the guard logic against throwaway repositories with
-a stubbed `npm`; it is part of `npm run check` and never builds anything real.
-
-## Repository layout
-
-- `src/` — TypeScript extension source
-- `tests/` — source/compiled-layout contract and unit tests
-- `scripts/` — build, package smoke, and git-hook helpers
-- `.githooks/` — optional tracked hooks that rebuild `dist/`
-- `dist/` — generated production JavaScript and declarations
-- `.test-dist/` — generated test JavaScript
-- `.work/specs/` and `.work/drafts/` — tracked authoring directories
-- `.spec/` — the design record; implementation docs do not duplicate its ADRs
-- `.pi/settings.json` — this repository's own opt-in entry (`".."`)
-
-`src/index.ts` registers the whole surface: seven tools and five commands.
-
-## Working on this repository
-
-Never run `npm install` or a build in a shared checkout that live pi sessions
-load. Pi loads the compiled `dist/`, so installing or rebuilding underneath a
-running session swaps the module under it. Do dependency work in a worktree
-with its own `node_modules`.
+- [docs/INSTALLING.md](docs/INSTALLING.md): installation, project opt-in, development commands, rebuild hooks, and repository layout.
+- [docs/SURFACE.md](docs/SURFACE.md): tools, commands, skills, and path rules.
+- [docs/DESIGN.md](docs/DESIGN.md): the design constraints behind pi-work's current shape.
+- [docs/EVIDENCE.md](docs/EVIDENCE.md): evidence kinds, environment controls, redaction, and command containment.
+- [docs/GLOSSARY.md](docs/GLOSSARY.md): project terms used in the design and implementation.
+- [docs/diagrams/](docs/diagrams/): architecture diagram source and generated SVG.
+- [Design record]: architecture, schema, boundaries, and deferred decisions.
+- [ADR index]: accepted architecture decisions.
+- [Postmortem]: the predecessor failures that shaped the constraints.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+[design record]: docs/DESIGN.md
+[ADR index]: docs/DESIGN.md#design-constraints
+[postmortem]: docs/DESIGN.md#design-constraints

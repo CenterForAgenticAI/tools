@@ -25,7 +25,7 @@ export const workValidateTool = defineTool({
 	description: "Parse and strictly validate a Workspec v2 YAML file.",
 	parameters: Type.Object({ path: Type.String() }, { additionalProperties: false }),
 	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-		const pathInput = confinedPath(params.path, "path");
+		const pathInput = confinedPath(params.path, "path", "working-directory");
 		if (!pathInput.ok) {
 			const details: WorkValidateDetails = {
 				path: params.path,

@@ -37,7 +37,7 @@ test("compiles exact single-direct delegate options and regenerates hashed by-re
 	assert.equal(receipt.delegate.cwd, root);
 	assert.deepEqual(receipt.delegate.writableRoots, ["src/import/schema/**"]);
 	assert.equal(receipt.delegate.confineWrites, true);
-	assert.equal(receipt.delegate.escalation, "local");
+	assert.equal(receipt.delegate.escalation, "off");
 	assert.deepEqual(receipt.delegate.reads, [receipt.briefPath]);
 	assert.deepEqual(receipt.canonicalDelegate, {
 		runs: [{
@@ -51,7 +51,7 @@ test("compiles exact single-direct delegate options and regenerates hashed by-re
 			reads: [receipt.briefPath],
 			writableRoots: ["src/import/schema/**"],
 			confineWrites: true,
-			escalation: "local",
+			escalation: "off",
 			worktree: false,
 			// This node declares no checklist, so the carrier holds focus alone.
 			// pi-delegate rejects an empty tasks list rather than accepting one that

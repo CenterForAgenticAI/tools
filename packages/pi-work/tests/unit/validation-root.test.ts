@@ -101,6 +101,22 @@ test("a linked spec cannot escape its worktree through a path or a symlink", asy
 	assert.ok(result.findings.some((finding) => finding.code === "criterion-draft-unavailable" && finding.message.includes("resolves outside the validation root")));
 });
 
+test("validation root ignores hostile Git configuration supplied by the caller", async () => {
+	const { root, linked, specPath } = await linkedFixture();
+	const previous = { GIT_DIR: process.env.GIT_DIR, GIT_CONFIG_COUNT: process.env.GIT_CONFIG_COUNT, GIT_CONFIG_KEY_0: process.env.GIT_CONFIG_KEY_0, GIT_CONFIG_VALUE_0: process.env.GIT_CONFIG_VALUE_0 };
+	try {
+		process.env.GIT_DIR = path.join(root, ".git");
+		process.env.GIT_CONFIG_COUNT = "1";
+		process.env.GIT_CONFIG_KEY_0 = "core.worktree";
+		process.env.GIT_CONFIG_VALUE_0 = root;
+		assert.equal(await realpath(validationRootForSpec(specPath, root)), await realpath(linked));
+	} finally {
+		for (const name of Object.keys(previous) as (keyof typeof previous)[]) {
+			if (previous[name] === undefined) delete process.env[name]; else process.env[name] = previous[name];
+		}
+	}
+});
+
 test("the validation context cannot supply only the caller's cwd", () => {
 	// @ts-expect-error A caller must identify the spec before supplying a cwd.
 	const context: WorkspecValidationContext = { cwd: "/caller" };

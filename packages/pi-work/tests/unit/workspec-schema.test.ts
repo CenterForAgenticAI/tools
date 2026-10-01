@@ -94,6 +94,14 @@ test("strict schema accepts the three evidence variants and rejects lifecycle fi
 	assert.equal(emptyChecklist.structuralValid, true);
 });
 
+test("named command environment rejects verifier controls, duplicates, and oversized declarations", () => {
+	const source = (names: string): string => withDraftLineage(`title: T\ndescription: D\nintent: I\nwork:\n  - id: command\n    task: run\n    acceptance:\n      - id: A\n        statement: ran\n        evidence:\n          kind: command\n          run: printf ok\n          inherit_env: ${names}\n          expect:\n            exit: 0\n            output_includes: ok\n`);
+	assert.equal(validateWorkspec(source("[CI_TOKEN]")).valid, true);
+	for (const names of ["[]", "[PATH]", "[HOME]", "[GIT_CONFIG_COUNT]", "[LD_PRELOAD]", "[CI_TOKEN, CI_TOKEN]", "[CI-TOKEN]", `[${"A".repeat(129)}]`, `[${Array.from({ length: 33 }, (_, i) => `A_${i}`).join(", ")}]`]) {
+		assert.equal(validateWorkspec(source(names)).valid, false, names);
+	}
+});
+
 test("command timeout is optional, bounded to 1s–1h, and never clamped", () => {
 	const sourceForTimeout = (timeout?: string): string => withDraftLineage(`title: T\ndescription: D\nintent: I\nwork:\n  - id: command\n    task: run\n    acceptance:\n      - id: A\n        statement: ran\n        evidence:\n          kind: command\n          run: printf ok\n          expect:\n            exit: 0\n            output_includes: ok\n${timeout === undefined ? "" : `          timeout_ms: ${timeout}\n`}`);
 	for (const timeout of [undefined, "1000", "30000", "3600000"]) {

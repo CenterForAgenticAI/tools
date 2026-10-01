@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { isEnvironmentVariableList } from "../schema/environment.js";
+import { commandEvidenceMatches, commandExpectationMatches, commandOutputMatches, redactCommandText, inheritedValuesSnapshot } from "./output.js";
 
 import type { AcceptanceCriterion, CommandEvidence, CommandExpectation, Evidence, WorkNode } from "../schema/workspec.js";
 
@@ -45,6 +47,7 @@ export interface CommandExecutionProof extends ExecutionWindow {
 	exitCode: number | null;
 	signal: NodeJS.Signals | null;
 	outputMatched: string;
+	inherit_env?: readonly string[];
 	untrackedPaths?: readonly string[];
 	monitoring: TreeMonitoringProof;
 	tree: TreeIdentity;
@@ -92,6 +95,7 @@ export type VerificationFailure =
 	| { code: "signaled"; message: string; signal: NodeJS.Signals }
 	| { code: "exit-mismatch"; message: string; expected: number; actual: number | null }
 	| { code: "output-mismatch"; message: string; expected: string }
+	| { code: "environment-unavailable"; message: string; names: readonly string[] }
 	| { code: "tree-identity-unavailable"; message: string }
 	| { code: "tree-mismatch"; message: string; expected: string; actual: string }
 	| { code: "tree-dirty"; message: string }
@@ -178,7 +182,7 @@ export interface FailedVerification {
 	outcome: "failed";
 	nodeId: string;
 	tree: TreeIdentity;
-	criteria: FailedCriterionResult[];
+	criteria: CriterionResult[];
 	checklist: ChecklistResults;
 	recordedAt: string;
 }
@@ -237,7 +241,7 @@ export interface ObservedFailedVerification {
 	readonly outcome: "failed";
 	readonly nodeId: string;
 	readonly tree: TreeIdentity;
-	readonly criteria: FailedCriterionResult[];
+	readonly criteria: readonly ObservedCriterionResult[];
 	readonly checklist: ObservedChecklistResults;
 	readonly recordedAt: string;
 }
@@ -355,8 +359,8 @@ function proofValue(value: unknown, tree: TreeIdentity): value is CriterionProof
 		if (!validCommandContainment(value.containment, value.executorPath, value.shellPath)) return false;
 		const untrackedPathsValid = value.untrackedPaths === undefined || (Array.isArray(value.untrackedPaths) && value.untrackedPaths.every((item: unknown) => stringValue(item) && item.length > 0));
 		const timeoutValid = value.timeout_ms === undefined || (typeof value.timeout_ms === "number" && Number.isInteger(value.timeout_ms) && value.timeout_ms >= 1_000 && value.timeout_ms <= 3_600_000);
-		if (!timeoutValid || !stringValue(value.authoredCommand) || value.authoredCommand.length === 0 || !stringValue(value.gitPath) || !value.gitPath.startsWith("/") || !stringValue(value.executorPath) || !value.executorPath.startsWith("/") || !stringValue(value.shellPath) || !value.shellPath.startsWith("/") || !expectationValue(value.expectation) || !stringValue(value.stdout) || !stringValue(value.stderr) || !Number.isInteger(value.exitCode) || value.exitCode !== value.expectation.exit || value.signal !== null || !stringValue(value.outputMatched) || value.outputMatched !== value.expectation.output_includes || !untrackedPathsValid || !monitoringValue(value.monitoring)) return false;
-		return value.stdout.includes(value.outputMatched) || value.stderr.includes(value.outputMatched);
+		if (!timeoutValid || !isEnvironmentVariableList(value.inherit_env) || !stringValue(value.authoredCommand) || value.authoredCommand.length === 0 || value.authoredCommand !== redactCommandText(inheritedValuesSnapshot([]), value.authoredCommand) || !stringValue(value.gitPath) || !value.gitPath.startsWith("/") || !stringValue(value.executorPath) || !value.executorPath.startsWith("/") || !stringValue(value.shellPath) || !value.shellPath.startsWith("/") || !expectationValue(value.expectation) || !commandExpectationMatches(inheritedValuesSnapshot([]), value.expectation) || !stringValue(value.stdout) || !stringValue(value.stderr) || !Number.isInteger(value.exitCode) || value.exitCode !== value.expectation.exit || value.signal !== null || !stringValue(value.outputMatched) || value.outputMatched !== value.expectation.output_includes || value.outputMatched !== redactCommandText(inheritedValuesSnapshot([]), value.outputMatched) || !untrackedPathsValid || !monitoringValue(value.monitoring)) return false;
+		return commandOutputMatches(inheritedValuesSnapshot([]), value.stdout, value.stderr, value.outputMatched);
 	}
 	if (value.kind === "agent-proof") {
 		if (!stringValue(value.agent) || value.agent.length === 0 || !stringValue(value.rubric) || !stringValue(value.rubricDigest) || value.rubricDigest !== sha256(value.rubric) || value.verdict !== "approve" || !stringValue(value.dispatchReceipt) || value.dispatchReceipt.trim().length === 0 || !Array.isArray(value.inputs) || value.inputs.length === 0) return false;
@@ -373,8 +377,12 @@ function failureValue(value: unknown): value is VerificationFailure {
 }
 
 function attemptValue(value: unknown, tree: TreeIdentity): value is CriterionAttempt {
-	const coherent = isRecord(value) && timestamp(value.startedAt) && timestamp(value.finishedAt) && Date.parse(value.finishedAt) >= Date.parse(value.startedAt);
-	return coherent && (value.kind === "command" || value.kind === "agent" || value.kind === "user") && isRecord(value.evidence) && treeValue(value.tree) && sameTree(value.tree, tree) && (value.stdout === undefined || stringValue(value.stdout)) && (value.stderr === undefined || stringValue(value.stderr)) && (value.exitCode === undefined || value.exitCode === null || Number.isInteger(value.exitCode));
+	if (!isRecord(value) || !isRecord(value.evidence)) return false;
+	const coherent = timestamp(value.startedAt) && timestamp(value.finishedAt) && Date.parse(value.finishedAt) >= Date.parse(value.startedAt) && (value.kind === "command" || value.kind === "agent" || value.kind === "user") && treeValue(value.tree) && sameTree(value.tree, tree) && (value.stdout === undefined || stringValue(value.stdout)) && (value.stderr === undefined || stringValue(value.stderr)) && (value.exitCode === undefined || value.exitCode === null || Number.isInteger(value.exitCode));
+	if (!coherent || value.kind !== value.evidence.kind) return false;
+	if (value.kind !== "command") return true;
+	const evidence = value.evidence;
+	return typeof evidence.run === "string" && evidence.run.length > 0 && isEnvironmentVariableList(evidence.inherit_env) && typeof evidence.expect === "object" && evidence.expect !== null && expectationValue(evidence.expect) && commandEvidenceMatches(evidence as CommandEvidence, inheritedValuesSnapshot([])) && (value.stdout === undefined && value.stderr === undefined || commandOutputMatches(inheritedValuesSnapshot([]), (value.stdout as string | undefined) ?? "", (value.stderr as string | undefined) ?? "", evidence.expect.output_includes));
 }
 
 function failedCriterionValue(value: unknown, tree: TreeIdentity): value is FailedCriterionResult {
@@ -435,7 +443,7 @@ function decodeResult(value: unknown, tree: TreeIdentity): ObservedVerificationR
 		criteria.push(decoded);
 	}
 	if (value.outcome === "failed") {
-		if (!criteria.every((criterion): criterion is FailedCriterionResult => criterion.outcome === "failed")) return undefined;
+		if (criteria.length > 0 && criteria.every((criterion) => criterion.outcome === "passed") && checklist.outcome === "complete") return undefined;
 		return { outcome: "failed" as const, nodeId: value.nodeId, tree, criteria, checklist, recordedAt: value.recordedAt };
 	}
 	if (value.outcome !== "passed" || criteria.length === 0 || !criteria.every((criterion): criterion is ObservedPassedCriterionResult => criterion.outcome === "passed") || checklist.outcome !== "complete") return undefined;

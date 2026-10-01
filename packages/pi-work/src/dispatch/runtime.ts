@@ -71,10 +71,14 @@ function record(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-	const expected = [...keys].sort();
-	const actual = Object.keys(value).sort();
-	return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+/**
+ * pi-delegate evolves its receipt additively (`acceptance`, `inputDigests`, `steps`
+ * arrived after v1 shipped), so a decoder that rejects unknown keys fails every
+ * dispatch the moment the producer grows a field. Required keys are still
+ * checked; unrecognised keys are ignored, never copied through.
+ */
+function hasKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+	return keys.every((key) => Object.hasOwn(value, key));
 }
 
 function nonEmptyString(value: unknown): value is string {
@@ -93,7 +97,7 @@ function decodeInputDigest(value: unknown): DelegateRuntimeInputDigest | undefin
 	// `focus` joins the accepted kinds with the handoff.focus carrier: the runtime
 	// records one digest per namespace, and an unrecognized kind fails the whole
 	// receipt closed rather than dropping that one digest.
-	if (!record(value) || !exactKeys(value, ["kind", "name", "algorithm", "digest"]) || (value.kind !== "task" && value.kind !== "read" && value.kind !== "checklist" && value.kind !== "focus") || !nonEmptyString(value.name) || value.algorithm !== "sha256" || !validSha256(value.digest)) return undefined;
+	if (!record(value) || !hasKeys(value, ["kind", "name", "algorithm", "digest"]) || (value.kind !== "task" && value.kind !== "read" && value.kind !== "checklist" && value.kind !== "focus") || !nonEmptyString(value.name) || value.algorithm !== "sha256" || !validSha256(value.digest)) return undefined;
 	return { kind: value.kind, name: value.name, algorithm: "sha256", digest: value.digest };
 }
 
@@ -107,8 +111,7 @@ function optionalBoolean(value: Record<string, unknown>, key: string): boolean {
 
 function decodeFork(value: unknown): DelegateRuntimeForkReceipt | undefined {
 	if (!record(value)) return undefined;
-	const allowed = new Set(["name", "agent", "workerCwd", "branch", "maxRounds", "cloneMode", "collapseMode", "confineWrites", "readOnly", "requestedModel", "resolvedModel", "skills", "inputDigests"]);
-	if (Object.keys(value).some((key) => !allowed.has(key)) || !nonEmptyString(value.name) || !nonEmptyString(value.agent) || !Number.isInteger(value.maxRounds) || (value.maxRounds as number) < 1 || !optionalString(value, "workerCwd") || !optionalString(value, "branch") || !optionalString(value, "cloneMode") || !optionalString(value, "collapseMode") || !optionalBoolean(value, "confineWrites") || !optionalBoolean(value, "readOnly") || !optionalString(value, "requestedModel") || !optionalString(value, "resolvedModel") || !Array.isArray(value.inputDigests)) return undefined;
+	if (!nonEmptyString(value.name) || !nonEmptyString(value.agent) || !Number.isInteger(value.maxRounds) || (value.maxRounds as number) < 1 || !optionalString(value, "workerCwd") || !optionalString(value, "branch") || !optionalString(value, "cloneMode") || !optionalString(value, "collapseMode") || !optionalBoolean(value, "confineWrites") || !optionalBoolean(value, "readOnly") || !optionalString(value, "requestedModel") || !optionalString(value, "resolvedModel") || !Array.isArray(value.inputDigests)) return undefined;
 	if (value.workerCwd !== undefined && (!path.isAbsolute(value.workerCwd as string) || path.normalize(value.workerCwd as string) !== value.workerCwd)) return undefined;
 	if (value.skills !== undefined && (!Array.isArray(value.skills) || value.skills.length === 0 || !value.skills.every(nonEmptyString))) return undefined;
 	const inputDigests = value.inputDigests.map(decodeInputDigest);
@@ -130,9 +133,17 @@ function decodeFork(value: unknown): DelegateRuntimeForkReceipt | undefined {
 	};
 }
 
-/** Strictly decode the declaration-backed pi-delegate v1 receipt envelope. */
+/** Optional additive envelope fields: shape-checked when present, otherwise ignored. */
+function validAdditiveEnvelope(value: Record<string, unknown>): boolean {
+	if (value.acceptance !== undefined && (!record(value.acceptance) || !nonEmptyString(value.acceptance.runId) || value.acceptance.runId !== value.runId)) return false;
+	if (value.inputDigests !== undefined && (!Array.isArray(value.inputDigests) || value.inputDigests.some((digest) => decodeInputDigest(digest) === undefined))) return false;
+	if (value.steps !== undefined && (!Array.isArray(value.steps) || !value.steps.every(record))) return false;
+	return true;
+}
+
+/** Decode the pi-delegate v1 receipt envelope: required fields strict, additive fields tolerated. */
 export function decodeDelegateRuntimeReceipt(value: unknown): DelegateRuntimeReceipt | undefined {
-	if (!record(value) || !exactKeys(value, ["schema", "version", "runId", "createdAt", "shape", "forks", "receiptPath", "resultPath"]) || value.schema !== "pi-delegate.runtime-receipt" || value.version !== 1 || !nonEmptyString(value.runId) || !validTimestamp(value.createdAt) || !nonEmptyString(value.shape) || !Array.isArray(value.forks) || !nonEmptyString(value.receiptPath) || !path.isAbsolute(value.receiptPath) || path.normalize(value.receiptPath) !== value.receiptPath || !nonEmptyString(value.resultPath) || !path.isAbsolute(value.resultPath) || path.normalize(value.resultPath) !== value.resultPath) return undefined;
+	if (!record(value) || !hasKeys(value, ["schema", "version", "runId", "createdAt", "shape", "forks", "receiptPath", "resultPath"]) || value.schema !== "pi-delegate.runtime-receipt" || value.version !== 1 || !nonEmptyString(value.runId) || !validTimestamp(value.createdAt) || !nonEmptyString(value.shape) || !Array.isArray(value.forks) || !validAdditiveEnvelope(value) || !nonEmptyString(value.receiptPath) || !path.isAbsolute(value.receiptPath) || path.normalize(value.receiptPath) !== value.receiptPath || !nonEmptyString(value.resultPath) || !path.isAbsolute(value.resultPath) || path.normalize(value.resultPath) !== value.resultPath) return undefined;
 	const forks = value.forks.map(decodeFork);
 	if (forks.some((fork) => fork === undefined)) return undefined;
 	return {

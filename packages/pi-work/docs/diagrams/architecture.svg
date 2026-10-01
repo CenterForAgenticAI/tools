@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020.3 339" width="1020.3" height="339" role="img" aria-labelledby="diagram-title diagram-description" font-family="'IBM Plex Sans','Helvetica Neue',Arial,sans-serif">
+<title id="diagram-title">pi-work plans and proves one work graph</title>
+<desc id="diagram-description">A Pi session uses pi-work to read and write workspec files, inspect a Git worktree, and hand one compiled node to pi-delegate for isolated worker execution.</desc>
+<rect x="0.5" y="0.5" width="1019.3" height="338" rx="6" fill="#ffffff" stroke="#dce6f5"/>
+<text x="32" y="40" font-size="17" font-family="'Domine',Georgia,'Times New Roman',serif" fill="#010c3f">pi-work plans and proves one work graph</text>
+<line x1="32" y1="54" x2="988.3" y2="54" stroke="#dce6f5"/>
+<defs><marker id="arrow-solid" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0.8 L8,4.5 L0,8.2 z" fill="#0464cd"/></marker><marker id="arrow-dashed" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0.8 L8,4.5 L0,8.2 z" fill="#7a869f"/></marker></defs>
+<path d="M188,193.5 C253,193.5 253,193.5 317.9,193.5" fill="none" stroke="#0464cd" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+<path d="M452.9,193.5 C520.6,193.5 520.6,110.5 588.3,110.5" fill="none" stroke="#0464cd" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+<path d="M452.9,193.5 C520.6,193.5 520.6,276.5 588.3,276.5" fill="none" stroke="#0464cd" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+<path d="M452.9,193.5 C529.9,193.5 529.9,193.5 606.8,193.5" fill="none" stroke="#0464cd" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+<path d="M753.8,193.5 C799.1,193.5 799.1,193.5 844.3,193.5" fill="none" stroke="#0464cd" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+<rect x="32" y="158" width="156" height="71" rx="4" fill="#ffffff" stroke="#032c7b" stroke-width="1.5"/>
+<text x="110" y="177" font-size="9" font-weight="600" letter-spacing="0.1em" text-anchor="middle" fill="#0464cd">PI</text>
+<text x="110" y="197" font-size="13" font-weight="600" text-anchor="middle" fill="#010c3f">Session agent</text>
+<text x="110" y="215" font-size="11" text-anchor="middle" fill="#5b6478">chooses the next action</text>
+<rect x="317.9" y="158" width="135" height="71" rx="4" fill="#9fd47b" stroke="#032c7b" stroke-width="1.5"/>
+<text x="385.4" y="177" font-size="9" font-weight="600" letter-spacing="0.1em" text-anchor="middle" fill="#032c7b">EXTENSION</text>
+<text x="385.4" y="197" font-size="13" font-weight="600" text-anchor="middle" fill="#010c3f">pi-work</text>
+<text x="385.4" y="215" font-size="11" text-anchor="middle" fill="#010c3f">author, plan, verify</text>
+<rect x="588.3" y="82" width="184" height="57" rx="18" fill="#f0f5ff" stroke="#0464cd" stroke-width="1.5"/>
+<text x="680.3" y="107" font-size="13" font-weight="600" text-anchor="middle" fill="#010c3f">.work files</text>
+<text x="680.3" y="125" font-size="11" text-anchor="middle" fill="#5b6478">drafts, specs, derived cache</text>
+<rect x="606.8" y="165" width="147" height="57" rx="4" fill="#f7f7f7" stroke="#9a9a9a" stroke-width="1.3" stroke-dasharray="5 4"/>
+<text x="680.3" y="190" font-size="13" font-weight="600" text-anchor="middle" fill="#28303f">pi-delegate</text>
+<text x="680.3" y="208" font-size="11" text-anchor="middle" fill="#5b6478">dispatch and isolation</text>
+<rect x="588.3" y="248" width="184" height="57" rx="18" fill="#f0f5ff" stroke="#0464cd" stroke-width="1.5"/>
+<text x="680.3" y="273" font-size="13" font-weight="600" text-anchor="middle" fill="#010c3f">Git worktree</text>
+<text x="680.3" y="291" font-size="11" text-anchor="middle" fill="#5b6478">work products and evidence</text>
+<rect x="844.3" y="165" width="144" height="57" rx="4" fill="#f7f7f7" stroke="#9a9a9a" stroke-width="1.3" stroke-dasharray="5 4"/>
+<text x="916.3" y="190" font-size="13" font-weight="600" text-anchor="middle" fill="#28303f">Worker</text>
+<text x="916.3" y="208" font-size="11" text-anchor="middle" fill="#5b6478">implements one node</text>
+<rect x="202" y="184.5" width="101.9" height="18" rx="3" fill="#ffffff"/><text x="253" y="197.5" font-size="11" text-anchor="middle" fill="#28303f">tool or command</text>
+<rect x="474.7" y="143" width="91.9" height="18" rx="3" fill="#ffffff"/><text x="520.6" y="156" font-size="11" text-anchor="middle" fill="#28303f">read and write</text>
+<rect x="466.9" y="226" width="107.4" height="18" rx="3" fill="#ffffff"/><text x="520.6" y="239" font-size="11" text-anchor="middle" fill="#28303f">inspect and verify</text>
+<rect x="476.6" y="184.5" width="106.5" height="18" rx="3" fill="#ffffff"/><text x="529.9" y="197.5" font-size="11" text-anchor="middle" fill="#28303f">dispatch one node</text>
+<rect x="783.8" y="184.5" width="30.5" height="18" rx="3" fill="#ffffff"/><text x="799.1" y="197.5" font-size="11" text-anchor="middle" fill="#28303f">run</text>
+<text x="988.3" y="325" font-size="9" letter-spacing="0.16em" text-anchor="end" fill="#9a9a9a">CAAIR</text>
+</svg>

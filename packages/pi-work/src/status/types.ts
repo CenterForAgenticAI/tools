@@ -137,6 +137,11 @@ export type StatusCacheDispatchWriteResult =
 	| { readonly status: "contended"; readonly path: string; readonly attempts: number; readonly residualRace: "readback-may-precede-later-overwrite"; readonly message: string }
 	| { readonly status: "failed"; readonly path: string; readonly attempts: number; readonly reason: "cache-read-error" | "malformed-cache" | "cache-source-mismatch" | "run-id-conflict" | "cache-write-error"; readonly message: string };
 
+export type StatusCacheVerificationWriteResult =
+	| { readonly status: "written"; readonly path: string; readonly attempts: number; readonly residualRace: "readback-may-precede-later-overwrite" }
+	| { readonly status: "contended"; readonly path: string; readonly attempts: number; readonly residualRace: "readback-may-precede-later-overwrite"; readonly message: string }
+	| { readonly status: "failed"; readonly path: string; readonly attempts: number; readonly reason: "cache-read-error" | "malformed-cache" | "cache-source-mismatch" | "cache-write-error"; readonly message: string };
+
 export interface StatusCacheDecode {
 	readonly cache?: StatusCacheV1;
 	readonly findings: readonly StatusFinding[];
@@ -149,12 +154,18 @@ export type ObservationReport =
 	| { readonly state: "conflicting-observation"; readonly update: ObservedVerificationCacheUpdate }
 	| { readonly state: "unverified" };
 
+/** Containment used by command evidence in an authority-verified pass. */
+export interface VerificationContainment {
+	readonly method: "systemd-scope" | "process-group" | "unknown";
+}
+
 export interface NodeStatusReport {
 	readonly address: NodeAddress;
 	readonly nodeId: string;
 	readonly task: string;
 	readonly lifecycle: LifecycleState;
 	readonly verification: VerificationState;
+	readonly containment: readonly VerificationContainment[];
 	readonly verificationObservation?: ObservedVerificationResult;
 	readonly review: ReviewState;
 	readonly reviewText: string;
@@ -252,6 +263,7 @@ export interface ValidatedStatusInput {
 export interface DerivedStatusContext {
 	readonly graph: StatusGraph;
 	readonly observations: ReadonlyMap<string, ObservationReport>;
+	readonly trusted: ReadonlyMap<string, "passed" | "failed">;
 	readonly review: ReadonlyMap<string, ReviewState>;
 	readonly dispatch: StatusCacheDispatchSection;
 	readonly findings: readonly StatusFinding[];
@@ -265,14 +277,14 @@ export type StatusNodeInput = {
 export type { Finding, FindingPath, NodeContractAssembly, PlanReceipt, WorkNode, Workspec };
 
 export const LIFECYCLE_TEXT: Readonly<Record<LifecycleState, string>> = {
-	done: "DONE — completion is derived from trusted results produced by this refresh for the current tree.",
+	done: "DONE — completion is derived from trusted verification run in this session for the current tree.",
 	ready: "READY — dependencies are done; this node may start or be remediated.",
 	blocked: "BLOCKED — waiting for: <qualified addresses or typed blockers>.",
 	"needs-decision": "NEEDS DECISION — unresolved: <decision ids>.",
 };
 
 export const VERIFICATION_TEXT: Readonly<Record<VerificationState, string>> = {
-	"verified-this-session": "Verified this session at commit <sha>; this refresh ran verification.",
+	"verified-this-session": "Verified this session at commit <sha>; work_verify ran verification.",
 	"failed-this-session": "Verification ran this session and failed at commit <sha>.",
 	"observed-green-not-verified-this-session": "Last observed green at commit <sha>; not verified this session. This does not satisfy done-ness or dependencies.",
 	"observed-failure-not-verified-this-session": "Last observed verification failed at commit <sha>; not verified this session.",
@@ -290,7 +302,7 @@ export const REVIEW_TEXT: Readonly<Record<ReviewState, string>> = {
 	"observed-rejection-not-authoritative": "A rejection was observed, but it is not authoritative for this session.",
 };
 
-export const REFRESH_BLOCKED_MESSAGE = "refresh is blocked: the public verification barrel does not expose a production-authority entry point that can run authored evidence, return a trusted current-session result, and safely yield serializable observed cache data.";
+export const REFRESH_BLOCKED_MESSAGE = "refresh is not run by work_status; use work_verify to run the node's evidence and record the result";
 
 export function lifecycleText(state: LifecycleState, values: { readonly blockers?: string | undefined; readonly decisions?: string | undefined } = {}): string {
 	return LIFECYCLE_TEXT[state]
@@ -305,6 +317,12 @@ export function verificationText(state: VerificationState, values: { readonly sh
 
 export function reviewText(state: ReviewState): string {
 	return REVIEW_TEXT[state];
+}
+
+export function containmentQualification(containment: readonly VerificationContainment[]): string {
+	if (containment.some((entry) => entry.method === "process-group")) return "Qualified: command evidence was held by a process group, not a systemd user scope, so a descendant that calls setsid may have survived. This pass is weaker than one contained by a control group.";
+	if (containment.some((entry) => entry.method === "unknown")) return "Qualified: command evidence containment was not recorded.";
+	return "";
 }
 
 export function refreshBlocked(): RefreshBlocked {

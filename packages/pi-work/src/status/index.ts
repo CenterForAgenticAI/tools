@@ -4,12 +4,15 @@ import path from "node:path";
 import { validateWorkspec, type Finding } from "../schema/index.js";
 import { errorCount } from "../schema/findings.js";
 import { inspectTree, resolveSpecPath, type VerificationFailure } from "../verify/index.js";
+import { redactCommandFailure, type InheritedValuesSnapshot } from "../verify/output.js";
+import { captureEvidenceEnvironment } from "../verify/executable.js";
 import { confinedPath } from "../tools/confined-path.js";
 import { addressKey } from "../plan/index.js";
 import { isCompositeNode } from "../schema/dependencies.js";
 import type { AcceptanceCriterion, WorkNode, Workspec } from "../schema/workspec.js";
 import { buildStatusGraph } from "./graph.js";
 import { classifyStatusCache, decodeStatusCache, readStatusCache, statusCachePath } from "./cache.js";
+import type { ObservedVerificationResult } from "../verify/index.js";
 import { renderBlockers } from "./derive.js";
 import { refreshStatus } from "./refresh.js";
 import type {
@@ -20,14 +23,16 @@ import type {
 	ObservationReport,
 	ReviewState,
 	StatusBlocker,
+	StatusCacheDispatchEntry,
 	StatusFinding,
 	StatusRequest,
 	StatusGraph,
+	VerificationContainment,
 	VerificationState,
 	WorkStatusDetails,
 	WorkStatusResult,
 } from "./types.js";
-import { lifecycleText, refreshBlocked, reviewText, verificationText, type NodeAddress, type StatusCacheV1, type TreeIdentity } from "./types.js";
+import { containmentQualification, lifecycleText, refreshBlocked, reviewText, verificationText, type NodeAddress, type StatusCacheV1, type TreeIdentity } from "./types.js";
 
 export * from "./types.js";
 export { blockedRefresh, refreshStatus } from "./refresh.js";
@@ -112,15 +117,53 @@ function validateRefreshAddresses(graph: StatusGraph, request: StatusRequest): S
 	return findings;
 }
 
-function cacheContext(tree: TreeIdentity, graph: StatusGraph, cache: StatusCacheV1 | undefined, cacheFindings: readonly StatusFinding[], specPath: string): DerivedStatusContext {
-	const classified = classifyStatusCache(cache, graph, tree, specPath, tree.kind === "git" ? tree.worktreePath : "");
+function specInheritedValues(spec: Workspec): InheritedValuesSnapshot {
+	const names = spec.work.flatMap(function collect(node): string[] {
+		return [...(node.acceptance ?? []).flatMap((criterion) => criterion.evidence.kind === "command" ? criterion.evidence.inherit_env ?? [] : []), ...(isCompositeNode(node) ? node.work.flatMap(collect) : [])];
+	});
+	return captureEvidenceEnvironment([...new Set(names)]).inherited;
+}
+
+function redactObservationStrings<T>(value: T, inherited: InheritedValuesSnapshot): T {
+	// Decode and classify the original proof first; sanitize only the returned
+	// observation so today's environment does not change authority decisions.
+	return JSON.parse(JSON.stringify(value, (_key: string, field: unknown) => typeof field === "string" ? redactCommandFailure(inherited, field) : field)) as T;
+}
+
+function cacheContext(tree: TreeIdentity, graph: StatusGraph, cache: StatusCacheV1 | undefined, cacheFindings: readonly StatusFinding[], specPath: string, source: string, inherited: InheritedValuesSnapshot): DerivedStatusContext {
+	const classified = classifyStatusCache(cache, graph, tree, specPath, tree.kind === "git" ? tree.worktreePath : "", source, inherited);
+	const dispatch: Record<string, StatusCacheDispatchEntry> = {};
+	for (const [runId, entry] of Object.entries(classified.dispatch)) {
+		const safeRunId = redactCommandFailure(inherited, runId);
+		let key = safeRunId;
+		let suffix = 0;
+		while (Object.hasOwn(dispatch, key)) key = `${safeRunId}#${++suffix}`;
+		dispatch[key] = redactObservationStrings(entry, inherited);
+	}
 	return {
 		graph,
-		observations: classified.observations,
+		observations: new Map([...classified.observations].map(([address, observation]) => [address, redactObservationStrings(observation, inherited)])),
+		trusted: classified.trusted,
 		review: classified.review,
-		dispatch: classified.dispatch,
-		findings: [...cacheFindings, ...classified.findings],
+		dispatch,
+		findings: redactObservationStrings([...cacheFindings, ...classified.findings], inherited),
 	};
+}
+
+/** Report the containment that actually held each passing command criterion. */
+function containmentOf(record: ObservedVerificationResult | undefined): VerificationContainment[] {
+	if (record?.outcome !== "passed") return [];
+	const seen = new Set<string>();
+	const containment: VerificationContainment[] = [];
+	for (const criterion of record.criteria) {
+		if (criterion.proof.kind !== "command-proof") continue;
+		const entry: VerificationContainment = { method: criterion.proof.containment ?? "unknown" };
+		const key = entry.method;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		containment.push(entry);
+	}
+	return containment;
 }
 
 function hasChecklist(node: WorkNode): node is WorkNode & { checklist: string[] } {
@@ -178,7 +221,7 @@ interface DerivationOutput {
 
 /** Reduce only the validated source graph assembled by the owning status boundary. */
 function deriveValidatedStatus(spec: Workspec, tree: TreeIdentity, context: DerivedStatusContext): DerivationOutput {
-	const trustedCurrent = new Map<string, "passed" | "failed">();
+	const trustedCurrent = new Map<string, "passed" | "failed">(context.trusted);
 	const memo = new Map<string, NodeStatusReport>();
 	const visiting = new Set<string>();
 	const findings: StatusFinding[] = [...context.findings];
@@ -195,6 +238,7 @@ function deriveValidatedStatus(spec: Workspec, tree: TreeIdentity, context: Deri
 				task: "",
 				lifecycle: "blocked",
 				verification: "unverified",
+				containment: [],
 				review: "not-configured",
 				reviewText: reviewText("not-configured"),
 				dispatches: [],
@@ -213,6 +257,7 @@ function deriveValidatedStatus(spec: Workspec, tree: TreeIdentity, context: Deri
 				task: assembly.node.task,
 				lifecycle: "blocked",
 				verification: "unverified",
+				containment: [],
 				review: "not-configured",
 				reviewText: reviewText("not-configured"),
 				dispatches: [],
@@ -267,23 +312,27 @@ function deriveValidatedStatus(spec: Workspec, tree: TreeIdentity, context: Deri
 			.filter((entry) => addressKey(entry.address) === key)
 			.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 		const renderedVerification = verification === "stale-observation" ? verificationText(verification, { old: observedUpdate?.tree.kind === "git" ? observedUpdate.tree.resolvedCommit : undefined, current: tree.kind === "git" ? tree.resolvedCommit : undefined }) : verification === "observed-green-not-verified-this-session" || verification === "observed-failure-not-verified-this-session" || verification === "verified-this-session" || verification === "failed-this-session" ? verificationText(verification, { sha: tree.kind === "git" ? tree.resolvedCommit : undefined }) : verificationText(verification);
+		const containment = trusted === "passed" ? containmentOf(observedUpdate?.record) : [];
+		const qualification = containmentQualification(containment);
+		const renderedLifecycle = lifecycleText(lifecycle, {
+			blockers: lifecycle === "blocked" ? renderBlockers(blockers) : undefined,
+			decisions: lifecycle === "needs-decision" ? spec.open_decisions?.map((decision) => decision.id).join(", ") : undefined,
+		});
 		const result: NodeStatusReport = {
 			address: [...address],
 			nodeId: assembly.node.id,
 			task: assembly.node.task,
 			lifecycle,
 			verification,
+			containment,
 			...(observedUpdate === undefined ? {} : { verificationObservation: observedUpdate.record }),
 			review,
 			reviewText: reviewText(review),
 			dispatches,
 			blockers,
 			findings: nodeFindings,
-			lifecycleText: lifecycleText(lifecycle, {
-				blockers: lifecycle === "blocked" ? renderBlockers(blockers) : undefined,
-				decisions: lifecycle === "needs-decision" ? spec.open_decisions?.map((decision) => decision.id).join(", ") : undefined,
-			}),
-			verificationText: renderedVerification,
+			lifecycleText: qualification.length > 0 && lifecycle === "done" ? `${renderedLifecycle} ${qualification}` : renderedLifecycle,
+			verificationText: qualification.length > 0 ? `${renderedVerification} ${qualification}` : renderedVerification,
 		};
 		visiting.delete(key);
 		memo.set(key, result);
@@ -325,7 +374,7 @@ export function deriveStatus(input: DeriveStatusInput): WorkStatusResult {
 	const decoded = input.cache === undefined ? { findings: [] as readonly StatusFinding[] } : decodeStatusCache(input.cache);
 	const cache = decoded.cache;
 	const graphBuild = buildStatusGraph(validation.spec);
-	const context = cacheContext(input.tree, graphBuild.graph, cache, decoded.findings, input.specPath);
+	const context = cacheContext(input.tree, graphBuild.graph, cache, decoded.findings, input.specPath, input.source, specInheritedValues(validation.spec));
 	const details = deriveStatusDetails(validation.spec, input.specPath, input.tree, { ...context, findings: [...graphBuild.findings, ...context.findings] }, statusCachePath(input.tree.worktreePath, input.specPath), refreshBlocked());
 	return { ok: errorCount(validation.findings) === 0, details };
 }
@@ -333,7 +382,7 @@ export function deriveStatus(input: DeriveStatusInput): WorkStatusResult {
 /** Read and derive a workspec using explicit target-tree identity. */
 export async function getWorkStatus(request: StatusRequest): Promise<WorkStatusResult> {
 	if (!request || typeof request.path !== "string" || request.path.length === 0 || typeof request.worktreePath !== "string" || request.worktreePath.length === 0 || typeof request.expectedCommit !== "string" || request.expectedCommit.length === 0) return invalidDetails(request ?? {}, "", [{ code: "invalid-status-input", message: "path, worktreePath, and expectedCommit are required and may not be empty" }]);
-	const pathInput = confinedPath(request.path, "path");
+	const pathInput = confinedPath(request.path, "path", "worktreePath");
 	if (!pathInput.ok) return invalidDetails(request, "", [pathInput.finding]);
 	const beforeRoot = aborted(request, "");
 	if (beforeRoot) return beforeRoot;
@@ -362,10 +411,14 @@ export async function getWorkStatus(request: StatusRequest): Promise<WorkStatusR
 	if (afterSource) return afterSource;
 	const validation = validateWorkspec(source, { specPath, cwd: root });
 	if (!validation.structuralValid || !validation.valid) return invalidDetails(request, statusCachePath(root, specPath), validation.findings);
+	const inherited = specInheritedValues(validation.spec);
 	const treeCheck = await inspectTree(root, request.expectedCommit);
 	const afterTree = aborted(request, statusCachePath(root, specPath));
 	if (afterTree) return afterTree;
-	if (!treeCheck.ok) return invalidDetails({ ...request, path: specPath }, statusCachePath(root, specPath), [{ code: "tree-identity-error", message: treeCheck.failure.message }]);
+	if (!treeCheck.ok) {
+
+		return invalidDetails({ ...request, path: specPath }, statusCachePath(root, specPath), [{ code: "tree-identity-error", message: redactCommandFailure(inherited, treeCheck.failure.message) }]);
+	}
 	const graphBuild = buildStatusGraph(validation.spec);
 	const requestFindings = validateRefreshAddresses(graphBuild.graph, request);
 	if (requestFindings.length > 0) {
@@ -379,7 +432,7 @@ export async function getWorkStatus(request: StatusRequest): Promise<WorkStatusR
 	const refresh = request.refresh ? await refreshStatus({ source, specPath, request, refresh: request.refresh, cwd: root }) : refreshBlocked();
 	const afterRefresh = aborted(request, cachePath);
 	if (afterRefresh) return afterRefresh;
-	const context = cacheContext(treeCheck.snapshot.identity, graphBuild.graph, cacheResult.cache, cacheResult.findings, specPath);
+	const context = cacheContext(treeCheck.snapshot.identity, graphBuild.graph, cacheResult.cache, cacheResult.findings, specPath, source, inherited);
 	const refreshFindings: StatusFinding[] = request.refresh && refresh.status === "blocked" ? [{ code: "refresh-authority-unavailable", message: refresh.message }] : [];
 	const details = deriveStatusDetails(validation.spec, specPath, treeCheck.snapshot.identity, { ...context, findings: [...graphBuild.findings, ...context.findings, ...refreshFindings] }, cachePath, refresh.status === "blocked" ? refresh : refreshBlocked());
 	return { ok: true, details: { ...details, refreshed: false } };

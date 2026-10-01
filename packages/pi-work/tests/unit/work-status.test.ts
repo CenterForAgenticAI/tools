@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -13,7 +13,7 @@ import { withDraftLineage } from "../helpers/workspec-source.ts";
 const execFileAsync = promisify(execFile);
 
 async function fixtureRepo(spec: string): Promise<{ root: string; commit: string }> {
-	const root = await mkdtemp(path.join(os.tmpdir(), "pi-work-status-tool-"));
+	const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-work-status-tool-")));
 	await writeFile(path.join(root, "spec.yaml"), withDraftLineage(spec, { cwd: root }));
 	await writeFile(path.join(root, ".gitignore"), ".work/.cache/\n");
 	await execFileAsync("git", ["init", "-q"], { cwd: root });

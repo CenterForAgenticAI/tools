@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { addressKey, formatNodeAddress } from "../plan/index.js";
 import {
@@ -10,6 +12,8 @@ import {
 } from "../verify/index.js";
 import type { NodeAddress, NodeContractAssembly } from "../plan/index.js";
 import type { Evidence } from "../schema/workspec.js";
+import { inheritedValuesSnapshot, redactCommandEvidence, type InheritedValuesSnapshot } from "../verify/output.js";
+import { digestSpecSource, sessionVerifications } from "./session-verification.js";
 import type {
 	ObservationReport,
 	ObservedReviewRecord,
@@ -23,6 +27,7 @@ import type {
 	StatusFinding,
 	StatusGraph,
 	StatusCacheVerificationEntry,
+	StatusCacheVerificationWriteResult,
 } from "./types.js";
 
 export const STATUS_CACHE_VERSION = 1 as const;
@@ -31,7 +36,7 @@ export const STATUS_CACHE_READBACK_RESIDUAL = "readback-may-precede-later-overwr
 
 const DISPATCH_CACHE_READBACK_SETTLE_MS = 50;
 
-const CACHE_DIRECTORY = path.join(".work", ".cache");
+const CACHE_DIRECTORY_NAME = ".pi-work-status-cache";
 
 function record(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -76,11 +81,52 @@ function safeRelativePath(worktreePath: string, specPath: string): string {
 	return relative.split(path.sep).join("/");
 }
 
-/** Resolve a contained deterministic cache name without touching the filesystem. */
+function inside(root: string, target: string): boolean {
+	const relative = path.relative(root, target);
+	return relative.length > 0 && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+/** Create cache directories only outside the verified tree and reject symlink ancestors. */
+async function ensureExternalCacheDirectory(cachePath: string, worktreePath: string): Promise<void> {
+	const root = await realpath(worktreePath);
+	const directory = path.resolve(path.dirname(cachePath));
+	if (inside(root, directory)) throw new Error("cache path is inside the verified worktree");
+	const missing: string[] = [];
+	let current = directory;
+	for (;;) {
+		try {
+			const status = await lstat(current);
+			if (!status.isDirectory() || status.isSymbolicLink()) throw new Error(`cache ancestor is not a directory: ${current}`);
+			break;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			const parent = path.dirname(current);
+			if (parent === current) throw new Error("cache directory has no existing ancestor", { cause: error });
+			missing.push(current);
+			current = parent;
+		}
+	}
+	for (const next of missing.reverse()) {
+		try { await mkdir(next); } catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		}
+		const status = await lstat(next);
+		if (!status.isDirectory() || status.isSymbolicLink()) throw new Error(`cache ancestor is not a directory: ${next}`);
+	}
+	const resolvedDirectory = await realpath(directory);
+	if (inside(root, resolvedDirectory)) throw new Error("cache path resolves inside the verified worktree");
+}
+
+function canonicalPath(value: string): string {
+	try { return realpathSync(value); } catch { return path.resolve(value); }
+}
+
+/** Resolve a deterministic cache name alongside, never inside, the verified worktree. */
 export function statusCachePath(worktreePath: string, specPath: string): string {
-	const relative = safeRelativePath(worktreePath, specPath);
+	const root = canonicalPath(worktreePath);
+	const relative = safeRelativePath(root, canonicalPath(specPath));
 	const digest = createHash("sha256").update(relative, "utf8").digest("hex").slice(0, 24);
-	return path.resolve(worktreePath, CACHE_DIRECTORY, `${digest}.json`);
+	return path.resolve(root, "..", CACHE_DIRECTORY_NAME, path.basename(root), `${digest}.json`);
 }
 
 export function emptyStatusCache(specPath: string): StatusCacheV1 {
@@ -455,7 +501,15 @@ interface DispatchCacheSnapshot {
 	readonly cache: StatusCacheV1;
 }
 
-async function readDispatchCacheSnapshot(cachePath: string, specPath: string, worktreePath: string): Promise<DispatchCacheSnapshot | StatusCacheDispatchWriteResult> {
+type CacheSnapshotFailure = {
+	readonly status: "failed";
+	readonly path: string;
+	readonly attempts: number;
+	readonly reason: "cache-read-error" | "malformed-cache" | "cache-source-mismatch" | "cache-write-error";
+	readonly message: string;
+};
+
+async function readDispatchCacheSnapshot(cachePath: string, specPath: string, worktreePath: string): Promise<DispatchCacheSnapshot | CacheSnapshotFailure> {
 	let source: string;
 	try {
 		source = await readFile(cachePath, "utf8");
@@ -487,7 +541,7 @@ function sameDispatchEntry(left: StatusCacheDispatchEntry, right: StatusCacheDis
  */
 export async function writeDispatchCacheEntry(cachePath: string, specPath: string, worktreePath: string, entry: StatusCacheDispatchEntry): Promise<StatusCacheDispatchWriteResult> {
 	try {
-		await mkdir(path.dirname(cachePath), { recursive: true });
+		await ensureExternalCacheDirectory(cachePath, worktreePath);
 	} catch (error) {
 		return { status: "failed", path: cachePath, attempts: 0, reason: "cache-write-error", message: error instanceof Error ? error.message : String(error) };
 	}
@@ -531,7 +585,42 @@ export async function writeDispatchCacheEntry(cachePath: string, specPath: strin
 	};
 }
 
-function sameContract(assembly: NodeContractAssembly, update: ObservedVerificationCacheUpdate): boolean {
+/** Persist only an observed, address-qualified verification result; serialized data never grants authority. */
+export async function writeVerificationCacheEntry(cachePath: string, specPath: string, worktreePath: string, entry: StatusCacheVerificationEntry): Promise<StatusCacheVerificationWriteResult> {
+	try {
+		await ensureExternalCacheDirectory(cachePath, worktreePath);
+	} catch (error) {
+		return { status: "failed", path: cachePath, attempts: 0, reason: "cache-write-error", message: error instanceof Error ? error.message : String(error) };
+	}
+	const safeEntry = decodeVerificationEntry(entry);
+	if (!safeEntry) return { status: "failed", path: cachePath, attempts: 0, reason: "malformed-cache", message: "verification update is malformed" };
+	const key = addressKey(safeEntry.address);
+	for (let attempt = 1; attempt <= STATUS_CACHE_DISPATCH_WRITE_MAX_ATTEMPTS; attempt += 1) {
+		const snapshot = await readDispatchCacheSnapshot(cachePath, specPath, worktreePath);
+		if ("status" in snapshot) return { status: "failed", path: snapshot.path, attempts: attempt, reason: snapshot.reason, message: snapshot.message };
+		const merged: StatusCacheV1 = { ...snapshot.cache, verification: { ...snapshot.cache.verification, [key]: safeEntry } };
+		const temporary = `${cachePath}.${process.pid}.${randomUUID()}.tmp`;
+		try {
+			await writeFile(temporary, `${JSON.stringify(merged, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+			await rename(temporary, cachePath);
+			await new Promise<void>((resolve) => setTimeout(resolve, DISPATCH_CACHE_READBACK_SETTLE_MS));
+			const readBack = await readDispatchCacheSnapshot(cachePath, specPath, worktreePath);
+			if ("status" in readBack) return { status: "failed", path: readBack.path, attempts: attempt, reason: readBack.reason, message: readBack.message };
+			const observed = readBack.cache.verification[key];
+			if (observed && isDeepStrictEqual(observed, safeEntry)) return { status: "written", path: cachePath, attempts: attempt, residualRace: STATUS_CACHE_READBACK_RESIDUAL };
+		} catch (error) {
+			await unlink(temporary).catch(() => undefined);
+			return { status: "failed", path: cachePath, attempts: attempt, reason: "cache-write-error", message: error instanceof Error ? error.message : String(error) };
+		}
+	}
+	return { status: "contended", path: cachePath, attempts: STATUS_CACHE_DISPATCH_WRITE_MAX_ATTEMPTS, residualRace: STATUS_CACHE_READBACK_RESIDUAL, message: `verification entry was absent or replaced after all ${STATUS_CACHE_DISPATCH_WRITE_MAX_ATTEMPTS} bounded write-and-read-back attempts` };
+}
+
+function sameStrings(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+	return left === undefined || right === undefined ? left === right : left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameContract(assembly: NodeContractAssembly, update: ObservedVerificationCacheUpdate, inherited: InheritedValuesSnapshot): boolean {
 	const expected = assembly.node.acceptance ?? [];
 	const actual = update.record.criteria;
 	if (expected.length !== actual.length) return false;
@@ -539,9 +628,10 @@ function sameContract(assembly: NodeContractAssembly, update: ObservedVerificati
 		const criterion = expected[index];
 		const observed = actual[index];
 		if (!criterion || !observed || criterion.id !== observed.criterion.id || criterion.statement !== observed.criterion.statement) return false;
-		const observedEvidence = observed.outcome === "failed" ? observed.attempt.evidence : observed.proof.kind === "command-proof" ? { kind: "command" as const, run: observed.proof.authoredCommand, expect: observed.proof.expectation, ...(observed.proof.timeout_ms === undefined ? {} : { timeout_ms: observed.proof.timeout_ms }) } : observed.proof.kind === "agent-proof" ? { kind: "agent" as const, agent: observed.proof.agent, inputs: observed.proof.inputs.map((input) => input.path), rubric: observed.proof.rubric } : { kind: "user" as const, prompt: observed.proof.prompt };
+		const observedEvidence = observed.outcome === "failed" ? observed.attempt.evidence : observed.proof.kind === "command-proof" ? { kind: "command" as const, run: observed.proof.authoredCommand, expect: observed.proof.expectation, ...(observed.proof.timeout_ms === undefined ? {} : { timeout_ms: observed.proof.timeout_ms }), ...(observed.proof.inherit_env === undefined ? {} : { inherit_env: [...observed.proof.inherit_env] }) } : observed.proof.kind === "agent-proof" ? { kind: "agent" as const, agent: observed.proof.agent, inputs: observed.proof.inputs.map((input) => input.path), rubric: observed.proof.rubric } : { kind: "user" as const, prompt: observed.proof.prompt };
 		if (criterion.evidence.kind === "command" && observedEvidence.kind === "command") {
-			if (criterion.evidence.run !== observedEvidence.run || JSON.stringify(criterion.evidence.expect) !== JSON.stringify(observedEvidence.expect) || criterion.evidence.timeout_ms !== observedEvidence.timeout_ms) return false;
+			const expected = redactCommandEvidence(criterion.evidence, inherited);
+			if (expected.run !== observedEvidence.run || expected.expect.exit !== observedEvidence.expect.exit || expected.expect.output_includes !== observedEvidence.expect.output_includes || expected.timeout_ms !== observedEvidence.timeout_ms || !sameStrings(expected.inherit_env, observedEvidence.inherit_env)) return false;
 		} else if (JSON.stringify(criterion.evidence as Evidence) !== JSON.stringify(observedEvidence)) return false;
 	}
 	const expectedChecklist = "checklist" in assembly.node && Array.isArray(assembly.node.checklist) ? assembly.node.checklist : [];
@@ -552,22 +642,51 @@ function sameContract(assembly: NodeContractAssembly, update: ObservedVerificati
 
 export interface ClassifiedCache {
 	readonly observations: ReadonlyMap<string, ObservationReport>;
+	readonly trusted: ReadonlyMap<string, "passed" | "failed">;
 	readonly review: ReadonlyMap<string, "observed-approval-not-authoritative" | "observed-rejection-not-authoritative">;
 	readonly dispatch: StatusCacheDispatchSection;
 	readonly findings: readonly StatusFinding[];
 }
 
+/** Rebind this process's authority runs to the current source, address and exact tree. */
+function classifySessionVerifications(graph: StatusGraph, tree: TreeIdentity, specPath: string, worktreePath: string, source: string, observations: Map<string, ObservationReport>, findings: StatusFinding[], inherited: InheritedValuesSnapshot): Map<string, "passed" | "failed"> {
+	const trusted = new Map<string, "passed" | "failed">();
+	for (const entry of sessionVerifications()) {
+		if (entry.sourceDigest !== digestSpecSource(source)) continue;
+		const { update } = entry;
+		if (canonicalSpecPath(worktreePath, update.specPath) !== specPath || !sameTree(update.tree, tree)) continue;
+		const addresses = graph.assemblies.filter((candidate) => candidate.node.id === update.nodeId).map((candidate) => candidate.address);
+		const [address, ...ambiguous] = addresses;
+		if (!address) continue;
+		if (ambiguous.length > 0) {
+			findings.push({ code: "ambiguous-node-id", nodeId: update.nodeId, addresses, message: `this session's verification of ${update.nodeId} cannot be attributed because it occurs at ${addresses.map(formatNodeAddress).join(", ")}` });
+			continue;
+		}
+		const key = addressKey(address);
+		const assembly = graph.byAddress.get(key);
+		if (!assembly) continue;
+		if (!sameContract(assembly, update, inherited)) {
+			findings.push({ code: "cache-source-conflict", address, message: `this session verified ${formatNodeAddress(address)} against different criteria or checklist items than the current workspec` });
+			continue;
+		}
+		trusted.set(key, update.record.outcome === "passed" ? "passed" : "failed");
+		observations.set(key, update.record.outcome === "passed" ? { state: "observed-green-not-verified-this-session", update } : { state: "observed-failure-not-verified-this-session", update });
+	}
+	return trusted;
+}
+
 /** Bind decoded observations to the current source, qualified address, and exact tree. */
-export function classifyStatusCache(cache: StatusCacheV1 | undefined, graph: StatusGraph, tree: TreeIdentity, specPath: string, worktreePath: string): ClassifiedCache {
+export function classifyStatusCache(cache: StatusCacheV1 | undefined, graph: StatusGraph, tree: TreeIdentity, specPath: string, worktreePath: string, source?: string, inherited: InheritedValuesSnapshot = inheritedValuesSnapshot([])): ClassifiedCache {
 	const observations = new Map<string, ObservationReport>();
 	const review = new Map<string, "observed-approval-not-authoritative" | "observed-rejection-not-authoritative">();
 	const dispatch: Record<string, StatusCacheDispatchEntry> = {};
 	const findings: StatusFinding[] = [];
-	if (!cache) return { observations, review, dispatch, findings };
+	const session = () => source === undefined ? new Map<string, "passed" | "failed">() : classifySessionVerifications(graph, tree, specPath, worktreePath, source, observations, findings, inherited);
+	if (!cache) return { observations, trusted: session(), review, dispatch, findings };
 	const canonicalCacheSpec = canonicalSpecPath(worktreePath, cache.specPath) ?? cache.specPath;
 	if (canonicalCacheSpec !== specPath) {
 		findings.push({ code: "cache-source-mismatch", expected: specPath, actual: cache.specPath, message: `cache belongs to ${cache.specPath}, not ${specPath}` });
-		return { observations, review, dispatch, findings };
+		return { observations, trusted: session(), review, dispatch, findings };
 	}
 	for (const [key, entry] of Object.entries(cache.verification)) {
 		const assembly = graph.byAddress.get(key);
@@ -594,7 +713,7 @@ export function classifyStatusCache(cache: StatusCacheV1 | undefined, graph: Sta
 			findings.push({ code: "stale-cache-observation", address: entry.address, message: `observation for ${formatNodeAddress(entry.address)} is not for the exact current TreeIdentity` });
 			continue;
 		}
-		if (!sameContract(assembly, entry.update)) {
+		if (!sameContract(assembly, entry.update, inherited)) {
 			observations.set(key, { state: "conflicting-observation", update: entry.update });
 			findings.push({ code: "cache-source-conflict", address: entry.address, message: `cached criterion or checklist data conflicts with the current workspec for ${formatNodeAddress(entry.address)}` });
 			continue;
@@ -625,7 +744,7 @@ export function classifyStatusCache(cache: StatusCacheV1 | undefined, graph: Sta
 		}
 		dispatch[runId] = entry;
 	}
-	return { observations, review, dispatch, findings };
+	return { observations, trusted: session(), review, dispatch, findings };
 }
 
 export function cacheEntry(update: ObservedVerificationCacheUpdate, address: NodeAddress): StatusCacheVerificationEntry {

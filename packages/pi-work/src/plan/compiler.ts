@@ -139,7 +139,12 @@ export async function compileWorkPlan(spec: Workspec, options: CompilePlanOption
 			task,
 			...(assembly.node.touches === undefined ? {} : { writableRoots: assembly.node.touches }),
 			confineWrites: true as const,
-			escalation: "local" as const,
+			// Solo-run escalation routes root originator -> user, and the root's authority
+			// comes only from the dispatcher's global pi-delegate config, which a dispatch
+			// cannot set. "local" therefore sent every blocker straight to the operator
+			// (#51). "off" gives the worker no raise tools: a blocker returns to the
+			// dispatching session in the worker's result.
+			escalation: "off" as const,
 			worktree,
 		};
 		const delegate: DelegateInvocation = shared;

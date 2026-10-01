@@ -60,7 +60,7 @@ export interface LegacyDelegateDispatchRequest {
 	readonly model?: string;
 	readonly writableRoots?: readonly string[];
 	readonly confineWrites: true;
-	readonly escalation: "local";
+	readonly escalation: "off";
 }
 
 /** The canonical request accepted when pi-delegate exports its normalizer. */

@@ -29,9 +29,7 @@ function render(details: WorkStatusDetails): string {
 	const lines = [`${details.specState}: ${details.nodes.length} node(s)`, `spec: ${details.path}`, `cache: ${details.cachePath}`];
 	if (details.currentTree?.kind === "git") lines.push(`tree: ${details.currentTree.worktreePath}@${details.currentTree.resolvedCommit}`);
 	for (const finding of details.findings) {
-		// A path-input rejection is only actionable if the caller can see which path was
-		// refused, so defer to the shared renderer that carries the message.
-		if ("severity" in finding) lines.push(finding.code === "absolute-path" ? renderFinding(finding) : `${finding.severity} ${finding.code}`);
+		if ("severity" in finding) lines.push(renderFinding(finding));
 		else lines.push(`finding ${finding.code}: ${finding.message}`);
 	}
 	for (const node of details.nodes) {

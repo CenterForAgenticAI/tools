@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { rm, access, chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { removeTempTree } from "../helpers/temp-tree.ts";
 
 import { createObservationalVerifier, isCriterionPassed, isNodePassed, makeCacheUpdate, runCommand, userChallenge, confirmationLine, verificationFailures, verifyNode, verifyNodeAndCache, type VerifyNodeRequest } from "../../src/verify/index.ts";
 import { createVerifier } from "../../src/verify/internal.ts";
@@ -48,7 +49,7 @@ test("observational verifier honors an authored timeout over its adapter default
 		const verify = (timeout_ms?: number) => verifier.verifyNode({ node: node(timeout_ms), specPath: "spec.yaml", target: target(repo) });
 		const timedOut = await verify();
 		assert.equal(timedOut.outcome, "failed");
-		if (timedOut.outcome === "failed") assert.ok(timedOut.criteria.some((criterion) => criterion.failures.some((failure) => failure.code === "timeout" && failure.message === "command exceeded 1000ms")));
+		if (timedOut.outcome === "failed") assert.ok(timedOut.criteria.some((criterion) => criterion.outcome === "failed" && criterion.failures.some((failure) => failure.code === "timeout" && failure.message === "command exceeded 1000ms")));
 		const passed = await verify(3_000);
 		assert.equal(passed.outcome, "passed");
 		if (passed.outcome === "passed") {
@@ -60,7 +61,7 @@ test("observational verifier honors an authored timeout over its adapter default
 			}
 		}
 	} finally {
-		await rm(repo.root, { recursive: true, force: true });
+		await removeTempTree(repo.root);
 	}
 });
 
@@ -99,7 +100,7 @@ test("constructed authority requires real tree ownership and rejects empty evide
 	assert.equal(verifier.isNodePassed(empty), false);
 	const mismatch = await verifier.verifyNode({ node: emptyNode, specPath: "spec.yaml", target: { worktreePath: repo.root, expectedCommit: "0".repeat(40) } });
 	assert.equal(mismatch.outcome, "failed");
-	await rm(repo.root, { recursive: true, force: true });
+	await removeTempTree(repo.root);
 });
 
 test("legacy public verification routes remain observational", async () => {
@@ -133,7 +134,7 @@ test("authority aborts before evidence and observational adapters fail closed on
 	const dirtyResult = await observed.verifyNode({ node: { id: "dirty-observed", task: "observe", acceptance: [{ id: "A", statement: "tracked change", evidence: { kind: "command" as const, run: "printf DIRTY > tracked; cat tracked; printf 'COMMITTED\\n' > tracked", expect: { exit: 0, output_includes: "DIRTY" } } }] }, specPath: "spec.yaml", target: target(repo) });
 	assert.equal(dirtyResult.outcome, "failed");
 	assert.ok(observed.verificationFailures(dirtyResult).some((failure) => failure.code === "tree-changed"));
-	await rm(repo.root, { recursive: true, force: true });
+	await removeTempTree(repo.root);
 });
 
 test("a PATH shadow of a verifier executable fails closed before the authored command can run", async () => {
@@ -150,14 +151,14 @@ test("a PATH shadow of a verifier executable fails closed before the authored co
 		const verified = await verifier.verifyNodeAndCache({ node: { id: "fake-path", task: "must not use a shadow", acceptance: [{ id: "A", statement: "authored marker", evidence: { kind: "command" as const, run: `touch ${marker}; printf AUTHORED_RAN`, expect: { exit: 0, output_includes: "AUTHORED_RAN" } } }] }, specPath: "spec.yaml", target: target(repo) });
 		assert.equal(verified.result.outcome, "failed");
 		assert.equal(verifier.isNodePassed(verified.result), false);
-		assert.equal(verified.cacheUpdate, undefined);
+		assert.equal(verified.cacheUpdate?.record.outcome, "failed");
 		assert.ok(verifier.verificationFailures(verified.result).some((failure) => failure.code === "executable-unavailable"));
 		assert.ok(!(await access(marker).then(() => true, () => false)));
 	} finally {
 		if (originalPath === undefined) delete process.env.PATH;
 		else process.env.PATH = originalPath;
-		await rm(fakeDirectory, { recursive: true, force: true });
-		await rm(repo.root, { recursive: true, force: true });
+		await removeTempTree(fakeDirectory);
+		await removeTempTree(repo.root);
 	}
 });
 
@@ -167,13 +168,13 @@ test("agent authority is unavailable while observational adapters remain usable 
 	const authority = createVerifier({ hasUI: false });
 	const unavailable = await authority.verifyNode({ node, specPath: "spec.yaml", target: target(repo) });
 	assert.equal(unavailable.outcome, "failed");
-	if (unavailable.outcome === "failed") assert.equal(unavailable.criteria[0]?.failures[0]?.code, "agent-unavailable");
+	if (unavailable.outcome === "failed") assert.ok(unavailable.criteria.some((criterion) => criterion.outcome === "failed" && criterion.failures.some((failure) => failure.code === "agent-unavailable")));
 	const observed = createObservationalVerifier({ judge: async (request) => ({ verdict: "approve" as const, dispatchReceipt: "receipt", inputDigests: request.inputs.map((input) => input.digest) }) });
 	const result = await observed.verifyNode({ node, specPath: "spec.yaml", target: target(repo) });
 	assert.equal(result.outcome, "passed");
 	assert.equal(observed.isNodePassed(result), false);
 	assert.equal(isNodePassed(result), false);
-	await rm(repo.root, { recursive: true, force: true });
+	await removeTempTree(repo.root);
 });
 
 test("host-captured user evidence can pass only through the constructed authority", async () => {
@@ -188,7 +189,7 @@ test("host-captured user evidence can pass only through the constructed authorit
 	assert.match(received, new RegExp(confirmationLine(userChallenge({ evidence: user, specPath: "spec.yaml", nodeId: "letter", criterionId: "U", tree: { kind: "git", worktreePath: repo.root, resolvedCommit: repo.commit } }, "session-1"))));
 	assert.equal(verifier.isNodePassed(result), true);
 	assert.equal(isNodePassed(result), false);
-	await rm(repo.root, { recursive: true, force: true });
+	await removeTempTree(repo.root);
 });
 
 test("host integration: graft #548 shape proves the authoritative verifier calls its executor and caches only its own result", { skip: systemdPrerequisite.available ? false : systemdPrerequisite.reason }, async () => {
@@ -208,7 +209,7 @@ test("host integration: graft #548 shape proves the authoritative verifier calls
 	assert.equal(isNodePassed(verified.result), false);
 	assert.equal(isCriterionPassed(verified.result.criteria[0]!), false);
 	assert.equal(Object.isFrozen(observed), true);
-	await rm(repo.root, { recursive: true, force: true });
+	await removeTempTree(repo.root);
 });
 
 test("substituted launchers are observational and cannot reach authority", async () => {
@@ -221,7 +222,7 @@ test("substituted launchers are observational and cannot reach authority", async
 	assert.equal(result.outcome, "passed");
 	assert.equal(observed.isNodePassed(result), false);
 	assert.ok(!(await access(marker).then(() => true, () => false)));
-	await rm(repo.root, { recursive: true, force: true });
+	await removeTempTree(repo.root);
 });
 
 test("dirty-then-clean execution is observed and rejected", async () => {
@@ -231,7 +232,7 @@ test("dirty-then-clean execution is observed and rejected", async () => {
 	const result = await verifier.verifyNode({ node, specPath: "spec.yaml", target: target(repo) });
 	assert.equal(result.outcome, "failed");
 	assert.equal(verifier.isNodePassed(result), false);
-	await rm(repo.root, { recursive: true, force: true });
+	await removeTempTree(repo.root);
 });
 
 test("nested tracked restoration fails while nested untracked churn is reported and allowed", async () => {
@@ -251,7 +252,7 @@ test("nested tracked restoration fails while nested untracked churn is reported 
 		assert.ok(untrackedResult.criteria[0].proof.monitoring.window.durationMs >= 0);
 		assert.equal(untrackedResult.criteria[0].proof.monitoring.residualRace, "events-after-final-drain-may-be-missed");
 	}
-	await rm(repo.root, { recursive: true, force: true });
+	await removeTempTree(repo.root);
 });
 
 test("host integration: authority snapshots request identity before slow evidence can await", { skip: systemdPrerequisite.available ? false : systemdPrerequisite.reason }, async () => {
@@ -277,5 +278,5 @@ test("host integration: authority snapshots request identity before slow evidenc
 		if (verified.result.criteria[0]?.proof.kind === "command-proof") assert.equal(verified.result.criteria[0].proof.authoredCommand, "sleep 0.45; printf PRETOKEN");
 	}
 	assert.equal(verified.cacheUpdate?.specPath, "pre-spec.yaml");
-	await rm(repo.root, { recursive: true, force: true });
+	await removeTempTree(repo.root);
 });

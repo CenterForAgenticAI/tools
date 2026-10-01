@@ -67,7 +67,7 @@ async function currentBranch(gitPath: string, worktreePath: string): Promise<str
 }
 
 function renderFinding(finding: WorkDispatchPreflightFinding | DispatchFinding): string {
-	if ("severity" in finding) return finding.code === "absolute-path" ? renderSchemaFinding(finding) : `${finding.severity} ${finding.code}`;
+	if ("severity" in finding) return renderSchemaFinding(finding);
 	return `finding ${finding.code}: ${finding.message}`;
 }
 
@@ -100,7 +100,7 @@ export function createWorkDispatchTool(dependencies: DispatchDependencies = {}) 
 			const input = { path: params.path, nodeAddress, worktreePath: params.worktreePath, expectedCommit: params.expectedCommit };
 			if (!params.path || !Array.isArray(nodeAddress) || nodeAddress.length === 0 || nodeAddress.some((segment) => typeof segment !== "string" || segment.length === 0) || !params.worktreePath || !params.expectedCommit) return response(preflightDetails(input, [{ code: "dispatch-input-invalid", message: "path, one qualified nodeAddress, worktreePath, and expectedCommit are required" }]));
 			if (signal?.aborted) return response(preflightDetails(input, [{ code: "dispatch-aborted", message: "dispatch was aborted before planning" }]));
-			const pathInput = confinedPath(params.path, "path");
+			const pathInput = confinedPath(params.path, "path", "worktreePath");
 			if (!pathInput.ok) return response(preflightDetails(input, [pathInput.finding]));
 
 			const tree = await inspectTree(params.worktreePath, params.expectedCommit);

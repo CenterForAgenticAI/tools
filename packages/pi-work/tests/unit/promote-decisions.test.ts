@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { parseDraft, promoteDraft } from "../../src/promote/index.ts";
-import { validateWorkspec } from "../../src/schema/index.ts";
+import { parseYaml, validateWorkspec } from "../../src/schema/index.ts";
+import { workPromoteTool, type WorkPromoteDetails } from "../../src/tools/work-promote.ts";
 import { REPO_ROOT } from "../helpers/source-under-test.ts";
 
 const BOOTSTRAP_DRAFT = ".work/drafts/pi-work-v1.md";
@@ -41,8 +43,8 @@ test("promotion carries every declared open decision, with its question context"
 		"  tripwire: Before decomposing the dispatch subtree.",
 		"  decides: user",
 		"- OD2: Which feature is dogfood 2?",
-		"  tripwire: Before calling v1 done.",
 		"  decides: user",
+		"  tripwire: Before calling v1 done.",
 	]), "d.md");
 	assert.equal(parsed.ok, true);
 	if (!parsed.ok) return;
@@ -61,6 +63,75 @@ test("promotion carries every declared open decision, with its question context"
 	assert.match(promoted.specSource, /^ {4}tripwire: "Before decomposing the dispatch subtree\."$/m);
 	// open_decisions must precede work, which is where the schema expects it.
 	assert.ok(promoted.specSource.indexOf("open_decisions:") < promoted.specSource.indexOf("work:"));
+});
+
+test("the actual promoter preserves prose colons and emits known decision fields", async () => {
+	const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-work-promote-decision-round-trip-"));
+	await writeFile(path.join(cwd, "draft.md"), draft([
+		"- OD1: Which compatibility path should ship?",
+		"  The relevant constraint is this: old callers must keep working.",
+		"  tripwire: Before implementation starts.",
+		"  decides: user",
+	]));
+
+	const result = await workPromoteTool.execute(
+		"test",
+		{ draftPath: "draft.md", specPath: "spec.yaml" },
+		undefined,
+		undefined,
+		{ cwd } as never,
+	) as unknown as { content: { type: string; text?: string }[]; details: WorkPromoteDetails };
+	assert.equal(result.details.valid, true);
+	assert.equal(result.details.written, true);
+
+	const output = await readFile(path.join(cwd, "spec.yaml"), "utf8");
+	const parsed = parseYaml(output);
+	assert.deepEqual(parsed.findings, []);
+	const value = parsed.value as { open_decisions?: { question?: string; tripwire?: string; decides?: string }[] } | undefined;
+	assert.deepEqual(value?.open_decisions, [{
+		id: "OD1",
+		question: "Which compatibility path should ship? The relevant constraint is this: old callers must keep working.",
+		tripwire: "Before implementation starts.",
+		decides: "user",
+	}]);
+});
+
+test("the actual promoter rejects unknown decision fields in every position without writing output", async () => {
+	for (const { label, key, lines } of [
+		{
+			label: "before known fields",
+			key: "owner",
+			lines: ["- OD1: Ship it?", "  owner: finance-ops", "  tripwire: Before implementation.", "  decides: user"],
+		},
+		{
+			label: "between known fields",
+			key: "blocks-2",
+			lines: ["- OD1: Ship it?", "  tripwire: Before implementation.", "  blocks-2: INV-1", "  decides: user"],
+		},
+		{
+			label: "after known fields",
+			key: "scope_hint",
+			lines: ["- OD1: Ship it?", "  tripwire: Before implementation.", "  decides: user", "  scope_hint: dispatch"],
+		},
+	] as const) {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-work-promote-unknown-decision-field-"));
+		await writeFile(path.join(cwd, "draft.md"), draft(lines));
+		const result = await workPromoteTool.execute(
+			"test",
+			{ draftPath: "draft.md", specPath: "spec.yaml" },
+			undefined,
+			undefined,
+			{ cwd } as never,
+		) as unknown as { content: { type: string; text?: string }[]; details: WorkPromoteDetails };
+
+		assert.equal(result.details.valid, false, label);
+		assert.equal(result.details.written, false, label);
+		const decisionFindings = result.details.findings.filter((finding) => finding.code === "decisions-malformed");
+		assert.equal(decisionFindings.length, 1, label);
+		assert.match(decisionFindings[0]!.message, new RegExp(`unknown decision field '${key}'`), label);
+		assert.match(result.content[0]?.text ?? "", new RegExp(`unknown decision field '${key}'`), label);
+		await assert.rejects(stat(path.join(cwd, "spec.yaml")), label);
+	}
 });
 
 test("a draft with no decisions region emits no open_decisions key", () => {

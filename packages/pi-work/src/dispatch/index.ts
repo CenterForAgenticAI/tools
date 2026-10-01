@@ -52,7 +52,7 @@ function nonEmptyStrings(value: unknown): value is readonly string[] {
 function validLegacyRequest(value: unknown): value is LegacyDelegateDispatchRequest {
 	if (!record(value)) return false;
 	const allowed = ["agent", "task", "cwd", "reads", "skills", "model", "writableRoots", "confineWrites", "escalation"];
-	if (!onlyKeys(value, allowed) || typeof value.agent !== "string" || value.agent.length === 0 || typeof value.task !== "string" || value.task.length === 0 || typeof value.cwd !== "string" || !path.isAbsolute(value.cwd) || path.normalize(value.cwd) !== value.cwd || !Array.isArray(value.reads) || value.reads.length !== 1 || typeof value.reads[0] !== "string" || !path.isAbsolute(value.reads[0]) || value.confineWrites !== true || value.escalation !== "local") return false;
+	if (!onlyKeys(value, allowed) || typeof value.agent !== "string" || value.agent.length === 0 || typeof value.task !== "string" || value.task.length === 0 || typeof value.cwd !== "string" || !path.isAbsolute(value.cwd) || path.normalize(value.cwd) !== value.cwd || !Array.isArray(value.reads) || value.reads.length !== 1 || typeof value.reads[0] !== "string" || !path.isAbsolute(value.reads[0]) || value.confineWrites !== true || value.escalation !== "off") return false;
 	if (value.skills !== undefined && !nonEmptyStrings(value.skills)) return false;
 	if (value.model !== undefined && (typeof value.model !== "string" || value.model.length === 0)) return false;
 	return value.writableRoots === undefined || nonEmptyStrings(value.writableRoots);
@@ -123,7 +123,7 @@ function legacyRequest(plan: PlanReceipt, target: DispatchTarget): LegacyDelegat
 		...(plan.delegate.model === undefined ? {} : { model: plan.delegate.model }),
 		...(plan.delegate.writableRoots === undefined ? {} : { writableRoots: plan.delegate.writableRoots }),
 		confineWrites: true,
-		escalation: "local",
+		escalation: "off",
 	};
 	return validLegacyRequest(request) ? request : { code: "dispatch-request-invalid", message: "compiled plan produced an invalid or unsupported delegate runtime request" };
 }

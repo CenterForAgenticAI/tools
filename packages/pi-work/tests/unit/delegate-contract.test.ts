@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
-import type { DelegateRuntimeReceipt } from "../../src/dispatch/index.ts";
+import { decodeDelegateRuntimeReceipt, type DelegateRuntimeReceipt } from "../../src/dispatch/index.ts";
 import { workPlanTool, type WorkPlanDetails } from "../../src/tools/work-plan.ts";
 import { withDraftLineage } from "../helpers/workspec-source.ts";
 
@@ -36,7 +36,7 @@ work:
 `);
 
 async function emittedPlan() {
-	const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-work-delegate-contract-"));
+	const cwd = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-work-delegate-contract-")));
 	await writeFile(path.join(cwd, "spec.yaml"), withDraftLineage(CONTRACT_SOURCE, { cwd }));
 	const result = await workPlanTool.execute("contract", { path: "spec.yaml", nodeAddresses: [["lane"]] }, undefined, undefined, { cwd } as never) as { details: WorkPlanDetails };
 	assert.equal(result.details.valid, true);
@@ -61,7 +61,7 @@ test("work_plan pins canonical runs, task handoff, and the unchanged legacy invo
 			task: "Execute the assembled work contract for node lane; read the contract from the attached brief.",
 			writableRoots: ["src/lane/**"],
 			confineWrites: true,
-			escalation: "local",
+			escalation: "off",
 			worktree: false,
 		});
 		assert.deepEqual(plan.canonicalDelegate, {
@@ -75,7 +75,7 @@ test("work_plan pins canonical runs, task handoff, and the unchanged legacy invo
 				task: "Execute the assembled work contract for node lane; read the contract from the attached brief.",
 				writableRoots: ["src/lane/**"],
 				confineWrites: true,
-				escalation: "local",
+				escalation: "off",
 				worktree: false,
 				mode: "solo",
 				handoff: {
@@ -112,7 +112,7 @@ if (delegateCheckout === undefined) {
 			readDelegateRuntimeReceipt?: (agentDir: string, runId: string) => unknown;
 		};
 		const runtimeApiModule = await import(pathToFileURL(path.join(delegateCheckout, "dist", "runtime-api.js")).href) as {
-			installDelegateRuntimeCore?: (core: { invoke(name: string, params: Record<string, unknown>, context: unknown): Promise<{ details: { runId: string } }> } | undefined) => void;
+			installDelegateRuntimeCore?: (core: { bindContext(context: unknown): { assertCurrent(): void; onInvalidate(callback: () => void): () => void }; observe(runId: string, invocation: unknown): () => void; invoke(name: string, params: Record<string, unknown>, context: unknown): Promise<{ details: { runId: string } }> } | undefined) => void;
 		};
 		const runtimeModule = await import(pathToFileURL(path.join(delegateCheckout, "dist", "runtime.js")).href) as {
 			registerRun?: (run: Record<string, unknown>) => void;
@@ -136,6 +136,9 @@ if (delegateCheckout === undefined) {
 		const invocations: Array<{ name: string; params: Record<string, unknown> }> = [];
 		runtimeModule.__resetRuntimeForTests!();
 		runtimeApiModule.installDelegateRuntimeCore!({
+			// Current pi-delegate clients refuse a core without the invocation lifecycle seam.
+			bindContext: () => ({ assertCurrent() {}, onInvalidate: () => () => {} }),
+			observe: () => () => {},
 			async invoke(name, params) {
 				invocations.push({ name, params });
 				runtimeModule.registerRun!({
@@ -191,6 +194,11 @@ if (delegateCheckout === undefined) {
 			assert.equal(focusDigests[0]?.digest, plan.focusSha256, "pi-work's focus digest must match the one the runtime records");
 			assert.equal(focusDigests[0]?.digest, sha256(focus));
 			assert.deepEqual(packageModule.readDelegateRuntimeReceipt!(agentDir, runId), receipt);
+
+			// #50: the runtime's receipt carries additive fields; pi-work's decoder must
+			// accept what the real builder emits, or every dispatch reports indeterminate.
+			assert.ok("acceptance" in receipt, "the real receipt carries additive fields");
+			assert.ok(decodeDelegateRuntimeReceipt(receipt), "pi-work must decode the real pi-delegate receipt");
 		} finally {
 			runtimeApiModule.installDelegateRuntimeCore!(undefined);
 			runtimeModule.__resetRuntimeForTests!();

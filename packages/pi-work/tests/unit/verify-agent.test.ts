@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { removeTempTree } from "../helpers/temp-tree.ts";
 
 import { runAgent } from "../../src/verify/agent.ts";
 import { childLoaderArgs, REPO_ROOT, sourceModuleUrl } from "../helpers/source-under-test.ts";
@@ -22,7 +23,7 @@ test("agent input failures happen before dispatch", async () => {
 	assert.equal(result.outcome, "failed");
 	assert.equal(calls, 0);
 	if (result.outcome === "failed") assert.equal(result.failures[0]?.code, "input-missing");
-	await rm(root, { recursive: true, force: true });
+	await removeTempTree(root);
 });
 
 test("agent approval accounts for byte digests and production defaults unavailable", async () => {
@@ -49,7 +50,7 @@ test("agent approval accounts for byte digests and production defaults unavailab
 	const oversized = await runAgent({ evidence: { kind: "agent", agent: "reviewer", inputs: ["diagram.bin"], rubric: "inspect" }, tree }, { maxInputBytes: 1, judge: async () => ({ verdict: "approve", dispatchReceipt: "r", inputDigests: [] }) });
 	assert.equal(oversized.outcome, "failed");
 	if (oversized.outcome === "failed") assert.equal(oversized.failures[0]?.code, "input-too-large");
-	await rm(root, { recursive: true, force: true });
+	await removeTempTree(root);
 });
 
 test("agent rejects empty inputs, empty receipts, and cancellation at every boundary", async () => {
@@ -71,7 +72,7 @@ test("agent rejects empty inputs, empty receipts, and cancellation at every boun
 	const afterAwait = await runAgent({ evidence: { kind: "agent", agent: "reviewer", inputs: ["diagram.bin"], rubric: "inspect" }, tree, signal: during.signal }, { judge: async () => { during.abort(); return { verdict: "approve", dispatchReceipt: "receipt", inputDigests: ["ignored"] }; } });
 	assert.equal(afterAwait.outcome, "failed");
 	if (afterAwait.outcome === "failed") assert.equal(afterAwait.failures[0]?.code, "verification-aborted");
-	await rm(root, { recursive: true, force: true });
+	await removeTempTree(root);
 });
 
 test("agent cancellation is observed after input loading and before dispatch", async () => {
@@ -88,7 +89,7 @@ test("agent cancellation is observed after input loading and before dispatch", a
 	assert.equal(dispatchResult.outcome, "failed");
 	if (dispatchResult.outcome === "failed") assert.equal(dispatchResult.failures[0]?.code, "verification-aborted");
 	assert.equal(calls, 0);
-	await rm(root, { recursive: true, force: true });
+	await removeTempTree(root);
 });
 
 test("agent rejects absolute inputs and dispatch failures before success", async () => {
@@ -102,7 +103,7 @@ test("agent rejects absolute inputs and dispatch failures before success", async
 	const infrastructure = await runAgent({ evidence: { kind: "agent", agent: "reviewer", inputs: ["diagram.bin"], rubric: "inspect" }, tree }, { judge: async (request) => ({ verdict: "infrastructure-failure", reason: `failed ${request.inputs.length}` }) });
 	assert.equal(infrastructure.outcome, "failed");
 	if (infrastructure.outcome === "failed") assert.equal(infrastructure.failures[0]?.code, "dispatch-failed");
-	await rm(root, { recursive: true, force: true });
+	await removeTempTree(root);
 });
 
 test("agent rejects named directories before dispatch", async () => {
@@ -113,7 +114,7 @@ test("agent rejects named directories before dispatch", async () => {
 	assert.equal(result.outcome, "failed");
 	if (result.outcome === "failed") assert.equal(result.failures[0]?.code, "input-not-file");
 	assert.equal(calls, 0);
-	await rm(root, { recursive: true, force: true });
+	await removeTempTree(root);
 });
 
 test("agent reports unreadable named inputs before dispatch", async () => {
@@ -145,7 +146,22 @@ process.stdout.write(JSON.stringify({ code: result.outcome === "failed" ? result
 		assert.deepEqual(JSON.parse(stdout), { code: "input-unreadable", calls: 0 });
 	} finally {
 		await chmod(input, 0o644);
-		await rm(root, { recursive: true, force: true });
+		await removeTempTree(root);
+	}
+});
+
+test("agent accepts an in-tree input when its worktree path has a filesystem alias", async (t) => {
+	const { root, tree } = await setup();
+	try {
+		if (root === await realpath(root)) { t.skip("host has no tmp path alias"); return; }
+		let calls = 0;
+		const result = await runAgent({ evidence: { kind: "agent", agent: "reviewer", inputs: ["diagram.bin"], rubric: "inspect" }, tree }, {
+			judge: async (request) => { calls += 1; return { verdict: "approve", dispatchReceipt: "receipt", inputDigests: request.inputs.map((input) => input.digest) }; },
+		});
+		assert.equal(result.outcome, "passed");
+		assert.equal(calls, 1);
+	} finally {
+		await removeTempTree(root);
 	}
 });
 
@@ -157,6 +173,6 @@ test("agent rejects symlink escape", async () => {
 	const result = await runAgent({ evidence: { kind: "agent", agent: "reviewer", inputs: ["escape"], rubric: "inspect" }, tree }, { judge: async () => ({ verdict: "approve", dispatchReceipt: "x", inputDigests: [] }) });
 	assert.equal(result.outcome, "failed");
 	if (result.outcome === "failed") assert.equal(result.failures[0]?.code, "input-path-escape");
-	await rm(root, { recursive: true, force: true });
-	await rm(outside, { recursive: true, force: true });
+	await removeTempTree(root);
+	await removeTempTree(outside);
 });

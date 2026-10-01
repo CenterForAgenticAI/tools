@@ -1,8 +1,10 @@
 import nodePath from "node:path";
 
+import { isEnvironmentVariableName } from "./environment.js";
 import type { FindingPath, SchemaFinding } from "./findings.js";
 
 const agentInputPathFormat = "agent-input-path";
+const environmentVariableFormat = "environment-variable";
 
 function record(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -25,18 +27,34 @@ export function workspecFormatFindings(value: unknown): SchemaFinding[] {
 			const nodePathSegments = [...path, nodeIndex];
 			if (Array.isArray(node.acceptance)) {
 				node.acceptance.forEach((criterion, criterionIndex) => {
-					if (!record(criterion) || !record(criterion.evidence) || criterion.evidence.kind !== "agent" || !Array.isArray(criterion.evidence.inputs)) return;
-					criterion.evidence.inputs.forEach((input, inputIndex) => {
-						if (typeof input !== "string" || isStaticAgentInputPath(input)) return;
-						findings.push({
-							code: "schema-invalid",
-							severity: "error",
-							path: [...nodePathSegments, "acceptance", criterionIndex, "evidence", "inputs", inputIndex],
-							keyword: "format",
-							params: { format: agentInputPathFormat },
-							message: `Expected string to match '${agentInputPathFormat}' format`,
+					if (!record(criterion) || !record(criterion.evidence)) return;
+					const evidence = criterion.evidence;
+					if (evidence.kind === "agent" && Array.isArray(evidence.inputs)) {
+						evidence.inputs.forEach((input, inputIndex) => {
+							if (typeof input !== "string" || isStaticAgentInputPath(input)) return;
+							findings.push({
+								code: "schema-invalid",
+								severity: "error",
+								path: [...nodePathSegments, "acceptance", criterionIndex, "evidence", "inputs", inputIndex],
+								keyword: "format",
+								params: { format: agentInputPathFormat },
+								message: `Expected string to match '${agentInputPathFormat}' format`,
+							});
 						});
-					});
+					}
+					if (evidence.kind === "command" && Array.isArray(evidence.inherit_env)) {
+						evidence.inherit_env.forEach((name, nameIndex) => {
+							if (typeof name !== "string" || isEnvironmentVariableName(name)) return;
+							findings.push({
+								code: "schema-invalid",
+								severity: "error",
+								path: [...nodePathSegments, "acceptance", criterionIndex, "evidence", "inherit_env", nameIndex],
+								keyword: "format",
+								params: { format: environmentVariableFormat },
+								message: `Expected string to match '${environmentVariableFormat}' format`,
+							});
+						});
+					}
 				});
 			}
 			if (Array.isArray(node.work)) inspectNodes(node.work, [...nodePathSegments, "work"]);

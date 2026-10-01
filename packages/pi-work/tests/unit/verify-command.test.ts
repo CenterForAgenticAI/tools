@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { constants, existsSync } from "node:fs";
-import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { rm, access, chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { removeTempTree } from "../helpers/temp-tree.ts";
 
 import { runCommand } from "../../src/verify/command.ts";
+import { isEnvironmentVariableName } from "../../src/schema/environment.ts";
 import { ExecutableResolutionError, pathShadowsExecutable, resolveVerifierExecutable } from "../../src/verify/executable.ts";
+import { REDACTED_INHERITED_VALUE, inheritedValuesSnapshot, redactCommandOutput } from "../../src/verify/output.ts";
 import { evidenceKind } from "../../src/verify/results.ts";
 import type { TreeIdentity } from "../../src/verify/results.ts";
 import { deterministicCommandOptions, systemdContainmentPrerequisite } from "../helpers/verifier-command.ts";
@@ -135,7 +138,7 @@ exit 1
 		assert.match(cleanupAttempts[0] ?? "", /SIGTERM/);
 		assert.match(cleanupAttempts[1] ?? "", /SIGKILL/);
 	} finally {
-		await rm(directory, { recursive: true, force: true });
+		await removeTempTree(directory);
 	}
 });
 
@@ -203,7 +206,7 @@ while :; do sleep 1; done
 		assert.ok(cleanupPids.length > 0, "the hanging cleanup child never recorded a pid");
 		for (const pid of cleanupPids) await waitForPidGone(pid);
 	} finally {
-		await rm(directory, { recursive: true, force: true });
+		await removeTempTree(directory);
 	}
 });
 
@@ -227,7 +230,7 @@ exit 0
 		}
 		assert.equal(cleanupAttempts, "");
 	} finally {
-		await rm(directory, { recursive: true, force: true });
+		await removeTempTree(directory);
 	}
 });
 
@@ -266,7 +269,7 @@ test("POSIX process group: cleanup captures a descendant's TERM output before cl
 			if (result.outcome === "passed") assert.equal(result.proof.stdout, "ROOTFINAL");
 		}
 	} finally {
-		await rm(directory, { recursive: true, force: true });
+		await removeTempTree(directory);
 	}
 });
 
@@ -293,7 +296,7 @@ test("POSIX process group: an escaped descendant holding stdout prevents a pass"
 		if (escapedPid) {
 			try { process.kill(escapedPid, "SIGKILL"); } catch { /* Already exited; no process remains to clean up. */ }
 		}
-		await rm(directory, { recursive: true, force: true });
+		await removeTempTree(directory);
 	}
 });
 
@@ -309,7 +312,7 @@ test("POSIX process group: a TERM-ignoring background child is killed via KILL",
 		assert.ok(Number.isInteger(pid) && pid > 0);
 		await waitForPidGone(pid);
 	} finally {
-		await rm(directory, { recursive: true, force: true });
+		await removeTempTree(directory);
 	}
 });
 
@@ -328,7 +331,7 @@ test("POSIX process group: timeout cleans the whole process group", { skip: proc
 	} finally {
 		if (running) await running.catch(() => undefined);
 		if (pid) await cleanupPid(pid);
-		await rm(directory, { recursive: true, force: true });
+		await removeTempTree(directory);
 	}
 });
 
@@ -369,6 +372,92 @@ test("command runner requires execution plus a positive observed output", async 
 	assert.equal(emptyFloor.outcome, "failed");
 	const malformedEvidence = { kind: "command" as const, run: "true", expect: { exit: 0 } } as unknown as Parameters<typeof evidenceKind>[0];
 	assert.equal(evidenceKind(malformedEvidence), "command");
+});
+
+test("named environment is passed by name, fails closed when missing, and redacts every returned field", async () => {
+	const name = "PI_WORK_INHERIT_TEST";
+	const secret = "pi-work-secret-sentinel-2026";
+	const previous = process.env[name];
+	process.env[name] = secret;
+	try {
+		const passed = await runProcessGroupCommand({ evidence: { kind: "command", run: 'printf "value:%s" "$PI_WORK_INHERIT_TEST"', inherit_env: [name], expect: { exit: 0, output_includes: "value:" } }, tree });
+		assert.equal(passed.outcome, "passed");
+		assert.equal(JSON.stringify(passed).includes(secret), false);
+		if (passed.outcome === "passed") {
+			assert.deepEqual(passed.proof.inherit_env, [name]);
+			assert.equal(passed.proof.stdout, `value:${REDACTED_INHERITED_VALUE}`);
+			assert.equal(passed.proof.outputMatched, "value:");
+		}
+		const failed = await runProcessGroupCommand({ evidence: { kind: "command", run: 'printf nothing', inherit_env: [name], expect: { exit: 0, output_includes: "value:" } }, tree });
+		assert.equal(failed.outcome, "failed");
+		assert.equal(JSON.stringify(failed).includes(secret), false);
+		delete process.env[name];
+		const missing = await runProcessGroupCommand({ evidence: { kind: "command", run: 'printf should-not-run', inherit_env: [name], expect: { exit: 0, output_includes: "should-not-run" } }, tree });
+		assert.equal(missing.outcome, "failed");
+		if (missing.outcome === "failed") assert.equal(missing.failures[0]?.code, "environment-unavailable");
+	} finally {
+		if (previous === undefined) delete process.env[name]; else process.env[name] = previous;
+	}
+});
+
+test("the launch-time inherited value stays redacted after the host environment changes", async () => {
+	const name = "PI_WORK_LAUNCH_SNAPSHOT";
+	const secret = "launch-test-value-984521";
+	const previous = process.env[name];
+	process.env[name] = secret;
+	const deterministic = deterministicCommandOptions();
+	try {
+		const result = await runCommand({ evidence: { kind: "command", run: 'printf "value:%s" "$PI_WORK_LAUNCH_SNAPSHOT"', inherit_env: [name], expect: { exit: 0, output_includes: "value:" } }, tree }, {
+			resolveExecutable: deterministic.resolveExecutable,
+			launcher: (file, args, options) => {
+				const child = deterministic.launcher!(file, args, options);
+				process.env[name] = "replacement-host-value-985522";
+				return child;
+			},
+		});
+		assert.equal(result.outcome, "observed");
+		assert.equal(JSON.stringify(result).includes(secret), false, "launch-time secret must not survive");
+		if (result.outcome === "observed") assert.equal(result.proof.stdout, `value:${REDACTED_INHERITED_VALUE}`);
+	} finally {
+		if (previous === undefined) delete process.env[name]; else process.env[name] = previous;
+	}
+});
+
+test("command inheritance refuses short values and output floors overlapping a secret", async () => {
+	const name = "PI_WORK_INHERIT_REVIEW";
+	const previous = process.env[name];
+	try {
+		process.env[name] = "abc";
+		const evidenceFor = (floor: string) => ({ kind: "command" as const, run: `printf %s "$${name}"`, inherit_env: [name], expect: { exit: 0, output_includes: floor } });
+		const short = await runProcessGroupCommand({ evidence: evidenceFor("nonmatch"), tree });
+		assert.equal(short.outcome, "failed");
+		if (short.outcome === "failed") assert.match(short.failures[0]?.message ?? "", new RegExp(name));
+		assert.equal(JSON.stringify(short).includes("abc"), false);
+		process.env[name] = "review-secret-984521";
+		for (const floor of ["review-secret", "review-secret-984521-tail"]) {
+			const result = await runProcessGroupCommand({ evidence: evidenceFor(floor), tree });
+			assert.equal(result.outcome, "failed");
+			if (result.outcome === "failed") assert.match(result.failures[0]?.message ?? "", new RegExp(name));
+			assert.equal(JSON.stringify(result).includes(process.env[name]!), false);
+		}
+	} finally {
+		if (previous === undefined) delete process.env[name]; else process.env[name] = previous;
+	}
+});
+
+test("inherited variable declarations reject verifier controls and redaction marker collisions", () => {
+	for (const name of ["PATH", "HOME", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "GIT_CONFIG_COUNT", "XDG_RUNTIME_DIR", "BASH_ENV"]) {
+		assert.equal(isEnvironmentVariableName(name), false, name);
+	}
+	const name = "PI_WORK_SECRET_COLLISION";
+	const previous = process.env[name];
+	process.env[name] = REDACTED_INHERITED_VALUE;
+	try {
+		const redacted = redactCommandOutput(inheritedValuesSnapshot([process.env[name] ?? ""]), REDACTED_INHERITED_VALUE, "");
+		assert.equal(JSON.stringify(redacted).includes(REDACTED_INHERITED_VALUE), false);
+	} finally {
+		if (previous === undefined) delete process.env[name]; else process.env[name] = previous;
+	}
 });
 
 test("a caller-supplied launcher produces an observation, not verifier authority", async () => {
@@ -494,7 +583,7 @@ test("command runner classifies abort, signals, and denied executables", async (
 		controller.abort();
 		if (abortPromise) await abortPromise.catch(() => undefined);
 		if (descendantPid) await cleanupPid(descendantPid);
-		await rm(abortDirectory, { recursive: true, force: true });
+		await removeTempTree(abortDirectory);
 	}
 	const signaled = await runCommand({ evidence: evidence("kill -TERM $$", "never"), tree }, deterministicCommandOptions());
 	assert.equal(signaled.outcome, "failed");
@@ -506,7 +595,7 @@ test("command runner classifies abort, signals, and denied executables", async (
 	const deniedResult = await runCommand({ evidence: evidence(denied, "Permission denied"), tree }, deterministicCommandOptions());
 	assert.equal(deniedResult.outcome, "failed");
 	if (deniedResult.outcome === "failed") assert.equal(deniedResult.failures[0]?.code, "shell-unavailable");
-	await rm(directory, { recursive: true, force: true });
+	await removeTempTree(directory);
 });
 
 test("host integration: command runner bounds a new-session TERM-ignoring descendant", { skip: systemdPrerequisite.available ? false : systemdPrerequisite.reason }, async () => {
@@ -518,7 +607,7 @@ test("host integration: command runner bounds a new-session TERM-ignoring descen
 	assert.equal(escaped.outcome, "failed");
 	if (escaped.outcome === "failed") assert.equal(escaped.failures[0]?.code, "timeout");
 	assert.ok(elapsed < CONTAINMENT_TIMEOUT_MS + 1_500, `timeout cleanup took ${elapsed}ms`);
-	await rm(directory, { recursive: true, force: true });
+	await removeTempTree(directory);
 });
 
 test("host integration: a bounded new-session descendant is observable and then killed", { skip: systemdPrerequisite.available ? false : systemdPrerequisite.reason }, async () => {
@@ -535,7 +624,7 @@ test("host integration: a bounded new-session descendant is observable and then 
 		assert.ok(pid > 0);
 		await waitForPidGone(pid);
 	} finally {
-		await rm(directory, { recursive: true, force: true });
+		await removeTempTree(directory);
 	}
 });
 
@@ -548,7 +637,7 @@ test("host integration: injected launcher preserves systemd containment for a re
 	});
 	assert.equal(injected.outcome, "failed");
 	if (injected.outcome === "failed") assert.equal(injected.failures[0]?.code, "timeout");
-	await rm(directory, { recursive: true, force: true });
+	await removeTempTree(directory);
 });
 
 test("host integration: an injected launcher's descendant is observable and then killed", { skip: systemdPrerequisite.available ? false : systemdPrerequisite.reason }, async () => {
@@ -566,7 +655,7 @@ test("host integration: an injected launcher's descendant is observable and then
 		assert.ok(pid > 0);
 		await waitForPidGone(pid);
 	} finally {
-		await rm(directory, { recursive: true, force: true });
+		await removeTempTree(directory);
 	}
 });
 
@@ -576,7 +665,9 @@ test("command runner kills timed out descendants and enforces output bound", asy
 	let descendantPid: number | undefined;
 	let timeoutPromise: Promise<Awaited<ReturnType<typeof runCommand>>> | undefined;
 	try {
-		timeoutPromise = runCommand({ evidence: evidence(ordinaryDescendantCommand(pidFile), "never"), tree }, { ...deterministicCommandOptions(), timeoutMs: 50 });
+		// Give the descendant time to start before testing timeout cleanup; 50ms
+		// can expire during launcher startup, before it writes its PID.
+		timeoutPromise = runCommand({ evidence: evidence(ordinaryDescendantCommand(pidFile), "never"), tree }, { ...deterministicCommandOptions(), timeoutMs: 500 });
 		descendantPid = await waitForPid(pidFile);
 		const timedOut = await timeoutPromise;
 		assert.equal(timedOut.outcome, "failed");
@@ -585,7 +676,7 @@ test("command runner kills timed out descendants and enforces output bound", asy
 	} finally {
 		if (timeoutPromise) await timeoutPromise.catch(() => undefined);
 		if (descendantPid) await cleanupPid(descendantPid);
-		await rm(directory, { recursive: true, force: true });
+		await removeTempTree(directory);
 	}
 	const tooMuch = await runCommand({ evidence: evidence("printf 123456789", "123"), tree }, { ...deterministicCommandOptions(), maxOutputBytes: 4 });
 	assert.equal(tooMuch.outcome, "failed");
@@ -615,6 +706,6 @@ test("command runner reports containment signalling failures instead of claiming
 	} finally {
 		if (originalPath === undefined) delete process.env.PATH;
 		else process.env.PATH = originalPath;
-		await rm(directory, { recursive: true, force: true });
+		await removeTempTree(directory);
 	}
 });

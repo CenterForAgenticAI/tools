@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
+import { validateWorkspec } from "../schema/index.js";
+import type { StatusCacheVerificationWriteResult } from "../status/types.js";
+import { isEnvironmentVariableList } from "../schema/environment.js";
+import { captureEvidenceEnvironment } from "./executable.js";
+import { commandEvidenceMatches, commandExpectationMatches, commandOutputMatches, redactCommandEvidence, redactCommandFailure, redactCommandText, inheritedValuesSnapshot, type InheritedValuesSnapshot } from "./output.js";
 import type { AcceptanceCriterion, WorkNode } from "../schema/workspec.js";
 import { runAgent, type AgentJudge } from "./agent.js";
 import { verifyChecklist, type ChecklistReports } from "./checklist.js";
@@ -28,6 +34,25 @@ import {
 import { inspectTree, monitorTree, verifyTreeUnchanged, type TreeCheck, type TreeSnapshot } from "./tree.js";
 import { runUser, type HostUserCapabilities, type SessionReader } from "./user.js";
 
+/** Attestations live with the verifier that mints them. Serialized data has no entry point. */
+const recorded = new Map<string, { readonly update: ObservedVerificationCacheUpdate; readonly sourceDigest: string }>();
+export function digestSpecSource(source: string): string {
+	return createHash("sha256").update(source).digest("hex");
+}
+export function sessionVerifications(): readonly { readonly update: ObservedVerificationCacheUpdate; readonly sourceDigest: string }[] {
+	return [...recorded.values()].map((entry) => deepFreeze(structuredClone(entry)));
+}
+/** Test-only reset; it can only remove authority, never grant it. */
+export function forgetSessionVerifications(): void { recorded.clear(); }
+function recordMintedVerification(update: VerificationCacheUpdate, source: string): void {
+	const observed = decodeVerificationCacheUpdate(update);
+	if (!observed) return;
+	const key = JSON.stringify([observed.specPath, observed.nodeId]);
+	const existing = recorded.get(key);
+	if (existing && existing.update.tree.worktreePath === observed.tree.worktreePath && existing.update.tree.resolvedCommit === observed.tree.resolvedCommit && existing.update.recordedAt > observed.recordedAt) return;
+	recorded.set(key, { update: observed, sourceDigest: digestSpecSource(source) });
+}
+
 export interface VerificationTarget {
 	readonly worktreePath: string;
 	readonly expectedCommit: string;
@@ -35,7 +60,13 @@ export interface VerificationTarget {
 
 export interface VerifyNodeRequest {
 	readonly node: WorkNode;
+	/** Qualified address disambiguates duplicate IDs in different assemblies. */
+	readonly address?: readonly string[] | undefined;
 	readonly specPath: string;
+	/** Exact validated source supplied by work_verify; absent in observation-only calls. */
+	readonly source?: string | undefined;
+	/** Additional spec-wide values captured by the tool before verification. */
+	readonly inherited?: InheritedValuesSnapshot | undefined;
 	readonly target: VerificationTarget;
 	// These optional members are plumbed straight through from callers that hold
 	// `T | undefined`. Absent and explicitly undefined mean the same thing here, so
@@ -60,10 +91,12 @@ export interface ObservationalVerifierAdapters {
 	readonly maxInputBytes?: number | undefined;
 }
 
+export type PersistVerification = (update: VerificationCacheUpdate) => Promise<StatusCacheVerificationWriteResult>;
+
 export interface AuthorityVerifier {
 	readonly inspectTarget: (target: VerificationTarget) => Promise<TreeCheck>;
 	readonly verifyNode: (request: VerifyNodeRequest) => Promise<VerificationResult>;
-	readonly verifyNodeAndCache: (request: VerifyNodeRequest) => Promise<{ result: VerificationResult; cacheUpdate?: VerificationCacheUpdate }>;
+	readonly verifyNodeAndCache: (request: VerifyNodeRequest, persist?: PersistVerification) => Promise<{ result: VerificationResult; cacheUpdate?: VerificationCacheUpdate; cacheWrite?: StatusCacheVerificationWriteResult }>;
 	readonly isCriterionPassed: (value: unknown) => value is PassedCriterionResult;
 	readonly isCompleteChecklist: (value: unknown) => value is CompleteChecklistResults;
 	readonly isNodePassed: (value: unknown) => value is NodeVerificationRecord;
@@ -96,12 +129,36 @@ function deepFreeze<T>(value: T, seen = new Set<object>()): T {
 function snapshotRequest(request: VerifyNodeRequest): VerifyNodeRequest {
 	const snapshot = structuredClone({
 		node: request.node,
+		address: request.address,
 		specPath: request.specPath,
+		source: request.source,
+		inherited: request.inherited,
 		target: request.target,
 		checklistReports: request.checklistReports,
 	});
 	deepFreeze(snapshot);
 	return { ...snapshot, signal: request.signal };
+}
+
+function assertNodeMatchesSource(request: VerifyNodeRequest): void {
+	if (request.source === undefined) return; // Legacy observation-only calls cannot attest.
+	const validation = validateWorkspec(request.source, { specPath: request.specPath, cwd: request.target.worktreePath });
+	if (!validation.valid || !validation.structuralValid) throw new TypeError("node source is not a valid workspec");
+	const matching: WorkNode[] = [];
+	function visit(nodes: readonly WorkNode[], parent: readonly string[]): void {
+		for (const node of nodes) {
+			const address = [...parent, node.id];
+			if (request.address ? isDeepStrictEqual(address, request.address) : node.id === request.node.id) matching.push(node);
+			if (Array.isArray(node.work)) visit(node.work, address);
+		}
+	}
+	visit(validation.spec.work, []);
+	if (matching.length !== 1 || !isDeepStrictEqual(matching[0], request.node)) throw new TypeError("node does not match validated source");
+}
+
+function nodeInheritedValues(node: WorkNode): InheritedValuesSnapshot {
+	const names = node.acceptance?.flatMap((criterion) => criterion.evidence.kind === "command" ? criterion.evidence.inherit_env ?? [] : []) ?? [];
+	return captureEvidenceEnvironment([...new Set(names)]).inherited;
 }
 
 function validTree(tree: TreeIdentity): boolean {
@@ -126,7 +183,7 @@ function validProof(proof: CriterionProof): boolean {
 	if (!validWindow(proof) || !validTree(proof.tree)) return false;
 	if (proof.kind === "command-proof") {
 		if (!validCommandContainment(proof.containment, proof.executorPath, proof.shellPath)) return false;
-		return proof.authoredCommand.length > 0 && (proof.timeout_ms === undefined || Number.isInteger(proof.timeout_ms) && proof.timeout_ms >= 1_000 && proof.timeout_ms <= 3_600_000) && proof.gitPath.startsWith("/") && proof.executorPath.startsWith("/") && proof.shellPath.startsWith("/") && validWindow(proof.monitoring.window) && proof.monitoring.method === "fs.watch" && (proof.monitoring.mode === "recursive" || proof.monitoring.mode === "directory-fallback") && proof.monitoring.residualRace === "events-after-final-drain-may-be-missed" && Number.isInteger(proof.expectation.exit) && proof.expectation.output_includes !== undefined && proof.expectation.output_includes.length > 0 && Number.isInteger(proof.exitCode) && proof.exitCode === proof.expectation.exit && proof.signal === null && proof.outputMatched === proof.expectation.output_includes && (proof.untrackedPaths === undefined || proof.untrackedPaths.every((path) => path.length > 0)) && (proof.stdout.includes(proof.outputMatched) || proof.stderr.includes(proof.outputMatched));
+		return proof.authoredCommand.length > 0 && proof.authoredCommand === redactCommandText(inheritedValuesSnapshot([]), proof.authoredCommand) && isEnvironmentVariableList(proof.inherit_env) && (proof.timeout_ms === undefined || Number.isInteger(proof.timeout_ms) && proof.timeout_ms >= 1_000 && proof.timeout_ms <= 3_600_000) && proof.gitPath.startsWith("/") && proof.executorPath.startsWith("/") && proof.shellPath.startsWith("/") && validWindow(proof.monitoring.window) && proof.monitoring.method === "fs.watch" && (proof.monitoring.mode === "recursive" || proof.monitoring.mode === "directory-fallback") && proof.monitoring.residualRace === "events-after-final-drain-may-be-missed" && Number.isInteger(proof.expectation.exit) && proof.expectation.output_includes !== undefined && proof.expectation.output_includes.length > 0 && commandExpectationMatches(inheritedValuesSnapshot([]), proof.expectation) && Number.isInteger(proof.exitCode) && proof.exitCode === proof.expectation.exit && proof.signal === null && proof.outputMatched === proof.expectation.output_includes && proof.outputMatched === redactCommandText(inheritedValuesSnapshot([]), proof.outputMatched) && (proof.untrackedPaths === undefined || proof.untrackedPaths.every((path) => path.length > 0)) && commandOutputMatches(inheritedValuesSnapshot([]), proof.stdout, proof.stderr, proof.outputMatched);
 	}
 	if (proof.kind === "agent-proof") {
 		return proof.agent.length > 0 && proof.rubric.length > 0 && proof.rubricDigest === createHash("sha256").update(proof.rubric, "utf8").digest("hex") && proof.verdict === "approve" && proof.dispatchReceipt.trim().length > 0 && proof.inputs.length > 0 && proof.inputs.every((input) => input.path.length > 0 && /^[a-f0-9]{64}$/.test(input.digest) && Number.isInteger(input.bytes) && input.bytes >= 0);
@@ -143,7 +200,7 @@ function validChecklist(checklist: CompleteChecklistResults): boolean {
 }
 
 function validAttempt(attempt: FailedCriterionResult["attempt"]): boolean {
-	return validTree(attempt.tree) && Number.isFinite(Date.parse(attempt.startedAt)) && Number.isFinite(Date.parse(attempt.finishedAt)) && Date.parse(attempt.finishedAt) >= Date.parse(attempt.startedAt) && (attempt.stdout === undefined || typeof attempt.stdout === "string") && (attempt.stderr === undefined || typeof attempt.stderr === "string") && (attempt.exitCode === undefined || attempt.exitCode === null || Number.isInteger(attempt.exitCode));
+	return (attempt.kind !== "command" || attempt.evidence.kind !== "command" || commandEvidenceMatches(attempt.evidence, inheritedValuesSnapshot([])) && commandOutputMatches(inheritedValuesSnapshot([]), attempt.stdout ?? "", attempt.stderr ?? "", attempt.evidence.expect.output_includes)) && validTree(attempt.tree) && Number.isFinite(Date.parse(attempt.startedAt)) && Number.isFinite(Date.parse(attempt.finishedAt)) && Date.parse(attempt.finishedAt) >= Date.parse(attempt.startedAt) && (attempt.stdout === undefined || typeof attempt.stdout === "string") && (attempt.stderr === undefined || typeof attempt.stderr === "string") && (attempt.exitCode === undefined || attempt.exitCode === null || Number.isInteger(attempt.exitCode));
 }
 
 function validIncompleteChecklist(checklist: IncompleteChecklistResults): boolean {
@@ -153,7 +210,7 @@ function validIncompleteChecklist(checklist: IncompleteChecklistResults): boolea
 function validResult(result: VerificationResult): boolean {
 	if (result.nodeId.length === 0 || !validTree(result.tree) || !Number.isFinite(Date.parse(result.recordedAt))) return false;
 	if (result.outcome === "passed") return result.criteria.length > 0 && result.criteria.every((criterion) => validCriterion(criterion)) && validChecklist(result.checklist);
-	return result.criteria.every((criterion) => criterion.outcome === "failed" && criterion.criterion.id.length > 0 && validAttempt(criterion.attempt) && sameTree(criterion.attempt.tree, result.tree) && criterion.failures.length > 0 && criterion.failures.every((failure) => failure.message.length > 0)) && (result.checklist.outcome === "incomplete" ? validIncompleteChecklist(result.checklist) : validChecklist(result.checklist));
+	return result.criteria.every((criterion) => criterion.outcome === "passed" ? validCriterion(criterion) : criterion.criterion.id.length > 0 && validAttempt(criterion.attempt) && sameTree(criterion.attempt.tree, result.tree) && criterion.failures.length > 0 && criterion.failures.every((failure) => failure.message.length > 0)) && (result.checklist.outcome === "incomplete" ? validIncompleteChecklist(result.checklist) : validChecklist(result.checklist));
 }
 
 function now(): string { return new Date().toISOString(); }
@@ -167,26 +224,28 @@ function fallbackTree(target: VerificationTarget): TreeIdentity {
 	return { kind: "git", worktreePath, resolvedCommit: /^[0-9a-f]{40}$/.test(target.expectedCommit) ? target.expectedCommit : "0".repeat(40) };
 }
 
-function attemptFor(criterion: AcceptanceCriterion, tree: TreeIdentity, startedAt = now(), finishedAt = now()): FailedCriterionResult["attempt"] {
-	return { kind: criterion.evidence.kind, evidence: criterion.evidence, startedAt, finishedAt, tree };
+function attemptFor(criterion: AcceptanceCriterion, tree: TreeIdentity, inherited: InheritedValuesSnapshot, startedAt = now(), finishedAt = now()): FailedCriterionResult["attempt"] {
+	const evidence = criterion.evidence.kind === "command" ? redactCommandEvidence(criterion.evidence, inherited) : criterion.evidence;
+	return { kind: evidence.kind, evidence, startedAt, finishedAt, tree };
 }
 
-function failed(criterion: AcceptanceCriterion, tree: TreeIdentity, failures: VerificationFailure[], startedAt?: string, finishedAt?: string): FailedCriterionResult {
+function failed(criterion: AcceptanceCriterion, tree: TreeIdentity, failures: VerificationFailure[], inherited: InheritedValuesSnapshot, startedAt?: string, finishedAt?: string): FailedCriterionResult {
 	const [first, ...rest] = failures;
 	return {
 		outcome: "failed",
 		criterion: criterionSummary(criterion),
-		attempt: attemptFor(criterion, tree, startedAt, finishedAt),
+		attempt: attemptFor(criterion, tree, inherited, startedAt, finishedAt),
 		failures: first ? [first, ...rest] : [{ code: "no-execution-evidence", message: "criterion produced no failure detail" }],
 	};
 }
 
-function failureForTree(code: VerificationFailure["code"], message: string): VerificationFailure {
-	return code === "tree-dirty" ? { code, message } : { code: "tree-changed", message };
+function failureForTree(code: VerificationFailure["code"], message: string, inherited: InheritedValuesSnapshot): VerificationFailure {
+	const safeMessage = redactCommandFailure(inherited, message);
+	return code === "tree-dirty" ? { code, message: safeMessage } : { code: "tree-changed", message: safeMessage };
 }
 
-function failedRecord(node: WorkNode, tree: TreeIdentity, failures: VerificationFailure[], checklistReports?: ChecklistReports): VerificationResult {
-	const criteria = (node.acceptance ?? []).map((criterion) => failed(criterion, tree, failures));
+function failedRecord(node: WorkNode, tree: TreeIdentity, failures: VerificationFailure[], inherited: InheritedValuesSnapshot, checklistReports?: ChecklistReports): VerificationResult {
+	const criteria = (node.acceptance ?? []).map((criterion) => failed(criterion, tree, failures.map((failure) => ({ ...failure, message: redactCommandFailure(inherited, failure.message) })), inherited));
 	return { outcome: "failed", nodeId: node.id, tree, criteria, checklist: verifyChecklist("checklist" in node ? node.checklist : undefined, checklistReports, tree), recordedAt: now() };
 }
 
@@ -252,30 +311,32 @@ function makeAuthorityVerifier(capabilities: VerifierCapabilities): AuthorityVer
 
 	async function verifyNode(request: VerifyNodeRequest): Promise<VerificationResult> {
 		request = snapshotRequest(request);
+		assertNodeMatchesSource(request);
+		const inherited = request.inherited ?? nodeInheritedValues(request.node);
 		const baseline = await inspectTree(request.target.worktreePath, request.target.expectedCommit);
-		if (!baseline.ok) return failedRecord(request.node, fallbackTree(request.target), [baseline.failure], request.checklistReports);
+		if (!baseline.ok) return failedRecord(request.node, fallbackTree(request.target), [baseline.failure], inherited, request.checklistReports);
 		const tree = baseline.snapshot.identity;
 		const monitor = await monitorTree(baseline.snapshot);
-		if (!monitor.ok) return failedRecord(request.node, tree, [monitor.failure], request.checklistReports);
+		if (!monitor.ok) return failedRecord(request.node, tree, [monitor.failure], inherited, request.checklistReports);
 		const criteria: (PassedCriterionResult | FailedCriterionResult)[] = [];
 		try {
 			for (const criterion of request.node.acceptance ?? []) {
 				if (request.signal?.aborted) {
-					criteria.push(failed(criterion, tree, [{ code: "verification-aborted", message: "verification was aborted before this criterion started" }]));
+					criteria.push(failed(criterion, tree, [{ code: "verification-aborted", message: "verification was aborted before this criterion started" }], inherited));
 					continue;
 				}
 			const startedAt = now();
 			let result: Awaited<ReturnType<typeof runCommand>> | Awaited<ReturnType<typeof runAgent>> | Awaited<ReturnType<typeof runUser>>;
-			if (criterion.evidence.kind === "command") result = await runCommand({ evidence: criterion.evidence, tree, signal: request.signal, gitPath: baseline.snapshot.gitPath, untrackedPaths: monitor.untrackedPaths, drainObservation: monitor.drain, monitoring: monitor.monitoring }, { timeoutMs: criterion.evidence.timeout_ms });
+			if (criterion.evidence.kind === "command") result = await runCommand({ evidence: criterion.evidence, tree, signal: request.signal, gitPath: baseline.snapshot.gitPath, untrackedPaths: monitor.untrackedPaths, inherited, drainObservation: monitor.drain, monitoring: monitor.monitoring }, { timeoutMs: criterion.evidence.timeout_ms });
 			else if (criterion.evidence.kind === "agent") result = await runAgent({ evidence: criterion.evidence, tree, signal: request.signal });
 			else result = await runUser({ evidence: criterion.evidence, specPath: request.specPath, nodeId: request.node.id, criterionId: criterion.id, tree }, { host: { hasUI: hostCapabilities.hasUI, confirm: hostCapabilities.confirm, session: hostCapabilities.sessionManager }, signal: request.signal });
 			const unchanged = await verifyTreeUnchanged(baseline.snapshot);
 			if (result.outcome === "failed") {
-				const failures = unchanged.ok ? result.failures : [...result.failures, failureForTree(unchanged.failure.code, unchanged.failure.message)];
+				const failures = unchanged.ok ? result.failures : [...result.failures, failureForTree(unchanged.failure.code, unchanged.failure.message, inherited)];
 				const [first, ...rest] = failures;
 				criteria.push({ outcome: "failed", criterion: criterionSummary(criterion), attempt: result.attempt, failures: first ? [first, ...rest] : [{ code: "no-execution-evidence", message: "criterion produced no failure detail" }] });
 			} else if (!unchanged.ok) {
-				criteria.push(failed(criterion, tree, [failureForTree(unchanged.failure.code, unchanged.failure.message)], startedAt, now()));
+				criteria.push(failed(criterion, tree, [failureForTree(unchanged.failure.code, unchanged.failure.message, inherited)], inherited, startedAt, now()));
 			} else {
 				criteria.push(createPassedCriterion(criterionSummary(criterion), result.proof));
 			}
@@ -283,11 +344,11 @@ function makeAuthorityVerifier(capabilities: VerifierCapabilities): AuthorityVer
 		await monitor.drain();
 		const finalTree = await verifyTreeUnchanged(baseline.snapshot);
 		if (monitor.changed() || !finalTree.ok) {
-			const treeFailure = monitor.changed() ? { code: "tree-changed" as const, message: "target tree changed while evidence was running" } : finalTree.ok ? { code: "tree-changed" as const, message: "target tree changed while evidence was running" } : failureForTree(finalTree.failure.code, finalTree.failure.message);
+			const treeFailure = monitor.changed() ? { code: "tree-changed" as const, message: "target tree changed while evidence was running" } : finalTree.ok ? { code: "tree-changed" as const, message: "target tree changed while evidence was running" } : failureForTree(finalTree.failure.code, finalTree.failure.message, inherited);
 			for (let index = 0; index < criteria.length; index += 1) {
 				const criterion = (request.node.acceptance ?? [])[index];
 				const current = criteria[index];
-				if (criterion && current?.outcome === "passed") criteria[index] = failed(criterion, tree, [treeFailure], current.startedAt, current.finishedAt);
+				if (criterion && current?.outcome === "passed") criteria[index] = failed(criterion, tree, [{ ...treeFailure, message: redactCommandFailure(inherited, treeFailure.message) }], inherited, current.startedAt, current.finishedAt);
 			}
 		}
 		const reportedChecklist = verifyChecklist("checklist" in request.node ? request.node.checklist : undefined, request.checklistReports, tree);
@@ -295,7 +356,7 @@ function makeAuthorityVerifier(capabilities: VerifierCapabilities): AuthorityVer
 		if (criteria.length === 0) return { outcome: "failed", nodeId: request.node.id, tree, criteria: [], checklist, recordedAt: now() };
 		const allPassed = criteria.every((criterion): criterion is PassedCriterionResult => criterion.outcome === "passed" && isCriterionPassed(criterion));
 		if (!allPassed || checklist.outcome !== "complete" || !isCompleteChecklist(checklist)) {
-			return { outcome: "failed", nodeId: request.node.id, tree, criteria: criteria.filter((criterion): criterion is FailedCriterionResult => criterion.outcome === "failed"), checklist, recordedAt: now() };
+			return { outcome: "failed", nodeId: request.node.id, tree, criteria, checklist, recordedAt: now() };
 		}
 		const [first, ...rest] = criteria;
 		if (!first) return { outcome: "failed", nodeId: request.node.id, tree, criteria: [], checklist, recordedAt: now() };
@@ -305,11 +366,19 @@ function makeAuthorityVerifier(capabilities: VerifierCapabilities): AuthorityVer
 		}
 	}
 
-	async function verifyNodeAndCache(request: VerifyNodeRequest): Promise<{ result: VerificationResult; cacheUpdate?: VerificationCacheUpdate }> {
+	async function verifyNodeAndCache(request: VerifyNodeRequest, persist?: PersistVerification): Promise<{ result: VerificationResult; cacheUpdate?: VerificationCacheUpdate; cacheWrite?: StatusCacheVerificationWriteResult }> {
 		request = snapshotRequest(request);
 		const result = await verifyNode(request);
-		if (!validResult(result) || result.outcome !== "passed") return { result };
-		return { result, cacheUpdate: createCacheUpdate(request.specPath, result) };
+		if (!validResult(result)) return { result };
+		const cacheUpdate = createCacheUpdate(request.specPath, result);
+		if (!persist) return { result, cacheUpdate };
+		const cacheWrite = await persist(cacheUpdate);
+		// In-process code that can import src/ modules is trusted: it can already
+		// write files and mutate this process. Serialized caller-authored data and
+		// model-supplied tool input must not grant authority. Only a completed cache
+		// write for these source bytes may attest, never a returned callback.
+		if (cacheWrite.status === "written" && request.source !== undefined && isCacheUpdate(cacheUpdate)) recordMintedVerification(cacheUpdate, request.source);
+		return { result, cacheUpdate, cacheWrite };
 	}
 
 	return Object.freeze({ inspectTarget: (target: VerificationTarget) => inspectTree(target.worktreePath, target.expectedCommit), verifyNode, verifyNodeAndCache, isCriterionPassed, isCompleteChecklist, isNodePassed, isCacheUpdate, verificationFailures: collectVerificationFailures });
@@ -323,8 +392,9 @@ function makeObservationalVerifier(adapters: ObservationalVerifierAdapters): Obs
 	const observationalAdapters: ObservationalVerifierAdapters = { command: commandAdapter, judge: judgeAdapter, session: sessionAdapter, maxInputBytes };
 	async function verifyNode(request: VerifyNodeRequest): Promise<ObservedVerificationResult> {
 		request = snapshotRequest(request);
+		const inherited = request.inherited ?? nodeInheritedValues(request.node);
 		const baseline = await inspectTree(request.target.worktreePath, request.target.expectedCommit);
-		if (!baseline.ok) return observeVerificationResult(failedRecord(request.node, fallbackTree(request.target), [baseline.failure], request.checklistReports));
+		if (!baseline.ok) return observeVerificationResult(failedRecord(request.node, fallbackTree(request.target), [baseline.failure], inherited, request.checklistReports));
 		const result = await runObservedNode(request, baseline.snapshot, observationalAdapters);
 		return observeVerificationResult(result);
 	}
@@ -338,36 +408,37 @@ function makeObservationalVerifier(adapters: ObservationalVerifierAdapters): Obs
 }
 
 async function runObservedNode(request: VerifyNodeRequest, baseline: TreeSnapshot, adapters: ObservationalVerifierAdapters): Promise<VerificationResult> {
+	const inherited = request.inherited ?? nodeInheritedValues(request.node);
 	const monitor = await monitorTree(baseline);
-	if (!monitor.ok) return failedRecord(request.node, baseline.identity, [monitor.failure], request.checklistReports);
+	if (!monitor.ok) return failedRecord(request.node, baseline.identity, [monitor.failure], inherited, request.checklistReports);
 	const criteria: (PassedCriterionResult | FailedCriterionResult)[] = [];
 	try {
 		for (const criterion of request.node.acceptance ?? []) {
 			if (request.signal?.aborted) {
-				criteria.push(failed(criterion, baseline.identity, [{ code: "verification-aborted", message: "verification was aborted before this criterion started" }]));
+				criteria.push(failed(criterion, baseline.identity, [{ code: "verification-aborted", message: "verification was aborted before this criterion started" }], inherited));
 				continue;
 			}
 			const startedAt = now();
 			let result: Awaited<ReturnType<typeof runCommand>> | Awaited<ReturnType<typeof runAgent>> | Awaited<ReturnType<typeof runUser>>;
-			if (criterion.evidence.kind === "command") result = await runCommand({ evidence: criterion.evidence, tree: baseline.identity, signal: request.signal, gitPath: baseline.gitPath, untrackedPaths: monitor.untrackedPaths, drainObservation: monitor.drain, monitoring: monitor.monitoring }, { ...adapters.command, timeoutMs: criterion.evidence.timeout_ms ?? adapters.command?.timeoutMs });
+			if (criterion.evidence.kind === "command") result = await runCommand({ evidence: criterion.evidence, tree: baseline.identity, signal: request.signal, gitPath: baseline.gitPath, untrackedPaths: monitor.untrackedPaths, inherited, drainObservation: monitor.drain, monitoring: monitor.monitoring }, { ...adapters.command, timeoutMs: criterion.evidence.timeout_ms ?? adapters.command?.timeoutMs });
 			else if (criterion.evidence.kind === "agent") result = await runAgent({ evidence: criterion.evidence, tree: baseline.identity, signal: request.signal }, { judge: adapters.judge, maxInputBytes: adapters.maxInputBytes });
 			else result = await runUser({ evidence: criterion.evidence, specPath: request.specPath, nodeId: request.node.id, criterionId: criterion.id, tree: baseline.identity }, adapters.session);
 			const unchanged = await verifyTreeUnchanged(baseline);
 			if (result.outcome === "failed") {
-				const failures = unchanged.ok ? result.failures : [...result.failures, failureForTree(unchanged.failure.code, unchanged.failure.message)];
+				const failures = unchanged.ok ? result.failures : [...result.failures, failureForTree(unchanged.failure.code, unchanged.failure.message, inherited)];
 				const [first, ...rest] = failures;
 				criteria.push({ outcome: "failed", criterion: criterionSummary(criterion), attempt: result.attempt, failures: first ? [first, ...rest] : [{ code: "no-execution-evidence", message: "criterion produced no failure detail" }] });
-			} else if (!unchanged.ok) criteria.push(failed(criterion, baseline.identity, [failureForTree(unchanged.failure.code, unchanged.failure.message)], startedAt, now()));
+			} else if (!unchanged.ok) criteria.push(failed(criterion, baseline.identity, [failureForTree(unchanged.failure.code, unchanged.failure.message, inherited)], inherited, startedAt, now()));
 			else criteria.push({ outcome: "passed", criterion: criterionSummary(criterion), proof: result.proof, startedAt: result.proof.startedAt, finishedAt: result.proof.finishedAt, durationMs: result.proof.durationMs });
 		}
 		await monitor.drain();
 		const finalTree = await verifyTreeUnchanged(baseline);
 		if (monitor.changed() || !finalTree.ok) {
-			const treeFailure = monitor.changed() ? { code: "tree-changed" as const, message: "target tree changed while evidence was running" } : finalTree.ok ? { code: "tree-changed" as const, message: "target tree changed while evidence was running" } : failureForTree(finalTree.failure.code, finalTree.failure.message);
+			const treeFailure = monitor.changed() ? { code: "tree-changed" as const, message: "target tree changed while evidence was running" } : finalTree.ok ? { code: "tree-changed" as const, message: "target tree changed while evidence was running" } : failureForTree(finalTree.failure.code, finalTree.failure.message, inherited);
 			for (let index = 0; index < criteria.length; index += 1) {
 				const criterion = (request.node.acceptance ?? [])[index];
 				const current = criteria[index];
-				if (criterion && current?.outcome === "passed") criteria[index] = failed(criterion, baseline.identity, [treeFailure], current.startedAt, current.finishedAt);
+				if (criterion && current?.outcome === "passed") criteria[index] = failed(criterion, baseline.identity, [treeFailure], inherited, current.startedAt, current.finishedAt);
 			}
 		}
 		const reportedChecklist = verifyChecklist("checklist" in request.node ? request.node.checklist : undefined, request.checklistReports, baseline.identity);

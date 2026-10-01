@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, realpath, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -16,7 +16,7 @@ const execFileAsync = promisify(execFile);
 const SPEC = withDraftLineage(`title: dispatch\ndescription: d\nintent: i\nwork:\n  - id: node\n    task: run\n    worker:\n      agent: implementer\n      skills: [implement-typescript]\n      model: test/model\n    touches: [src/**]\n    checklist: [preserve task carrier]\n    acceptance:\n      - id: A\n        statement: signal\n        evidence:\n          kind: command\n          run: printf signal\n          expect:\n            exit: 0\n            output_includes: signal\n`);
 
 async function fixture(source = SPEC): Promise<{ root: string; commit: string }> {
-	const root = await mkdtemp(path.join(os.tmpdir(), "pi-work-dispatch-tool-"));
+	const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-work-dispatch-tool-")));
 	await writeFile(path.join(root, "spec.yaml"), withDraftLineage(source, { cwd: root }));
 	await writeFile(path.join(root, ".gitignore"), ".work/.cache/\n");
 	await execFileAsync("git", ["init", "-q", "-b", "fixture"], { cwd: root });
@@ -142,7 +142,7 @@ test("work_dispatch preserves the merge-base legacy request end to end", async (
 			model: "test/model",
 			writableRoots: ["src/**"],
 			confineWrites: true,
-			escalation: "local",
+			escalation: "off",
 		});
 		assert.equal(result.details.receipt.forks[0]?.name, "node-fork");
 		assert.equal(result.details.cacheWrite.status, "written");

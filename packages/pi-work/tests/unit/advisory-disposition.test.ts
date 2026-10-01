@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import { after, default as test } from "node:test";
 
 import { renderFinding, validateWorkspec } from "../../src/schema/index.ts";
 import { REPO_ROOT } from "../helpers/source-under-test.ts";
@@ -12,6 +13,13 @@ const BOOTSTRAP_SPEC = ".work/specs/pi-work-v1.yaml";
 const bootstrapSpecSkip = existsSync(path.join(REPO_ROOT, BOOTSTRAP_SPEC))
 	? false
 	: `missing repository fixture: ${BOOTSTRAP_SPEC}`;
+const ADVISORY_FIXTURE_ROOT = mkdtempSync(path.join(os.tmpdir(), "pi-work-advisory-disposition-"));
+const ADVISORY_VALIDATION_CONTEXT = {
+	specPath: path.join(ADVISORY_FIXTURE_ROOT, "spec.yaml"),
+	cwd: ADVISORY_FIXTURE_ROOT,
+};
+
+after(() => rmSync(ADVISORY_FIXTURE_ROOT, { recursive: true, force: true }));
 
 /** Three nodes sharing one file, which is the concentration threshold. */
 function overlapping(dispositions = ""): string {
@@ -62,28 +70,42 @@ function overlapping(dispositions = ""): string {
 		"            exit: 0",
 		"            output_includes: x",
 		"",
-	].join("\n"));
+	].join("\n"), { cwd: ADVISORY_FIXTURE_ROOT });
 }
 
-function disposition(code: string, target: string): string {
+interface DispositionInput {
+	code: string;
+	target: string;
+	reason?: string;
+	authority?: string;
+	at?: string;
+}
+
+function dispositions(...entries: DispositionInput[]): string {
 	return [
 		"advisory_dispositions:",
-		`  - code: ${code}`,
-		`    target: ${target}`,
-		"    reason: The overlap is serialized by depends_on, so it cannot race.",
-		"    authority: tester",
-		"    at: 2026-08-23",
+		...entries.flatMap((entry) => [
+			`  - code: ${entry.code}`,
+			`    target: ${entry.target}`,
+			`    reason: ${entry.reason ?? "The overlap is serialized by depends_on, so it cannot race."}`,
+			`    authority: ${entry.authority ?? "tester"}`,
+			`    at: ${entry.at ?? "2026-08-23"}`,
+		]),
 	].join("\n");
 }
 
+function disposition(code: string, target: string): string {
+	return dispositions({ code, target });
+}
+
 test("an accepted advisory is still reported, annotated with who accepted it and why", () => {
-	const before = validateWorkspec(overlapping(), { specPath: path.join(REPO_ROOT, ".work", "specs", "pi-work-v1.yaml"), cwd: REPO_ROOT });
+	const before = validateWorkspec(overlapping(), ADVISORY_VALIDATION_CONTEXT);
 	const raised = before.findings.filter((finding) => finding.code === "touches-concentration");
 	assert.ok(raised.length > 0, "fixture must raise the advisory it disposes");
 	const target = raised[0] && "target" in raised[0] ? raised[0].target : undefined;
 	assert.ok(target);
 
-	const after = validateWorkspec(overlapping(disposition("touches-concentration", target)), { specPath: path.join(REPO_ROOT, ".work", "specs", "pi-work-v1.yaml"), cwd: REPO_ROOT });
+	const after = validateWorkspec(overlapping(disposition("touches-concentration", target)), ADVISORY_VALIDATION_CONTEXT);
 	const accepted = after.findings.find((finding) => finding.code === "touches-concentration" && "target" in finding && finding.target === target);
 	assert.ok(accepted, "the advisory must still be reported after being accepted");
 	assert.deepEqual(accepted?.disposition, {
@@ -102,12 +124,82 @@ test("an accepted advisory is still reported, annotated with who accepted it and
 	assert.equal(after.valid, before.valid);
 });
 
+test("every disposition after the first duplicate pair is an error and the pair accepts no authority", () => {
+	const before = validateWorkspec(overlapping(), { specPath: path.join(REPO_ROOT, ".work", "specs", "pi-work-v1.yaml"), cwd: REPO_ROOT });
+	const raised = before.findings.filter((finding) => finding.code === "touches-concentration");
+	const target = raised[0] && "target" in raised[0] ? raised[0].target : undefined;
+	assert.ok(target);
+
+	const result = validateWorkspec(overlapping(dispositions(
+		{ code: "touches-concentration", target },
+		{ code: "touches-concentration", target },
+		{
+			code: "touches-concentration",
+			target,
+			reason: "This reason conflicts with the first.",
+			authority: "someone-else",
+			at: "1999-01-01",
+		},
+	)), { specPath: path.join(REPO_ROOT, ".work", "specs", "pi-work-v1.yaml"), cwd: REPO_ROOT });
+	const duplicates = result.findings.filter((finding) => finding.code === "duplicate-advisory-disposition");
+
+	assert.equal(result.valid, false);
+	assert.equal(duplicates.length, 2, "both the equal and conflicting repeated entries must be rejected");
+	assert.deepEqual(duplicates.map((finding) => ({
+		severity: finding.severity,
+		path: finding.path,
+		relatedPaths: finding.relatedPaths,
+	})), [
+		{ severity: "error", path: ["advisory_dispositions", 1], relatedPaths: [["advisory_dispositions", 0]] },
+		{ severity: "error", path: ["advisory_dispositions", 2], relatedPaths: [["advisory_dispositions", 0]] },
+	]);
+	for (const duplicate of duplicates) {
+		assert.match(renderFinding(duplicate), /duplicates advisory_dispositions\[0\].*remove or combine the repeated acceptance/);
+	}
+
+	const after = result.findings.filter((finding) => finding.code === "touches-concentration");
+	assert.equal(after.length, raised.length, "the underlying findings must remain visible");
+	const duplicatedTarget = after.find((finding) => "target" in finding && finding.target === target);
+	assert.ok(duplicatedTarget);
+	assert.equal(duplicatedTarget.disposition, undefined, "an ambiguous pair must not accept any authority");
+});
+
+test("distinct code-target pairs stay independent and separator characters cannot collide", () => {
+	const before = validateWorkspec(overlapping(), { specPath: path.join(REPO_ROOT, ".work", "specs", "pi-work-v1.yaml"), cwd: REPO_ROOT });
+	const targets = before.findings
+		.filter((finding) => finding.code === "touches-concentration" && "target" in finding)
+		.map((finding) => finding.target);
+	assert.ok(targets[0]);
+	assert.ok(targets[1]);
+
+	const result = validateWorkspec(overlapping(dispositions(
+		{ code: "collision|code", target: "target" },
+		{ code: "collision", target: "code|target" },
+		{ code: "touches-concentration", target: targets[0] },
+		{ code: "touches-concentration", target: targets[1] },
+		{ code: "different-code", target: targets[0] },
+	)), { specPath: path.join(REPO_ROOT, ".work", "specs", "pi-work-v1.yaml"), cwd: REPO_ROOT });
+
+	assert.equal(result.findings.some((finding) => finding.code === "duplicate-advisory-disposition"), false);
+	for (const target of targets.slice(0, 2)) {
+		const finding = result.findings.find((candidate) => candidate.code === "touches-concentration" && "target" in candidate && candidate.target === target);
+		assert.deepEqual(finding?.disposition, {
+			reason: "The overlap is serialized by depends_on, so it cannot race.",
+			authority: "tester",
+			at: "2026-08-23",
+		});
+	}
+});
+
 test("a disposition cannot accept an error, and says so as an error of its own", () => {
 	const spec = withDraftLineage([
 		"title: T",
 		"description: D",
 		"intent: I",
-		disposition("dependency-unresolved", "missing"),
+		dispositions(
+			{ code: "dependency-unresolved", target: "missing" },
+			{ code: "dependency-unresolved", target: "missing", reason: "A duplicate still must not accept an error." },
+		),
 		"work:",
 		"  - id: n",
 		"    task: t",
@@ -122,20 +214,23 @@ test("a disposition cannot accept an error, and says so as an error of its own",
 		"            exit: 0",
 		"            output_includes: x",
 		"",
-	].join("\n"));
-	const result = validateWorkspec(spec, { specPath: path.join(REPO_ROOT, ".work", "specs", "pi-work-v1.yaml"), cwd: REPO_ROOT });
+	].join("\n"), { cwd: ADVISORY_FIXTURE_ROOT });
+	const result = validateWorkspec(spec, ADVISORY_VALIDATION_CONTEXT);
 	assert.equal(result.valid, false);
 	// The original error survives; accepting it is refused rather than honoured.
 	assert.ok(result.findings.some((finding) => finding.code === "dependency-unresolved" && finding.severity === "error"));
-	const refusal = result.findings.find((finding) => finding.code === "disposition-targets-error");
-	assert.ok(refusal, "naming an error must be refused");
-	assert.equal(refusal?.severity, "error");
-	assert.match(renderFinding(refusal!), /which this spec raises as an error; only an advisory can be accepted/);
+	const refusals = result.findings.filter((finding) => finding.code === "disposition-targets-error");
+	assert.equal(refusals.length, 2, "every attempted acceptance of an error must still be refused");
+	for (const refusal of refusals) {
+		assert.equal(refusal.severity, "error");
+		assert.match(renderFinding(refusal), /which this spec raises as an error; only an advisory can be accepted/);
+	}
+	assert.equal(result.findings.filter((finding) => finding.code === "duplicate-advisory-disposition").length, 1);
 	assert.equal(result.findings.some((finding) => finding.code === "dependency-unresolved" && finding.disposition !== undefined), false, "an error must never carry a disposition");
 });
 
 test("a disposition matching nothing is reported as stale rather than kept silently", () => {
-	const result = validateWorkspec(overlapping(disposition("touches-concentration", "not/a/shared/file.ts")), { specPath: path.join(REPO_ROOT, ".work", "specs", "pi-work-v1.yaml"), cwd: REPO_ROOT });
+	const result = validateWorkspec(overlapping(disposition("touches-concentration", "not/a/shared/file.ts")), ADVISORY_VALIDATION_CONTEXT);
 	const stale = result.findings.find((finding) => finding.code === "disposition-unmatched");
 	assert.ok(stale, "an unmatched disposition must be surfaced");
 	assert.equal(stale?.severity, "warning");
@@ -178,16 +273,16 @@ function longDescription(dispositions = ""): string {
 		"            exit: 0",
 		"            output_includes: x",
 		"",
-	].join("\n"));
+	].join("\n"), { cwd: ADVISORY_FIXTURE_ROOT });
 }
 
 test("a disposition for a targetless advisory is told why it cannot match, not that the spec is silent", () => {
-	const raised = validateWorkspec(longDescription(), { specPath: path.join(REPO_ROOT, ".work", "specs", "pi-work-v1.yaml"), cwd: REPO_ROOT });
+	const raised = validateWorkspec(longDescription(), ADVISORY_VALIDATION_CONTEXT);
 	const advisory = raised.findings.find((finding) => finding.code === "description-too-long");
 	assert.ok(advisory, "fixture must raise description-too-long");
 	assert.equal("target" in advisory!, false, "the premise of this test is that the advisory names no target");
 
-	const result = validateWorkspec(longDescription(disposition("description-too-long", "$.description")), { specPath: path.join(REPO_ROOT, ".work", "specs", "pi-work-v1.yaml"), cwd: REPO_ROOT });
+	const result = validateWorkspec(longDescription(disposition("description-too-long", "$.description")), ADVISORY_VALIDATION_CONTEXT);
 	const unmatched = result.findings.find((finding) => finding.code === "disposition-unmatched");
 	assert.ok(unmatched, "a disposition that matches nothing must still be surfaced");
 
@@ -200,7 +295,7 @@ test("a disposition for a targetless advisory is told why it cannot match, not t
 
 test("a disposition for a code the spec genuinely never raises still reads as stale", () => {
 	// Guards the other branch: the original wording is correct here and must survive.
-	const result = validateWorkspec(longDescription(disposition("intent-description-duplicate", "$.intent")), { specPath: path.join(REPO_ROOT, ".work", "specs", "pi-work-v1.yaml"), cwd: REPO_ROOT });
+	const result = validateWorkspec(longDescription(disposition("intent-description-duplicate", "$.intent")), ADVISORY_VALIDATION_CONTEXT);
 	const unmatched = result.findings.find((finding) => finding.code === "disposition-unmatched");
 	assert.ok(unmatched);
 	assert.equal(result.findings.some((finding) => finding.code === "intent-description-duplicate"), false, "fixture must not raise the code being disposed");

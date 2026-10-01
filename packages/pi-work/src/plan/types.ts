@@ -60,7 +60,7 @@ export interface DelegateInvocation {
 	readonly task: string;
 	readonly writableRoots?: readonly string[];
 	readonly confineWrites: true;
-	readonly escalation: "local";
+	readonly escalation: "off";
 	readonly worktree: boolean;
 }
 
@@ -96,7 +96,7 @@ export interface CanonicalDelegateRun {
 	readonly reads: readonly [string];
 	readonly writableRoots?: readonly string[];
 	readonly confineWrites: true;
-	readonly escalation: "local";
+	readonly escalation: "off";
 	readonly worktree: boolean;
 	readonly handoff?: DelegateHandoff;
 }

@@ -2,7 +2,8 @@ import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:chil
 import { promisify } from "node:util";
 
 import type { CommandEvidence } from "../schema/workspec.js";
-import { captureAuthoredPath, captureSystemdEnvironment, isAbsoluteExecutable, pathShadowsExecutable, resolveVerifierExecutable, type VerifierExecutable } from "./executable.js";
+import { captureAuthoredPath, captureEvidenceEnvironment, isAbsoluteExecutable, pathShadowsExecutable, resolveVerifierExecutable, type VerifierExecutable } from "./executable.js";
+import { inheritedValuesSnapshot, redactCommandEvidence, redactCommandFailure, redactCommandOutput, redactCommandText, type InheritedValuesSnapshot } from "./output.js";
 import type { CommandExecutionProof, CriterionAttempt, TreeIdentity, TreeMonitoringProof, VerificationFailure } from "./results.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -32,6 +33,8 @@ export interface CommandRunInput {
 	drainObservation?: () => Promise<void>;
 	monitoring?: () => TreeMonitoringProof;
 	gitPath?: string;
+	/** Captured values from every criterion in this node. */
+	inherited?: InheritedValuesSnapshot;
 }
 
 export type CommandRunOutcome =
@@ -52,6 +55,7 @@ function inferredSignal(code: number | null): NodeJS.Signals | null {
 interface FailureExtras {
 	expected?: number | string;
 	actual?: number | null;
+	names?: readonly string[];
 	errorCode?: string;
 	signal?: NodeJS.Signals;
 	exitCode?: number;
@@ -67,6 +71,7 @@ function failure(code: VerificationFailure["code"], message: string, extra: Fail
 	if (code === "signaled") return { code, message, signal: extra.signal ?? "SIGTERM" };
 	if (code === "exit-mismatch") return { code, message, expected: typeof extra.expected === "number" ? extra.expected : 0, actual: extra.actual ?? null };
 	if (code === "output-mismatch") return { code, message, expected: typeof extra.expected === "string" ? extra.expected : "" };
+	if (code === "environment-unavailable") return { code, message, names: extra.names ?? [] };
 	if (code === "spawn-error") return { code, message, ...(extra.errorCode === undefined ? {} : { errorCode: extra.errorCode }) };
 	if (code === "executable-unavailable") return { code, message, executable: extra.executable ?? "unknown" };
 	if (code === "cleanup-unavailable" || code === "cleanup-failed") return { code, message };
@@ -140,19 +145,35 @@ export async function runCommand(input: CommandRunInput, options: CommandRunnerO
 	const resolveExecutable: ExecutableResolver = options.resolveExecutable ?? (async (executable) => {
 		try { return await resolveVerifierExecutable(executable); } catch { return undefined; }
 	});
-	const environment = captureSystemdEnvironment();
+	const declaredEnvironment = input.evidence.inherit_env;
+	const requestedEnvironment = declaredEnvironment ?? [];
+	const { environment, inherited, missing, short, valid: validEnvironment } = captureEvidenceEnvironment(declaredEnvironment, input.inherited);
+	const redaction = inheritedValuesSnapshot([...inherited.values, ...(input.inherited?.values ?? [])]);
 	const authoredPath = captureAuthoredPath();
 	const startedAt = now();
 	const timeoutMs = Math.max(1, options.timeoutMs ?? input.evidence.timeout_ms ?? DEFAULT_TIMEOUT_MS);
 	const maxOutputBytes = Math.max(1, options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
 	const expectation = input.evidence.expect;
+	const observedEvidence = redactCommandEvidence(input.evidence, redaction);
+	const observedExpectation = observedEvidence.expect;
 	const authoredCommand = input.evidence.run;
-	const attemptBase = (finishedAt: string): CriterionAttempt => ({ kind: input.evidence.kind, evidence: input.evidence, startedAt, finishedAt, tree: input.tree });
+	const observedAuthoredCommand = observedEvidence.run;
+	const attemptBase = (finishedAt: string): CriterionAttempt => ({ kind: input.evidence.kind, evidence: observedEvidence, startedAt, finishedAt, tree: input.tree });
 	const expectedOutput = expectation.output_includes;
 	if (expectedOutput === undefined || expectedOutput.length === 0) {
 		const finishedAt = now();
 		return { outcome: "failed", attempt: attemptBase(finishedAt), failures: [failure("positive-floor-missing", "command evidence requires a non-empty expect.output_includes")] };
 	}
+
+	if (!validEnvironment) return { outcome: "failed", attempt: attemptBase(now()), failures: [failure("environment-unavailable", "requested environment declaration is invalid")] };
+	if (missing.length > 0) return { outcome: "failed", attempt: attemptBase(now()), failures: [failure("environment-unavailable", `requested environment is unavailable: ${missing.join(", ")}`, { names: missing })] };
+	if (short.length > 0) return { outcome: "failed", attempt: attemptBase(now()), failures: [failure("environment-unavailable", `inherited environment value must be at least 8 characters: ${short.join(", ")}`, { names: short })] };
+	const colliding = requestedEnvironment.filter((name) => {
+		const value = environment[name];
+		const floor = expectation.output_includes;
+		return value !== undefined && floor !== undefined && (value.includes(floor) || floor.includes(value));
+	});
+	if (colliding.length > 0) return { outcome: "failed", attempt: attemptBase(now()), failures: [failure("environment-unavailable", `expect.output_includes overlaps inherited environment: ${colliding.join(", ")}`, { names: colliding })] };
 
 	if (process.platform !== "linux" && process.platform !== "darwin") {
 		const finishedAt = now();
@@ -203,7 +224,7 @@ export async function runCommand(input: CommandRunInput, options: CommandRunnerO
 	try {
 		const file = useSystemdContainment ? executorPath : shellPath;
 		const args = useSystemdContainment
-			? ["--user", "--scope", "--quiet", "--expand-environment=no", `--setenv=PATH=${authoredPath}`, `--unit=${unitName}`, "--property=KillMode=control-group", `--working-directory=${input.tree.worktreePath}`, shellPath, "-c", authoredCommand]
+			? ["--user", "--scope", "--quiet", "--expand-environment=no", `--setenv=PATH=${authoredPath}`, ...requestedEnvironment.map((name) => `--setenv=${name}`), `--unit=${unitName}`, "--property=KillMode=control-group", `--working-directory=${input.tree.worktreePath}`, shellPath, "-c", authoredCommand]
 			: ["-c", authoredCommand];
 		child = launcher(file, args, {
 			cwd: input.tree.worktreePath,
@@ -215,7 +236,7 @@ export async function runCommand(input: CommandRunInput, options: CommandRunnerO
 	} catch (error) {
 		const finishedAt = now();
 		const code = useSystemdContainment ? "cleanup-unavailable" : "spawn-error";
-		return { outcome: "failed", attempt: attemptBase(finishedAt), failures: [failure(code, error instanceof Error ? error.message : String(error))] };
+		return { outcome: "failed", attempt: attemptBase(finishedAt), failures: [failure(code, redactCommandText(redaction, error instanceof Error ? error.message : String(error)))] };
 	}
 
 	const rootPid = child.pid;
@@ -316,13 +337,14 @@ export async function runCommand(input: CommandRunInput, options: CommandRunnerO
 	const stdout = outputText(stdoutChunks);
 	const stderr = outputText(stderrChunks);
 	const reportedSignal = closeSignal ?? inferredSignal(closeCode);
-	const attempt: CriterionAttempt = { kind: input.evidence.kind, evidence: input.evidence, startedAt, finishedAt, tree: input.tree, stdout, stderr, exitCode: closeCode, signal: reportedSignal };
-	const cleanupFailures: VerificationFailure[] = cleanupFailure === undefined ? [] : [failure("cleanup-failed", cleanupFailure)];
+	const storedOutput = redactCommandOutput(redaction, stdout, stderr);
+	const attempt: CriterionAttempt = { kind: input.evidence.kind, evidence: observedEvidence, startedAt, finishedAt, tree: input.tree, stdout: storedOutput.stdout, stderr: storedOutput.stderr, exitCode: closeCode, signal: reportedSignal };
+	const cleanupFailures: VerificationFailure[] = cleanupFailure === undefined ? [] : [failure("cleanup-failed", redactCommandFailure(redaction, cleanupFailure))];
 	if (spawnError) {
 		const code = useSystemdContainment ? "cleanup-unavailable" : "spawn-error";
-		return { outcome: "failed", attempt, failures: [failure(code, spawnError.message, spawnError.code === undefined ? {} : { errorCode: spawnError.code }), ...cleanupFailures] };
+		return { outcome: "failed", attempt, failures: [failure(code, redactCommandText(redaction, spawnError.message), spawnError.code === undefined ? {} : { errorCode: spawnError.code }), ...cleanupFailures] };
 	}
-	if (useSystemdContainment && systemdUnavailable(stderr)) return { outcome: "failed", attempt, failures: [failure("cleanup-unavailable", stderr), ...cleanupFailures] };
+	if (useSystemdContainment && systemdUnavailable(stderr)) return { outcome: "failed", attempt, failures: [failure("cleanup-unavailable", "systemd user scope is unavailable"), ...cleanupFailures] };
 	if (timedOut) return { outcome: "failed", attempt, failures: [failure("timeout", `command exceeded ${timeoutMs}ms`), ...cleanupFailures] };
 	if (aborted) return { outcome: "failed", attempt, failures: [failure("aborted", "command was aborted"), ...cleanupFailures] };
 	if (outputOverflow) return { outcome: "failed", attempt, failures: [failure("output-limit", `command output exceeded ${maxOutputBytes} bytes`), ...cleanupFailures] };
@@ -331,7 +353,7 @@ export async function runCommand(input: CommandRunInput, options: CommandRunnerO
 	if (reportedSignal) return { outcome: "failed", attempt, failures: [failure("signaled", `command terminated by ${reportedSignal}`, { signal: reportedSignal }), ...cleanupFailures] };
 	if (closeCode === 126 || closeCode === 127) return { outcome: "failed", attempt, failures: [failure("shell-unavailable", `shell could not execute command (exit ${closeCode})`, { exitCode: closeCode }), ...cleanupFailures] };
 	if (closeCode !== expectation.exit) return { outcome: "failed", attempt, failures: [failure("exit-mismatch", `expected exit ${expectation.exit}, got ${String(closeCode)}`, { expected: expectation.exit, actual: closeCode }), ...cleanupFailures] };
-	if (!stdout.includes(expectedOutput) && !stderr.includes(expectedOutput)) return { outcome: "failed", attempt, failures: [failure("output-mismatch", `output did not include ${JSON.stringify(expectedOutput)}`, { expected: expectedOutput }), ...cleanupFailures] };
+	if (!stdout.includes(expectedOutput) && !stderr.includes(expectedOutput)) return { outcome: "failed", attempt, failures: [failure("output-mismatch", `output did not include ${JSON.stringify(observedExpectation.output_includes)}`, { expected: observedExpectation.output_includes }), ...cleanupFailures] };
 	const monitoring: TreeMonitoringProof = input.monitoring?.() ?? {
 		method: "none",
 		mode: "none",
@@ -339,8 +361,8 @@ export async function runCommand(input: CommandRunInput, options: CommandRunnerO
 		residualRace: "not-monitored",
 	};
 	const proof: CommandExecutionProof = {
-		kind: "command-proof", containment: useSystemdContainment ? "systemd-scope" : "process-group", authoredCommand, ...(input.evidence.timeout_ms === undefined ? {} : { timeout_ms: input.evidence.timeout_ms }), gitPath, executorPath, shellPath, expectation, stdout, stderr, exitCode: closeCode, signal: closeSignal,
-		outputMatched: expectedOutput, untrackedPaths: [...(input.untrackedPaths?.() ?? [])], monitoring, startedAt, finishedAt, durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)), tree: input.tree,
+		kind: "command-proof", containment: useSystemdContainment ? "systemd-scope" : "process-group", authoredCommand: observedAuthoredCommand, ...(requestedEnvironment.length === 0 ? {} : { inherit_env: [...requestedEnvironment] }), ...(input.evidence.timeout_ms === undefined ? {} : { timeout_ms: input.evidence.timeout_ms }), gitPath, executorPath, shellPath, expectation: observedExpectation, stdout: storedOutput.stdout, stderr: storedOutput.stderr, exitCode: closeCode, signal: closeSignal,
+		outputMatched: observedExpectation.output_includes, untrackedPaths: (input.untrackedPaths?.() ?? []).map((path) => redactCommandText(redaction, path)), monitoring, startedAt, finishedAt, durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)), tree: input.tree,
 	};
 	// A caller-supplied launcher remains useful for containment tests, but its
 	// claim about what ran is observational rather than verifier authority.

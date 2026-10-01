@@ -446,6 +446,7 @@ test("only the work-verify composition root imports the authority factory", asyn
 		sources.set(path.relative(REPO_ROOT, file), text);
 	}
 	const expectedImports = new Map([
+		["src/status/session-verification.ts", ""],
 		["src/tools/work-verify.ts", "{ createVerifier, type VerificationTarget }"],
 		["src/verify/verify-node.ts", "{ createObservationalVerifier, verificationFailures, type ObservationalVerifier, type ObservationalVerifierAdapters, type VerificationTarget, type VerifyNodeOptions, type VerifyNodeRequest }"],
 	]);
@@ -456,7 +457,10 @@ test("only the work-verify composition root imports the authority factory", asyn
 		assert.ok(sourceText, `missing source for ${file}`);
 		assert.equal((sourceText.match(/internal\.js/g) ?? []).length, 1, `${file} has an unreviewed internal.js route`);
 		const imports = [...sourceText.matchAll(/\bimport\s+([^;]*?)\s+from\s+["'][^"']*internal\.js["']\s*;?/g)].map((match) => match[1].replace(/\s+/g, " ").replace(/,\s*}/g, " }").trim());
-		assert.deepEqual(imports, [expectedImport], `${file} must use its exact reviewed internal.js import`);
+		if (file === "src/status/session-verification.ts") {
+			assert.deepEqual(imports, []);
+			assert.match(sourceText, /export \{ digestSpecSource, sessionVerifications, forgetSessionVerifications \} from "\.\.\/verify\/internal\.js"/);
+		} else assert.deepEqual(imports, [expectedImport], `${file} must use its exact reviewed internal.js import`);
 	}
 	const factoryConsumers = [...sources.entries()]
 		.filter(([, sourceText]) => /\bcreateVerifier\b/.test(sourceText))

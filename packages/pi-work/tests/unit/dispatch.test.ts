@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
@@ -13,6 +14,7 @@ import {
 	type DispatchDependencies,
 } from "../../src/dispatch/index.ts";
 import { importDelegateRuntime } from "../../src/dispatch/runtime.ts";
+import { REPO_ROOT } from "../helpers/source-under-test.ts";
 import type { PlanReceipt } from "../../src/plan/index.ts";
 import type { StatusCacheDispatchEntry } from "../../src/status/types.ts";
 
@@ -37,7 +39,7 @@ function plan(worktree = false): PlanReceipt {
 			task: "Execute the assembled work contract for node node; read the contract from the attached brief.",
 			writableRoots: ["src/**"],
 			confineWrites: true,
-			escalation: "local",
+			escalation: "off",
 			worktree,
 		},
 		canonicalDelegate: {
@@ -52,7 +54,7 @@ function plan(worktree = false): PlanReceipt {
 				reads: [BRIEF],
 				writableRoots: ["src/**"],
 				confineWrites: true,
-				escalation: "local",
+				escalation: "off",
 				worktree,
 			}],
 		},
@@ -284,7 +286,7 @@ test("dispatchPlan submits one validated direct request and records the applied 
 		model: "test/model",
 		writableRoots: ["src/**"],
 		confineWrites: true,
-		escalation: "local",
+		escalation: "off",
 	});
 	assert.equal("worktree" in requests[0]!, false);
 	assert.equal("await" in requests[0]!, false);
@@ -477,7 +479,7 @@ test("optional upstream receipt fields remain honestly absent while the validate
 			reads: completePlan.delegate.reads,
 			task: completePlan.delegate.task,
 			confineWrites: true,
-			escalation: "local",
+			escalation: "off",
 			worktree: false,
 		},
 	};
@@ -500,7 +502,7 @@ test("request and receipt decoders reject unknown and mistyped values", () => {
 		cwd: ROOT,
 		reads: [BRIEF],
 		confineWrites: true,
-		escalation: "local",
+		escalation: "off",
 	};
 	assert.equal(validateDelegateDispatchRequest(request), true);
 	for (const invalid of [
@@ -518,7 +520,7 @@ test("request and receipt decoders reject unknown and mistyped values", () => {
 		{ ...request, reads: [BRIEF, BRIEF] },
 		{ ...request, reads: [1] },
 		{ ...request, confineWrites: false },
-		{ ...request, escalation: "off" },
+		{ ...request, escalation: "local" },
 		{ ...request, skills: "implement-typescript" },
 		{ ...request, skills: [] },
 		{ ...request, skills: [1] },
@@ -558,8 +560,13 @@ test("request and receipt decoders reject unknown and mistyped values", () => {
 		{ runs: [{ ...run, handoff: { focus: { objective: "ok", boundaries: [1] } } }] },
 	]) assert.equal(validateDelegateDispatchRequest(invalid), false);
 	assert.deepEqual(decodeDelegateRuntimeReceipt(receipt()), receipt());
-	assert.equal(decodeDelegateRuntimeReceipt({ ...receipt(), unknown: true }), undefined);
-	assert.equal(decodeDelegateRuntimeReceipt({ ...receipt(), forks: [{ ...receipt().forks[0]!, extra: true }] }), undefined);
+	assert.deepEqual(decodeDelegateRuntimeReceipt({ ...receipt(), unknown: true }), receipt(), "unknown top-level keys are ignored, not copied");
+	assert.deepEqual(decodeDelegateRuntimeReceipt({ ...receipt(), forks: [{ ...receipt().forks[0]!, extra: true }] }), receipt(), "unknown fork keys are ignored, not copied");
+	assert.equal(decodeDelegateRuntimeReceipt({ ...receipt(), runId: undefined }), undefined, "required keys are still required");
+	assert.equal(decodeDelegateRuntimeReceipt({ ...receipt(), acceptance: { runId: "other", transport: "in-process", state: "accepted" } }), undefined, "acceptance must describe this run");
+	assert.equal(decodeDelegateRuntimeReceipt({ ...receipt(), acceptance: "accepted" }), undefined);
+	assert.equal(decodeDelegateRuntimeReceipt({ ...receipt(), inputDigests: [{ kind: "task", name: "task", algorithm: "sha256", digest: "short" }] }), undefined);
+	assert.equal(decodeDelegateRuntimeReceipt({ ...receipt(), steps: "planned" }), undefined);
 	assert.equal(decodeDelegateRuntimeReceipt({ ...receipt(), receiptPath: "relative/receipt.json" }), undefined);
 	assert.equal(decodeDelegateRuntimeReceipt({ ...receipt(), forks: [{ ...receipt().forks[0]!, workerCwd: "relative" }] }), undefined);
 });
@@ -676,4 +683,20 @@ test("dispatchPlan calls the injected dispatch port at most once across every re
 			assert.equal(writes, scenario.writes, label);
 		}
 	}
+});
+
+// Issue #50: pi-delegate's receipt gained `acceptance`, `inputDigests` and `steps`, and the
+// decoder rejected every dispatch. The fixture below was emitted by pi-delegate's own
+// receipt builder (createDelegateRuntimeClient().dispatch, pi-delegate main 23a6f098,
+// package 0.9.0), not written by hand. The live equivalent against a built checkout
+// is in delegate-contract.test.ts (PI_DELEGATE_CHECKOUT).
+test("the decoder accepts a receipt emitted by pi-delegate's real builder", async () => {
+	const real = JSON.parse(await readFile(path.join(REPO_ROOT, "tests", "fixtures", "delegate-runtime-receipt.real.json"), "utf8")) as Record<string, unknown>;
+	for (const key of ["acceptance", "inputDigests", "steps"]) assert.ok(key in real, `the fixture must carry the additive field ${key}`);
+	const decoded = decodeDelegateRuntimeReceipt(real);
+	assert.ok(decoded, "a real receipt must decode");
+	assert.equal(decoded.runId, real.runId);
+	assert.equal(decoded.forks[0]?.name, "lane");
+	assert.deepEqual(decoded.forks[0]?.inputDigests, (real.forks as Array<{ inputDigests: unknown }>)[0]!.inputDigests);
+	assert.equal(Object.hasOwn(decoded, "acceptance"), false, "additive fields are not copied through");
 });

@@ -187,8 +187,15 @@ Every promoted criterion needs one evidence kind:
   because a command exited 0. Optionally set `timeout_ms` alongside `run`
   and `expect` when a gate needs more than the 30,000 ms default; it must be
   an integer from 1,000 to 3,600,000 ms (one hour). Invalid values fail
-  validation rather than being clamped. Draft Markdown criteria are preserved
-  verbatim by `work_promote`; add `timeout_ms` to the evidence object when
+  validation rather than being clamped. Optionally add `inherit_env: [VARIABLE_NAME]`
+  to explicitly pass named host variables to the command; unset names fail closed
+  and exact inherited values are redacted from rendered output, details,
+  failures, and cache. Values shorter than 8 characters, and output floors
+  that contain or are contained in an inherited value, fail closed by name.
+  Redaction does not contain commands that transform or transmit secrets; only
+  inherit secrets into commands you trust. Do not put values in the workspec.
+  Draft Markdown criteria are preserved verbatim by `work_promote`; add
+  `timeout_ms` to the evidence object when
   decomposing the promoted skeleton.
 - `agent` names an agent, its named `inputs`, and a `rubric`. In v1 this returns
   the typed `agent-unavailable` outcome and fails closed because pi-work's
@@ -236,9 +243,10 @@ step.
 
 - Do not promise `verified-this-session` from a draft, a promoted file, a
   dispatch receipt, or a cache hit.
-- `work_status --refresh` is blocked in v1, so the status surface cannot report
-  `verified-this-session`. It reports observation states or `unverified` until a
-  real authority constructor is available.
+- `work_status --refresh` is blocked in v1: refresh cannot run evidence for you.
+  `work_status` reports `verified-this-session` only after `work_verify` verifies
+  that node in this process against the exact source, worktree, and commit.
+  Everything else reports an observation state or `unverified`.
 - A source-level `work_validate` or `work_promote` export can be exercised by
   tests or a direct host integration, but do not claim a tool ran unless the
   host actually registered and invoked it.

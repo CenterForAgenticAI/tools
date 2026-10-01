@@ -63,8 +63,8 @@ export const workPromoteTool = defineTool({
 	description: "Losslessly promote a marked Markdown draft into a Workspec YAML skeleton.",
 	parameters: Type.Object({ draftPath: Type.String(), specPath: Type.String() }, { additionalProperties: false }),
 	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-		const draftInput = confinedPath(params.draftPath, "draftPath");
-		const specInput = confinedPath(params.specPath, "specPath");
+		const draftInput = confinedPath(params.draftPath, "draftPath", "working-directory");
+		const specInput = confinedPath(params.specPath, "specPath", "working-directory");
 		if (!draftInput.ok || !specInput.ok) {
 			const findings = [
 				...(draftInput.ok ? [] : [draftInput.finding]),

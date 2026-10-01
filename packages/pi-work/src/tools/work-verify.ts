@@ -4,9 +4,14 @@ import path from "node:path";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import { isCompositeNode } from "../schema/dependencies.js";
 import { type Finding, validateWorkspec } from "../schema/index.js";
+import { statusCachePath, writeVerificationCacheEntry } from "../status/cache.js";
+import type { StatusCacheVerificationWriteResult } from "../status/types.js";
 import { renderFinding } from "../schema/findings.js";
 import { createVerifier, type VerificationTarget } from "../verify/internal.js";
+import { redactCommandFailure } from "../verify/output.js";
+import { captureEvidenceEnvironment } from "../verify/executable.js";
 import type { VerificationCacheUpdate, VerificationFailure, VerificationResult } from "../verify/results.js";
 import { resolveSpecPath } from "../verify/tree.js";
 import { confinedPath } from "./confined-path.js";
@@ -32,19 +37,19 @@ export interface WorkVerifyDetails {
 	failures: VerificationFailure[];
 	result?: VerificationResult;
 	cacheUpdate?: VerificationCacheUpdate;
+	cacheWrite?: StatusCacheVerificationWriteResult;
 	truncated: boolean;
 }
 
 function render(details: WorkVerifyDetails): string {
 	const lines = [`${details.outcome}: node ${details.nodeId}`, `tree: ${details.worktreePath}@${details.expectedCommit}`];
-	// A path-input rejection is only actionable if the caller can see which path was
-	// refused, so defer to the shared renderer that carries the message.
-	for (const finding of details.findings) lines.push(finding.code === "absolute-path" ? renderFinding(finding) : `${finding.severity} ${finding.code}`);
+	for (const finding of details.findings) lines.push(renderFinding(finding));
 	for (const failure of details.failures) lines.push(`failure ${failure.code}: ${failure.message}`);
 	if (details.result) {
 		lines.push(`criteria: ${details.result.criteria.length}`);
 		lines.push(`checklist: ${details.result.checklist.outcome}`);
 	}
+	if (details.cacheWrite) lines.push(`cache: ${details.cacheWrite.status}`);
 	return lines.join("\n");
 }
 
@@ -55,11 +60,12 @@ function resultPayload(details: WorkVerifyDetails): { content: [{ type: "text"; 
 	return { content: [{ type: "text", text: `${rendered.slice(0, MAX_RENDERED_TEXT - 24)}\n… output truncated` }], details };
 }
 
-function locateNode(nodes: readonly import("../schema/workspec.js").WorkNode[], id: string): import("../schema/workspec.js").WorkNode | undefined {
+function locateNode(nodes: readonly import("../schema/workspec.js").WorkNode[], id: string, parent: readonly string[] = []): { node: import("../schema/workspec.js").WorkNode; address: string[] } | undefined {
 	for (const node of nodes) {
-		if (node.id === id) return node;
+		const address = [...parent, node.id];
+		if (node.id === id) return { node, address };
 		if (Array.isArray(node.work)) {
-			const found = locateNode(node.work, id);
+			const found = locateNode(node.work, id, address);
 			if (found) return found;
 		}
 	}
@@ -72,7 +78,7 @@ function inside(root: string, target: string): boolean {
 }
 
 function failureDetails(params: { path: string; nodeId: string; worktreePath: string; expectedCommit: string }, failures: VerificationFailure[], findings: Finding[] = []): WorkVerifyDetails {
-	return { ...params, outcome: "failed", findings, failures, truncated: false };
+	return { path: params.path, nodeId: params.nodeId, worktreePath: params.worktreePath, expectedCommit: params.expectedCommit, outcome: "failed", findings, failures, truncated: false };
 }
 
 export function createWorkVerifyTool() {
@@ -82,7 +88,7 @@ export function createWorkVerifyTool() {
 		description: "Execute a workspec node's evidence fail-closed in an explicitly identified worktree.",
 		parameters: WorkVerifyParameters,
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			const pathInput = confinedPath(params.path, "path");
+			const pathInput = confinedPath(params.path, "path", "worktreePath");
 			if (!pathInput.ok) return resultPayload(failureDetails(params, [], [pathInput.finding]));
 			const target: VerificationTarget = { worktreePath: params.worktreePath, expectedCommit: params.expectedCommit };
 			const verifier = createVerifier({
@@ -91,7 +97,11 @@ export function createWorkVerifyTool() {
 				sessionManager: ctx.sessionManager,
 			});
 			const tree = await verifier.inspectTarget(target);
-			if (!tree.ok) return resultPayload(failureDetails(params, [tree.failure]));
+			// The spec has not been read yet, so inherit_env names are unavailable.
+			// Do not echo Git diagnostics that can contain a prior command's secret filename.
+			if (!tree.ok) return resultPayload(failureDetails(params, [tree.failure.code === "tree-dirty"
+				? { code: "tree-dirty", message: "target worktree is not clean" }
+				: { code: "tree-identity-unavailable", message: `target worktree failed verifier preflight (${tree.failure.code})` }]));
 			const specPath = resolveSpecPath(tree.snapshot.identity.worktreePath, pathInput.relativePath);
 			if (!inside(tree.snapshot.identity.worktreePath, specPath)) return resultPayload(failureDetails(params, [{ code: "tree-identity-unavailable", message: "spec path escapes the target worktree" }]));
 			let source: string;
@@ -107,17 +117,27 @@ export function createWorkVerifyTool() {
 			const validation = validateWorkspec(source, { specPath: canonicalSpecPath, cwd: tree.snapshot.identity.worktreePath });
 			if (!validation.structuralValid) return resultPayload(failureDetails(params, [], validation.findings));
 			if (!validation.valid) return resultPayload(failureDetails(params, [], validation.findings));
-			const node = locateNode(validation.spec.work, params.nodeId);
-			if (!node) return resultPayload(failureDetails(params, [{ code: "no-execution-evidence", message: `unknown node ${params.nodeId}` }]));
-			const verified = await verifier.verifyNodeAndCache({ node, specPath: params.path, target, checklistReports: params.checklistReports, signal });
-			const { result, cacheUpdate } = verified;
+			const located = locateNode(validation.spec.work, params.nodeId);
+			if (!located) return resultPayload(failureDetails(params, [{ code: "no-execution-evidence", message: `unknown node ${params.nodeId}` }]));
+			const names = validation.spec.work.flatMap(function collect(node): string[] {
+				return [...(node.acceptance ?? []).flatMap((criterion) => criterion.evidence.kind === "command" ? criterion.evidence.inherit_env ?? [] : []), ...(isCompositeNode(node) ? node.work.flatMap(collect) : [])];
+			});
+			const inherited = captureEvidenceEnvironment([...new Set(names)]).inherited;
+			const { result, cacheUpdate, cacheWrite } = await verifier.verifyNodeAndCache(
+				{ node: located.node, address: located.address, specPath: canonicalSpecPath, source, target, inherited, checklistReports: params.checklistReports, signal },
+				(update) => writeVerificationCacheEntry(statusCachePath(tree.snapshot.identity.worktreePath, canonicalSpecPath), canonicalSpecPath, tree.snapshot.identity.worktreePath, { address: located.address, update }),
+			);
+			const cacheFailure: VerificationFailure[] = cacheWrite !== undefined && cacheWrite.status !== "written"
+				? [{ code: "verification-aborted", message: `verification cache ${cacheWrite.status}; result was not recorded` }] : [];
+			const safeCacheWrite = cacheWrite === undefined || cacheWrite.status === "written" ? cacheWrite : { ...cacheWrite, message: redactCommandFailure(inherited, cacheWrite.message) };
 			const details: WorkVerifyDetails = {
-				...params,
-				outcome: result.outcome,
+				path: params.path, nodeId: params.nodeId, worktreePath: params.worktreePath, expectedCommit: params.expectedCommit,
+				outcome: cacheFailure.length > 0 ? "failed" : result.outcome,
 				findings: [],
-				failures: verifier.verificationFailures(result),
+				failures: [...verifier.verificationFailures(result), ...cacheFailure],
 				result,
 				...(cacheUpdate === undefined ? {} : { cacheUpdate }),
+				...(safeCacheWrite === undefined ? {} : { cacheWrite: safeCacheWrite }),
 				truncated: false,
 			};
 			return resultPayload(details);

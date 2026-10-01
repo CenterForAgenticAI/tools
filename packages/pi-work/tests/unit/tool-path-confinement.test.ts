@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -97,12 +97,17 @@ function paramsFor(toolName: string, parameter: ConfinedPathCase["parameter"], s
 	return { ...params[toolName], [parameter]: suppliedPath };
 }
 
-function confinementMessage(suppliedPath: string): string {
-	return `tool paths are confined to the working directory; absolute paths are not allowed: ${JSON.stringify(suppliedPath)}`;
+// work_dispatch, work_status and work_verify resolve a relative path against the
+// worktreePath argument; every other tool resolves it against the session cwd (#52).
+const WORKTREE_RELATIVE_TOOLS: ReadonlySet<string> = new Set(["work_dispatch", "work_status", "work_verify"]);
+
+function confinementMessage(toolName: string, parameter: string, suppliedPath: string): string {
+	const base = WORKTREE_RELATIVE_TOOLS.has(toolName) ? "the worktreePath you pass in this call" : "the working directory (the session's cwd)";
+	return `tool paths are confined to ${base}: ${parameter} must be relative to it, and absolute paths are not allowed: ${JSON.stringify(suppliedPath)}`;
 }
 
 function expectedRendered(toolName: string, parameter: ConfinedPathCase["parameter"], suppliedPath: string): string {
-	const message = confinementMessage(suppliedPath);
+	const message = confinementMessage(toolName, parameter, suppliedPath);
 	const finding = `error absolute-path at $.${parameter}: ${message}`;
 	switch (toolName) {
 		case "work_validate":
@@ -154,7 +159,7 @@ test("every spec-path parameter rejects unprefixed absolute paths through one co
 	for (const { toolName, parameter } of CONFINED_PATH_CASES) {
 		for (const suppliedPath of ABSOLUTE_PATHS) {
 			const result = await invoke(tools, toolName, paramsFor(toolName, parameter, suppliedPath), "/caller/worktree");
-			const message = confinementMessage(suppliedPath);
+			const message = confinementMessage(toolName, parameter, suppliedPath);
 			assert.deepEqual(result.details.findings, [{
 				code: "absolute-path",
 				severity: "error",
@@ -169,7 +174,7 @@ test("every spec-path parameter rejects unprefixed absolute paths through one co
 });
 
 test("every path-taking tool keeps @/ paths relative to the working directory", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "pi-work-tool-paths-"));
+	const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-work-tool-paths-")));
 	try {
 		await writeFile(path.join(root, "draft.md"), "## Acceptance criteria <!-- work:criteria -->\n\n- A1: It works\n");
 		await writeFile(path.join(root, ".gitignore"), ".work/.cache/\n");
@@ -226,6 +231,58 @@ test("every path-taking tool keeps @/ paths relative to the working directory", 
 		// work_verify renders a read-error without its message, so the resolved path is
 		// asserted on the typed finding rather than the rendered text.
 		assert.match(verified.details.findings?.[0]?.message ?? "", new RegExp(`realpath '${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/missing\\.yaml'`));
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("a path rejection names what the path is relative to, per tool (#52)", async () => {
+	const tools = registeredTools();
+	const cwdTool = await invoke(tools, "work_validate", paramsFor("work_validate", "path", "/abs/spec.yaml"), "/caller/worktree");
+	assert.match(cwdTool.content[0]?.text ?? "", /relative to it.*working directory|working directory \(the session's cwd\): path must be relative to it/);
+	for (const toolName of ["work_status", "work_verify", "work_dispatch"]) {
+		const result = await invoke(tools, toolName, paramsFor(toolName, "path", "/abs/spec.yaml"), "/caller/worktree");
+		assert.match(result.content[0]?.text ?? "", /worktreePath you pass in this call: path must be relative to it/, toolName);
+		assert.doesNotMatch(result.content[0]?.text ?? "", /session's cwd/, toolName);
+	}
+});
+
+test("a rendered finding carries its message, not only its code (#52)", async () => {
+	const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-work-render-")));
+	try {
+		await writeFile(path.join(root, "bad.yaml"), "title: [unclosed\n");
+		const tools = registeredTools();
+		const result = await invoke(tools, "work_validate", { path: "bad.yaml" }, root);
+		const withMessage = (result.details.findings ?? []).filter((finding) => "message" in finding && typeof finding.message === "string" && finding.message.length > 0);
+		assert.ok(withMessage.length > 0, "the probe must produce a finding that carries a message");
+		for (const finding of withMessage) assert.ok((result.content[0]?.text ?? "").includes((finding as { message: string }).message), `the message of ${finding.code} must be rendered`);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("work_status, work_verify and work_dispatch render a finding's message (#52)", async () => {
+	const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-work-render-wrappers-")));
+	try {
+		await writeFile(path.join(root, "bad.yaml"), "title: [unclosed\n");
+		await writeFile(path.join(root, ".gitignore"), ".work/.cache/\n");
+		await execFileAsync("git", ["init", "-q", "-b", "fixture"], { cwd: root, timeout: 5000 });
+		await execFileAsync("git", ["add", "."], { cwd: root, timeout: 5000 });
+		await execFileAsync("git", ["-c", "user.name=pi-work", "-c", "user.email=pi-work@example.invalid", "commit", "-qm", "fixture"], { cwd: root, timeout: 5000 });
+		const commit = (await execFileAsync("git", ["rev-parse", "HEAD^{commit}"], { cwd: root, timeout: 5000 })).stdout.trim();
+		const tools = registeredTools();
+		const calls: Record<string, Record<string, unknown>> = {
+			work_status: { path: "bad.yaml", worktreePath: root, expectedCommit: commit },
+			work_verify: { path: "bad.yaml", nodeId: "node", worktreePath: root, expectedCommit: commit },
+			work_dispatch: { path: "bad.yaml", nodeAddress: ["node"], worktreePath: root, expectedCommit: commit },
+		};
+		for (const [toolName, params] of Object.entries(calls)) {
+			const result = await invoke(tools, toolName, params, root);
+			const details = result.details as { findings?: readonly { code: string; message?: string }[] };
+			const withMessage = (details.findings ?? []).filter((finding) => typeof finding.message === "string" && finding.message.length > 0 && finding.code !== "absolute-path");
+			assert.ok(withMessage.length > 0, `${toolName} must produce a finding that carries a message`);
+			for (const finding of withMessage) assert.ok((result.content[0]?.text ?? "").includes(finding.message as string), `${toolName} must render the message of ${finding.code}`);
+		}
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

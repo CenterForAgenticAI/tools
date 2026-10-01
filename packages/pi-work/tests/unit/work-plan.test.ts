@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -14,8 +14,8 @@ const bootstrapSpecSkip = existsSync(path.join(REPO_ROOT, BOOTSTRAP_SPEC))
 	? false
 	: `missing repository fixture: ${BOOTSTRAP_SPEC}`;
 
-async function execute(file: string, nodeAddresses: string[][], cwd = REPO_ROOT) {
-	return workPlanTool.execute("test", { path: file, nodeAddresses }, undefined, undefined, { cwd } as never) as Promise<{ content: { type: string; text?: string }[]; details: WorkPlanDetails }>;
+async function execute(file: string, nodeAddresses: string[][], cwd = REPO_ROOT, responseOffset?: number, responseSnapshot?: string) {
+	return workPlanTool.execute("test", { path: file, nodeAddresses, ...(responseOffset === undefined ? {} : { responseOffset }), ...(responseSnapshot === undefined ? {} : { responseSnapshot }) }, undefined, undefined, { cwd } as never) as Promise<{ content: { type: string; text?: string }[]; details: WorkPlanDetails }>;
 }
 
 async function copyFixture(cwd: string, fixture: string): Promise<string> {
@@ -50,9 +50,9 @@ test("work_plan is exported, creates .work/.cache lazily, and returns a receipt"
 	assert.equal(result.details.plans.length, 1);
 	assert.equal(result.details.worktree, false);
 	assert.equal(result.details.plans[0].delegate.worktree, false);
-	assert.equal(result.details.plans[0].delegate.cwd, cwd);
+	assert.equal(result.details.plans[0].delegate.cwd, await realpath(cwd));
 	assert.match(result.content[0].text!, /1 plan/);
-	assert.ok(result.details.plans[0].briefPath.startsWith(cwd));
+	assert.ok(result.details.plans[0].briefPath.startsWith(await realpath(cwd)));
 	await access(result.details.plans[0].briefPath);
 	await access(path.join(cwd, ".work", ".cache"));
 });
@@ -96,6 +96,69 @@ for (const fixture of ["cyclic-dependency.yaml", "cross-scope-dependency.yaml"])
 		await assert.rejects(access(path.join(cwd, ".work", ".cache", "briefs")));
 	});
 }
+
+test("work_plan pages receipts against a stable rendering and places advisories before them", async () => {
+	const cwd = await mkdtemp(path.join(os.tmpdir(), "pi-work-plan-pages-"));
+	const nodeAddresses = Array.from({ length: 45 }, (_, index) => [`node-${index}`]);
+	const nodes = nodeAddresses.map(([id]) => `  - id: ${id}
+    task: ${id}
+    touches: [src/shared.ts]
+    acceptance:
+      - id: ${id}-acceptance
+        statement: ${id} is green
+        evidence:
+          kind: command
+          run: printf ${id}
+          expect:
+            exit: 0
+            output_includes: ${id}`).join("\n");
+	const source = (title: string) => withDraftLineage(`title: ${title}
+description: pages
+intent: pages
+work:
+${nodes}`, { cwd });
+	await writeFile(path.join(cwd, "spec.yaml"), source("pages"));
+	try {
+		let responseOffset: number | undefined;
+		let responseSnapshot: string | undefined;
+		let firstPage: Awaited<ReturnType<typeof execute>> | undefined;
+		let lastPage: Awaited<ReturnType<typeof execute>> | undefined;
+		const renderedReceiptIds: string[] = [];
+		for (let page = 0; page < 45; page += 1) {
+			const result = await execute("spec.yaml", nodeAddresses, cwd, responseOffset, responseSnapshot);
+			const text = result.content[0]?.text ?? "";
+			assert.equal(result.details.plans.length, 45);
+			assert.ok(text.length <= 4000);
+			renderedReceiptIds.push(...Array.from(text.matchAll(/^node-(\d+) @ /gm), ([, id]) => id!));
+			if (page === 0) assert.ok(text.indexOf("advisory touch-overlap:") < text.indexOf("node-0 @ "), "overlap warning must appear before receipts");
+			firstPage ??= result;
+			lastPage = result;
+			if (result.details.nextResponseOffset === undefined) break;
+			assert.ok(result.details.responseSnapshot);
+			assert.match(text, new RegExp(`responseOffset=${result.details.nextResponseOffset}&responseSnapshot=${result.details.responseSnapshot}`));
+			responseOffset = result.details.nextResponseOffset;
+			responseSnapshot = result.details.responseSnapshot;
+		}
+		assert.equal(lastPage?.details.truncated, false);
+		assert.deepEqual(renderedReceiptIds, Array.from({ length: 45 }, (_, index) => String(index)));
+		assert.ok(firstPage?.details.nextResponseOffset);
+		assert.ok(firstPage?.details.responseSnapshot);
+		const outOfRange = await execute("spec.yaml", nodeAddresses, cwd, 999999, firstPage.details.responseSnapshot);
+		assert.equal(outOfRange.details.continuationError?.code, "response-offset-out-of-range");
+		const missingSnapshot = await execute("spec.yaml", nodeAddresses, cwd, firstPage.details.nextResponseOffset);
+		assert.equal(missingSnapshot.details.continuationError?.code, "response-snapshot-required");
+		const midWord = await execute("spec.yaml", nodeAddresses, cwd, 1, firstPage.details.responseSnapshot);
+		assert.equal(midWord.details.continuationError?.code, "response-offset-not-issued");
+		await writeFile(path.join(cwd, "spec.yaml"), `${source("pages")}\n# a comment that does not affect the rendering\n`);
+		const changedComment = await execute("spec.yaml", nodeAddresses, cwd, firstPage.details.nextResponseOffset, firstPage.details.responseSnapshot);
+		assert.equal(changedComment.details.continuationError?.code, "response-snapshot-mismatch");
+		await writeFile(path.join(cwd, "spec.yaml"), source("changed pages"));
+		const stale = await execute("spec.yaml", nodeAddresses, cwd, firstPage.details.nextResponseOffset, firstPage.details.responseSnapshot);
+		assert.equal(stale.details.continuationError?.code, "response-snapshot-mismatch");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
 
 test("work_plan counts its rendered real-bootstrap advisories and disclaims readiness", { skip: bootstrapSpecSkip }, async () => {
 	const result = await execute(BOOTSTRAP_SPEC, BOOTSTRAP_NODE_ADDRESSES);

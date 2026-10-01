@@ -1,6 +1,6 @@
-import { execFileSync } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
+import { runGitSync } from "../git.js";
 
 /** Find the repository that owns a spec, not the process that happens to read it. */
 export function validationRootForSpec(specPath: string, fallbackCwd: string = process.cwd()): string {
@@ -12,7 +12,7 @@ export function validationRootForSpec(specPath: string, fallbackCwd: string = pr
 	}
 	const specDirectory = path.dirname(canonicalSpecPath);
 	try {
-		return execFileSync("git", ["-C", specDirectory, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+		return runGitSync(specDirectory, ["rev-parse", "--show-toplevel"]).trim();
 	} catch {
 		// A spec may live in a project that has no Git repository.
 	}

@@ -62,6 +62,7 @@ export type LintFinding =
 
 /** Findings about the disposition records themselves, never about what they accept. */
 export type DispositionFinding =
+	| (FindingBase<"error", "duplicate-advisory-disposition"> & { dispositionCode: string; target: string; relatedPaths: FindingPath[]; message: string })
 	| (FindingBase<"error", "disposition-targets-error"> & { dispositionCode: string; target: string; message: string })
 	| (FindingBase<"warning", "disposition-unmatched"> & { dispositionCode: string; target: string; message: string });
 
@@ -182,9 +183,10 @@ export function renderFinding(finding: Finding): string {
 	if (finding.code === "touches-concentration") {
 		return `${summary}: ${finding.target} (${finding.nodeIds.join(", ")})${accepted}`;
 	}
-	if (finding.code === "absolute-path") return `${summary}: ${finding.message}`;
-	if (finding.code === "disposition-targets-error" || finding.code === "disposition-unmatched") return `${summary}: ${finding.message}`;
-	if ("message" in finding && finding.code.startsWith("criterion-")) return `${summary}: ${finding.message}`;
+	if (finding.code === "duplicate-advisory-disposition" || finding.code === "disposition-targets-error" || finding.code === "disposition-unmatched") return `${summary}: ${finding.message}`;
+	// Any finding that carries a message shows it: a bare code names the problem
+	// without saying what to change (#52). The criterion- and path codes rely on this.
+	if ("message" in finding && typeof finding.message === "string" && finding.message.length > 0) return `${summary}: ${finding.message}${accepted}`;
 	return `${summary}${accepted}`;
 }
 

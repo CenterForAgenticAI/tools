@@ -39,7 +39,7 @@ export const workAmendCriterionTool = defineTool({
 		authority: Type.String(),
 	}, { additionalProperties: false }),
 	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-		const pathInput = confinedPath(params.path, "path");
+		const pathInput = confinedPath(params.path, "path", "working-directory");
 		if (!pathInput.ok) {
 			return failed({
 				path: params.path,
