@@ -164,6 +164,49 @@ type WorkerTurnSnapshot =
 	| { definitions: FinalAgentToolDefinition[] }
 	| { errorMessage: string };
 
+/**
+ * Tool names the model is told about by a Pi >= 0.86 transcript, replayed in
+ * order from system messages. Returns undefined for the legacy `Context` shape
+ * (no system messages), where `context.tools` is authoritative.
+ */
+export function transcriptDeclaredToolNames(context: unknown): string[] | undefined {
+	const messages = (context as { messages?: unknown } | null | undefined)?.messages;
+	if (!Array.isArray(messages)) return undefined;
+	const names = new Set<string>();
+	let sawSystemMessage = false;
+	for (const message of messages as Array<{
+		role?: unknown;
+		toolsAdded?: Array<{ name?: unknown }>;
+		toolsRemoved?: Array<{ name?: unknown }>;
+	} | null>) {
+		if (message?.role !== "system") continue;
+		sawSystemMessage = true;
+		for (const tool of message.toolsRemoved ?? []) {
+			if (typeof tool?.name === "string") names.delete(tool.name);
+		}
+		for (const tool of message.toolsAdded ?? []) {
+			if (typeof tool?.name === "string") names.add(tool.name);
+		}
+	}
+	return sawSystemMessage ? [...names] : undefined;
+}
+
+/** Explain how a declared tool set differs from the final worker set; undefined when identical. */
+export function describeToolDeclarationMismatch(
+	declared: readonly string[],
+	expected: readonly string[],
+): string | undefined {
+	// Only an EXTRA declared tool widens what the worker can see. A declared set
+	// that is a strict subset is legitimate on Pi >= 0.99: a tool's prepareLoadout
+	// hook (pi-fabric full-code mode hides everything but fabric_exec) drops names
+	// from the declaration while they stay in agent.state.tools. Failing on those
+	// would break every such worker on every turn without narrowing anything.
+	const expectedSet = new Set(expected);
+	const extra = declared.filter((name) => !expectedSet.has(name));
+	if (extra.length === 0) return undefined;
+	return `Worker tool floor: the provider request declares tools outside the final worker tool set; unexpected: ${extra.join(", ")}.`;
+}
+
 function createFinalFloorErrorStream(errorMessage: string): ReturnType<AgentStreamFunction> {
 	const stream = createAssistantMessageEventStream();
 	const error: AssistantMessage = {
@@ -198,7 +241,13 @@ function installFinalWorkerToolFloor(
 	workerFabricRuntimePath?: string,
 ): () => void {
 	if (!enabled) return () => {};
-	const agent = session.agent as (typeof session.agent & AgentCompatibilitySurface) | undefined;
+	// `streamFn` is re-declared by AgentCompatibilitySurface: its SDK type changed
+	// from `Context` to `TranscriptContext` in Pi 0.86+, and intersecting the two
+	// function types fails to type-check on some releases (Pi 0.99.1).
+	// The double cast is needed because Pi 0.99.1 declares neither property publicly.
+	const agent = session.agent as unknown as
+		| (Omit<typeof session.agent, "streamFn" | "streamFunction"> & AgentCompatibilitySurface)
+		| undefined;
 	if (!agent) return () => {};
 	const property: "streamFunction" | "streamFn" | undefined =
 		typeof agent.streamFunction === "function" ? "streamFunction" :
@@ -241,6 +290,19 @@ function installFinalWorkerToolFloor(
 		if (!snapshot) return previousProvider(...args);
 		if ("errorMessage" in snapshot) return createFinalFloorErrorStream(snapshot.errorMessage);
 		const context = args[1];
+		// Pi >= 0.86 passes a normalized transcript: tool declarations travel as
+		// `toolsAdded`/`toolsRemoved` on system messages and `context.tools` is
+		// ignored by every provider, so rewriting it cannot narrow what the model
+		// is told. Verify the declaration instead and fail closed on any drift.
+		const declared = transcriptDeclaredToolNames(context);
+		if (declared) {
+			const mismatch = describeToolDeclarationMismatch(
+				declared,
+				snapshot.definitions.map((tool) => tool.name),
+			);
+			if (mismatch) return createFinalFloorErrorStream(mismatch);
+			return previousProvider(...args);
+		}
 		const nextArgs = [args[0], { ...context, tools: snapshot.definitions }, args[2]] as AgentStreamArguments;
 		return previousProvider(...nextArgs);
 	};

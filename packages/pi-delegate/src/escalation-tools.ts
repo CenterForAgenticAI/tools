@@ -37,7 +37,7 @@ import {
 	ESCALATE_DECISION_TOOL,
 	ESCALATE_TOOL,
 	RESOLVE_ESCALATION_TOOL,
-} from "./tool-surface.js";
+} from "./escalation-tool-names.js";
 import type { WorkerChannel } from "./worker-channel.js";
 import { isSafeRunId } from "./run-id.js";
 

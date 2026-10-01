@@ -2,7 +2,6 @@
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { join, relative, isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 import {
 	readOutcome,
 	readEscalationRequest,
@@ -67,8 +66,10 @@ function received(scope: EscalationScope, request: EscalationRequest, outcome: E
 	}
 	// A concurrently appended final line is not durable receipt evidence yet.
 	const expected = renderRaiseOutcome(request.requestId, request.kind, request.payload, outcome);
-	const entries = parseSessionEntries(text.slice(0, text.lastIndexOf("\n") + 1));
-	return entries.some((entry) => {
+	return text.slice(0, text.lastIndexOf("\n") + 1).split("\n").some((line) => {
+		let entry;
+		try { entry = JSON.parse(line); }
+		catch { return false; }
 		const message = entry?.type === "message" ? entry.message : undefined;
 		return message?.role === "toolResult" && message.toolCallId === request.consumer!.toolCallId &&
 			message.isError !== true &&

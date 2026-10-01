@@ -393,12 +393,7 @@ own naming scheme should subscribe here and translate at its own boundary.
 that pi-delegate adds to the session. The two share a name but are separate
 mechanisms.
 
-**Deprecated names.** Earlier releases emitted three channels under different
-names: `legacy.delegate.complete`, `legacy.delegate.guidance_delivered`, and
-`legacy.delegate.worker_notify`. This release emits each of them right after
-its canonical name (`delegate:complete`, `delegate:guidance-delivered`,
-`delegate:worker-notify`), with the same payload object. The deprecated names
-will be removed in the next minor release.
+Canonical names are the only event-bus names emitted by this release; hosts that need a different naming scheme should translate them at their own boundary.
 
 ## Calling from a CLI process (no live pi session)
 

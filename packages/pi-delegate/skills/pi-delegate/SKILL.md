@@ -530,7 +530,10 @@ are checked lexically, case-aware per filesystem root, and through existing
 symlinks. Use `readOnly: true` on the run entry to restrict primary-root
 `write`/`edit` paths; scratch and separate artifact roots remain writable, while
 the primary root and its ancestors are excluded. It also rejects common mutating
-bash commands; prose and a tool list do not enforce read-only behavior.
+bash commands while allowing non-writing shell forms such as literal `/dev/null`
+redirection, file-descriptor duplication, and safe read-only Git inspection.
+Git output, executable-helper, and global config-injection options remain
+refused; prose and a tool list do not enforce read-only behavior.
 The repository-pollution guard rejects reserved or declared artifact names and
 the protected `.pi/pi-delegate.json` config for `write`/`edit` and common shell
 writes in Git worktrees. It detects the effective (last) static `dd of=` operand

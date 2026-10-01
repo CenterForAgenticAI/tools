@@ -198,13 +198,9 @@ export function isUniformRunLive(status: UniformRunStatus): boolean {
 }
 
 /**
- * Compute elapsed and silence independently (issue #53).
- *
-	* Live elapsed is wall-clock `now - startedAt`, so a healthy-but-quiet child
-	* keeps accruing runtime. Terminal elapsed is frozen at `lastActivityAt`
-	* (the durable result's `finishedAt`). Event silence remains separately
-	* visible through `lastActivityAgeMs`; it is never treated as terminality.
-	*/
+ * Compute live elapsed from wall-clock time and terminal elapsed from the
+ * retained finish timestamp. Activity age measures silence independently.
+ */
 export function getUniformRunTiming(
 	status: UniformRunStatus,
 	now: number = Date.now(),
@@ -215,11 +211,7 @@ export function getUniformRunTiming(
 			? details.lastEventAt
 			: status.lastActivityAt;
 	const live = isUniformRunLive(status);
-	const endAt = live
-		? status.source === "detached"
-			? now
-			: (status.lastActivityAt ?? now)
-		: status.lastActivityAt;
+	const endAt = live ? now : status.lastActivityAt;
 	const elapsedMs =
 		typeof status.startedAt === "number" &&
 		Number.isFinite(status.startedAt) &&
@@ -621,13 +613,9 @@ function inMemoryStatus(run: NonNullable<ReturnType<typeof getRunSnapshot>>): Un
 	}
 
 	const lastActivityAt = entries.reduce<number | undefined>((acc, entry) => {
-		// Spec 0024 / REQ-LIVE-2..5 — while an entry is LIVE (non-terminal), prefer
-		// its propagated `lastActivityAt` (real worker-channel activity) so the
-		// status elapsed advances instead of freezing at the dispatch gap, and a
-		// genuinely silent live entry's elapsed stops advancing at its last bump.
-		// A TERMINAL entry ignores `lastActivityAt` and reports its real
-		// `endedAt`-based duration (REQ-LIVE-3). An entry with NO `lastActivityAt`
-		// (legacy / never-wired) falls back to `endedAt ?? startedAt` (REQ-LIVE-4).
+		// Live entries retain the last activity for silence reporting. Terminal
+		// entries use their finish time; entries without activity use their known
+		// end/start timestamp. Live elapsed is computed independently above.
 		const raw =
 			isLiveStatus(entry.status) && entry.lastActivityAt !== undefined
 				? entry.lastActivityAt

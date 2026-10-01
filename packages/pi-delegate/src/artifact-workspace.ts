@@ -761,8 +761,10 @@ function readAttemptCandidatePayload(attempt: WorkerArtifactAttempt): ReadArtifa
 		if (!openedDirectory.isDirectory() || openedDirectory.dev !== attempt.outputDev || openedDirectory.ino !== attempt.outputIno) {
 			throw new Error("artifact attempt output directory changed during open");
 		}
-		const fdDirectory = descriptorDirectoryPath(directoryFd);
-		if (!fdDirectory) throw new Error("descriptor-relative artifact candidate read is unavailable");
+		// Without a traversable descriptor namespace (macOS) read by path: the file
+		// open is O_NOFOLLOW with an lstat/fstat identity match, and the directory
+		// identity is asserted before and after, so a replaced directory is refused.
+		const fdDirectory = descriptorDirectoryPath(directoryFd) ?? pathFallback(attempt.outputPath);
 		const payload = readArtifactPayload(path.join(fdDirectory, attempt.artifactName));
 		assertDirectoryIdentity(attempt.root, attempt.rootDev, attempt.rootIno, "artifact attempt directory");
 		assertDirectoryIdentity(attempt.outputPath, attempt.outputDev, attempt.outputIno, "artifact attempt output directory");
@@ -955,7 +957,7 @@ export function validateRetainedWorkerArtifact(
 	if (options.allowExpired !== true && (options.now ?? Date.now()) > Date.parse(ref.expiresAt)) {
 		throw new WorkerArtifactUnavailableError("artifact reference has expired", ref.artifactId);
 	}
-	let opened: { fd: number; fdPath: string; manifest: WorkerArtifactManifest } | undefined;
+	let opened: OpenedRetainedSnapshot | undefined;
 	try {
 		opened = openRetainedSnapshotDirectory(ref, paths);
 		readRetainedPayload(opened, ref);
@@ -1012,10 +1014,27 @@ function equalArtifactRef(left: WorkerArtifactReference, right: WorkerArtifactRe
 	return Object.keys(left).every((key) => left[key as keyof WorkerArtifactReference] === right[key as keyof WorkerArtifactReference]);
 }
 
+interface OpenedRetainedSnapshot {
+	fd: number;
+	fdPath: string;
+	manifest: WorkerArtifactManifest;
+	snapshotPath: string;
+	/** False when only a path walk is available, so identity must be rechecked after each read. */
+	descriptorBacked: boolean;
+}
+
+function assertRetainedSnapshotPathIdentity(opened: OpenedRetainedSnapshot, ref: WorkerArtifactReference): void {
+	if (opened.descriptorBacked) return;
+	const current = fs.lstatSync(opened.snapshotPath);
+	if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== ref.snapshotDev || current.ino !== ref.snapshotIno) {
+		throw new Error("retained artifact snapshot identity changed during read");
+	}
+}
+
 function openRetainedSnapshotDirectory(
 	ref: WorkerArtifactReference,
 	paths: { snapshot: string; manifest: string; payload: string },
-): { fd: number; fdPath: string; manifest: WorkerArtifactManifest } {
+): OpenedRetainedSnapshot {
 	assertNoSymlinkComponents(paths.snapshot, "retained artifact snapshot");
 	const before = fs.lstatSync(paths.snapshot);
 	if (!before.isDirectory() || before.isSymbolicLink() || before.dev !== ref.snapshotDev || before.ino !== ref.snapshotIno) {
@@ -1028,11 +1047,13 @@ function openRetainedSnapshotDirectory(
 		if (!opened.isDirectory() || opened.dev !== ref.snapshotDev || opened.ino !== ref.snapshotIno) {
 			throw new Error("retained artifact snapshot identity changed during open");
 		}
-		const fdPath = descriptorDirectoryPath(fd);
-		if (!fdPath) throw new Error("descriptor-relative retained artifact read is unavailable");
+		const descriptorPath = descriptorDirectoryPath(fd);
+		const fdPath = descriptorPath ?? pathFallback(paths.snapshot);
 		const manifest = parseManifest(readRegularJson(path.join(fdPath, "manifest.json")));
 		if (!equalArtifactRef(manifest.artifactRef, ref)) throw new Error("artifact reference does not match its retained manifest");
-		return { fd, fdPath, manifest };
+		const snapshot: OpenedRetainedSnapshot = { fd, fdPath, manifest, snapshotPath: paths.snapshot, descriptorBacked: descriptorPath !== undefined };
+		assertRetainedSnapshotPathIdentity(snapshot, ref);
+		return snapshot;
 	} catch (error) {
 		fs.closeSync(fd);
 		throw error;
@@ -1040,11 +1061,12 @@ function openRetainedSnapshotDirectory(
 }
 
 function readRetainedPayload(
-	opened: { fd: number; fdPath: string },
+	opened: OpenedRetainedSnapshot,
 	ref: WorkerArtifactReference,
 ): ReadArtifactPayload {
 	const retained = readArtifactPayload(path.join(opened.fdPath, "payload"));
 	const mode = fs.lstatSync(path.join(opened.fdPath, "payload")).mode & 0o222;
+	assertRetainedSnapshotPathIdentity(opened, ref);
 	if (mode !== 0 || retained.candidate.bytes !== ref.bytes || retained.candidate.sha256 !== ref.sha256) {
 		throw new Error("retained artifact payload no longer matches its immutable manifest");
 	}
@@ -1090,7 +1112,7 @@ export async function openWorkerArtifact(value: unknown, options: { root?: strin
 	ensureRealOwnerDirectory(path.join(paths.control, "usage", "readers"));
 	const readerId = randomUUID();
 	const readerPath = path.join(paths.control, "usage", "readers", `${readerId}.json`);
-	let opened: { fd: number; fdPath: string; manifest: WorkerArtifactManifest } | undefined;
+	let opened: OpenedRetainedSnapshot | undefined;
 	const lease = await acquireRawMetadataLease(path.join(paths.control, "metadata.lock"), options.signal);
 	try {
 		opened = openRetainedSnapshotDirectory(ref, paths);
@@ -1222,7 +1244,7 @@ function pinWorkerArtifactUnderLock(
 	expiresAt: string,
 	timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
 ): void {
-	let opened: ReturnType<typeof openRetainedSnapshotDirectory> | undefined;
+	let opened: OpenedRetainedSnapshot | undefined;
 	try { opened = openRetainedSnapshotDirectory(ref, paths); }
 	finally { if (opened) fs.closeSync(opened.fd); }
 	const pinPath = path.join(paths.control, "pins", `${id}.json`);
@@ -1837,18 +1859,50 @@ export function __setArtifactDescriptorDirectoryPathForTests(
 	return () => { descriptorDirectoryPathForTests = previous; };
 }
 
+/**
+ * Return a descriptor-namespace path only when children can be reached through
+ * it. Darwin's `/dev/fd/N` stats as a directory yet cannot be traversed
+ * (`lstat(/dev/fd/N/child)` is ENOENT, `readdir` is ENOTDIR), so "the descriptor
+ * is a directory" proves nothing. Traverse `<candidate>/.` and require it to be
+ * the very directory the descriptor holds. Callers fall back to a path walk
+ * bracketed by identity rechecks when this returns undefined.
+ */
+/**
+ * Path-based walking replaces the descriptor namespace only where the platform has no
+ * traversable one (macOS). Elsewhere a missing namespace fails closed, as it did before the
+ * fallback existed. Identity rechecks narrow, but cannot close, a swap between check and use.
+ */
+function pathFallback(capturedPath: string): string {
+	if (process.platform !== "darwin" && !descriptorDirectoryPathForTests) throw new Error("descriptor-relative traversal is unavailable on this platform");
+	return capturedPath;
+}
+
 function descriptorDirectoryPath(fd: number): string | undefined {
 	if (descriptorDirectoryPathForTests) return descriptorDirectoryPathForTests(fd);
+	return probeDescriptorDirectoryPath(fd);
+}
+
+/** The real platform probe, bypassing the test seam, so a test can check the capability itself. */
+export function __probeArtifactDescriptorDirectoryPathForTests(fd: number): string | undefined {
+	return probeDescriptorDirectoryPath(fd);
+}
+
+function probeDescriptorDirectoryPath(fd: number): string | undefined {
+	let held: fs.Stats;
+	try { held = fs.fstatSync(fd); } catch { return undefined; }
+	if (!held.isDirectory()) return undefined;
 	for (const candidate of [`/proc/self/fd/${fd}`, `/dev/fd/${fd}`]) {
 		try {
-			const stat = fs.statSync(candidate);
-			if (stat.isDirectory()) return candidate;
+			const traversed = fs.statSync(`${candidate}/.`);
+			if (traversed.isDirectory() && sameIdentity(traversed, held)) return candidate;
 		} catch { /* try the next descriptor namespace */ }
 	}
 	return undefined;
 }
 
 function descriptorCurrentPath(fd: number): string | undefined {
+	// A test that withholds the descriptor namespace models macOS, which also has no readable descriptor links.
+	if (descriptorDirectoryPathForTests && descriptorDirectoryPathForTests(fd) === undefined) return undefined;
 	for (const candidate of [`/proc/self/fd/${fd}`, `/dev/fd/${fd}`]) {
 		try {
 			const target = fs.readlinkSync(candidate);
@@ -1858,9 +1912,27 @@ function descriptorCurrentPath(fd: number): string | undefined {
 	return undefined;
 }
 
-function descriptorPathWithin(fd: number, quarantineRoot: string): string {
-	const currentPath = descriptorCurrentPath(fd);
-	if (!currentPath) throw new Error("quarantine path is no longer identity-pinned");
+/**
+ * Where the pinned directory currently lives, proved inside the owned root.
+ * Without readable descriptor links (macOS) the captured path stands in, and
+ * its identity must still equal the held descriptor's.
+ */
+function descriptorPathWithin(fd: number, quarantineRoot: string, capturedPath: string): string {
+	let currentPath = descriptorCurrentPath(fd);
+	if (!currentPath) {
+		const held = fs.fstatSync(fd);
+		let at: fs.Stats | undefined;
+		try { at = fs.lstatSync(capturedPath); } catch { at = undefined; }
+		if (!at || !at.isDirectory() || at.isSymbolicLink() || !sameIdentity(at, held)) throw new Error("quarantine path is no longer identity-pinned");
+		currentPath = path.resolve(capturedPath);
+		// The identity check above follows symlinks in parent components, so require the quarantine
+		// root itself to be a real directory. Narrows, but cannot close, a swap between this check
+		// and the next call (Node has no *at primitives).
+		const rootAt = fs.lstatSync(quarantineRoot);
+		if (!rootAt.isDirectory() || rootAt.isSymbolicLink()) throw new Error('quarantine root is no longer a real directory');
+		// Owned roots are created from real paths, so any symlink in an ancestor means the tree was relocated.
+		if (fs.realpathSync(quarantineRoot) !== path.resolve(quarantineRoot)) throw new Error('quarantine root path contains a symlink');
+	}
 	const relative = path.relative(quarantineRoot, currentPath);
 	if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
 		throw new Error("quarantine identity moved outside its owned root");
@@ -1872,16 +1944,18 @@ async function removePinnedDirectory(
 	fd: number,
 	expected: Pick<fs.Stats, "dev" | "ino">,
 	quarantineRoot: string,
+	capturedPath: string,
 ): Promise<void> {
-	descriptorPathWithin(fd, quarantineRoot);
-	const descriptorPath = descriptorDirectoryPath(fd);
-	if (!descriptorPath) throw new Error("descriptor-relative quarantine deletion is unavailable");
+	descriptorPathWithin(fd, quarantineRoot, capturedPath);
+	// macOS has no traversable descriptor namespace: walk the captured path, with
+	// the directory identity rechecked before every child mutation.
+	const descriptorPath = descriptorDirectoryPath(fd) ?? pathFallback(capturedPath);
 	for (const entry of await fs.promises.readdir(descriptorPath, { withFileTypes: true })) {
-		descriptorPathWithin(fd, quarantineRoot);
+		descriptorPathWithin(fd, quarantineRoot, capturedPath);
 		const childPath = path.join(descriptorPath, entry.name);
 		const before = await fs.promises.lstat(childPath);
 		if (!before.isDirectory() || before.isSymbolicLink()) {
-			descriptorPathWithin(fd, quarantineRoot);
+			descriptorPathWithin(fd, quarantineRoot, capturedPath);
 			await fs.promises.unlink(childPath);
 			continue;
 		}
@@ -1892,8 +1966,8 @@ async function removePinnedDirectory(
 			if (!opened.isDirectory() || !sameIdentity(before, opened)) {
 				throw new Error("quarantine child identity changed during deletion");
 			}
-			await removePinnedDirectory(childFd, opened, quarantineRoot);
-			const currentPath = descriptorPathWithin(childFd, quarantineRoot);
+			await removePinnedDirectory(childFd, opened, quarantineRoot, path.join(capturedPath, entry.name));
+			const currentPath = descriptorPathWithin(childFd, quarantineRoot, path.join(capturedPath, entry.name));
 			const current = fs.lstatSync(currentPath);
 			if (!current.isDirectory() || current.isSymbolicLink() || !sameIdentity(current, opened)) {
 				throw new Error("quarantine child path was replaced during deletion");
@@ -1911,8 +1985,8 @@ async function removePinnedDirectory(
 
 async function removePinnedQuarantineRoot(fd: number, candidate: QuarantinedCandidate): Promise<void> {
 	const quarantineRoot = path.resolve(path.dirname(candidate.path));
-	await removePinnedDirectory(fd, candidate, quarantineRoot);
-	const currentPath = descriptorPathWithin(fd, quarantineRoot);
+	await removePinnedDirectory(fd, candidate, quarantineRoot, candidate.path);
+	const currentPath = descriptorPathWithin(fd, quarantineRoot, candidate.path);
 	const current = fs.lstatSync(currentPath);
 	if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== candidate.dev || current.ino !== candidate.ino) {
 		throw new Error("quarantine root path was replaced during deletion");

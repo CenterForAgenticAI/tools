@@ -68,17 +68,43 @@ must save JSON and Markdown needs `tools: [read, bash, write]` alongside the
 dispatch-time `readOnly: true` policy.
 
 The scratch exception applies to built-in `write`/`edit`, not to bash.
-Read-only bash still refuses output redirection, `tee`, and interpreter code,
-including `node <script>`, even when the destination is inside scratch. A
-workflow requiring a validator script needs a separately scoped capability;
-granting `write` alone does not make that script executable.
+Read-only bash still refuses output redirection to a file, `tee`, and interpreter
+code, including `node <script>`, even when the destination is inside scratch.
+Literal `/dev/null` output redirection and file-descriptor duplication or closure
+(for example `2>/dev/null`, `2>&1`, and `2>&-`) are allowed because they do not
+write file content. A workflow requiring a validator script needs a separately
+scoped capability; granting `write` alone does not make that script executable.
 
 The bash denylist blocks, at minimum, `rm`, `mv`, `cp`, `tee`, `truncate`, `dd`,
 `mkdir`, `touch`, `chmod`, `chown`, `ln`, `install`, in-place `sed`, recognized
 package installs (`npm install`, `yarn add`, `pnpm add`, and `pip install`),
-mutating git subcommands, and unquoted output redirection. Inspection commands
-such as `rg`, `git log`, `git status`, `git diff`, `wc`, `ls`, `cat`, `find`, and
-`fd` remain available.
+mutating git forms, and output redirection to filesystem paths. For every Git
+subcommand, read-only bash also refuses `--output`; Git's global `-c`,
+`--config-env`, and `--exec-path` options; transport-program options
+`--upload-pack`, `--receive-pack`, and `ls-remote -u`; pager execution through
+`grep -O` or `--open-files-in-pager`; and `--ext-diff`. `hash-object` is refused
+even without `-w` because configured clean filters can execute programs.
+Environment assignments in front of `git` (directly or through `env`) are
+refused unless they are locale/display settings (`LC_*`, `LANG`, `TZ`, `TERM`,
+`NO_COLOR`), git targets (`GIT_DIR`, `GIT_WORK_TREE`), or `GIT_PAGER`/`PAGER`
+set to `cat` or empty; variables such as `GIT_PAGER`, `GIT_EXTERNAL_DIFF`,
+`GIT_SSH_COMMAND`, `EDITOR`, `GIT_CONFIG_*`, and `GIT_TRACE` can run a program
+or write a file. Abbreviated long options (`--outp=`, `--ext`) count as the
+full option.
+Inspection commands such as `rg`, `git log`, `git status`, `git diff`, `git branch
+--show-current`, `git remote -v`, `git worktree list`, `wc`, `ls`, `cat`, `find`,
+and `fd` remain available when they do not carry these unsafe options. Read-only
+git forms may inspect any readable target; writable-root checks still apply to
+mutating git forms.
+
+To summarize the checked-in refusal corpus while developing this policy, run:
+
+```sh
+node --import tsx scripts/replay-readonly-refusals.mjs
+```
+
+Running the script as plain `node scripts/replay-readonly-refusals.mjs` prints
+that command when the TypeScript source loader is unavailable.
 
 The in-session bash reserved-name check is **best-effort defense-in-depth, not a sandbox**. Arbitrary shell
 syntax, interpreters (`bash -c`, `python -c`, `node -e`, Perl, Ruby), nested shells, aliases, functions,

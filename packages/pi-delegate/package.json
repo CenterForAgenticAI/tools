@@ -1,5 +1,5 @@
 {
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "Multi-shape pi subagent delegation: supervised forks, direct workers, chain steps, detached drivers, steering, and worktree isolation.",
   "type": "module",
   "main": "dist/index.js",
@@ -116,9 +116,9 @@
     "typescript-eslint": "^8.64.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1",
-    "@earendil-works/pi-coding-agent": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1",
-    "@earendil-works/pi-tui": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1",
+    "@earendil-works/pi-ai": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1 || 0.99.1 || 0.99.2",
+    "@earendil-works/pi-coding-agent": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1 || 0.99.1 || 0.99.2",
+    "@earendil-works/pi-tui": "0.80.6 || 0.83.0 || 0.84.1 || 0.84.2 || 0.85.1 || 0.99.1 || 0.99.2",
     "typebox": "*"
   }
 }

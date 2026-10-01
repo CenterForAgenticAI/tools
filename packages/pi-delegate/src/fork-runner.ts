@@ -26,6 +26,7 @@ import {
 	type SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
+import { DELEGATE_EVENTS } from "./events.js";
 import { existsSync } from "node:fs";
 type DefaultResourceLoaderOptions = NonNullable<
 	ConstructorParameters<typeof DefaultResourceLoader>[0]
@@ -996,6 +997,11 @@ export async function prepareWorkerSessionResources(
 			artifactWriterRequirement: base.artifactWriterRequirement,
 			writeConfined: base.confinement !== undefined,
 		});
+		// Resolve trusted ownership before registering deferred controls in this worker's registry.
+		if (toolScope.delegateOptIn && toolScope.delegateToolSelectorIndexes.some((index) =>
+			["delegate_control", "delegate_escalation"].includes(toolScope.extensionToolSelectors[index].tool))) {
+			eventBus.emit(DELEGATE_EVENTS.revealControlTools, undefined);
+		}
 		assertWorkerToolSurfaceUsable(effectiveSurface, toolScope);
 		if (toolScope.diagnostics.length > 0) {
 			logDelegateDiagnostic(toolScope.diagnostics.join(" "), {

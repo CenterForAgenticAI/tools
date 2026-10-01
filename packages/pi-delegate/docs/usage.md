@@ -105,7 +105,7 @@ accepted on ingress and is canonicalized to this driver mode; new calls use
   - `steer` — guide an explicit supervised run's copied supervisor `fork`, or an
     authenticated detached `driver` through its control route. Direct workers,
     chain steps, and unknown in-process shapes reject steering.
-  - `follow_up` — queue a daemon-driver instruction after its current turn.
+  - `follow_up` — queue a daemon-driver instruction after its current turn. The turn must still be running: once `prompt_status` reports a terminal state, `follow_up` and `steer` fail with `control-unavailable` and leave a slept driver asleep.
   - `ui_answer` — answer one correlated daemon-driver extension question.
   - `cancel` — abort one run (or the whole dispatch); authenticated detached
     drivers use their authenticated control route.

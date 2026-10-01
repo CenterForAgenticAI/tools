@@ -40,7 +40,7 @@ import {
 	type DelegateOnlyConfig,
 } from "./delegate-only/config.js";
 import type { FooterIconMode } from "./footer-presentation.js";
-import { normalizeThinkingFields, type ThinkingLevel } from "./thinking-policy.js";
+import { normalizeThinkingFields, type ThinkingLevel } from "./thinking-fields.js";
 import {
 	DEFAULT_HEARTBEAT_INTERVAL_MS as HEARTBEAT_INTERVAL_DEFAULT,
 	DEFAULT_MAX_CONSECUTIVE_HEARTBEATS as MAX_CONSECUTIVE_HEARTBEATS_DEFAULT,

@@ -77,6 +77,16 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 	"status",
 	"show",
 	"diff",
+	"diff-tree",
+	"diff-index",
+	"diff-files",
+	"range-diff",
+	"patch-id",
+	"name-rev",
+	"show-ref",
+	"show-branch",
+	"ls-remote",
+	"whatchanged",
 	"rev-parse",
 	"rev-list",
 	"ls-files",
@@ -90,13 +100,29 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 	"merge-base",
 	"symbolic-ref",
 	"check-ignore",
+	"help",
+	"var",
+	"count-objects",
+	"verify-commit",
+	"verify-tag",
 	"version",
+]);
+
+const ARGUMENT_SENSITIVE_GIT_SUBCOMMANDS = new Set([
+	"branch",
+	"remote",
+	"worktree",
+	"config",
+	"stash",
+	"tag",
+	"notes",
+	"reflog",
+	"hash-object",
 ]);
 
 const RESERVED_ARTIFACT_NAMES = new Set(["plan.md", "implementation.md", "review.md", "progress.md", "context.md"]);
 
 const GIT_TARGET_FLAGS = new Set(["-C", "--git-dir", "--work-tree"]);
-const GIT_FLAGS_WITH_VALUES = new Set(["-c", "--config-env"]);
 const PATCH_DIRECTIVES = [
 	"*** Add File: ",
 	"*** Update File: ",
@@ -963,9 +989,69 @@ function resolveGitTarget(value: string, cwd: string): string | undefined {
 	return lexicalPath(value, cwd);
 }
 
-function parseGitSimpleCommand(tokens: string[], cwd: string): { targets: string[]; subcommand?: string } | undefined {
+interface ParsedGitSimpleCommand {
+	targets: string[];
+	subcommand?: string;
+	arguments: string[];
+	unsafeOption?: string;
+}
+
+function gitSubcommandArguments(tokens: readonly string[], start: number): string[] {
+	const arguments_: string[] = [];
+	for (let index = start; index < tokens.length; index++) {
+		const token = tokens[index]!;
+		const redirect = /^(?:\d*|&)?(?:>>|>&|>)(.*)$/u.exec(token);
+		if (!redirect) arguments_.push(token);
+		else if (redirect[1] === "") index++;
+	}
+	return arguments_;
+}
+
+function matchesAbbreviatedGitOption(argument: string, option: string): boolean {
+	const equals = argument.indexOf("=");
+	const name = equals === -1 ? argument : argument.slice(0, equals);
+	return name.length > 2 && name.startsWith("--") && option.startsWith(name);
+}
+
+/**
+ * Git options that can escape read-only classification by writing a file,
+ * selecting an executable helper, or injecting configuration that does either.
+ */
+function unsafeReadOnlyGitOption(subcommand: string, arguments_: readonly string[]): string | undefined {
+	for (const argument of arguments_) {
+		if (argument === "--") break;
+		if (matchesAbbreviatedGitOption(argument, "--output")) return "--output";
+		if (matchesAbbreviatedGitOption(argument, "--ext-diff")) return "--ext-diff";
+		if (subcommand === "ls-remote" && matchesAbbreviatedGitOption(argument, "--upload-pack")) return "--upload-pack";
+		if (argument === "--receive-pack" || argument.startsWith("--receive-pack=")) return "--receive-pack";
+		if (subcommand === "grep" && matchesAbbreviatedGitOption(argument, "--open-files-in-pager")) {
+			return "--open-files-in-pager";
+		}
+		if (subcommand === "ls-remote" && /^-[^-]*u/u.test(argument)) return "-u";
+		if (subcommand === "grep" && /^-[^-]*O/u.test(argument)) return "-O";
+	}
+	return undefined;
+}
+
+/**
+ * Environment assignments allowed in front of a readOnly git command. Git reads
+ * many variables that name an executable (GIT_PAGER, GIT_EXTERNAL_DIFF,
+ * GIT_SSH_COMMAND, EDITOR...), inject configuration (GIT_CONFIG_*), or write a
+ * file (GIT_TRACE*=<path>), so anything outside this allowlist is refused.
+ */
+const SAFE_GIT_ENVIRONMENT_NAMES = new Set(["GIT_DIR", "GIT_WORK_TREE", "LANG", "LANGUAGE", "TZ", "TERM", "NO_COLOR", "COLUMNS", "LINES", "GIT_OPTIONAL_LOCKS"]);
+const SAFE_PAGER_VALUES = new Set(["", "cat"]);
+
+function unsafeGitEnvironmentAssignment(name: string, value: string): string | undefined {
+	if (SAFE_GIT_ENVIRONMENT_NAMES.has(name) || name.startsWith("LC_")) return undefined;
+	if ((name === "GIT_PAGER" || name === "PAGER") && SAFE_PAGER_VALUES.has(value.replace(/^(['"])(.*)\1$/su, "$2"))) return undefined;
+	return name;
+}
+
+function parseGitSimpleCommand(tokens: string[], cwd: string): ParsedGitSimpleCommand | undefined {
 	let index = 0;
 	const targets: string[] = [];
+	let unsafeOption: string | undefined;
 	let commandCwd = cwd;
 	// Consume EVERY leading shell assignment, not just the git ones: with only
 	// `GIT_*` recognised, an unrelated prefix such as `LC_ALL=C GIT_DIR=…` hid
@@ -973,6 +1059,7 @@ function parseGitSimpleCommand(tokens: string[], cwd: string): { targets: string
 	while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[index]!)) {
 		const assignment = tokens[index]!;
 		const equals = assignment.indexOf("=");
+		unsafeOption ??= unsafeGitEnvironmentAssignment(assignment.slice(0, equals), assignment.slice(equals + 1));
 		if (/^(?:GIT_DIR|GIT_WORK_TREE)$/u.test(assignment.slice(0, equals))) {
 			const target = resolveGitTarget(assignment.slice(equals + 1), commandCwd);
 			if (target) targets.push(target);
@@ -999,6 +1086,7 @@ function parseGitSimpleCommand(tokens: string[], cwd: string): { targets: string
 			}
 			const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/su.exec(token);
 			if (!assignment) break;
+			unsafeOption ??= unsafeGitEnvironmentAssignment(assignment[1]!, assignment[2]!);
 			if (assignment[1] === "GIT_DIR" || assignment[1] === "GIT_WORK_TREE") {
 				const target = resolveGitTarget(assignment[2]!, commandCwd);
 				if (target) targets.push(target);
@@ -1042,17 +1130,135 @@ function parseGitSimpleCommand(tokens: string[], cwd: string): { targets: string
 			index++;
 			continue;
 		}
-		if (GIT_FLAGS_WITH_VALUES.has(token)) {
-			index += 2;
+		if (token === "-c" || token.startsWith("-c") || token === "--config-env" || token.startsWith("--config-env=")) {
+			unsafeOption ??= token === "-c" || token.startsWith("-c") ? "-c" : "--config-env";
+			index += token === "-c" || token === "--config-env" ? 2 : 1;
+			continue;
+		}
+		if (token === "--exec-path" || token.startsWith("--exec-path=")) {
+			unsafeOption ??= "--exec-path";
+			index += token === "--exec-path" ? 2 : 1;
 			continue;
 		}
 		if (token.startsWith("-")) {
 			index++;
 			continue;
 		}
-		return { targets, subcommand: token };
+		const arguments_ = gitSubcommandArguments(tokens, index + 1);
+		return {
+			targets,
+			subcommand: token,
+			arguments: arguments_,
+			...(unsafeOption === undefined ? {} : { unsafeOption }),
+		};
 	}
-	return { targets };
+	return { targets, arguments: [], ...(unsafeOption === undefined ? {} : { unsafeOption }) };
+}
+function readOnlyGitBranch(arguments_: readonly string[]): boolean {
+	if (arguments_.length === 0) return true;
+	let listingMode = false;
+	let showCurrent = false;
+	for (let index = 0; index < arguments_.length; index++) {
+		const argument = arguments_[index]!;
+		if (argument === "--show-current") {
+			showCurrent = true;
+			continue;
+		}
+		if (/^-[arv]+$/u.test(argument)) {
+			if (argument.includes("a") || argument.includes("r")) listingMode = true;
+			continue;
+		}
+		if (argument === "--list") {
+			listingMode = true;
+			continue;
+		}
+		if (["--contains", "--merged", "--no-merged"].includes(argument)) {
+			listingMode = true;
+			continue;
+		}
+		if (["--points-at", "--format", "--sort"].includes(argument)) {
+			if (arguments_[index + 1] === undefined) return false;
+			if (argument === "--points-at") listingMode = true;
+			index++;
+			continue;
+		}
+		if (["--contains=", "--merged=", "--no-merged=", "--points-at="].some((prefix) => argument.startsWith(prefix))) {
+			listingMode = true;
+			continue;
+		}
+		if (argument.startsWith("--format=") || argument.startsWith("--sort=")) continue;
+		if (argument.startsWith("-")) return false;
+		if (!listingMode || showCurrent) return false;
+	}
+	return !showCurrent || arguments_.length === 1;
+}
+
+function readOnlyGitRemote(arguments_: readonly string[]): boolean {
+	if (arguments_.length === 0) return true;
+	if (arguments_.length === 1 && arguments_[0] === "-v") return true;
+	if (arguments_[0] === "show") return arguments_.length === 2 && !arguments_[1]!.startsWith("-");
+	if (arguments_[0] !== "get-url") return false;
+	const operands = arguments_.slice(1).filter((argument) => argument !== "--all" && argument !== "--push");
+	return operands.length === 1 && !operands[0]!.startsWith("-");
+}
+
+function readOnlyGitConfig(arguments_: readonly string[]): boolean {
+	const readActions = new Set(["--get", "--get-all", "--get-regexp", "--list", "-l", "get", "list"]);
+	const displayModifiers = new Set(["--show-origin", "--show-scope"]);
+	let action: string | undefined;
+	for (const argument of arguments_) {
+		if (displayModifiers.has(argument)) continue;
+		if (readActions.has(argument)) {
+			if (action !== undefined) return false;
+			action = argument;
+			continue;
+		}
+		if (argument.startsWith("-")) return false;
+	}
+	return action !== undefined || (arguments_.length > 0 && arguments_.every((argument) => displayModifiers.has(argument)));
+}
+
+function readOnlyGitTag(arguments_: readonly string[]): boolean {
+	if (arguments_.length === 0) return true;
+	let listingMode = false;
+	for (const argument of arguments_) {
+		if (argument === "-l" || argument === "--list" ||
+			argument === "--contains" || argument.startsWith("--contains=") ||
+			argument === "--points-at" || argument.startsWith("--points-at=")) {
+			listingMode = true;
+			continue;
+		}
+		if (argument.startsWith("-")) return false;
+		if (!listingMode) return false;
+	}
+	return listingMode;
+}
+
+function readOnlyGitReflog(arguments_: readonly string[]): boolean {
+	if (arguments_.length === 0) return true;
+	if (arguments_.some((argument) => ["expire", "delete", "exists", "write", "drop", "list"].includes(argument))) return false;
+	return arguments_[0] === "show" || arguments_[0]!.startsWith("-");
+}
+
+function isReadOnlyGitInvocation(parsed: ParsedGitSimpleCommand): boolean {
+	const subcommand = parsed.subcommand;
+	if (subcommand === undefined || parsed.unsafeOption !== undefined) return false;
+	if (unsafeReadOnlyGitOption(subcommand, parsed.arguments) !== undefined) return false;
+	if (READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) return true;
+	if (!ARGUMENT_SENSITIVE_GIT_SUBCOMMANDS.has(subcommand)) return false;
+	const arguments_ = parsed.arguments;
+	switch (subcommand) {
+		case "branch": return readOnlyGitBranch(arguments_);
+		case "remote": return readOnlyGitRemote(arguments_);
+		case "worktree": return arguments_[0] === "list";
+		case "config": return readOnlyGitConfig(arguments_);
+		case "stash": return arguments_[0] === "list" || arguments_[0] === "show";
+		case "tag": return readOnlyGitTag(arguments_);
+		case "notes": return arguments_[0] === "list" || arguments_[0] === "show";
+		case "reflog": return readOnlyGitReflog(arguments_);
+		// Even without --write, hash-object may execute a configured clean filter.
+		case "hash-object": return false;
+	}
 }
 
 /**
@@ -1066,21 +1272,30 @@ function hasUnevaluatedExpansion(value: string): boolean {
 	return /[$`]/u.test(value);
 }
 
+interface GitTargetViolation {
+	target: string;
+	dynamic: boolean;
+}
+
 /** Return explicit, out-of-root git targets from mutating bash commands. */
-export function outOfRootGitTargets(command: string, policy: WriteConfinementPolicy, cwd: string): string[] {
+function outOfRootGitTargetViolations(command: string, policy: WriteConfinementPolicy, cwd: string): GitTargetViolation[] {
 	if (typeof command !== "string") return [];
-	const offending: string[] = [];
+	const offending: GitTargetViolation[] = [];
 	for (const simpleCommand of splitSimpleCommands(command)) {
 		const parsed = parseGitSimpleCommand(shellWords(simpleCommand), cwd);
-		if (!parsed || (parsed.subcommand !== undefined && READ_ONLY_GIT_SUBCOMMANDS.has(parsed.subcommand))) continue;
+		if (!parsed || isReadOnlyGitInvocation(parsed)) continue;
 		for (const target of parsed.targets) {
-			const unresolved = hasUnevaluatedExpansion(target);
-			if ((unresolved || !isWritablePath(target, policy, cwd)) && !offending.includes(target)) {
-				offending.push(target);
+			const dynamic = hasUnevaluatedExpansion(target);
+			if ((dynamic || !isWritablePath(target, policy, cwd)) && !offending.some((entry) => entry.target === target)) {
+				offending.push({ target, dynamic });
 			}
 		}
 	}
 	return offending;
+}
+
+export function outOfRootGitTargets(command: string, policy: WriteConfinementPolicy, cwd: string): string[] {
+	return outOfRootGitTargetViolations(command, policy, cwd).map((entry) => entry.target);
 }
 
 const READ_ONLY_MUTATING_EXECUTABLES = new Set([
@@ -1159,9 +1374,34 @@ function shellOutputRedirections(command: string): ShellOutputRedirections {
 	return { found, targets };
 }
 
-/** Return true for an unquoted shell output redirection. */
+/** Return true when an unquoted shell output redirection can write bytes. */
 function hasOutputRedirection(command: string): boolean {
-	return shellOutputRedirections(command).found;
+	let quote: "'" | '"' | undefined;
+	for (let index = 0; index < command.length; index++) {
+		const character = command[index]!;
+		if (character === "\\" && quote !== "'") { index++; continue; }
+		if (character === "'" || character === '"') {
+			if (quote === undefined) quote = character;
+			else if (quote === character) quote = undefined;
+			continue;
+		}
+		if (quote !== undefined || character !== ">") continue;
+		if (command[index - 1] === "<" || command[index + 1] === "|") return true;
+		const append = command[index + 1] === ">";
+		if (append && command[index - 1] === "&") return true;
+		let targetStart = index + (append ? 2 : 1);
+		while (/\s/u.test(command[targetStart] ?? "")) targetStart++;
+		if (command[targetStart] === "&") {
+			const duplicate = /^&(?:\d+|-)(?=$|[\s;|&()<>])/u.exec(command.slice(targetStart));
+			if (!duplicate) return true;
+			index = targetStart + duplicate[0].length - 1;
+			continue;
+		}
+		const target = readShellWordAt(command, targetStart);
+		if (target.end === targetStart || command.slice(targetStart, target.end) !== "/dev/null") return true;
+		index = target.end - 1;
+	}
+	return false;
 }
 
 function nonOptionShellArguments(words: readonly string[]): string[] {
@@ -1684,8 +1924,17 @@ export function readOnlyBashRefusal(command: string, cwd = process.cwd()): strin
 			return `readOnly bash policy refuses package installation ${words.slice(0, 2).join(" ")}`;
 		}
 		const parsedGit = parseGitSimpleCommand(rawWords, cwd);
-		if (parsedGit?.subcommand !== undefined && !READ_ONLY_GIT_SUBCOMMANDS.has(parsedGit.subcommand)) {
-			return `readOnly bash policy refuses mutating git subcommand ${parsedGit.subcommand}`;
+		if (parsedGit?.unsafeOption !== undefined) {
+			return `readOnly bash policy refuses unsafe git global option ${parsedGit.unsafeOption}`;
+		}
+		if (parsedGit?.subcommand !== undefined) {
+			const unsafeOption = unsafeReadOnlyGitOption(parsedGit.subcommand, parsedGit.arguments);
+			if (unsafeOption !== undefined) {
+				return `readOnly bash policy refuses unsafe git option ${unsafeOption}`;
+			}
+			if (!isReadOnlyGitInvocation(parsedGit)) {
+				return `readOnly bash policy refuses mutating git subcommand ${parsedGit.subcommand}`;
+			}
 		}
 	}
 	return undefined;
@@ -2159,6 +2408,17 @@ export function createWriteConfinementExtension(
 					writeDiagnostic(`${policy.readOnly === true ? "readOnly" : "artifact filename"} refusal: ${reason}`, { throttleKey: refusalThrottleKey });
 					return { block: true, reason };
 				}
+				const offending = outOfRootGitTargetViolations(command, policy, context.cwd);
+				if (offending.length > 0) {
+					const dynamic = offending.some((entry) => entry.dynamic);
+					const reason = dynamic
+						? "Delegate worker refused a mutating git command with a dynamic/unresolvable target; writable-root confinement cannot verify shell expansions. Use a literal target inside the assigned writable root."
+						: confinementRefusal("git", offending.map((entry) => entry.target), policy);
+					const refusal: PolicyRefusal = { boundary: "writableRoot", toolName: "bash", reason };
+					notifyRefusal(policy, refusal);
+					writeDiagnostic(`write-confinement refusal: ${reason}`, { throttleKey: refusalThrottleKey });
+					return { block: true, reason };
+				}
 				if (policy.readOnly === true) {
 					const readOnlyReason = readOnlyBashRefusal(command, context.cwd);
 					if (readOnlyReason) {
@@ -2168,14 +2428,6 @@ export function createWriteConfinementExtension(
 						writeDiagnostic(`readOnly refusal: ${reason}`, { throttleKey: refusalThrottleKey });
 						return { block: true, reason };
 					}
-				}
-				const offending = outOfRootGitTargets(safeInputCommand(event.input) ?? "", policy, context.cwd);
-				if (offending.length > 0) {
-					const reason = confinementRefusal("git", offending, policy);
-					const refusal: PolicyRefusal = { boundary: "writableRoot", toolName: "bash", reason };
-					notifyRefusal(policy, refusal);
-					writeDiagnostic(`write-confinement refusal: ${reason}`, { throttleKey: refusalThrottleKey });
-					return { block: true, reason };
 				}
 			}
 		} catch (error) {

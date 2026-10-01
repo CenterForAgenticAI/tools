@@ -235,6 +235,7 @@ import {
 import {
 	answerDaemonDriverUi,
 	cancelDaemonDriver,
+	DaemonDriverTurnSettledError,
 	followUpDaemonDriver,
 	hasOwnedDaemonDriverRun,
 	isDaemonRequestError,
@@ -527,6 +528,17 @@ export interface WarmPlannedProviderAuthArgs {
 	/** Deterministic test seam; production callers use WHOLE_PREFLIGHT_WARMUP_DEADLINE_MS. */
 	deadlineMs?: number;
 	onDiagnostic?: (message: string) => void;
+}
+
+/**
+ * Typed result details for a driver steer or follow-up refused because the turn
+ * has settled, so runtime callers get `control-unavailable` and the prompt state
+ * instead of an untyped core error.
+ */
+function settledTurnDetails(error: unknown): { errorCode?: "control-unavailable"; turnSettled?: true; promptState?: string } {
+	return error instanceof DaemonDriverTurnSettledError
+		? { errorCode: "control-unavailable", turnSettled: true, promptState: error.promptState }
+		: {};
 }
 
 function credentialWarmupAbortError(): Error {
@@ -1409,7 +1421,20 @@ export { resolveChildCwd };
  * `deliverAs === "queue"` skips straight to rung 3. When the clone session
  * isn't available at all we also jump to rung 3 — that happens if the
  * entry hasn't booted yet or has already torn down.
+ *
+ * Pi >= 0.99 `steer()` resolves to a disposition. `"handled"` means an input
+ * handler consumed the text without queueing it, so it must not be reported as
+ * a delivered steer. The same handler chain would consume an equivalent
+ * follow-up, and `sendUserMessage()` does not expose its disposition, so a
+ * handled steer goes straight to rung 3: the guidance is kept and the worker
+ * sees it when pending guidance next drains (its next `message_subagent`).
+ * Keeping it deliberately overrides a handler that consumed the text on
+ * purpose; it is a product choice, revisit it if a handler needs to block
+ * guidance. Only `undefined` (older SDKs) and `"queued"` count as a delivered
+ * steer; any other value is kept as guidance.
  */
+export type SteerQueuedDisposition = "handled" | "queued";
+
 export interface SteerFallbackArgs {
 	runId: string;
 	forkName: string;
@@ -1417,7 +1442,7 @@ export interface SteerFallbackArgs {
 	deliverAs?: "steer" | "followUp" | "queue";
 	cloneSession?: {
 		isStreaming: boolean;
-		steer(text: string): Promise<void>;
+		steer(text: string): Promise<void | SteerQueuedDisposition>;
 		sendUserMessage(
 			text: string,
 			opts?: { deliverAs?: "steer" | "followUp" },
@@ -1440,8 +1465,11 @@ export async function steerForkFallbackLadder(
 	if (clone) {
 		if (clone.isStreaming) {
 			try {
-				await clone.steer(args.text);
-				return { delivered: "steer" };
+				const disposition = await clone.steer(args.text);
+				if (disposition === undefined || disposition === "queued") return { delivered: "steer" };
+				errors.push(`steer: not queued (disposition ${String(disposition)})`);
+				pushGuidance(args.runId, args.forkName, args.text);
+				return { delivered: "queued", error: errors.join("; ") };
 			} catch (err) {
 				errors.push(`steer: ${(err as Error)?.message ?? err}`);
 			}
@@ -6489,7 +6517,7 @@ export default function (pi: ExtensionAPI) {
 				} catch (error) {
 					return {
 						content: [{ type: "text" as const, text: `Cannot steer daemon driver runId=${params.runId}: ${error instanceof Error ? error.message : String(error)}.` }],
-						details: { runId: params.runId, mode: "driver" },
+						details: { runId: params.runId, mode: "driver", ...settledTurnDetails(error) },
 						isError: true,
 					};
 				}
@@ -7338,7 +7366,7 @@ export default function (pi: ExtensionAPI) {
 			} catch (error) {
 				return {
 					content: [{ type: "text" as const, text: `Could not queue daemon follow-up for runId=${params.runId}: ${error instanceof Error ? error.message : String(error)}` }],
-					details: { runId: params.runId, mode: "driver" },
+					details: { runId: params.runId, mode: "driver", ...settledTurnDetails(error) },
 					isError: true,
 				};
 			}

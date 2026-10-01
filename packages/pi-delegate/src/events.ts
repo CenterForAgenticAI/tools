@@ -58,29 +58,11 @@ export const DELEGATE_COMPLETE_CUSTOM_TYPE = "delegate:complete" as const;
 
 export type DelegateEventName = (typeof DELEGATE_EVENTS)[keyof typeof DELEGATE_EVENTS];
 
-/**
- * Names emitted before the rename back to `delegate:*`, kept for one release.
- *
- * pi-delegate emits each deprecated name immediately after its canonical name,
- * with the same payload object. Its own listeners subscribe only to canonical
- * names, so nothing inside pi-delegate runs twice. Remove this map, and the
- * alias emission, in the next minor release.
- *
- * @deprecated Subscribe to the canonical `DELEGATE_EVENTS` names.
- */
-export const DEPRECATED_DELEGATE_EVENT_ALIASES: Readonly<Partial<Record<DelegateEventName, string>>> = Object.freeze({
-	[DELEGATE_EVENTS.complete]: "legacy.delegate.complete",
-	[DELEGATE_EVENTS.guidanceDelivered]: "legacy.delegate.guidance_delivered",
-	[DELEGATE_EVENTS.workerNotify]: "legacy.delegate.worker_notify",
-});
-
-/** Emit a canonical delegate event and, while it exists, its deprecated alias. */
+/** Emit a canonical delegate event. */
 export function emitDelegateEvent(
 	emit: (channel: string, data: unknown) => void,
 	name: DelegateEventName,
 	data: unknown,
 ): void {
 	emit(name, data);
-	const alias = DEPRECATED_DELEGATE_EVENT_ALIASES[name];
-	if (alias !== undefined) emit(alias, data);
 }

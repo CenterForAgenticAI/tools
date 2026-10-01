@@ -109,8 +109,32 @@ const systemClock: WorkerChannelClock = {
 
 const PROMPT_IDLE_POLL_INTERVAL_MS = 10;
 
+/**
+ * What Pi's `AgentSession.prompt()` reports through `preflightResult`.
+ *
+ * - Pi <= 0.85 passes a boolean: `true` once the prompt is accepted and `false`
+ *   immediately before `prompt()` rejects.
+ * - Pi >= 0.99 passes the disposition of an accepted prompt (`"handled"` by an
+ *   extension command or input handler, `"queued"` while streaming, `"started"`
+ *   when a turn begins). It reports a rejected prompt only by throwing, so
+ *   the callback is never invoked for a failed preflight.
+ *
+ * A disposition string is truthy, so the value must never be read as a boolean.
+ */
+export type PromptPreflightResult = boolean | "handled" | "queued" | "started";
+
+/**
+ * Whether a preflight report means the prompt was accepted. Fails closed: `false`,
+ * an absent value, and any disposition this code does not know are all "not
+ * accepted", so a future Pi release that adds a rejection value cannot be
+ * mistaken for success by truthiness.
+ */
+export function isPromptPreflightAccepted(result: unknown): boolean {
+	return result === true || result === "handled" || result === "queued" || result === "started";
+}
+
 type PromptOptions = {
-	preflightResult?: (success: boolean) => void;
+	preflightResult?: (result: PromptPreflightResult) => void;
 	streamingBehavior?: "steer" | "followUp";
 };
 
@@ -202,12 +226,12 @@ function promptWithRequestIdentity(
 	const callerPreflight = promptOptions?.preflightResult;
 	const options: PromptOptions = {
 		...promptOptions,
-		preflightResult: (success) => {
-			accepted = success;
-			if (success && delivery === "followUp" && queuedCandidate) {
+		preflightResult: (result) => {
+			accepted = isPromptPreflightAccepted(result);
+			if (accepted && delivery === "followUp" && queuedCandidate) {
 				bindIdentity(queuedCandidate);
 			}
-			callerPreflight?.(success);
+			callerPreflight?.(result);
 		},
 	};
 	return promptIdentityContext.run(

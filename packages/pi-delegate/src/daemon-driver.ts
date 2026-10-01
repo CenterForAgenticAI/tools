@@ -76,6 +76,19 @@ export class DaemonLaunchError extends Error {
 		this.name = "DaemonLaunchError";
 	}
 }
+/**
+ * A steer or follow-up addressed to a driver whose prompt has no active turn.
+ * The daemon queues both only behind a running turn, so once the prompt is
+ * terminal there is nothing to deliver into. Raised before any wake, so a
+ * rejected control call never revives a slept session.
+ */
+export class DaemonDriverTurnSettledError extends Error {
+	constructor(readonly operation: "steer" | "follow_up", readonly promptState: string) {
+		super(`driver turn has ${promptState}; ${operation} needs an active turn`);
+		this.name = "DaemonDriverTurnSettledError";
+	}
+}
+
 export interface DaemonDriverLaunchResult {
 	runId: string;
 	locator: DaemonRunLocator;
@@ -744,12 +757,13 @@ async function connectRecordedDriver(
 	agentDir: string,
 	runId: string,
 	environment: NodeJS.ProcessEnv,
+	connect: typeof connectDaemonLazy = connectDaemonLazy,
 ): Promise<{ cfg: OrchestrateCfg; client: DaemonClient; locator: DaemonRunLocator }> {
-	const cfg = await reconcileDaemonPendingLaunch(agentDir, runId, environment);
+	const cfg = await reconcileDaemonPendingLaunch(agentDir, runId, environment, connect);
 	if (!cfg || !cfg.daemonLocator || !cfg.daemonConnection) {
 		throw new Error(`no daemon driver locator for runId=${runId}`);
 	}
-	const client = await connectDaemonLazy(connectOptions(cfg.daemonConnection, environment, true));
+	const client = await connect(connectOptions(cfg.daemonConnection, environment, true));
 	return { cfg, client, locator: cfg.daemonLocator };
 }
 
@@ -780,18 +794,100 @@ export async function statusDaemonDriver(
 			"status attach",
 			client.attach(locator.daemonSessionId, { fromCursor: locator.cursor, live: false }),
 		);
-		const status = await boundedDaemonOperation(
-			"status",
-			client.request("status", {}, locator.daemonSessionId),
-		);
-		if (!("session" in status)) {
-			throw new Error(`daemon returned global status for session ${locator.daemonSessionId}`);
-		}
-		return { ...status, session: attachment.result.session };
+		const status = await readRegistryStatus(client, locator.daemonSessionId);
+		return { ...status, session: currentSessionSummary(status.session, attachment.result.session) };
 	} finally {
 		if (attachment) {
 			await boundedDaemonOperation("status detach", attachment.detach()).catch(() => undefined);
 		}
+		client.close();
+	}
+}
+
+/**
+ * Prefer the attach snapshot, which carries live state (pending questions,
+ * observed phase) that the registry-only `status` summary lacks, but only
+ * when it describes the registry's current generation. A snapshot from an
+ * older generation is a host that has since slept, so the registry summary
+ * wins.
+ */
+function currentSessionSummary(
+	registry: DaemonSessionStatus["session"],
+	attached: DaemonAttachment["result"]["session"],
+): DaemonSessionStatus["session"] {
+	return attached.generation === registry.generation && attached.runtime === registry.runtime ? attached : registry;
+}
+
+/**
+ * The daemon registry's view of a session. Runtime state and generation come
+ * from here, never from an attach snapshot: the registry is what the daemon
+ * checks generations against, and it advances on every sleep.
+ */
+async function readRegistryStatus(client: DaemonClient, daemonSessionId: string): Promise<DaemonSessionStatus> {
+	const status = await boundedDaemonOperation("status", client.request("status", {}, daemonSessionId));
+	if (!("session" in status)) {
+		throw new Error(`daemon returned global status for session ${daemonSessionId}`);
+	}
+	return status;
+}
+
+/** Refuse a steer or follow-up when the recorded prompt has reached a terminal state. */
+async function assertDriverTurnActive(
+	client: DaemonClient,
+	locator: DaemonRunLocator,
+	operation: "steer" | "follow_up",
+): Promise<void> {
+	const status = await boundedDaemonOperation(
+		"prompt_status",
+		client.promptStatus(locator.daemonSessionId, { promptId: locator.promptId }),
+	);
+	if (isTerminalPromptStatus(status)) throw new DaemonDriverTurnSettledError(operation, status.state);
+}
+
+/**
+ * Deliver a steer or follow-up to a driver whose turn is still running.
+ *
+ * The prompt state is checked before attaching, and again immediately before
+ * any wake, so a turn that settled and slept in between is refused rather than
+ * woken. The daemon has no atomic "queue only behind an active run" operation,
+ * so a turn can still settle between the last check and delivery. The daemon
+ * then rejects the input with invalid_state (no active run) or stale_generation
+ * (the session slept again); both are re-checked against prompt_status and
+ * reported as a settled turn with its actual terminal state.
+ */
+async function sendDriverInput<T>(
+	agentDir: string,
+	runId: string,
+	operation: "steer" | "follow_up",
+	environment: NodeJS.ProcessEnv,
+	connect: typeof connectDaemonLazy,
+	send: (attachment: DaemonAttachment, generation: number, cfg: OrchestrateCfg) => Promise<T>,
+): Promise<T> {
+	const { cfg, client, locator } = await connectRecordedDriver(agentDir, runId, environment, connect);
+	let attachment: DaemonAttachment | undefined;
+	try {
+		await assertDriverTurnActive(client, locator, operation);
+		attachment = await boundedDaemonOperation(
+			"attach",
+			client.attach(locator.daemonSessionId, { fromCursor: locator.cursor, live: false }),
+		);
+		const { session } = await readRegistryStatus(client, locator.daemonSessionId);
+		let generation = session.generation;
+		if (session.runtime === "asleep") {
+			await assertDriverTurnActive(client, locator, operation);
+			generation = (await wakeAfterContention(attachment, generation)).session.generation;
+		}
+		if (generation !== locator.generation) updateDaemonGeneration(agentDir, runId, generation);
+		try {
+			return await boundedDaemonOperation(operation, send(attachment, generation, cfg));
+		} catch (error) {
+			if (isDaemonRequestError(error) && (error.code === "invalid_state" || error.code === "stale_generation")) {
+				await assertDriverTurnActive(client, locator, operation);
+			}
+			throw error;
+		}
+	} finally {
+		if (attachment) await boundedDaemonOperation("detach", attachment.detach()).catch(() => undefined);
 		client.close();
 	}
 }
@@ -817,8 +913,9 @@ async function attachRecordedDriver(
 				live: false,
 			}),
 		);
-		let generation = attachment.result.session.generation;
-		if (options.wakeIfAsleep && attachment.result.session.runtime === "asleep") {
+		const { session } = await readRegistryStatus(client, locator.daemonSessionId);
+		let generation = session.generation;
+		if (options.wakeIfAsleep && session.runtime === "asleep") {
 			const woke = await wakeAfterContention(attachment, generation);
 			generation = woke.session.generation;
 		}
@@ -843,24 +940,10 @@ export async function steerDaemonDriver(
 	text: string,
 	attributionLabel?: string,
 	environment: NodeJS.ProcessEnv = process.env,
+	connect: typeof connectDaemonLazy = connectDaemonLazy,
 ): Promise<OperationResult<"steer">> {
-	const { cfg, client, attachment, locator } = await attachRecordedDriver(
-		agentDir,
-		runId,
-		environment,
-		{ wakeIfAsleep: true },
-	);
-	try {
-		return await boundedDaemonOperation(
-			"steer",
-			attachment.steer(locator.generation, {
-				text,
-				attribution: { label: attributionLabel ?? cfg.agentName },
-			}),
-		);
-	} finally {
-		await closeAttachedDriver(client, attachment);
-	}
+	return await sendDriverInput(agentDir, runId, "steer", environment, connect, (attachment, generation, cfg) =>
+		attachment.steer(generation, { text, attribution: { label: attributionLabel ?? cfg.agentName } }));
 }
 
 export async function followUpDaemonDriver(
@@ -869,24 +952,10 @@ export async function followUpDaemonDriver(
 	text: string,
 	attributionLabel?: string,
 	environment: NodeJS.ProcessEnv = process.env,
+	connect: typeof connectDaemonLazy = connectDaemonLazy,
 ): Promise<OperationResult<"follow_up">> {
-	const { cfg, client, attachment, locator } = await attachRecordedDriver(
-		agentDir,
-		runId,
-		environment,
-		{ wakeIfAsleep: true },
-	);
-	try {
-		return await boundedDaemonOperation(
-			"follow_up",
-			attachment.followUp(locator.generation, {
-				text,
-				attribution: { label: attributionLabel ?? cfg.agentName },
-			}),
-		);
-	} finally {
-		await closeAttachedDriver(client, attachment);
-	}
+	return await sendDriverInput(agentDir, runId, "follow_up", environment, connect, (attachment, generation, cfg) =>
+		attachment.followUp(generation, { text, attribution: { label: attributionLabel ?? cfg.agentName } }));
 }
 
 export async function answerDaemonDriverUi(

@@ -1,6 +1,6 @@
 # @centerforagenticai/pi-delegate
 
-**Kind:** extension · **Status:** stable · **Pi:** 0.80.6, 0.83.0, 0.84.1, 0.84.2, or 0.85.1 · **Node:** >=22.19
+**Kind:** extension · **Status:** stable · **Pi:** 0.80.6, 0.83.0, 0.84.1, 0.84.2, 0.85.1, 0.99.1, or 0.99.2 · **Node:** >=22.19
 
 ## What it does
 
@@ -10,6 +10,9 @@ pi-delegate runs specialist agents from a Pi session and returns one result for 
 - Add a private supervisor that can review and redirect a worker before returning one answer.
 - Keep the foreground responsive with background completion wakes, inspection, cancellation, recovery, and escalation.
 - Isolate worker changes in Git worktrees and confine writes to approved roots.
+- Keep read-only workers useful for inspection: literal `/dev/null` redirection,
+  file-descriptor duplication, and safe read-only Git forms remain available;
+  Git output, executable-helper, and global config-injection options are refused.
 - Use the same production handlers from a Node client, Fabric, or another Pi extension.
 
 Read [Using pi-delegate](docs/usage.md) for the complete behavior and examples.

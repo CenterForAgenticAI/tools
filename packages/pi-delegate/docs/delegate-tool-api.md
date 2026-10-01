@@ -1384,7 +1384,7 @@ delegate_control({
 })
 ```
 
-Unlike `steer`, `follow_up` waits behind the current daemon turn.
+Unlike `steer`, `follow_up` waits behind the current daemon turn. It needs a running turn: when `prompt_status` already reports `settled`, `aborted`, or `failed`, the call fails with `errorCode: "control-unavailable"`, `turnSettled: true`, and the `promptState`, without waking the driver. Driver steering follows the same rule.
 
 ### Answer a daemon UI question
 
@@ -1421,7 +1421,7 @@ For supervised forks:
 - `queue` places guidance at the beginning of the worker's next round; and
 - omission uses the best-effort ladder `steer → followUp → queue`.
 
-Omit `forkName` to broadcast to every live supervised fork in the run. Direct workers and chain steps do not support steering because they have no supervisor. Runs with missing, future, mixed, or otherwise unrecognized shape metadata are shown as neutral runs and reject steering rather than guessing an actor. Detached driver runs support authenticated driver-level steering.
+Omit `forkName` to broadcast to every live supervised fork in the run. Direct workers and chain steps do not support steering because they have no supervisor. Runs with missing, future, mixed, or otherwise unrecognized shape metadata are shown as neutral runs and reject steering rather than guessing an actor. Detached driver runs support authenticated driver-level steering while their turn is running; a settled driver rejects it as described under [Queue a daemon follow-up](#queue-a-daemon-follow-up).
 
 `forkName` resolves in a fixed order, and fails closed. An exact `name` match wins unconditionally. Otherwise the value is matched against display labels. Steering restricts candidates to supervised entries (or an authenticated driver route); cancellation accepts any live delegated entry; recovery accepts failed entries. Exactly one candidate resolves, and the result says which entry it picked. Zero or several candidates change nothing and return an error naming the real entry names to retry with.
 
