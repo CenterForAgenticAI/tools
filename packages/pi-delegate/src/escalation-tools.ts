@@ -7,7 +7,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { Type, type TSchema } from "@sinclair/typebox";
+import { Type, type TSchema } from "typebox";
 
 import type { ResolvedEscalationConfig } from "./config.js";
 import {

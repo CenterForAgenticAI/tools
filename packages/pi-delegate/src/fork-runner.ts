@@ -31,7 +31,7 @@ type DefaultResourceLoaderOptions = NonNullable<
 	ConstructorParameters<typeof DefaultResourceLoader>[0]
 >;
 
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { AgentConfig, AgentSource, CollapseMode } from "./agents.js";
 import {
 	createActorActivityPublisher,

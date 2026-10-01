@@ -1,5 +1,6 @@
-import { Type, type TSchema } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
+import { Type, type TSchema } from "typebox";
+import { Value } from "typebox/value";
+import { firstSchemaIssue } from "./schema-errors.js";
 import { CONTROL_ROUTE, ESCALATION_ROUTE, resolveControlCall, resolveEscalationCall, type ControlAction, type EscalationAction } from "./control-surface.js";
 import { prepareRuntimeDispatchArguments } from "./delegate-params.js";
 import { UnsupportedRunOptionError } from "./delegate-runs.js";
@@ -26,12 +27,13 @@ export function prepareRuntimeToolArguments(name: string, schema: TSchema, input
  if (input.forkName === "") throw new RuntimeBoundaryError("invalid-request", "invalid entry name: forkName must be nonblank");
  // Omitted JS optionals are absent, exactly as they are on the wire.
  const properties: Record<string, TSchema> = {};
- for (const [key, field] of Object.entries<TSchema>(schema.properties ?? {})) properties[key] = Array.isArray(field.enum) ? { ...field, ...Type.Union(field.enum.map((value: string) => Type.Literal(value))) } : field;
- schema = { ...schema, properties };
+ const declared = (schema as { properties?: Record<string, TSchema & { enum?: unknown }> }).properties ?? {};
+ for (const [key, field] of Object.entries(declared)) properties[key] = Array.isArray(field.enum) ? { ...field, ...Type.Union(field.enum.map((value: string) => Type.Literal(value))) } : field;
+ schema = { ...schema, properties } as TSchema;
  const params: Record<string, unknown> = {};
- for (const key of Object.keys(schema.properties ?? {})) if (input[key] !== undefined) params[key] = input[key];
+ for (const key of Object.keys(properties)) if (input[key] !== undefined) params[key] = input[key];
  if (!Value.Check(schema, params)) {
-  const error = Value.Errors(schema, params).First();
+  const error = firstSchemaIssue(schema, params);
   throw new RuntimeBoundaryError("invalid-request", `${error?.path ?? name}: ${error?.message ?? "invalid parameters"}`);
  }
  for (const key of ["runId", "rootRunId", "requestId"]) {

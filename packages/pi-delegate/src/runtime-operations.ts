@@ -1,4 +1,4 @@
-import type { Static, TSchema } from "@sinclair/typebox";
+import type { Static, TSchema } from "typebox";
 import { DelegateRuntimeError, type DelegateRuntimeToolResult } from "./runtime-api.js";
 import { RuntimeInvocation, type RuntimeContextBinding, type DelegateRuntimeInvocationOptions } from "./runtime-invocation.js";
 import { isSafeRunId } from "./run-id.js";

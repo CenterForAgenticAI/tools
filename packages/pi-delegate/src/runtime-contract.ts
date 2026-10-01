@@ -1,5 +1,6 @@
-import { Type, type Static, type TSchema } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
+import { Type, type Static, type TSchema } from "typebox";
+import { Value } from "typebox/value";
+import { firstSchemaIssue } from "./schema-errors.js";
 import { sanitizeName, ManagementConfigSchema, type ManagementAction, type ManagementConfig } from "./agent-management.js";
 
 const text = Type.String();
@@ -8,9 +9,9 @@ const optionalText = Type.Optional(text);
 const optionalBoolean = Type.Optional(Type.Boolean());
 const object = Type.Record(text, Type.Unknown());
 const RuntimeDigestSchema = Type.Object({ kind: Type.Union([Type.Literal("task"), Type.Literal("read"), Type.Literal("checklist"), Type.Literal("focus")]), name: text, algorithm: Type.Literal("sha256"), digest: text }, { additionalProperties: true });
-const RuntimeStepSchema = Type.Object({ id: text, name: text, agent: text, kind: Type.Union([Type.Literal("worker"), Type.Literal("command")]), stepIndex: Type.Integer(), dependsOn: strings, state: Type.Union((["planned", "started", "completed", "failed", "aborted", "skipped"] as const).map(value => Type.Literal(value))), inputDigests: Type.Array(RuntimeDigestSchema), actualInputDigests: Type.Array(Type.Object({ sequence: Type.Integer(), algorithm: Type.Literal("sha256"), digest: text })) });
+const RuntimeStepSchema = Type.Object({ id: text, name: text, agent: text, kind: Type.Union([Type.Literal("worker"), Type.Literal("command")]), stepIndex: Type.Integer(), dependsOn: strings, state: Type.Union([Type.Literal("planned"), Type.Literal("started"), Type.Literal("completed"), Type.Literal("failed"), Type.Literal("aborted"), Type.Literal("skipped")]), inputDigests: Type.Array(RuntimeDigestSchema), actualInputDigests: Type.Array(Type.Object({ sequence: Type.Integer(), algorithm: Type.Literal("sha256"), digest: text })) });
 export const RuntimeStatusSchema = Type.Object({
- dispatches: Type.Array(Type.Object({ runId: text, shape: Type.Union((["supervised", "direct", "chain", "driver", "orchestrate", "unknown"] as const).map(value => Type.Literal(value))), state: Type.Union((["constructing", "running", "terminal-done", "terminal-failed", "terminal-steered", "terminal-paused"] as const).map(value => Type.Literal(value))), source: Type.Union([Type.Literal("in-memory"), Type.Literal("detached")]), startedAt: Type.Optional(Type.Number()), lastActivityAt: Type.Optional(Type.Number()), details: Type.Optional(Type.Object({ steps: Type.Optional(Type.Array(RuntimeStepSchema)), recovery: Type.Optional(Type.Object({ recovered: Type.Boolean(), partial: Type.Boolean(), orphanedAt: Type.Optional(Type.Number()), totalForks: Type.Integer(), recoveredForks: Type.Integer(), completedForks: Type.Integer(), pausedForks: Type.Integer(), failedForks: Type.Integer(), abortedForks: Type.Integer() })), terminalReason: optionalText, childlogTail: optionalText, childlogTailTruncated: optionalBoolean, stderrTruncated: optionalBoolean }, { additionalProperties: true })) })),
+ dispatches: Type.Array(Type.Object({ runId: text, shape: Type.Union([Type.Literal("supervised"), Type.Literal("direct"), Type.Literal("chain"), Type.Literal("driver"), Type.Literal("orchestrate"), Type.Literal("unknown")]), state: Type.Union([Type.Literal("constructing"), Type.Literal("running"), Type.Literal("terminal-done"), Type.Literal("terminal-failed"), Type.Literal("terminal-steered"), Type.Literal("terminal-paused")]), source: Type.Union([Type.Literal("in-memory"), Type.Literal("detached")]), startedAt: Type.Optional(Type.Number()), lastActivityAt: Type.Optional(Type.Number()), details: Type.Optional(Type.Object({ steps: Type.Optional(Type.Array(RuntimeStepSchema)), recovery: Type.Optional(Type.Object({ recovered: Type.Boolean(), partial: Type.Boolean(), orphanedAt: Type.Optional(Type.Number()), totalForks: Type.Integer(), recoveredForks: Type.Integer(), completedForks: Type.Integer(), pausedForks: Type.Integer(), failedForks: Type.Integer(), abortedForks: Type.Integer() })), terminalReason: optionalText, childlogTail: optionalText, childlogTailTruncated: optionalBoolean, stderrTruncated: optionalBoolean }, { additionalProperties: true })) })),
  runs: Type.Optional(Type.Array(object)), degraded: optionalBoolean, truncated: optionalBoolean,
 });
 export type DelegateRuntimeStatus = Static<typeof RuntimeStatusSchema>;
@@ -47,7 +48,7 @@ export const RuntimeCancelSchema = Type.Intersect([RuntimeControlFields, control
 ])]);
 export const RuntimeControlSchema = Type.Union([RuntimeSteerSchema, RuntimeCancelSchema]);
 export type DelegateRuntimeControlResult = Static<typeof RuntimeControlSchema>;
-export const RuntimePromptStatusSchema = Type.Object({ runId: text, mode: Type.Literal("driver"), promptStatus: Type.Object({ state: Type.Union((["pending", "unknown", "settled", "failed", "aborted"] as const).map(value => Type.Literal(value))), promptId: optionalText, acceptedAt: optionalText, settledAt: optionalText, terminalOutcome: optionalText, finalCursor: Type.Optional(Type.Object({ entryId: Type.Union([text, Type.Null()]), epoch: Type.Integer() })), errorCode: optionalText, reason: optionalText }, { additionalProperties: true }) });
+export const RuntimePromptStatusSchema = Type.Object({ runId: text, mode: Type.Literal("driver"), promptStatus: Type.Object({ state: Type.Union([Type.Literal("pending"), Type.Literal("unknown"), Type.Literal("settled"), Type.Literal("failed"), Type.Literal("aborted")]), promptId: optionalText, acceptedAt: optionalText, settledAt: optionalText, terminalOutcome: optionalText, finalCursor: Type.Optional(Type.Object({ entryId: Type.Union([text, Type.Null()]), epoch: Type.Integer() })), errorCode: optionalText, reason: optionalText }, { additionalProperties: true }) });
 export type DelegateRuntimePromptStatus = Static<typeof RuntimePromptStatusSchema>;
 export const RuntimeRecoverySchema = Type.Union([
  Type.Object({ runId: text, forkName: text, status: Type.Union([Type.Literal("recovered"), Type.Literal("already-recovered")]), recoveryRunId: text, strategy: Type.Union([Type.Literal("fresh"), Type.Literal("resume")]) }),
@@ -127,6 +128,6 @@ export function assertRuntimeCorrespondence(request: Record<string, unknown>, va
 
 /** Runtime validation narrows data; callers never assert a native payload into a public type. */
 export function decodeRuntimeResult<S extends TSchema>(schema: S, value: unknown): Static<S> {
- if (!Value.Check(schema, value)) throw new RuntimeResultContractError(`Incompatible runtime result: ${Value.Errors(schema, value).First()?.path ?? "root"}`);
+ if (!Value.Check(schema, value)) throw new RuntimeResultContractError(`Incompatible runtime result: ${firstSchemaIssue(schema, value)?.path ?? "root"}`);
  return value;
 }

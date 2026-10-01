@@ -324,11 +324,68 @@ export function hasOwnedDaemonDriverRun(
 	}
 }
 
+function canonicalPathFromExistingAncestor(candidate: string): string {
+	const resolved = path.resolve(candidate);
+	let existing = resolved;
+	const missing: string[] = [];
+	while (true) {
+		try {
+			return path.resolve(fs.realpathSync(existing), ...missing);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			try {
+				fs.lstatSync(existing);
+			} catch (lstatError) {
+				if ((lstatError as NodeJS.ErrnoException).code !== "ENOENT") throw lstatError;
+				const parent = path.dirname(existing);
+				if (parent === existing) throw error;
+				missing.unshift(path.basename(existing));
+				existing = parent;
+				continue;
+			}
+			throw error;
+		}
+	}
+}
+
 function connectOptions(
 	connection: DaemonConnectionRecord,
 	environment: NodeJS.ProcessEnv,
 	autoSpawn: boolean,
 ) {
+	// The test wrapper marks its run root. Never let a missing socket override
+	// fall back to pi-daemon's per-user endpoint, even when a test supplies a
+	// custom environment instead of inheriting the wrapper's variables.
+	const testRoot = process.env.PI_DELEGATE_TEST_ROOT;
+	if (testRoot) {
+		const home = environment.HOME ?? process.env.PI_DELEGATE_TEST_USER_HOME ?? process.env.HOME ?? "";
+		const defaultSocket = (runtimeDir: string | undefined) => runtimeDir !== undefined
+			? path.resolve(runtimeDir, "pi-daemon", "pi-daemon.sock")
+			: path.resolve(home, ".local", "state", "pi-daemon", "run", "pi-daemon.sock");
+		const socket = connection.socketPath ?? environment.PI_DAEMON_SOCKET ?? defaultSocket(environment.XDG_RUNTIME_DIR);
+		const state = connection.stateDir ?? environment.PI_DAEMON_STATE_DIR ??
+			path.resolve(environment.XDG_STATE_HOME ?? path.resolve(home, ".local", "state"), "pi-daemon");
+		const userDefault = process.env.PI_DELEGATE_TEST_USER_RUNTIME_DIR
+			? path.resolve(process.env.PI_DELEGATE_TEST_USER_RUNTIME_DIR, "pi-daemon", "pi-daemon.sock")
+			: path.resolve(process.env.PI_DELEGATE_TEST_USER_HOME ?? home, ".local", "state", "pi-daemon", "run", "pi-daemon.sock");
+		const userStateDefault = path.resolve(
+			process.env.PI_DELEGATE_TEST_USER_STATE_HOME || path.resolve(process.env.PI_DELEGATE_TEST_USER_HOME ?? home, ".local", "state"),
+			"pi-daemon",
+		);
+		const canonicalTestRoot = canonicalPathFromExistingAncestor(testRoot);
+		const canonicalSocket = canonicalPathFromExistingAncestor(socket);
+		const canonicalState = canonicalPathFromExistingAncestor(state);
+		const insideRoot = (candidate: string) => {
+			const relative = path.relative(canonicalTestRoot, candidate);
+			return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+		};
+		if (!insideRoot(canonicalSocket) || canonicalSocket === canonicalPathFromExistingAncestor(userDefault)) {
+			throw new Error(`Test daemon endpoint is not isolated: ${socket}; set PI_DAEMON_SOCKET inside ${testRoot}`);
+		}
+		if (!insideRoot(canonicalState) || canonicalState === canonicalPathFromExistingAncestor(userStateDefault)) {
+			throw new Error(`Test daemon state directory is not isolated: ${state}; set PI_DAEMON_STATE_DIR inside ${testRoot}`);
+		}
+	}
 	return {
 		client: CLIENT_IDENTITY,
 		autoSpawn,

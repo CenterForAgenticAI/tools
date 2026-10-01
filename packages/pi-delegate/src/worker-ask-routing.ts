@@ -7,7 +7,7 @@
  * tool with either a typed escalation adapter or an actionable denial.
  */
 
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { DefaultResourceLoader, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ResolvedEscalationConfig } from "./config.js";
 import {

@@ -19,8 +19,9 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Type, type Static } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
+import { Type, type Static } from "typebox";
+import { Value } from "typebox/value";
+import { schemaIssues } from "./schema-errors.js";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -312,7 +313,7 @@ function managementConfigError(config: Record<string, unknown>): string | undefi
 		if (parsedSteps.error) return parsedSteps.error;
 	}
 	if (Value.Check(ManagementConfigSchema, config)) return undefined;
-	for (const error of Value.Errors(ManagementConfigSchema, config)) {
+	for (const error of schemaIssues(ManagementConfigSchema, config)) {
 		const fieldPath = error.path
 			.split("/")
 			.filter(Boolean)
@@ -506,7 +507,7 @@ function parseStepList(raw: unknown): { steps?: ChainStepFileConfig[]; error?: s
 			? ManagementChainReferenceStepSchema
 			: hasRunDiscriminant ? ManagementChainRunStepSchema : ManagementChainWorkerStepSchema;
 		if (!Value.Check(stepSchema, item)) {
-			for (const validation of Value.Errors(stepSchema, item)) {
+			for (const validation of schemaIssues(stepSchema, item)) {
 				const suffix = validation.path
 					.split("/")
 					.filter(Boolean)

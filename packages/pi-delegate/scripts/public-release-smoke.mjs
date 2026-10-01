@@ -15,7 +15,7 @@ assert.deepEqual(Object.keys(manifest.peerDependencies ?? {}).sort(), [
   "@earendil-works/pi-ai",
   "@earendil-works/pi-coding-agent",
   "@earendil-works/pi-tui",
-  "@sinclair/typebox",
+  "typebox",
 ]);
 
 for (const entries of Object.values(manifest.pi ?? {})) {

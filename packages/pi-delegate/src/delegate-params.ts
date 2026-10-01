@@ -1,5 +1,6 @@
-import { Type, type Static, type TSchema } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
+import { Type, type Static, type TSchema } from "typebox";
+import { Value } from "typebox/value";
+import { firstSchemaIssue } from "./schema-errors.js";
 import { normalizeDelegateParams } from "./delegate-normalize.js";
 import { compileDelegateRuns, validateRuns, UnsupportedRunOptionError } from "./delegate-runs.js";
 import { ManagementConfigSchema, RuntimeManagementSchema } from "./agent-management.js";
@@ -201,7 +202,8 @@ export const DelegateParamsInternal = Type.Object({
 	handoff: Type.Optional(Type.Object({}, { additionalProperties: true, opaquePayload: true })),
 	action: Type.Optional(Type.String()),
 	agent_scope: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("project"), Type.Literal("both")])),
-	config: Type.Optional(Type.Composite([ManagementConfigSchema], { additionalProperties: true })),
+	// Same schema TypeBox 0.34's Type.Composite built: the properties, with these options.
+	config: Type.Optional(Type.Object({ ...ManagementConfigSchema.properties }, { additionalProperties: true })),
 	clone_mode: Type.Optional(runCoreProperties.clone_mode),
 	task_delivery: Type.Optional(runCoreProperties.task_delivery),
 	maxSubagentDepth: Type.Optional(Type.Integer({ minimum: 0, maximum: HARD_MAX_DEPTH })),
@@ -247,6 +249,29 @@ export function prepareRuntimeDispatchArguments(input: Record<string, unknown>):
  return legacy;
 }
 
+/**
+ * TypeBox 1.x `Value.Convert` coerces `null` into the target type (`0` for an
+ * integer, `"null"` for a string), where 0.34 left it untouched for
+ * validation to reject. A caller who writes `depth: null` made a mistake; it
+ * must not become a plausible value. Restore every `null` the caller wrote so
+ * `Value.Check` still refuses it. 1.x also converts in place, so the caller
+ * clones before converting and keeps `original` intact for this comparison.
+ */
+function convertPreservingNull(original: unknown, converted: unknown): unknown {
+	if (original === null) return null;
+	if (Array.isArray(original) && Array.isArray(converted) && original.length === converted.length) {
+		return converted.map((item, index) => convertPreservingNull(original[index], item));
+	}
+	if (original && typeof original === "object" && !Array.isArray(original) && converted && typeof converted === "object" && !Array.isArray(converted)) {
+		const result: Record<string, unknown> = { ...(converted as Record<string, unknown>) };
+		for (const [key, value] of Object.entries(original as Record<string, unknown>)) {
+			if (key in result) result[key] = convertPreservingNull(value, result[key]);
+		}
+		return result;
+	}
+	return converted;
+}
+
 export function prepareArguments(input: unknown): Record<string, unknown> {
 	const normalized = normalizeDelegateParams(input);
 	if (!normalized || typeof normalized !== "object") throw new Error("delegate arguments must be an object");
@@ -261,11 +286,11 @@ export function prepareArguments(input: unknown): Record<string, unknown> {
 		}
 		return management;
 	}
-	const converted = Value.Convert(DelegateParamsInternal, normalized);
+	const converted = convertPreservingNull(normalized, Value.Convert(DelegateParamsInternal, Value.Clone(normalized)));
 	const error = firstUnknown(converted, DelegateParamsInternal, "");
 	if (error) throw new Error(error);
 	if (!Value.Check(DelegateParamsInternal, converted)) {
-		const detail = [...Value.Errors(DelegateParamsInternal, converted)][0];
+		const detail = firstSchemaIssue(DelegateParamsInternal, converted);
 		throw new Error(`${detail?.path || "delegate"}: ${detail?.message || "invalid delegate arguments"}`);
 	}
 	// Semantic validation runs at the ingress too, so a contract violation is

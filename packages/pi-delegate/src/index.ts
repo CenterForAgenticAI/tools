@@ -19,7 +19,7 @@ import {
 	type ToolDefinition,
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { Type, type TProperties, type TSchema, type TObject } from "@sinclair/typebox";
+import { Type, type TProperties, type TSchema, type TObject } from "typebox";
 import { DELEGATE_RUNTIME_CAPABILITIES } from "./runtime-contract.js";
 export * from "./runtime-contract.js";
 import { prepareRuntimeToolArguments, RuntimeBoundaryError } from "./runtime-boundary.js";
@@ -1221,7 +1221,8 @@ const LegacyDelegateParams = Type.Object({
 		}) as any,
 	),
 	config: Type.Optional(
-		Type.Composite([ManagementConfigSchema], {
+		// Same schema TypeBox 0.34's Type.Composite built: the properties, with these options.
+		Type.Object({ ...ManagementConfigSchema.properties }, {
 			// The accepted fields are already declared structurally by
 			// ManagementConfigSchema below; re-listing them in prose duplicated
 			// ~900 chars of schema for no added information.
