@@ -2,7 +2,7 @@
 
 Read this before writing or porting a Bend model. It maps the Lean proof
 habits used in our models to explicit Bend proof terms, and names the shared
-helpers in `Lib.bend`, the generator `gen-enums.mjs`, and the gate `tools/intent-gate.mjs`.
+helpers in `Lib.bend`, the generator `gen-enums.mjs`, and the gate `.intent/tools/intent-gate.mjs`.
 
 Ported from the architect module's Bend 2.0.28 patterns; pi-intent's gate and
 transition fixture are checked with Bend 2.0.34 (`bend --help` prints the version). `bend guide`
@@ -154,9 +154,9 @@ Lean fixture printer. Parity is the migration's acceptance check.
 ## Gate
 
 ```sh
-node tools/intent-check.mjs [repo-dir]    # offline freshness and receipt policy
-node tools/intent-gate.mjs [repo-dir]     # PROOF.bend plus neg/*.bend
-node tools/intent-conform.mjs [repo-dir] --require-coverage
+node .intent/tools/intent-check.mjs [repo-dir]    # offline freshness and receipt policy
+node .intent/tools/intent-gate.mjs [repo-dir]     # PROOF.bend plus neg/*.bend
+node .intent/tools/intent-conform.mjs [repo-dir] --require-coverage
 ```
 
 Exit 0 means PROOF.bend exited successfully and printed a complete

@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { INTENT_DIR } from "../kit/intent-core.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distEntry = join(repoRoot, "dist", "index.js");
@@ -125,8 +126,10 @@ try {
 	assert.deepEqual(discovered.skills.map(skill => skill.name).sort(), expectedSkills);
 	const initializedApp = join(temporaryDirectory, "initialized-app");
 	execFileSync(process.execPath, [join(installedRoot, "bin/pi-intent.mjs"), "init", initializedApp], { timeout: 30000 });
-	assert.ok(existsSync(join(initializedApp, "intent/model/Lib.bend")), "packed init must copy Bend library");
-	assert.ok(existsSync(join(initializedApp, "tools/intent-check.mjs")), "packed bin must vendor checks");
+	assert.ok(existsSync(join(initializedApp, INTENT_DIR, "model/Lib.bend")), "packed init must copy Bend library");
+	assert.ok(existsSync(join(initializedApp, INTENT_DIR, "tools/intent-check.mjs")), "packed bin must vendor checks");
+	assert.equal(existsSync(join(initializedApp, "intent")), false, "packed init must not create a visible intent directory");
+	assert.equal(existsSync(join(initializedApp, "tools")), false, "packed init must not create a top-level tools directory");
 	console.log(`package smoke passed: pi resolved ${extension.resolvedPath}; packed ${packRecord.filename}; discovered ${expectedSkills.join(", ")}`);
 } finally {
 	rmSync(temporaryDirectory, { recursive: true, force: true });

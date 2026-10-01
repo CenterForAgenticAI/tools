@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { check } from '../../kit/intent-check.mjs';
 import { conform } from '../../kit/intent-conform.mjs';
 import { gate } from '../../kit/intent-gate.mjs';
 import { liveEvaluator, produce } from '../../kit/intent-receipt.mjs';
-import { canonical, codeOnly, hasProof, IntentError, lawIds, POLICY, record, rootArg, run, seal, sha256, verifyReceipt } from '../../kit/intent-core.mjs';
+import { INTENT_DIR, canonical, codeOnly, hasProof, IntentError, lawIds, POLICY, record, rootArg, run, seal, sha256, verifyHeaders, verifyReceipt } from '../../kit/intent-core.mjs';
 import { init, vendor } from '../../bin/pi-intent.mjs';
 import { generate, validate } from '../../kit/gen-enums.mjs';
 import { inventory } from '../../kit/inventory.mjs';
@@ -28,6 +28,7 @@ function fixture(t) {
   mkdirSync(join(root, '.scratch'), { recursive: true });
   const dir = mkdtempSync(join(root, '.scratch/intent-test-'));
   cpSync(example, dir, { recursive: true, filter: p => !p.includes('/target') && !p.includes('__pycache__') });
+  renameSync(join(dir, 'intent'), join(dir, INTENT_DIR));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
@@ -35,7 +36,7 @@ function writeJson(path, obj) { writeFileSync(path, JSON.stringify(obj)); }
 function command(script, dir, args = []) { return spawnSync(process.execPath, [join(root, script), dir, ...args], { encoding: 'utf8', env, timeout: 180000 }); }
 function smallManifest(dir, overrides = {}) {
   const check = { name: 'small', laws: ['stopped_rejects', 'active_allows'], model: [process.execPath, '-e', 'console.log("a\\nb")'], real: [process.execPath, '-e', 'console.log("b\\na")'], broken: [process.execPath, '-e', 'console.log("wrong")'], ...overrides };
-  writeJson(join(dir, 'intent/conform.json'), { schema: 1, checks: [check] });
+  writeJson(join(dir, '.intent/conform.json'), { schema: 1, checks: [check] });
   return check;
 }
 
@@ -92,7 +93,7 @@ test('dated Jev snapshot is recorded and accepted by the offline check', async t
   assert.equal(receipt.model, 'typesafe/jev-1.13-20260917');
   assert.equal(receipt.verdict, 'pass');
   const dir = fixture(t);
-  writeJson(join(dir, 'intent/receipts/0001-transitions.json'), receipt);
+  writeJson(join(dir, '.intent/receipts/0001-transitions.json'), receipt);
   assert.match(check(dir), /ok/);
 });
 
@@ -120,17 +121,17 @@ test('Jev snapshot matching treats regex metacharacters literally and rejects un
 test('offline check detects laws, record and receipt edits and altered policy', t => {
   const dir = fixture(t);
   assert.match(check(dir), /ok/);
-  const path = join(dir, 'intent/receipts/0001-transitions.json');
+  const path = join(dir, '.intent/receipts/0001-transitions.json');
   writeJson(path, { ...stored, model: 'hand edited' });
   assert.throws(() => check(dir), /hand-edited/);
   writeJson(path, stored);
-  writeFileSync(join(dir, 'intent/model/LAWS.bend'), fixtureLaws + '\n# changed');
+  writeFileSync(join(dir, '.intent/model/LAWS.bend'), fixtureLaws + '\n# changed');
   assert.throws(() => check(dir), /changed since approval/);
-  writeFileSync(join(dir, 'intent/model/laws.sha256'), sha256(fixtureLaws + '\n# changed'));
+  writeFileSync(join(dir, '.intent/model/laws.sha256'), sha256(fixtureLaws + '\n# changed'));
   assert.throws(() => check(dir), /hashes are stale/);
-  writeFileSync(join(dir, 'intent/model/LAWS.bend'), fixtureLaws);
-  writeFileSync(join(dir, 'intent/model/laws.sha256'), sha256(fixtureLaws));
-  writeFileSync(join(dir, 'intent/records/0001-transitions.md'), fixtureRecord + '\nchanged');
+  writeFileSync(join(dir, '.intent/model/LAWS.bend'), fixtureLaws);
+  writeFileSync(join(dir, '.intent/model/laws.sha256'), sha256(fixtureLaws));
+  writeFileSync(join(dir, '.intent/records/0001-transitions.md'), fixtureRecord + '\nchanged');
   assert.throws(() => check(dir), /hashes are stale/);
   const body = structuredClone(stored);
   delete body.integrity;
@@ -164,9 +165,9 @@ test('record structure rejects missing sections, mismatched ids and noncontiguou
   assert.throws(() => lawIds('law none:\n'), /reserved/);
   assert.equal(codeOnly('"@unsafe" # ?TODO\ndef f():\n  True{}').includes('@unsafe'), false);
   const dir = fixture(t);
-  writeFileSync(join(dir, 'intent/records/0001-transitions.md'), fixtureRecord.replace('status: approved', 'status: descriptive'));
+  writeFileSync(join(dir, '.intent/records/0001-transitions.md'), fixtureRecord.replace('status: approved', 'status: descriptive'));
   assert.throws(() => check(dir), /no approved/);
-  rmSync(join(dir, 'intent/records/0001-transitions.md'));
+  rmSync(join(dir, '.intent/records/0001-transitions.md'));
   assert.throws(() => check(dir), /empty/);
   assert.equal(rootArg([]), root);
   assert.throws(() => rootArg(['--wrong']), /unknown/);
@@ -176,67 +177,80 @@ test('record structure rejects missing sections, mismatched ids and noncontiguou
 
 test('vendor headers detect drift in check itself and shared scripts; init never approves', t => {
   const dir = fixture(t);
+  assert.equal(INTENT_DIR, '.intent');
+  assert.equal(existsSync(join(dir, 'intent')), false);
+  assert.match(check(dir), /ok/); // Moving fixture bytes preserves the bound receipt.
   vendor(dir);
-  writeFileSync(join(dir, 'tools/unrelated.mjs'), '// app-owned tool, not vendored by pi-intent');
-  const checked = spawnSync(process.execPath, [join(dir, 'tools/intent-check.mjs'), dir], { encoding: 'utf8', timeout: 30000 });
+  assert.equal(existsSync(join(dir, 'tools')), false);
+  for (const parts of [['tools'], ['other', 'tools'], [INTENT_DIR, 'not-tools']]) {
+    verifyHeaders(pathToFileURL(join(dir, ...parts, 'intent-check.mjs')));
+  }
+  writeFileSync(join(dir, '.intent/tools/unrelated.mjs'), '// app-owned tool, not vendored by pi-intent');
+  const checked = spawnSync(process.execPath, [join(dir, '.intent/tools/intent-check.mjs'), dir], { encoding: 'utf8', timeout: 30000 });
   assert.equal(checked.status, 0, checked.stderr);
   for (const name of ['intent-check.mjs', 'intent-core.mjs']) {
     vendor(dir);
-    writeFileSync(join(dir, 'tools', name), text(join(dir, 'tools', name)) + '\n// accidental drift');
-    const result = spawnSync(process.execPath, [join(dir, 'tools/intent-check.mjs'), dir], { encoding: 'utf8', timeout: 30000 });
+    writeFileSync(join(dir, INTENT_DIR, 'tools', name), text(join(dir, INTENT_DIR, 'tools', name)) + '\n// accidental drift');
+    const result = spawnSync(process.execPath, [join(dir, '.intent/tools/intent-check.mjs'), dir], { encoding: 'utf8', timeout: 30000 });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /stale.*header/);
   }
   vendor(dir);
-  const corePath = join(dir, 'tools/intent-core.mjs');
+  const corePath = join(dir, '.intent/tools/intent-core.mjs');
   writeFileSync(corePath, text(corePath).replace(`v${JSON.parse(text(join(root, 'package.json'))).version}`, 'v0.0.0'));
-  assert.equal(spawnSync(process.execPath, [join(dir, 'tools/intent-check.mjs'), dir], { encoding: 'utf8', timeout: 30000 }).status, 1);
+  assert.equal(spawnSync(process.execPath, [join(dir, '.intent/tools/intent-check.mjs'), dir], { encoding: 'utf8', timeout: 30000 }).status, 1);
   const target = join(dir, 'new-app');
   init(target);
-  assert.match(text(join(target, 'intent/records/0001-change.md')), /status: draft/);
+  assert.match(text(join(target, '.intent/records/0001-change.md')), /status: draft/);
   assert.equal(command('kit/intent-check.mjs', target).status, 1);
+  assert.throws(() => init(target), /\.intent\/ already exists/);
+  const recordPath = join(target, INTENT_DIR, 'records/0001-change.md');
+  const draft = text(recordPath);
   assert.throws(() => init(target), /already exists/);
+  assert.equal(text(recordPath), draft, 'init must preserve existing adopter state');
+  renameSync(join(dir, INTENT_DIR), join(dir, 'intent'));
+  assert.throws(() => check(dir), /\.intent\/records unavailable/, 'legacy visible state must not be silently accepted');
 });
 
 test('Bend gate proves laws and rejects both negatives and bypass constructs', async t => {
   const dir = fixture(t);
   await gate(dir, bend);
   for (const snippet of ['@unsafe', 'def bypass?(x):\n  x', '?TODO']) {
-    writeFileSync(join(dir, 'intent/model/Bypass.bend'), snippet);
+    writeFileSync(join(dir, '.intent/model/Bypass.bend'), snippet);
     await assert.rejects(gate(dir, bend), /forbidden/);
   }
-  rmSync(join(dir, 'intent/model/Bypass.bend'));
-  symlinkSync(join(dir, 'intent/model/LAWS.bend'), join(dir, 'intent/model/Alias.bend'));
+  rmSync(join(dir, '.intent/model/Bypass.bend'));
+  symlinkSync(join(dir, '.intent/model/LAWS.bend'), join(dir, '.intent/model/Alias.bend'));
   await assert.rejects(gate(dir, bend), /symlink/);
-  rmSync(join(dir, 'intent/model/Alias.bend'));
-  writeFileSync(join(dir, 'intent/model/neg/stopped.bend'), text(join(dir, 'intent/model/PROOF.bend')).replace('./LAWS.bend', '../LAWS.bend') + '\n# expect-failure: M.stopped_rejects');
+  rmSync(join(dir, '.intent/model/Alias.bend'));
+  writeFileSync(join(dir, '.intent/model/neg/stopped.bend'), text(join(dir, '.intent/model/PROOF.bend')).replace('./LAWS.bend', '../LAWS.bend') + '\n# expect-failure: M.stopped_rejects');
   await assert.rejects(gate(dir, bend), /control did not fail/);
-  writeFileSync(join(dir, 'intent/model/neg/stopped.bend'), 'import Missing\n# expect-failure: Missing\n');
+  writeFileSync(join(dir, '.intent/model/neg/stopped.bend'), 'import Missing\n# expect-failure: Missing\n');
   await assert.rejects(gate(dir, bend), /unrelated law/);
-  writeFileSync(join(dir, 'intent/model/neg/stopped.bend'), 'import Base');
+  writeFileSync(join(dir, '.intent/model/neg/stopped.bend'), 'import Base');
   await assert.rejects(gate(dir, bend), /missing # expect-failure/);
-  rmSync(join(dir, 'intent/model/neg'), { recursive: true });
+  rmSync(join(dir, '.intent/model/neg'), { recursive: true });
   await assert.rejects(gate(dir, bend), /empty/);
 });
 
 test('gate rejects orphaned laws, failed proofs and unavailable Bend', async t => {
   const dir = fixture(t);
   await assert.rejects(gate(dir, join(dir, 'no-bend')), e => e.code === 2);
-  writeFileSync(join(dir, 'intent/model/Unimported.bend'), 'import Base\nlaw helper:\n  Unit\ndef helper():\n  False{}\n');
+  writeFileSync(join(dir, '.intent/model/Unimported.bend'), 'import Base\nlaw helper:\n  Unit\ndef helper():\n  False{}\n');
   await assert.rejects(gate(dir, bend), /Unimported.bend did not check/);
-  rmSync(join(dir, 'intent/model/Unimported.bend'));
-  writeFileSync(join(dir, 'intent/model/PROOF.bend'), 'import Base');
+  rmSync(join(dir, '.intent/model/Unimported.bend'));
+  writeFileSync(join(dir, '.intent/model/PROOF.bend'), 'import Base');
   await assert.rejects(gate(dir, bend), /no proof def/);
-  writeFileSync(join(dir, 'intent/model/PROOF.bend'), text(join(example, 'intent/model/PROOF.bend')).replace('def M.stopped_rejects(to):\n  {==}', 'def M.stopped_rejects(to):\n  Unit{}'));
+  writeFileSync(join(dir, '.intent/model/PROOF.bend'), text(join(example, 'intent/model/PROOF.bend')).replace('def M.stopped_rejects(to):\n  {==}', 'def M.stopped_rejects(to):\n  Unit{}'));
   await assert.rejects(gate(dir, bend), /did not check/);
 });
 
 for (const language of ['typescript', 'go', 'python', 'rust']) test(`${language} oracle executes app code, matches all 16 Bend cases and differs from broken model`, t => {
   if (language === 'rust' && spawnSync('cargo', ['--version'], { timeout: 5000 }).error) return t.skip('cargo is not on PATH; Rust conformance unavailable');
   const dir = fixture(t);
-  const manifest = JSON.parse(text(join(dir, 'intent/conform.json')));
+  const manifest = JSON.parse(text(join(dir, '.intent/conform.json')));
   manifest.checks = manifest.checks.filter(c => c.name === language);
-  writeJson(join(dir, 'intent/conform.json'), manifest);
+  writeJson(join(dir, '.intent/conform.json'), manifest);
   const result = command('kit/intent-conform.mjs', dir, ['--require-coverage']);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /16 cases; broken model differs/);
@@ -245,9 +259,9 @@ for (const language of ['typescript', 'go', 'python', 'rust']) test(`${language}
 
 test('real implementation drift fails with disagreeing cases', t => {
   const dir = fixture(t);
-  const manifest = JSON.parse(text(join(dir, 'intent/conform.json')));
+  const manifest = JSON.parse(text(join(dir, '.intent/conform.json')));
   manifest.checks = manifest.checks.filter(c => c.name === 'typescript');
-  writeJson(join(dir, 'intent/conform.json'), manifest);
+  writeJson(join(dir, '.intent/conform.json'), manifest);
   writeFileSync(join(dir, 'src/session.ts'), text(join(dir, 'src/session.ts')).replace("from !== 'not-running'", "from === 'not-running'"));
   const result = command('kit/intent-conform.mjs', dir);
   assert.equal(result.status, 1, result.stderr);
@@ -257,13 +271,13 @@ test('real implementation drift fails with disagreeing cases', t => {
 
 test('a retyped oracle agrees with deliberately wrong model and is rejected', t => {
   const dir = fixture(t);
-  const manifest = JSON.parse(text(join(dir, 'intent/conform.json')));
+  const manifest = JSON.parse(text(join(dir, '.intent/conform.json')));
   const c = manifest.checks[0];
   // A wrong, retyped "real" oracle and model both claim every transition rejects.
   c.model = c.broken;
   c.real = [process.execPath, '-e', 'for(const f of ["idle","working","blocked","not-running"]) for(const t of ["idle","working","blocked","not-running"]) console.log(`${f}->${t} false`)'];
   manifest.checks = [c];
-  writeJson(join(dir, 'intent/conform.json'), manifest);
+  writeJson(join(dir, '.intent/conform.json'), manifest);
   const result = command('kit/intent-conform.mjs', dir);
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /oracle does not exercise the real code/);
@@ -282,9 +296,9 @@ test('conformance sorts lines, enforces coverage, validates laws before executin
     smallManifest(dir, override);
     await assert.rejects(conform(dir), e => e.code === 2);
   }
-  writeFileSync(join(dir, 'intent/conform.json'), '{');
+  writeFileSync(join(dir, '.intent/conform.json'), '{');
   await assert.rejects(conform(dir), /invalid JSON/);
-  writeJson(join(dir, 'intent/conform.json'), { schema: 1, checks: [] });
+  writeJson(join(dir, '.intent/conform.json'), { schema: 1, checks: [] });
   await assert.rejects(conform(dir), /nonempty/);
 });
 
@@ -330,17 +344,17 @@ test('ported Bend helpers generate checking enum proofs and report law inventory
   const dir = fixture(t);
   const spec = { enums: [{ name: 'Flag', cases: [{ ctor: 'Off', key: 'off' }, { ctor: 'On', key: 'on' }] }] };
   validate(spec);
-  writeFileSync(join(dir, 'intent/model/Flag.bend'), generate(spec));
-  const result = await run([bend, 'Flag.bend', '--check-only'], join(dir, 'intent/model'), 120000);
+  writeFileSync(join(dir, '.intent/model/Flag.bend'), generate(spec));
+  const result = await run([bend, 'Flag.bend', '--check-only'], join(dir, '.intent/model'), 120000);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout + result.stderr, /ALL PROOFS CHECK/);
-  const inv = inventory(join(dir, 'intent/model'));
+  const inv = inventory(join(dir, '.intent/model'));
   assert.ok(inv.declarations.some(d => d.id === 'stopped_rejects' && d.status === 'defined'));
   assert.ok(inv.counts.constructor > 0);
   assert.equal(hasProof('/a/L.bend', 'law', '/a/P.bend', 'import ./Other.bend as M\ndef M.law(x):'), false);
   assert.equal(hasProof('/a/L.bend', 'law', '/a/L.bend', 'def law(x):'), true);
-  writeFileSync(join(dir, 'intent/model/PROOF.bend'), 'import ./Rows.bend as M\ndef M.stopped_rejects(to):\n  {==}\ndef M.active_allows(from,to):\n  {==}');
-  assert.equal(inventory(join(dir, 'intent/model')).declarations.find(d => d.id === 'stopped_rejects').status, 'open');
+  writeFileSync(join(dir, '.intent/model/PROOF.bend'), 'import ./Rows.bend as M\ndef M.stopped_rejects(to):\n  {==}\ndef M.active_allows(from,to):\n  {==}');
+  assert.equal(inventory(join(dir, '.intent/model')).declarations.find(d => d.id === 'stopped_rejects').status, 'open');
   await assert.rejects(gate(dir, bend), /no proof def resolving/);
   assert.equal(canonical({ b: 2, a: 1 }), '{"a":1,"b":2}');
 });

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { join, resolve } from 'node:path';
-import { cli, json, lawIds, read, reject, rootArg, run, unavailable, verifyHeaders } from './intent-core.mjs';
+import { INTENT_DIR, cli, json, lawIds, read, reject, rootArg, run, unavailable, verifyHeaders } from './intent-core.mjs';
 
 const lines = text => text.split(/\r?\n/).filter(line => line.trim() !== '').sort();
 export async function conform(root, requireCoverage = false) {
   verifyHeaders(import.meta.url);
-  const laws = lawIds(read(join(root, 'intent', 'model', 'LAWS.bend')));
-  const manifest = json(join(root, 'intent', 'conform.json'));
-  if (manifest?.schema !== 1 || !Array.isArray(manifest.checks) || !manifest.checks.length) unavailable('intent/conform.json requires schema: 1 and a nonempty checks[]; write a manifest');
+  const laws = lawIds(read(join(root, INTENT_DIR, 'model', 'LAWS.bend')));
+  const manifest = json(join(root, INTENT_DIR, 'conform.json'));
+  if (manifest?.schema !== 1 || !Array.isArray(manifest.checks) || !manifest.checks.length) unavailable(`${INTENT_DIR}/conform.json requires schema: 1 and a nonempty checks[]; write a manifest`);
   const covered = new Set();
   const names = new Set();
   // Validate the entire manifest before executing any command.

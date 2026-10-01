@@ -5,6 +5,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+export const INTENT_DIR = '.intent';
 export const POLICY = Object.freeze({ version: 'pi-intent/1', coverageThreshold: 0.8, fidelityThreshold: 0.9 });
 export class IntentError extends Error {
   constructor(message, code = 1) { super(message); this.code = code; }
@@ -107,7 +108,7 @@ export function verifyReceipt(value, rec, lawsText, recordText) {
 }
 export function verifyHeaders(scriptUrl) {
   const dir = resolve(fileURLToPath(new URL('.', scriptUrl)));
-  if (basename(dir) !== 'tools') return; // Package sources are versioned by npm/Git; vendored tools carry body hashes.
+  if (basename(dir) !== 'tools' || basename(dirname(dir)) !== INTENT_DIR) return; // Only .intent/tools carries vendored body hashes.
   // Only files owned by the kit: adopting apps may keep unrelated tools here.
   const scripts = ['gen-enums', 'intent-check', 'intent-conform', 'intent-core', 'intent-gate', 'intent-receipt', 'inventory'];
   let version;
@@ -117,7 +118,7 @@ export function verifyHeaders(scriptUrl) {
     const index = lines[0].startsWith('#!') ? 1 : 0;
     const match = /^\/\/ pi-intent v(\S+) sha256=([a-f0-9]{64})$/.exec(lines[index]);
     lines.splice(index, 1);
-    if (!match || sha256(lines.join('\n')) !== match[2] || (version && version !== match[1])) reject(`tools/${name}: stale or missing pi-intent header; re-run pi-intent vendor after reviewing local changes`);
+    if (!match || sha256(lines.join('\n')) !== match[2] || (version && version !== match[1])) reject(`${INTENT_DIR}/tools/${name}: stale or missing pi-intent header; re-run pi-intent vendor after reviewing local changes`);
     version = match[1];
   }
 }

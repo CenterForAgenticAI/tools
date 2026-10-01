@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { POLICY, canonical, cli, coverageQuestions, fidelityQuestions, lawIds, read, record, reject, seal, sha256, unavailable, verdict, verifyHeaders } from './intent-core.mjs';
+import { INTENT_DIR, POLICY, canonical, cli, coverageQuestions, fidelityQuestions, lawIds, read, record, reject, seal, sha256, unavailable, verdict, verifyHeaders } from './intent-core.mjs';
 
 // Evaluator contract: (JevRequest) => Promise<JevResponse>. Tests inject a fake.
 export async function produce(recordText, lawsText, filename, model, evaluate) {
@@ -39,17 +39,17 @@ await cli(async argv => {
   if (argv.length !== 3 || !/^\d{4}-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(argv[1])) unavailable('usage: intent-receipt.mjs <repo-dir> <record-id> <jev-model>; approve the record first');
   const root = resolve(argv[0]);
   const filename = `${argv[1]}.md`;
-  const recordText = read(join(root, 'intent', 'records', filename));
-  const lawsText = read(join(root, 'intent', 'model', 'LAWS.bend'));
+  const recordText = read(join(root, INTENT_DIR, 'records', filename));
+  const lawsText = read(join(root, INTENT_DIR, 'model', 'LAWS.bend'));
   // Fail before sending anything if approval hashes are stale.
-  if (read(join(root, 'intent', 'model', 'laws.sha256')).trim() !== sha256(lawsText)) reject('LAWS.bend is not approved; obtain human approval and update laws.sha256 before judging');
+  if (read(join(root, INTENT_DIR, 'model', 'laws.sha256')).trim() !== sha256(lawsText)) reject('LAWS.bend is not approved; obtain human approval and update laws.sha256 before judging');
   record(recordText, filename);
   if (record(recordText, filename).status !== 'approved') reject('record is not approved; request human approval before judging');
   const evaluator = await liveEvaluator(argv[2]);
   try {
     const receipt = await produce(recordText, lawsText, filename, argv[2], evaluator.evaluate);
-    mkdirSync(join(root, 'intent', 'receipts'), { recursive: true });
-    writeFileSync(join(root, 'intent', 'receipts', `${argv[1]}.json`), `${canonical(receipt)}\n`);
+    mkdirSync(join(root, INTENT_DIR, 'receipts'), { recursive: true });
+    writeFileSync(join(root, INTENT_DIR, 'receipts', `${argv[1]}.json`), `${canonical(receipt)}\n`);
     console.log(`intent-receipt: ${receipt.verdict}; committed receipt must be reviewed (integrity is not a signature)`);
     if (receipt.verdict !== 'pass') reject('receipt rejects the laws; revise with approval and rerun intent-receipt');
   } finally { evaluator.close(); }

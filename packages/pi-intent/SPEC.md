@@ -1,16 +1,16 @@
 # Intent records standard v1
 
-**Package:** pi-intent 0.2 · **Status:** experimental. This is the first version of the format, not a stability promise.
+**Package:** pi-intent 0.3 · **Status:** experimental. This is the first version of the format, not a stability promise.
 
 An intent record states what a person wants. A compiled-intent model states checkable claims about a finite decision. A Jev receipt records typed judgments about whether those claims match the record. Conformance compares the model with the app's real code. These are separate forms of evidence: a proof of the model does not prove the implementation follows it.
 
 ## Files
 
-An adopting repository MUST use this visible layout:
+An adopting repository MUST use this single hidden-directory layout:
 
 ```text
 CONTEXT.md                         project vocabulary (existing or human-authored)
-intent/
+.intent/
   records/NNNN-<slug>.md
   model/LAWS.bend
         PROOF.bend
@@ -20,10 +20,12 @@ intent/
   receipts/<record-id>.json
   conform.json
   oracle/…                        in the app's language
- tools/intent-*.mjs                vendored scripts, plus shared/helper .mjs files
+  tools/*.mjs                     vendored scripts, including shared/helper files
 ```
 
-Other model modules, enum specifications and row-emitting Bend programs may live in `intent/model/`. `pi-intent init <dir>` creates a draft scaffold, not approval or a working oracle. `pi-intent vendor <dir>` copies every kit `.mjs` file to `tools/`, replacing local copies. Review local edits before updating. `Lib.bend` is copied by init; review future library updates separately.
+All tool-created project state MUST stay under `.intent/`; command repo arguments still name the repository root. ripgrep and fd skip hidden directories by default; search `.intent` explicitly or use `rg --hidden` / `fd --hidden`.
+
+Other model modules, enum specifications and row-emitting Bend programs may live in `.intent/model/`. `pi-intent init <dir>` creates a draft scaffold, not approval or a working oracle. `pi-intent vendor <dir>` copies every kit `.mjs` file to `.intent/tools/`, replacing local copies. Review local edits before updating. `Lib.bend` is copied by init; review future library updates separately.
 
 ## Intent record
 
@@ -109,9 +111,9 @@ In v1 each approved record is judged against all current laws, so each must cove
   "checks": [{
     "name": "transitions-python",
     "laws": ["stopped_rejects", "active_allows"],
-    "model": ["bend", "intent/model/Rows.bend"],
-    "real": ["python3", "intent/oracle/python.py"],
-    "broken": ["bend", "intent/model/Broken.bend"],
+    "model": ["bend", ".intent/model/Rows.bend"],
+    "real": ["python3", ".intent/oracle/python.py"],
+    "broken": ["bend", ".intent/model/Broken.bend"],
     "cwd": ".",
     "timeoutMs": 30000
   }]
@@ -131,10 +133,10 @@ Conformance is language-neutral and does not use Jev. Finite decisions fit this 
 ## Commands and failure contract
 
 ```sh
-node tools/intent-check.mjs [repo-dir]
-node tools/intent-gate.mjs [repo-dir]
-node tools/intent-conform.mjs [repo-dir] [--require-coverage]
-node tools/intent-receipt.mjs <repo-dir> <record-id> <jev-model>
+node .intent/tools/intent-check.mjs [repo-dir]
+node .intent/tools/intent-gate.mjs [repo-dir]
+node .intent/tools/intent-conform.mjs [repo-dir] [--require-coverage]
+node .intent/tools/intent-receipt.mjs <repo-dir> <record-id> <jev-model>
 ```
 
-Node >=22.19 runs the zero-dependency kit. Exit 0 means pass; 1 means rejected evidence; 2 means malformed/missing input, unavailable tools, timeout or output cap. Failures name the stale evidence and a repair. Vendored script headers are `// pi-intent v<version> sha256=<body-hash>` after the shebang, if present. `intent-check` validates its own header and every kit-owned `.mjs` header in `tools/`, requiring one consistent version; unrelated app tools are ignored. A body hash excludes the header line. This reveals local drift, not malicious script replacement.
+Node >=22.19 runs the zero-dependency kit. Exit 0 means pass; 1 means rejected evidence; 2 means malformed/missing input, unavailable tools, timeout or output cap. Failures name the stale evidence and a repair. Vendored script headers are `// pi-intent v<version> sha256=<body-hash>` after the shebang, if present. `intent-check` validates its own header and every kit-owned `.mjs` header in `.intent/tools/`, requiring one consistent version; unrelated app tools are ignored. A body hash excludes the header line. This reveals local drift, not malicious script replacement.

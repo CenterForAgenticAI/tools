@@ -40,16 +40,29 @@ npx pi-intent init .
 npx pi-intent vendor .
 ```
 
-If installed only as a pi package, run `node <installed-package>/bin/pi-intent.mjs init .` using its resolved installation directory. `init` scaffolds a draft; it does not approve a record or supply your app oracle. `vendor` overwrites `tools/` copies. Review local edits first. Each script carries the package version and a SHA-256 body hash so local drift is visible.
+If installed only as a pi package, run `node <installed-package>/bin/pi-intent.mjs init .` using its resolved installation directory. `init` scaffolds a draft; it does not approve a record or supply your app oracle. `vendor` overwrites `.intent/tools/` copies. Review local edits first. Each script carries the package version and a SHA-256 body hash so local drift is visible.
 
 ```text
-intent/records/NNNN-slug.md
-intent/model/LAWS.bend PROOF.bend Lib.bend neg/*.bend laws.sha256
-intent/receipts/<record-id>.json
-intent/conform.json
-intent/oracle/…
-tools/intent-*.mjs
+.intent/records/NNNN-slug.md
+.intent/model/LAWS.bend PROOF.bend Lib.bend neg/*.bend laws.sha256
+.intent/receipts/<record-id>.json
+.intent/conform.json
+.intent/oracle/…
+.intent/tools/*.mjs
 ```
+
+All tool-created project state lives in one hidden `.intent/` directory. Run commands from the repo root (or pass that root as the argument), not from `.intent/`. ripgrep and fd skip hidden directories by default; search `.intent` explicitly or use `rg --hidden` / `fd --hidden`.
+
+### Migrate from 0.2.0 to 0.3.0
+
+Review local script edits, then move the old directories and refresh the scripts:
+
+```sh
+git mv intent .intent && git mv tools .intent/tools
+npx pi-intent vendor .
+```
+
+Update build hooks, workspec paths and oracle/manifest command paths to `.intent/`. Receipts remain valid when file contents stay unchanged: they bind record and law contents, not paths.
 
 Read [SPEC.md](SPEC.md) for the first format version. The three shipped skills guide drafting (`intent-records`), Bend authoring (`compiled-intent`) and app parity (`intent-conformance`). New projects draft then approve a record; retrofits describe actual behaviour first, then ask which behaviour to keep.
 
@@ -57,9 +70,9 @@ Read [SPEC.md](SPEC.md) for the first format version. The three shipped skills g
 
 | Check | Run it | Proves |
 |---|---|---|
-| `node tools/intent-check.mjs` | every build | record structure, approved law hash, current receipt hashes, integrity and recomputed passing policy; no Bend or network |
-| `node tools/intent-gate.mjs` | CI | freshness plus Bend proofs, failing negative controls and absence of forbidden bypass constructs |
-| `node tools/intent-conform.mjs` | opt-in build/CI | model rows match actual app rows; broken model differs; lists uncovered laws |
+| `node .intent/tools/intent-check.mjs` | every build | record structure, approved law hash, current receipt hashes, integrity and recomputed passing policy; no Bend or network |
+| `node .intent/tools/intent-gate.mjs` | CI | freshness plus Bend proofs, failing negative controls and absence of forbidden bypass constructs |
+| `node .intent/tools/intent-conform.mjs` | opt-in build/CI | model rows match actual app rows; broken model differs; lists uncovered laws |
 
 Add `--require-coverage` to conformance to reject uncovered laws. Exit 0 means pass, 1 rejection, 2 missing/malformed input or unavailable tool, timeout or output cap. Failures say what to repair. `BEND_BIN` can select the proof-gate executable; manifest commands select their own executable.
 
@@ -69,9 +82,9 @@ Add `--require-coverage` to conformance to reject uncovered laws. Exit 0 means p
 
 ```json
 {"scripts": {
-  "prebuild": "node tools/intent-check.mjs",
+  "prebuild": "node .intent/tools/intent-check.mjs",
   "build": "tsc",
-  "intent:ci": "node tools/intent-gate.mjs && node tools/intent-conform.mjs --require-coverage"
+  "intent:ci": "node .intent/tools/intent-gate.mjs && node .intent/tools/intent-conform.mjs --require-coverage"
 }}
 ```
 
@@ -80,23 +93,23 @@ Add `--require-coverage` to conformance to reject uncovered laws. Exit 0 means p
 ```make
 .PHONY: intent-check build intent-ci
 intent-check:
-	node tools/intent-check.mjs
+	node .intent/tools/intent-check.mjs
 build: intent-check
 	go build ./...
 intent-ci:
-	node tools/intent-gate.mjs
-	node tools/intent-conform.mjs --require-coverage
+	node .intent/tools/intent-gate.mjs
+	node .intent/tools/intent-conform.mjs --require-coverage
 ```
 
 **Cargo:** put this in `build.rs` for the compiler-free check. Cargo runs it when the listed inputs change; run the standalone check in CI as well.
 
 ```rust
 fn main() {
-    for path in ["intent/records", "intent/model", "intent/receipts", "tools"] {
+    for path in [".intent/records", ".intent/model", ".intent/receipts", ".intent/tools"] {
         println!("cargo:rerun-if-changed={path}");
     }
     let status = std::process::Command::new("node")
-        .arg("tools/intent-check.mjs").status().expect("install Node >=22.19");
+        .arg(".intent/tools/intent-check.mjs").status().expect("install Node >=22.19");
     assert!(status.success(), "intent freshness rejected; read the error above");
 }
 ```
@@ -104,16 +117,16 @@ fn main() {
 **Go:** `go generate` can run the fast check explicitly; it is not automatically run by `go build`. Make the Makefile above your build entry point, or use:
 
 ```go
-//go:generate node tools/intent-check.mjs
+//go:generate node .intent/tools/intent-check.mjs
 ```
 
 **CI**, with Node, Bend and the app toolchain preinstalled:
 
 ```sh
-node tools/intent-check.mjs
-node tools/intent-gate.mjs
+node .intent/tools/intent-check.mjs
+node .intent/tools/intent-gate.mjs
 # opt in for finite decisions connected to app code
-node tools/intent-conform.mjs --require-coverage
+node .intent/tools/intent-conform.mjs --require-coverage
 ```
 
 Do not give CI Jev credentials. Commit the authoring receipt before CI runs.
@@ -130,23 +143,28 @@ Do not give CI Jev credentials. Commit the authoring receipt before CI runs.
 
 The fast check alone needs only Node. The gate needs Bend regardless of app language. Conformance does not use Jev.
 
-[examples/transitions](examples/transitions) models one decision over `idle`, `working`, `blocked` and `not-running`: stopped sources reject; active sources allow every target. All 16 source/target pairs are exercised. Its approval and receipt are labeled synthetic fixtures, not real human/Jev approval.
+[examples/transitions](examples/transitions) models one decision over `idle`, `working`, `blocked` and `not-running`: stopped sources reject; active sources allow every target. All 16 source/target pairs are exercised. Its approval and receipt are labeled synthetic fixtures, not real human/Jev approval. The example stores its tree as `intent/` because npm and the public release omit dot-directories; adopters use `.intent/`.
 
-The TypeScript oracle imports `src/session.ts`; the Go main imports `go/session`; the Rust binary imports the `transition_session` library; the Python oracle imports `python/session.py`. Each calls the implementation, not a copied predicate. Run from the package checkout:
+The TypeScript oracle imports `src/session.ts`; the Go main imports `go/session`; the Rust binary imports the `transition_session` library; the Python oracle imports `python/session.py`. Each calls the implementation, not a copied predicate. Stage a scratch adopter before running from the package checkout (the tests do the same):
 
 ```sh
-node kit/intent-check.mjs examples/transitions
-BEND_BIN="$HOME/.bend/bin/bend" node kit/intent-gate.mjs examples/transitions
-PATH="$HOME/.bend/bin:$PATH" node kit/intent-conform.mjs examples/transitions --require-coverage
+mkdir -p .scratch
+example=$(mktemp -d .scratch/transitions-XXXXXX)
+cp -R examples/transitions/. "$example/"
+mv "$example/intent" "$example/.intent"
+node kit/intent-check.mjs "$example"
+BEND_BIN="$HOME/.bend/bin/bend" node kit/intent-gate.mjs "$example"
+PATH="$HOME/.bend/bin:$PATH" node kit/intent-conform.mjs "$example" --require-coverage
+rm -rf "$example"
 ```
 
-The example manifest uses these real commands:
+The staged example manifest uses these real commands (the Rust manifest points its binary at `../.intent/oracle/rust.rs`):
 
 ```json
-["node", "intent/oracle/typescript.mjs"]
-["go", "run", "./intent/oracle/go"]
+["node", ".intent/oracle/typescript.mjs"]
+["go", "run", "./.intent/oracle/go"]
 ["cargo", "run", "--quiet", "--manifest-path", "rust/Cargo.toml"]
-["python3", "intent/oracle/python.py"]
+["python3", ".intent/oracle/python.py"]
 ```
 
 Adapt `conform.json` to the languages installed in your project. Package tests require TypeScript, Go and Python; Rust is skipped with a reason only when Cargo is absent. Tests also change the real code to prove drift rejects, and substitute a wrongly retyped oracle/model to prove the broken-model control rejects.
@@ -172,7 +190,7 @@ After human record and law approval:
 ```sh
 # The standalone command dynamically imports this optional authoring dependency.
 npm install --no-save pi-fabric
-node tools/intent-receipt.mjs . 0001-transitions <jev-model>
+node .intent/tools/intent-receipt.mjs . 0001-transitions <jev-model>
 ```
 
 `intent-receipt` needs `pi-fabric` resolvable from the authoring project, not merely installed in a separate pi package directory. It imports `pi-fabric/jev` and exits 2 with an installation hint if unavailable. Model identifiers select the route:
@@ -200,15 +218,15 @@ work:
   - id: model-change
     task: Encode the approved session transition rules and prove them.
     refs:
-      - path: intent/records/0001-transitions.md
+      - path: .intent/records/0001-transitions.md
         why: Human-approved R1 and R2 define allowable transitions.
-    touches: [intent/model/**, intent/receipts/**, tools/**]
+    touches: [.intent/model/**, .intent/receipts/**, .intent/tools/**]
     acceptance:
       - id: receipt-current
         statement: The laws encode approved R1 and R2 with a current passing receipt.
         evidence:
           kind: command
-          run: node tools/intent-check.mjs
+          run: node .intent/tools/intent-check.mjs
           expect:
             exit: 0
             output_includes: "intent-check: ok"
@@ -216,7 +234,7 @@ work:
         statement: R1 and R2 are proved and their negative controls fail.
         evidence:
           kind: command
-          run: node tools/intent-gate.mjs
+          run: node .intent/tools/intent-gate.mjs
           timeout_ms: 180000
           expect:
             exit: 0
@@ -224,13 +242,13 @@ work:
   - id: implementation
     task: Implement the transition decision and real-code oracle.
     depends_on: [model-change]
-    touches: [src/**, intent/oracle/**, intent/conform.json]
+    touches: [src/**, .intent/oracle/**, .intent/conform.json]
     acceptance:
       - id: app-conforms
         statement: Actual session decisions follow the approved transition laws.
         evidence:
           kind: command
-          run: node tools/intent-conform.mjs
+          run: node .intent/tools/intent-conform.mjs
           timeout_ms: 180000
           expect:
             exit: 0

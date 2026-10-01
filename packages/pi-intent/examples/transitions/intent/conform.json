@@ -9,15 +9,15 @@
       ],
       "model": [
         "bend",
-        "intent/model/Rows.bend"
+        ".intent/model/Rows.bend"
       ],
       "real": [
         "node",
-        "intent/oracle/typescript.mjs"
+        ".intent/oracle/typescript.mjs"
       ],
       "broken": [
         "bend",
-        "intent/model/Broken.bend"
+        ".intent/model/Broken.bend"
       ],
       "timeoutMs": 120000
     },
@@ -29,16 +29,16 @@
       ],
       "model": [
         "bend",
-        "intent/model/Rows.bend"
+        ".intent/model/Rows.bend"
       ],
       "real": [
         "go",
         "run",
-        "./intent/oracle/go"
+        "./.intent/oracle/go"
       ],
       "broken": [
         "bend",
-        "intent/model/Broken.bend"
+        ".intent/model/Broken.bend"
       ],
       "timeoutMs": 120000
     },
@@ -50,15 +50,15 @@
       ],
       "model": [
         "bend",
-        "intent/model/Rows.bend"
+        ".intent/model/Rows.bend"
       ],
       "real": [
         "python3",
-        "intent/oracle/python.py"
+        ".intent/oracle/python.py"
       ],
       "broken": [
         "bend",
-        "intent/model/Broken.bend"
+        ".intent/model/Broken.bend"
       ],
       "timeoutMs": 120000
     },
@@ -70,7 +70,7 @@
       ],
       "model": [
         "bend",
-        "intent/model/Rows.bend"
+        ".intent/model/Rows.bend"
       ],
       "real": [
         "cargo",
@@ -81,7 +81,7 @@
       ],
       "broken": [
         "bend",
-        "intent/model/Broken.bend"
+        ".intent/model/Broken.bend"
       ],
       "timeoutMs": 120000
     }

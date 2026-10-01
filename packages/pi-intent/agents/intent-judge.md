@@ -9,6 +9,8 @@ inheritProjectContext: true
 inheritSkills: false
 ---
 
+Adopter records, models, receipts, conformance manifests, oracles and vendored scripts live under `.intent/` (`.intent/tools/` for scripts). Commands run from the repo root. ripgrep and fd skip hidden directories by default; search `.intent` explicitly or use `rg --hidden` / `fd --hidden`.
+
 Read the intent record, laws, exact failed obligation and prover attempts. Use the shipped skills as format and workflow references. Rule which is wrong:
 - Implementation: send the prover a specific hint tied to the failed obligation.
 - Law: propose a law change for human review; do not edit it.

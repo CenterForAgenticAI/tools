@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 import { join, relative } from 'node:path';
 import { check } from './intent-check.mjs';
-import { bendFiles, cli, codeOnly, hasProof, lawIds, read, reject, rootArg, run } from './intent-core.mjs';
+import { INTENT_DIR, bendFiles, cli, codeOnly, hasProof, lawIds, read, reject, rootArg, run } from './intent-core.mjs';
 
 export async function gate(root, bend = process.env.BEND_BIN || 'bend') {
   console.log(check(root));
-  const dir = join(root, 'intent', 'model');
+  const dir = join(root, INTENT_DIR, 'model');
   const files = bendFiles(dir);
   const negatives = files.filter(f => relative(dir, f).startsWith('neg/') || /(^|\/)neg-[^/]*\.bend$/.test(relative(dir, f)));
-  if (!negatives.length) reject('intent/model/neg is empty; add a negative control for each law');
+  if (!negatives.length) reject(`${INTENT_DIR}/model/neg is empty; add a negative control for each law`);
   const proofFile = join(dir, 'PROOF.bend');
   const proof = read(proofFile);
   const entries = new Set([proofFile]);
