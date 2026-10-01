@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { assertNoPublicReferenceLeaks } from "./public-reference-scan.ts";
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const temporaryDirectory = mkdtempSync(join(tmpdir(), "pi-question-smoke-"));
 const consumerDirectory = join(temporaryDirectory, "consumer");
@@ -49,6 +51,14 @@ try {
 	mkdirSync(consumerDirectory);
 	writeFileSync(join(consumerDirectory, "package.json"), '{"private":true,"type":"module"}\n');
 	const tarball = join(temporaryDirectory, pack.filename);
+	if (packageJson.name === "@centerforagenticai/pi-question") {
+		const unpackedDirectory = join(temporaryDirectory, "unpacked");
+		mkdirSync(unpackedDirectory);
+		run("tar", ["-xzf", tarball, "-C", unpackedDirectory], repoRoot);
+		assertNoPublicReferenceLeaks(join(unpackedDirectory, "package"));
+		console.log("smoke:public-references ok");
+	}
+
 	run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--omit=peer", tarball], consumerDirectory);
 	assert.equal(
 		existsSync(join(consumerDirectory, "node_modules", "@earendil-works", "pi-coding-agent")),
