@@ -6,8 +6,10 @@ import {
 	type MachineLeaseHandle,
 } from "./machine-lease.js";
 import {
+	MAX_USAGE_ATTEMPT_DELAY_MS,
 	normalizeUsageEndpointPercent,
 	type SharedUsageAttemptRecord,
+	type SharedUsageFailureReason,
 	type SharedUsageStore,
 	type UsageFailureDetail,
 } from "./shared-usage.js";
@@ -39,9 +41,8 @@ export const USAGE_FETCH_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 128 * 1024;
 const MAX_ERROR_CHARS = 512;
 const BASE_BACKOFF_MS = 30_000;
-const MAX_BACKOFF_MS = 15 * 60_000;
 const BACKOFF_LADDER_STEPS =
-	Math.ceil(Math.log2(MAX_BACKOFF_MS / BASE_BACKOFF_MS)) + 1;
+	Math.ceil(Math.log2(MAX_USAGE_ATTEMPT_DELAY_MS / BASE_BACKOFF_MS)) + 1;
 /** Disable only after the capped rung has failed once more. */
 export const USAGE_FETCH_DISABLE_AFTER_FAILURES = BACKOFF_LADDER_STEPS + 1;
 
@@ -104,12 +105,7 @@ export interface UsageFetchStatus {
 	readonly disabled: boolean;
 	readonly failureCount: number;
 	readonly nextAttemptAtMs?: number;
-	readonly disabledReason?:
-		| "rate-limit"
-		| "server-error"
-		| "credential-unavailable"
-		| "malformed-response"
-		| "network-error";
+	readonly disabledReason?: SharedUsageFailureReason;
 }
 
 export type UsageFetchResultStatus =
@@ -217,7 +213,10 @@ function retryAfterMs(response: UsageFetchResponse): number | undefined {
 	}
 	const seconds = Number(value);
 	if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-	return Math.min(MAX_BACKOFF_MS, Math.max(0, Math.ceil(seconds * 1_000)));
+	return Math.min(
+		MAX_USAGE_ATTEMPT_DELAY_MS,
+		Math.max(0, Math.ceil(seconds * 1_000)),
+	);
 }
 
 /** Redacts bearer and access-token values before an error can escape this module. */
@@ -642,14 +641,37 @@ async function queryEndpoint(
 		: normalizeAnthropicUsagePayload(payload);
 }
 
+/**
+ * The attempt's deadline, or undefined when no honest ladder could have set it.
+ *
+ * The store already bounds `nextAttemptAtMs` against the record's own
+ * `observedAtMs` on append and read (internal issue #108). That span
+ * check alone is not enough for a reader: a record whose ORIGIN sits centuries
+ * ahead carries a legitimate-looking span and would still suppress polling for
+ * that account forever. No honest deadline lies further than one capped rung
+ * from now, so anything beyond that is ignored rather than trusted.
+ */
+function plausibleAttemptDeadline(
+	attempt: SharedUsageAttemptRecord | undefined,
+	nowMs: number,
+): number | undefined {
+	if (attempt === undefined) return undefined;
+	if (attempt.nextAttemptAtMs > nowMs + MAX_USAGE_ATTEMPT_DELAY_MS) {
+		return undefined;
+	}
+	return attempt.nextAttemptAtMs;
+}
+
 function statusFromAttempt(
 	attempt: SharedUsageAttemptRecord | undefined,
 	enabled: boolean,
+	nowMs: number,
 ): UsageFetchStatus {
 	const nextAttemptAtMs =
-		attempt?.failureCount === 0 ? undefined : attempt?.nextAttemptAtMs;
-	const disabledReason =
-		attempt?.failureReason as UsageFetchStatus["disabledReason"];
+		attempt?.failureCount === 0
+			? undefined
+			: plausibleAttemptDeadline(attempt, nowMs);
+	const disabledReason = attempt?.failureReason;
 	return {
 		enabled,
 		disabled: attempt?.disabled ?? false,
@@ -833,6 +855,7 @@ export class UsageFetcher {
 		return statusFromAttempt(
 			this.#sharedStore.latestAttempt(providerId, family),
 			enabled,
+			this.#now(),
 		);
 	}
 
@@ -997,11 +1020,9 @@ export class UsageFetcher {
 		// forever. The bound belongs here, on the record, before any clause
 		// reads it.
 		//
-		// `nextAttemptAtMs` is allowed one debounce interval of headroom because
-		// Only the ORIGIN timestamps are bounded, not `nextAttemptAtMs`: a real
-		// failure ladder legitimately schedules its next rung far ahead, up to
-		// MAX_BACKOFF_MS, and bounding that would break genuine backoff
-		// suppression. An honest record cannot have been OBSERVED in the future.
+		// `nextAttemptAtMs` is bounded relative to `observedAtMs` by the store and
+		// checked again here before it may suppress a send. An honest record cannot
+		// have been OBSERVED in the future either.
 		if (
 			attempt.observedAtMs > nowMs ||
 			(attempt.failureTriggeredAtMs !== undefined &&
@@ -1009,7 +1030,12 @@ export class UsageFetcher {
 		) {
 			return undefined;
 		}
-		if (attempt.failureCount > 0 && attempt.nextAttemptAtMs > nowMs) {
+		const nextAttemptAtMs = plausibleAttemptDeadline(attempt, nowMs);
+		if (
+			attempt.failureCount > 0 &&
+			nextAttemptAtMs !== undefined &&
+			nextAttemptAtMs > nowMs
+		) {
 			return "backoff";
 		}
 		if (attempt.observedAtMs >= failedAtMs) return "already-answered";
@@ -1190,8 +1216,13 @@ export class UsageFetcher {
 		// Once the recorded backoff has elapsed, the account is retried whether or
 		// not it was disabled. A retry that fails again simply re-arms the ladder at
 		// its capped rung, so a genuinely dead endpoint is polled at most once per
-		// MAX_BACKOFF_MS rather than hammered.
-		if (prior !== undefined && prior.nextAttemptAtMs > nowMs) {
+		// MAX_USAGE_ATTEMPT_DELAY_MS rather than hammered.
+		const priorDeadline = plausibleAttemptDeadline(prior, nowMs);
+		if (
+			prior !== undefined &&
+			priorDeadline !== undefined &&
+			priorDeadline > nowMs
+		) {
 			await this.#persistWindowGap(
 				account,
 				nowMs,
@@ -1223,7 +1254,13 @@ export class UsageFetcher {
 			// over a stale `disabled` flag, so a recovered account can be observed
 			// again. Re-read under the lease because a peer may have attempted in
 			// between.
-			if (current !== undefined && current.nextAttemptAtMs > this.#now()) {
+			const currentNowMs = this.#now();
+			const currentDeadline = plausibleAttemptDeadline(current, currentNowMs);
+			if (
+				current !== undefined &&
+				currentDeadline !== undefined &&
+				currentDeadline > currentNowMs
+			) {
 				await this.#persistWindowGap(
 					account,
 					this.#now(),
@@ -1555,7 +1592,7 @@ export class UsageFetcher {
 					: new UsageEndpointError("usage endpoint failed", "network-error");
 			const failureCount = (prior?.failureCount ?? 0) + 1;
 			const backoff = Math.min(
-				MAX_BACKOFF_MS,
+				MAX_USAGE_ATTEMPT_DELAY_MS,
 				BASE_BACKOFF_MS * 2 ** Math.max(0, failureCount - 1),
 			);
 			const disabled = failureCount >= USAGE_FETCH_DISABLE_AFTER_FAILURES;

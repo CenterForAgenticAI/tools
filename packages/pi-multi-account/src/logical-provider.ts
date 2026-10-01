@@ -22,6 +22,7 @@ import {
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { RuntimeState, type LogicalRoutePin } from "./runtime-state.js";
+import { hostFinalStopMessage } from "./host-final-stop-message.js";
 import { DEFAULT_CONFIG } from "./config.js";
 import type {
 	AllowedFamily,
@@ -47,6 +48,16 @@ import type { ProviderType, Vendor } from "./vendor.js";
 
 export { LOGICAL_PROVIDER_ID } from "./models-declaration.js";
 import { LOGICAL_PROVIDER_ID } from "./models-declaration.js";
+import { forceCodexSseOptions } from "./codex-adapter.js";
+
+/** Fixed diagnostic label for a caller-supplied transport; never echoes the raw value. */
+function codexTransportLabel(
+	transport: unknown,
+): "websocket" | "websocket-cached" | "auto" | "other" {
+	return transport === "websocket" || transport === "websocket-cached" || transport === "auto"
+		? transport
+		: "other";
+}
 
 /** One physical account the logical provider may dispatch to. */
 export interface LogicalPhysicalAccount {
@@ -666,6 +677,7 @@ export function createLogicalProvider(
 	deps: LogicalProviderDeps,
 ): LogicalProvider {
 	const coordinator = createHostRetryCoordinator(deps);
+	let codexTransportNoticeSent = false;
 
 	const diagnose = (message: string): void => {
 		deps.onDiagnostic?.(message);
@@ -936,6 +948,7 @@ export function createLogicalProvider(
 
 	const projectMessage = (message: AssistantMessage, modelId: string): AssistantMessage => ({
 		...message, api: LOGICAL_PROVIDER_ID, provider: LOGICAL_PROVIDER_ID, model: modelId,
+		...hostFinalStopMessage(message),
 	});
 
 	const projectEvent = (event: unknown, modelId: string): unknown => {
@@ -1127,8 +1140,24 @@ export function createLogicalProvider(
 					await originalOnResponse(response, responseModel);
 				}
 			};
+			let routedOptions = options;
+			if (account.family === "openai-codex") {
+				// Temporary Pi 0.99 WebSocket containment; see CODEX_FORCED_TRANSPORT.
+				const forced = forceCodexSseOptions(options);
+				routedOptions = forced.options;
+				if (forced.overridden && options?.transport !== undefined && !codexTransportNoticeSent) {
+					codexTransportNoticeSent = true;
+					try {
+						deps.onDiagnostic?.(
+							`Codex transport "${codexTransportLabel(options.transport)}" overridden to "sse" on routed calls (Pi 0.99 WebSocket containment).`,
+						);
+					} catch {
+						// A diagnostic sink failure cannot replace a provider result.
+					}
+				}
+			}
 			const attributedOptions: SimpleStreamOptions = {
-				...options,
+				...routedOptions,
 				onPayload: wrappedOnPayload,
 				onResponse: wrappedOnResponse,
 			};

@@ -235,9 +235,33 @@ function normalizeAliasContext(
 }
 
 /**
- * Wraps the exact maintained stream without replacing transport or OAuth. Pi's
+ * Temporary containment for the Pi 0.99 Codex WebSocket failure: a WebSocket
+ * error leaves the session in a state where the next Codex turn crashes with
+ * "Cannot read properties of undefined (reading 'length')". Routes this
+ * extension owns always request SSE. The base `openai-codex` provider is never
+ * touched; only options on calls we already route are adjusted. Remove once the
+ * WebSocket path is fixed upstream.
+ */
+export const CODEX_FORCED_TRANSPORT = "sse" as const;
+
+/** Returns options with Codex transport pinned to SSE, and whether a value was overridden. */
+export function forceCodexSseOptions<T extends SimpleStreamOptions>(
+  options: T | undefined,
+): { options: T; overridden: boolean } {
+  if (options?.transport === CODEX_FORCED_TRANSPORT) {
+    return { options, overridden: false };
+  }
+  return {
+    options: { ...(options ?? {}), transport: CODEX_FORCED_TRANSPORT } as T,
+    overridden: true,
+  };
+}
+
+/**
+ * Wraps the exact maintained stream without replacing OAuth. Pi's
  * alias-resolved apiKey and every other option field are forwarded unchanged;
- * only model/context identity and callback attribution are adapted.
+ * model/context identity and callback attribution are adapted, and transport
+ * is pinned to SSE (see {@link CODEX_FORCED_TRANSPORT}).
  */
 export function createCodexAliasStream(
   maintainedStream: NonNullable<ProviderConfig["streamSimple"]>,
@@ -251,12 +275,12 @@ export function createCodexAliasStream(
     };
     const upstreamContext = normalizeAliasContext(context, aliasModel);
 
-    let upstreamOptions = options;
+    let upstreamOptions = forceCodexSseOptions(options).options;
     if (options?.onPayload || options?.onResponse) {
       const aliasOnPayload = options.onPayload;
       const aliasOnResponse = options.onResponse;
       upstreamOptions = {
-        ...options,
+        ...upstreamOptions,
         ...(aliasOnPayload
           ? {
               onPayload: (payload: unknown) =>

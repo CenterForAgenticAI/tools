@@ -65,25 +65,22 @@ export const EXHAUSTION_HOLD_MS = 60 * 60_000;
  * policy.
  */
 const MAX_REFRESH_DEBOUNCE_MS = 60 * 60_000;
+/** Longest persisted usage-attempt delay produced by the capped retry ladder. */
+export const MAX_USAGE_ATTEMPT_DELAY_MS = 15 * 60_000;
 
 export const SHARED_USAGE_MAX_BYTES = 512 * 1024;
 const MAX_RECORD_BYTES = 4_096;
 const MAX_OBSERVER_ID_LENGTH = 256;
 /**
- * Shape a field name must have inside a record type this build does not
- * recognise, applied when deciding whether compaction may carry it forward
- * rather than delete it.
- *
- * A length bound alone was the first attempt and round 3 refuted it: a key
- * called `Bearer SECRET` is short, so the credential simply moved from the
- * value into the key. Field names this project writes are lower-camel
- * identifiers.
- *
- * There is no companion value-length bound: unknown string VALUES are refused
- * outright rather than length-capped, because a bounded short string is
- * exactly the shape of a leaked bearer token.
+ * Exactly the grammar `defaultObserverId()` can emit: a hostname mapped into
+ * `[A-Za-z0-9._-]`, then at most one `:` followed only by decimal pid digits,
+ * sliced to MAX_OBSERVER_ID_LENGTH. The rule is derived from the producer
+ * rather than from a guess about what a credential looks like
+ * (internal issue #108), and it deliberately does not require the
+ * colon or the pid: on a host whose name fills the slice, the delimiter and pid
+ * are cut off, and the store must not refuse or delete those records.
  */
-const CARRYABLE_FIELD_NAME = /^[a-z][A-Za-z0-9]{0,63}$/;
+const OBSERVER_ID_PATTERN = /^(?=.{1,256}$)[A-Za-z0-9._-]*(?::[0-9]*)?$/;
 
 export type UsageObservationSource = "rate-limit-header" | "usage-endpoint";
 
@@ -123,6 +120,25 @@ const USAGE_FAILURE_DETAILS = new Set<UsageFailureDetail>([
 	"quota-summary-error",
 ]);
 
+/**
+ * The closed set `failureReason()` in usage-fetch.ts can produce. A persisted
+ * attempt may carry only one of these, so the field cannot hold caller text.
+ */
+export type SharedUsageFailureReason =
+	| "rate-limit"
+	| "server-error"
+	| "credential-unavailable"
+	| "malformed-response"
+	| "network-error";
+
+const USAGE_FAILURE_REASONS = new Set<SharedUsageFailureReason>([
+	"rate-limit",
+	"server-error",
+	"credential-unavailable",
+	"malformed-response",
+	"network-error",
+]);
+
 /** Machine-global fetch-attempt state; deliberately ignored by usage aggregation. */
 export interface SharedUsageAttemptRecord {
 	readonly recordType: "usage-attempt";
@@ -133,9 +149,10 @@ export interface SharedUsageAttemptRecord {
 	readonly observedAtMs: number;
 	readonly observerId: string;
 	readonly failureCount: number;
+	/** Bounded relative to `observedAtMs` by the capped retry ladder. */
 	readonly nextAttemptAtMs: number;
 	readonly disabled: boolean;
-	readonly failureReason?: string;
+	readonly failureReason?: SharedUsageFailureReason;
 	/** Fixed, sanitized classification detail; never an upstream error body. */
 	readonly failureDetail?: UsageFailureDetail;
 	/**
@@ -238,141 +255,9 @@ function validTimestamp(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
-/**
- * Whether a record this build cannot interpret may survive compaction.
- *
- * Compaction rebuilds the file from recognised records, so anything not carried
- * here is deleted. That is how an older build destroys a record type added
- * after it. Carrying unknown records forward keeps a newer build's state alive
- * across a mixed-version fleet.
- *
- * The filter exists because "unrecognised" also covers records this build
- * rejected as malformed, including the credential-bearing ones that
- * `append` refuses and compaction currently scrubs. Carrying those would turn a
- * durability fix into a privacy regression, so a carried record must still look
- * like a usage record for a known account: a `recordType` string this build
- * does not know, the same account identity fields every record carries, and no
- * field outside that shape. A future record type satisfies this; a leaked
- * authorization header does not.
- */
-function carryableUnknownRecord(value: unknown): boolean {
-	if (typeof value !== "object" || value === null || Array.isArray(value))
-		return false;
-	const record = value as Record<string, unknown>;
-	// `recordType` must look like a record type, not merely be non-empty.
-	//
-	// Round 2 proved "non-empty string" is not a constraint: `Bearer <token>`
-	// is a non-empty string, so a credential placed here survived compaction.
-	// A real record type is a lower-kebab identifier, and nothing that fails
-	// this shape is a record type this build should carry blind.
-	if (
-		typeof record.recordType !== "string" ||
-		!CARRYABLE_RECORD_TYPE.test(record.recordType)
-	)
-		return false;
-	if (
-		typeof record.providerId !== "string" ||
-		typeof record.family !== "string" ||
-		!isAllowedFamily(record.family) ||
-		!isCanonicalManagedProviderId(record.providerId, record.family) ||
-		!validTimestamp(record.observedAtMs) ||
-		!validObserverId(record.observerId) ||
-		// Stricter than `validObserverId` on purpose: that only bounds length,
-		// and a bearer token is a bounded string. See CARRYABLE_OBSERVER_ID.
-		!CARRYABLE_OBSERVER_ID.test(record.observerId)
-	)
-		return false;
-	// Beyond the identity fields above, a carried record may hold only
-	// NON-STRING values.
-	//
-	// The first version of this filter bounded value shape -- primitives only,
-	// length-capped -- and review proved it unsound: `{ authorization: "Bearer
-	// SHORT" }` is a bounded primitive and survived compaction, which is exactly
-	// the privacy regression the carry-through was not allowed to create.
-	//
-	// Refusing unknown strings outright is the only defensible rule here. A
-	// denylist of sensitive-looking field names would be a guess about what a
-	// future record type calls its fields, and every credential this project
-	// handles is a string. Timestamps, counts, fractions and flags -- what a
-	// forward-compatible usage record actually needs -- are unaffected. A future
-	// type that genuinely needs a string field must teach this build about
-	// itself rather than rely on being carried blind.
-	for (const [key, entry] of Object.entries(record)) {
-		// Field NAMES are constrained by shape, not only length. Round 3 found
-		// a length bound alone lets a key called `Bearer SECRET` through: the
-		// credential rides in the key rather than the value. A field name in a
-		// JSON record written by this project is a lower-camel identifier.
-		if (!CARRYABLE_FIELD_NAME.test(key)) return false;
-		if (CARRYABLE_IDENTITY_FIELDS.has(key)) continue;
-		if (!carryableUnknownValue(entry)) return false;
-	}
-	return true;
-}
-
-/**
- * Record types compaction may carry forward: the project's own namespace.
- *
- * Two weaker rules were tried and both refuted. "Non-empty" fell to
- * `Bearer <token>` in round 2. A lower-kebab shape fell in round 3 to
- * `sk-ant-api03-deadbeef`, which IS lower-kebab -- an API key and a record
- * type are not distinguishable by shape, so no amount of character-class
- * tightening can separate them.
- *
- * A namespace can. Every record type this file writes is `usage-`-prefixed
- * (`usage-attempt`, `usage-exhaustion-hold`), so a future type from a newer
- * build will be too. That is a property of the writer rather than a guess
- * about what a credential looks like, which is why it holds where the shape
- * checks did not.
- */
-const CARRYABLE_RECORD_TYPE = /^usage-[a-z][a-z0-9-]{0,56}$/;
-
-/**
- * Shape a carried record's `observerId` must have.
- *
- * `validObserverId` only bounds length, and round 2 proved that insufficient:
- * a bearer token is a bounded string. This restricts the CHARACTER SET instead,
- * which is what makes the field unusable for smuggling while still accepting
- * everything the producer can emit.
- *
- * The colon is deliberately NOT required. `defaultObserverId` builds
- * `${hostname()}:${process.pid}` and then truncates to MAX_OBSERVER_ID_LENGTH,
- * so on a host with a very long name the pid -- and the colon with it -- is cut
- * off entirely. Round 3 found an earlier version of this expression required
- * the colon, which would have made compaction DELETE legitimate records on such
- * a machine: the precise data loss this carry-through exists to prevent, caused
- * by the fix for it. A verified probe produced a 256-character id with no colon
- * at all.
- *
- * The length bound matches MAX_OBSERVER_ID_LENGTH rather than guessing a
- * narrower one, so the accepted domain covers every value the producer can
- * actually return.
- */
-const CARRYABLE_OBSERVER_ID = /^[A-Za-z0-9._:-]{1,256}$/;
-
-/**
- * Identity fields every record carries. They are the only strings a carried
- * unknown record may contain, and each is format-checked above rather than
- * merely bounded.
- */
-const CARRYABLE_IDENTITY_FIELDS = new Set([
-	"recordType",
-	"providerId",
-	"family",
-	"observerId",
-]);
-
-function carryableUnknownValue(value: unknown): boolean {
-	return (
-		value === null || typeof value === "boolean" || typeof value === "number"
-	);
-}
 
 function validObserverId(value: unknown): value is string {
-	return (
-		typeof value === "string" &&
-		value.length > 0 &&
-		value.length <= MAX_OBSERVER_ID_LENGTH
-	);
+	return typeof value === "string" && OBSERVER_ID_PATTERN.test(value);
 }
 
 const TOKEN_FIELDS = [
@@ -474,10 +359,15 @@ function validAttemptRecord(value: unknown): value is SharedUsageAttemptRecord {
 		validObserverId(record.observerId) &&
 		nonNegativeInteger(record.failureCount) &&
 		validTimestamp(record.nextAttemptAtMs) &&
+		record.nextAttemptAtMs >= record.observedAtMs &&
+		record.nextAttemptAtMs - record.observedAtMs <=
+			MAX_USAGE_ATTEMPT_DELAY_MS &&
 		typeof record.disabled === "boolean" &&
 		(record.failureReason === undefined ||
 			(typeof record.failureReason === "string" &&
-				record.failureReason.length <= 128)) &&
+				USAGE_FAILURE_REASONS.has(
+					record.failureReason as SharedUsageFailureReason,
+				))) &&
 		(record.failureDetail === undefined ||
 			(typeof record.failureDetail === "string" &&
 				USAGE_FAILURE_DETAILS.has(record.failureDetail as UsageFailureDetail))) &&
@@ -551,9 +441,19 @@ function defaultStorePath(): string {
 	return join(agentDir, "pi-multi-account", "usage.ndjson");
 }
 
-/** Identity is bounded metadata only; it contains no credential-derived value. */
-export function defaultObserverId(): string {
-	return `${hostname()}:${process.pid}`.slice(0, MAX_OBSERVER_ID_LENGTH);
+/**
+ * Identity is bounded metadata only; it contains no credential-derived value.
+ *
+ * Hostname characters outside the observer-id alphabet are mapped to `-`, so
+ * every value this producer returns is one `validObserverId` accepts. Without
+ * that, an unusual hostname would make the default store constructor throw.
+ */
+export function defaultObserverId(
+	host: string = hostname(),
+	pid: number = process.pid,
+): string {
+	const safeHost = host.replace(/[^A-Za-z0-9._-]/g, "-");
+	return `${safeHost}:${pid}`.slice(0, MAX_OBSERVER_ID_LENGTH);
 }
 
 function projectRecord(record: SharedUsageRecord): SharedUsageRecord {
@@ -829,24 +729,26 @@ function compactUsageFile(options: {
 		const latestRateLimits = new Map<string, SharedUsageRecord>();
 		const latestAttempts = new Map<string, SharedUsageAttemptRecord>();
 		const latestHolds = new Map<string, SharedUsageExhaustionHoldRecord>();
-		// Records this build has no reader for are carried through verbatim.
+		// Compaction is a CLOSED REGISTRY: only the three record types this
+		// build validates survive, and each survives as the JSON of its own
+		// validated projection, never as the source bytes.
 		//
-		// Compaction rebuilds the file from what it recognises, so without this a
-		// process running an older build silently deletes every record type added
-		// after it -- including the exhaustion holds that keep a spent account out
-		// of rotation. The account then looks healthy
-		// to the next process and gets routed to again.
+		// internal MR !83 carried unrecognised records verbatim so an
+		// older build would not delete a newer build's record types. Four rounds
+		// of shape rules (non-empty, lower-kebab, `usage-` namespace, lower-camel
+		// field names) tried to tell a future record from credential text and
+		// all were refuted (internal issue #110): `sk-ant-api03-deadbeef`
+		// is indistinguishable by shape from an identifier, a `usage-` prefix is
+		// free to any writer, and a retained source line keeps every field name
+		// and raw numeric text too. A record this build cannot interpret cannot
+		// be proved credential-free, so it is dropped.
 		//
-		// Carrying them verbatim rather than re-serialising keeps this build from
-		// imposing a shape on data it does not understand, and matches how the
-		// writer tail below is copied byte-for-byte.
-		//
-		// This is deliberately limited to whole unrecognised *records*.
-		// Unrecognised *fields* on a recognised record are still stripped by
-		// projectRecord/projectAttempt: that projection is the credential scrub
-		// required by AGENTS.md, and widening it here would trade a privacy
-		// guarantee for a durability one.
-		const unrecognisedLines: string[] = [];
+		// Mixed-version safety is kept for every type this build knows, the
+		// exhaustion hold included: each is re-emitted from its validated fields,
+		// so a peer on this build never deletes a live hold. The accepted cost
+		// is that a record type added after this build is dropped when this
+		// build compacts; a new type must stay advisory until every build in the
+		// fleet recognises it.
 
 		for (const line of completeUsageLines(options.path, completePrefixBytes)) {
 			let parsed: unknown;
@@ -893,10 +795,7 @@ function compactUsageFile(options: {
 				if (!previous || hold.observedAtMs >= previous.observedAtMs) {
 					latestHolds.set(hold.providerId, hold);
 				}
-			} else if (carryableUnknownRecord(parsed)) {
-				unrecognisedLines.push(line);
 			}
-
 		}
 		const compactedRecords = new Set([
 			...latest.values(),
@@ -905,12 +804,9 @@ function compactUsageFile(options: {
 			...latestAttempts.values(),
 			...latestHolds.values(),
 		]);
-		// Carried records go first and verbatim, so a build that cannot interpret
-		// them neither reorders them relative to each other nor reformats them.
-		const compacted = [
-			...unrecognisedLines.map((line) => `${line}\n`),
-			...[...compactedRecords].map((record) => `${JSON.stringify(record)}\n`),
-		].join("");
+		const compacted = [...compactedRecords]
+			.map((record) => `${JSON.stringify(record)}\n`)
+			.join("");
 		const compactedBytes = Buffer.byteLength(compacted, "utf8");
 		if (compactedBytes > options.maxBytes) return false;
 
@@ -1009,6 +905,11 @@ export class SharedUsageStore {
 
 	append(record: SharedUsageLogRecord): boolean {
 		try {
+			// Judge the caller's own value, not the projection: projecting slices
+			// the observer id, and a value this store would have to rewrite is
+			// not one the producer emitted.
+			if (!validObserverId((record as { observerId?: unknown }).observerId))
+				return false;
 			const projected = validExhaustionHoldRecord(record)
 				? projectExhaustionHold(record)
 				: validAttemptRecord(record)
@@ -1134,16 +1035,22 @@ export class SharedUsageStore {
 	 * records, so a hold that has lapsed simply stops being reported. Callers get
 	 * a time to compare, not a boolean, because routing has to combine it with an
 	 * authoritative recovery time and take whichever is later.
+	 *
+	 * `clearedAtMs` excludes holds whose own validated `failedAtMs` is at or
+	 * before it, so a caller's operator clear is judged against the failure
+	 * the record states rather than one reconstructed from its deadline.
 	 */
 	activeExhaustionHoldUntilMs(
 		providerId: string,
 		family: AllowedFamily,
 		nowMs: number,
+		clearedAtMs?: number,
 	): number | undefined {
 		let latest: number | undefined;
 		for (const hold of this.readExhaustionHolds()) {
 			if (hold.providerId !== providerId || hold.family !== family) continue;
 			if (hold.holdUntilMs <= nowMs) continue;
+			if (clearedAtMs !== undefined && hold.failedAtMs <= clearedAtMs) continue;
 			// A relative bound alone is not enough. `holdUntilMs - failedAtMs` can
 			// be a legitimate 60 minutes while `failedAtMs` itself sits in the year
 			// 3138, which would exclude the account for centuries. No honest hold

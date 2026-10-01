@@ -98,7 +98,18 @@ export interface PausedRoute {
 	readonly retryAfterMs: number | null;
 }
 
-export type ReactiveRouteDecision = SelectedRoute | PausedRoute;
+/**
+ * A structured refusal or unknown provider stop. The failed account is kept
+ * as-is: no cooldown, no invalidation, no alternative, and no continuation.
+ * The stop is deterministic for the request context, so another account would
+ * only spend another request on the same answer.
+ */
+export interface RetainedRoute {
+	readonly status: "retained";
+	readonly classification: FailureClassification;
+}
+
+export type ReactiveRouteDecision = SelectedRoute | PausedRoute | RetainedRoute;
 
 export interface HealthSelectionDecision {
 	readonly providerId: string;
@@ -1092,6 +1103,11 @@ export function routeAfterFailure(options: {
 		throw new TypeError("failedAccount must be a canonical managed provider.");
 	}
 	const classification = classifyFailure(failure);
+	// Before any state observation: a retained stop writes nothing and routes
+	// nowhere, so settlement cannot turn it into a switch or a continuation.
+	if (classification.accountAction === "retain-account") {
+		return { status: "retained", classification };
+	}
 	if (
 		classification.category === "config" &&
 		failure.code === "model_not_found" &&

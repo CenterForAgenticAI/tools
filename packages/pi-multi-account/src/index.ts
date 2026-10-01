@@ -3890,6 +3890,18 @@ export const createMultiAccountExtension =
 				modelSupport,
 				alreadyCooled: classified.alreadyCooled === true,
 			});
+			if (decision.status === "retained") {
+				// A structured refusal or unknown stop keeps the account: no switch,
+				// no park, no OpenRouter, and no continuation. The same context would
+				// stop the same way on any account.
+				diagnostics.record(
+					"info",
+					"routing.retained",
+					"The provider stopped the turn with a refusal or unknown stop reason; the account was kept and no follow-up was scheduled.",
+					{ providerId, kind: decision.classification.kind ?? "unknown" },
+				);
+				return;
+			}
 			if (decision.status === "paused") {
 				// OpenRouter is an explicitly enabled, metered FINAL rung. The helper
 				// re-checks every managed family so family-chain policy cannot bypass
@@ -4873,7 +4885,7 @@ export const createMultiAccountExtension =
 								config,
 								nowMs,
 							});
-							if (reactive.status === "paused") return;
+							if (reactive.status !== "selected") return;
 							reactiveCandidate = reactive;
 							destinationProviderId = reactive.destination.providerId;
 						}
@@ -5299,9 +5311,17 @@ export const createMultiAccountExtension =
 			turnRouteOrigin = origin;
 			handledFailures.add(event.message);
 			const responseFailure = lastFailure.get(providerId) ?? {};
-			const messageCode = providerErrorCodeFromMessage(
-				event.message.errorMessage,
-			);
+			// A structured provider stop is copied only from this two-value allowlist,
+			// never spread, and it wins over any code parsed from provider-authored
+			// errorMessage prose: refusal text must not read as a rate limit.
+			const rawStopCode = (event.message as { code?: unknown }).code;
+			const stopCode =
+				rawStopCode === "refusal" || rawStopCode === "unknown_stop"
+					? rawStopCode
+					: undefined;
+			const messageCode =
+				stopCode ??
+				providerErrorCodeFromMessage(event.message.errorMessage);
 			const failure: ProviderFailureSignal = {
 				...responseFailure,
 				...(messageCode === undefined ? {} : { code: messageCode }),

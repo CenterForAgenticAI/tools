@@ -13,6 +13,7 @@ import {
   sanitizeDiagnosticText,
   sanitizeHeaderValue,
 } from "./diagnostics.js";
+import { hostFinalStopMessage } from "./host-final-stop-message.js";
 
 export const ANTHROPIC_ALIAS_API = "hypha-anthropic-oauth" as const;
 
@@ -53,12 +54,19 @@ function withAliasAttribution(
   };
 }
 
+/**
+ * Bounds an upstream error and, for a structured refusal or unknown stop,
+ * publishes the shared host-final message. A direct alias turn reaches the
+ * host's retry and compaction predicates without the unified provider, so
+ * provider-authored stop wording must not make the host resend the request.
+ */
 function sanitizeUpstreamError(message: AssistantMessage): AssistantMessage {
   if (message.errorMessage === undefined) return message;
-  return {
+  const sanitized: AssistantMessage = {
     ...message,
     errorMessage: sanitizeDiagnosticText(message.errorMessage),
   };
+  return { ...sanitized, ...hostFinalStopMessage(sanitized) };
 }
 
 function withAliasEvent(

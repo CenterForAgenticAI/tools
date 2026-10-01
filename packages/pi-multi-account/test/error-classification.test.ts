@@ -88,6 +88,8 @@ describe("classifyFailure", () => {
 		[{ httpStatus: 403 }, "permission", "cooldown-and-route"],
 		[{ code: "insufficient_permissions" }, "permission", "cooldown-and-route"],
 		[{ code: "model_not_found" }, "config", "route-without-retry"],
+		[{ code: "refusal" }, "unknown", "retain-account"],
+		[{ code: "unknown_stop" }, "unknown", "retain-account"],
 		[{ transportKind: "socket-reset" }, "transport", "cooldown-and-route"],
 		[{ httpStatus: 503 }, "transport", "cooldown-and-route"],
 		[{}, "unknown", "cooldown-and-route"],
@@ -96,6 +98,18 @@ describe("classifyFailure", () => {
 			category,
 			accountAction: action,
 		});
+	});
+
+	it("classifies a refusal or unknown provider stop as retain-account without a cooldown", () => {
+		for (const code of ["refusal", "unknown_stop"] as const) {
+			const classification = classifyFailure({ code });
+			expect(classification).toEqual({
+				category: "unknown",
+				kind: code === "refusal" ? "refusal" : "unknown-stop",
+				accountAction: "retain-account",
+			});
+			expect(classification).not.toHaveProperty("cooldownReason");
+		}
 	});
 
 	it("treats a single 401 as terminal but network/OAuth service failures as transient", () => {

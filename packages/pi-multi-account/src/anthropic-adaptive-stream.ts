@@ -24,8 +24,9 @@
  * Provenance: pi-anthropic-oauth@0.2.4-intel.2, private pin
  * 99ac00f290efbcb93e7f23e6b7482d8727367aa7, upstream baseline
  * 53266ecb51b6d1890ef3f7251a64cb1d71d96099, source src/stream.ts.
- * Local delta: adaptive thinking emits type=adaptive and mapped output effort,
- * without budget_tokens; all other request and response behavior is unchanged.
+ * Local delta: adaptive thinking emits type=adaptive and mapped output effort
+ * without budget_tokens; request-local retry/timeout options reach the SDK; and
+ * refusal or unknown stop reasons retain bounded, structured error details.
  */
 
 import { Anthropic } from "@anthropic-ai/sdk";
@@ -41,6 +42,8 @@ import {
   type SimpleStreamOptions,
   type StopReason,
 } from "@earendil-works/pi-ai";
+import { sanitizeDiagnosticText } from "./diagnostics.js";
+import type { ProviderErrorCode } from "./error-classification.js";
 type IndexedBlock =
   | ({ type: "text"; text: string } & { index: number })
   | ({ type: "thinking"; thinking: string; thinkingSignature?: string } & {
@@ -95,18 +98,51 @@ const REQUIRED_BETAS = [
   "interleaved-thinking-2025-05-14",
 ] as const;
 
-function mapStopReason(reason: string | null | undefined): StopReason {
+type StopReasonResult = Readonly<{
+  stopReason: StopReason;
+  errorMessage?: string;
+  code?: Extract<ProviderErrorCode, "refusal" | "unknown_stop">;
+}>;
+
+function mapStopReason(
+  reason: string | null | undefined,
+  stopDetails?: unknown,
+): StopReasonResult {
   switch (reason) {
     case "end_turn":
     case "pause_turn":
     case "stop_sequence":
-      return "stop";
+      return { stopReason: "stop" };
     case "max_tokens":
-      return "length";
+      return { stopReason: "length" };
     case "tool_use":
-      return "toolUse";
-    default:
-      return "error";
+      return { stopReason: "toolUse" };
+    case "refusal": {
+      const explanation =
+        typeof stopDetails === "object" &&
+        stopDetails !== null &&
+        typeof (stopDetails as { explanation?: unknown }).explanation === "string"
+          ? sanitizeDiagnosticText(
+              (stopDetails as { explanation: string }).explanation,
+            )
+          : "";
+      return {
+        stopReason: "error",
+        errorMessage:
+          explanation || "The model refused to complete the request",
+        code: "refusal",
+      };
+    }
+    default: {
+      const boundedReason = sanitizeDiagnosticText(reason ?? "unknown");
+      return {
+        stopReason: "error",
+        errorMessage: sanitizeDiagnosticText(
+          `Provider stopped with: ${boundedReason}`,
+        ),
+        code: "unknown_stop",
+      };
+    }
   }
 }
 
@@ -163,7 +199,7 @@ export function streamAnthropicAdaptive(
   const stream = createAssistantMessageEventStream();
 
   void (async () => {
-    const output: AssistantMessage = {
+    const output: AssistantMessage & { code?: ProviderErrorCode } = {
       role: "assistant",
       content: [],
       api: model.api,
@@ -276,10 +312,24 @@ export function streamAnthropicAdaptive(
       // which throws under fine-grained-tool-streaming (input may be invalid
       // mid-flight) and aborts the turn. The raw stream yields the same
       // RawMessageStreamEvents; tool args are already parsed leniently below.
+      const maxRetries = options?.maxRetries;
+      const timeoutMs = options?.timeoutMs;
       const { data: anthropicStream, response: httpResponse } =
         await client.messages
           .create(params, {
             signal: options?.signal,
+            ...(Number.isFinite(maxRetries) &&
+            Number.isInteger(maxRetries) &&
+            (maxRetries ?? -1) >= 0
+              ? { maxRetries }
+              : {}),
+            // Any finite positive timeout is honored; the SDK timer takes whole
+            // milliseconds, so a fractional value is floored to at least 1.
+            ...(typeof timeoutMs === "number" &&
+            Number.isFinite(timeoutMs) &&
+            timeoutMs > 0
+              ? { timeout: Math.max(1, Math.floor(timeoutMs)) }
+              : {}),
           })
           .withResponse();
 
@@ -474,7 +524,19 @@ export function streamAnthropicAdaptive(
         }
 
         if (event.type === "message_delta") {
-          output.stopReason = mapStopReason(event.delta.stop_reason);
+          const rawStopReason = event.delta.stop_reason;
+          const mapped = mapStopReason(
+            rawStopReason,
+            (event.delta as { stop_details?: unknown }).stop_details,
+          );
+          output.stopReason = mapped.stopReason;
+          if (typeof rawStopReason === "string") {
+            output.rawStopReason = sanitizeDiagnosticText(rawStopReason);
+          }
+          if (mapped.errorMessage !== undefined) {
+            output.errorMessage = mapped.errorMessage;
+          }
+          if (mapped.code !== undefined) output.code = mapped.code;
           output.usage.input =
             (event.usage as { input_tokens?: number }).input_tokens ||
             output.usage.input;
@@ -505,11 +567,15 @@ export function streamAnthropicAdaptive(
       }
 
       if (options?.signal?.aborted) throw new Error("Request aborted");
-      stream.push({
-        type: "done",
-        reason: output.stopReason as "stop" | "length" | "toolUse",
-        message: output,
-      });
+      if (output.stopReason === "error") {
+        stream.push({ type: "error", reason: "error", error: output });
+      } else {
+        stream.push({
+          type: "done",
+          reason: output.stopReason as "stop" | "length" | "toolUse",
+          message: output,
+        });
+      }
       stream.end();
     } catch (error) {
       for (const block of output.content as Array<{

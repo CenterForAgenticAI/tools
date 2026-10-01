@@ -13,6 +13,8 @@ export const PROVIDER_ERROR_CODES = [
 	"model_not_found",
 	"unsupported_api_version",
 	"invalid_request",
+	"refusal",
+	"unknown_stop",
 ] as const;
 export type ProviderErrorCode = (typeof PROVIDER_ERROR_CODES)[number];
 
@@ -50,10 +52,12 @@ export type FailureCategory =
 
 export interface FailureClassification {
 	readonly category: FailureCategory;
+	readonly kind?: "refusal" | "unknown-stop";
 	readonly accountAction:
 		| "cooldown-and-route"
 		| "invalidate-and-route"
-		| "route-without-retry";
+		| "route-without-retry"
+		| "retain-account";
 	readonly cooldownReason?: CooldownReason;
 	readonly serverHint?: NumericServerHint;
 }
@@ -246,6 +250,14 @@ export function classifyFailure(
 
 	if (hasCode(signal, CONFIG_CODES)) {
 		return { category: "config", accountAction: "route-without-retry" };
+	}
+
+	if (signal.code === "refusal" || signal.code === "unknown_stop") {
+		return {
+			category: "unknown",
+			kind: signal.code === "refusal" ? "refusal" : "unknown-stop",
+			accountAction: "retain-account",
+		};
 	}
 
 	if (isTransportFailure(signal)) {

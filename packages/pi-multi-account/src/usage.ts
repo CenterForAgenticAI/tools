@@ -337,8 +337,8 @@ export class UsageLedger {
 	 * exhaustion hold is one. But a hold is machine-global: deleting the record
 	 * would revoke it for every other session on the machine, and those peers
 	 * may still be refusing work on that account. So the override is
-	 * PROCESS-LOCAL -- this session stops honouring holds installed up to the
-	 * moment of the clear, and peers keep theirs.
+	 * PROCESS-LOCAL -- this session stops honouring holds whose failure happened
+	 * at or before the clear, and peers keep theirs.
 	 *
 	 * Stored as the clear time rather than a boolean so a LATER failure still
 	 * installs a hold this session honours. A boolean would make one `clear`
@@ -346,6 +346,13 @@ export class UsageLedger {
 	 * which is a permanent effect from a transient instruction.
 	 */
 	readonly #holdOverrides = new Map<string, number>();
+	/**
+	 * When `clear()` with no account last ran. Clear-all is one point in time
+	 * for EVERY account, including ones with no hold visible at that instant:
+	 * enumerating the holds present then let a peer publish a pre-clear hold a
+	 * moment later and still have it honoured (internal issue #110).
+	 */
+	#clearAllAtMs: number | undefined;
 	readonly #sharedStore: SharedUsageStore | undefined;
 	readonly #now: () => number;
 
@@ -714,29 +721,29 @@ export class UsageLedger {
 		family: AllowedFamily,
 		nowMs = this.#now(),
 	): number | undefined {
-		const holdUntilMs = this.#sharedStore?.activeExhaustionHoldUntilMs(
+		// An operator `clear` in THIS process stops us honouring holds whose
+		// failure happened at or before it. A hold from a LATER failure is
+		// honoured again: the override is a point in time, not a permanent
+		// exemption. Peers keep honouring the record either way, because it is
+		// not deleted.
+		//
+		// The store compares each hold's own validated `failedAtMs`. Deriving
+		// the failure time from the deadline (`holdUntilMs - EXHAUSTION_HOLD_MS`)
+		// is only right for an exact one-hour hold, and the store accepts every
+		// shorter span (internal issue #110).
+		const accountClearedAtMs = this.#holdOverrides.get(providerId);
+		const clearedAtMs =
+			accountClearedAtMs === undefined
+				? this.#clearAllAtMs
+				: this.#clearAllAtMs === undefined
+					? accountClearedAtMs
+					: Math.max(accountClearedAtMs, this.#clearAllAtMs);
+		return this.#sharedStore?.activeExhaustionHoldUntilMs(
 			providerId,
 			family,
 			nowMs,
+			clearedAtMs,
 		);
-		if (holdUntilMs === undefined) return undefined;
-		// An operator `clear` in THIS process stops us honouring holds that were
-		// already installed when it ran. A hold from a LATER failure is honoured
-		// again: the override is a point in time, not a permanent exemption.
-		// Peers keep honouring the record either way, because it is not deleted.
-		//
-		// `holdUntilMs - EXHAUSTION_HOLD_MS` recovers the failure time from the
-		// reported deadline without a second store read. The writer always sets
-		// exactly that span (asserted by the hold-duration test), and the
-		// store's own read bound refuses any record claiming more.
-		const clearedAtMs = this.#holdOverrides.get(providerId);
-		if (
-			clearedAtMs !== undefined &&
-			holdUntilMs - EXHAUSTION_HOLD_MS <= clearedAtMs
-		) {
-			return undefined;
-		}
-		return holdUntilMs;
 	}
 
 	/**
@@ -811,11 +818,7 @@ export class UsageLedger {
 		if (providerId === undefined) {
 			this.#snapshots.clear();
 			this.#quotaObservations.clear();
-			for (const id of this.#sharedStore
-				?.readExhaustionHolds()
-				.map((hold) => hold.providerId) ?? []) {
-				this.#holdOverrides.set(id, nowMs);
-			}
+			this.#clearAllAtMs = Math.max(this.#clearAllAtMs ?? nowMs, nowMs);
 		} else {
 			this.#snapshots.delete(providerId);
 			this.#quotaObservations.delete(providerId);
