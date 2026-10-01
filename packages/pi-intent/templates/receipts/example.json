@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "recordId": "0001-transitions",
+  "recordSha256": "6bf296d470b5f690fe13ca56861d2a286fabadb9097fc93e3b081fcd48ce2196",
+  "lawsSha256": "f9dbd77172c3bcdfdea98d7e0df98cbbffbc9207fb9a8d98f60976ead2112bf8",
+  "policy": {
+    "version": "pi-intent/1",
+    "coverageThreshold": 0.8,
+    "fidelityThreshold": 0.9
+  },
+  "model": "fixture/fake",
+  "questions": {
+    "coverage": {
+      "R1": {
+        "type": "choice",
+        "instructions": "Which law encodes clause R1: A not-running session rejects every target state.? Choose none if no law faithfully covers it.",
+        "criteria": {
+          "stopped_rejects": "Law stopped_rejects",
+          "active_allows": "Law active_allows",
+          "none": "No law covers this clause"
+        }
+      },
+      "R2": {
+        "type": "choice",
+        "instructions": "Which law encodes clause R2: A transition is allowed exactly when the source is idle, working or blocked, independent of the target state.? Choose none if no law faithfully covers it.",
+        "criteria": {
+          "stopped_rejects": "Law stopped_rejects",
+          "active_allows": "Law active_allows",
+          "none": "No law covers this clause"
+        }
+      }
+    },
+    "fidelity": {
+      "stopped_rejects": {
+        "type": "noul",
+        "instructions": "Does law stopped_rejects faithfully encode clause(s) R1: A not-running session rejects every target state. without weakening, strengthening or adding unrelated constraints?",
+        "criteria": {
+          "true": "All mapped clauses are faithfully encoded and at least one is mapped.",
+          "false": "No mapped clause, or a mismatch in meaning."
+        }
+      },
+      "active_allows": {
+        "type": "noul",
+        "instructions": "Does law active_allows faithfully encode clause(s) R2: A transition is allowed exactly when the source is idle, working or blocked, independent of the target state. without weakening, strengthening or adding unrelated constraints?",
+        "criteria": {
+          "true": "All mapped clauses are faithfully encoded and at least one is mapped.",
+          "false": "No mapped clause, or a mismatch in meaning."
+        }
+      }
+    }
+  },
+  "answers": {
+    "coverage": {
+      "R1": {
+        "type": "choice",
+        "choice": "stopped_rejects",
+        "confidence": 1,
+        "probabilities": {
+          "stopped_rejects": 1,
+          "active_allows": 0,
+          "none": 0
+        }
+      },
+      "R2": {
+        "type": "choice",
+        "choice": "active_allows",
+        "confidence": 1,
+        "probabilities": {
+          "stopped_rejects": 0,
+          "active_allows": 1,
+          "none": 0
+        }
+      }
+    },
+    "fidelity": {
+      "stopped_rejects": {
+        "type": "noul",
+        "noul": 1
+      },
+      "active_allows": {
+        "type": "noul",
+        "noul": 1
+      }
+    }
+  },
+  "verdict": "pass",
+  "integrity": "19b35a1cc9cab697badca9499c32f3f0ea53330fa1c0ceb7bc18e45bed3fb5e4"
+}

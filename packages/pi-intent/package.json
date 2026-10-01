@@ -1,0 +1,78 @@
+{
+  "version": "0.2.0",
+  "description": "Intent records, compiled-intent Bend models and Jev evaluation receipts for pi.",
+  "keywords": [
+    "pi-package"
+  ],
+  "type": "module",
+  "bin": {
+    "pi-intent": "./bin/pi-intent.mjs"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "agents",
+    "kit",
+    "bin",
+    "templates",
+    "SPEC.md",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "lint": "eslint . --cache --cache-location node_modules/.cache/eslint/",
+    "typecheck": "tsc -p tsconfig.check.json --incremental --tsBuildInfoFile node_modules/.cache/tsc/check.tsbuildinfo",
+    "typecheck:tests": "tsc -p tsconfig.tests.check.json --incremental --tsBuildInfoFile node_modules/.cache/tsc/tests-check.tsbuildinfo",
+    "test:compile": "node scripts/compile-tests.mjs",
+    "test:run": "node --test --test-concurrency=${TEST_CONCURRENCY:-4} .test-dist/tests/unit/*.test.js tests/unit/*.test.mjs",
+    "test": "npm run test:compile && c8 npm run test:run",
+    "smoke:package": "node scripts/smoke-package.mjs",
+    "test:public": "npm run test:compile && node --test --test-concurrency=${TEST_CONCURRENCY:-4} --test-skip-pattern='Bend|oracle|implementation drift' .test-dist/tests/unit/*.test.js tests/unit/*.test.mjs",
+    "check:ci": "npm run lint && npm run typecheck && npm run typecheck:tests && npm run test:public && npm run build && npm run smoke:package",
+    "check": "npm run lint && npm run typecheck && npm run typecheck:tests && npm test && npm run build && npm run smoke:package"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "name": "@centerforagenticai/pi-intent",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/pi-intent"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/pi-intent#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.99.1",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.0.0",
+    "c8": "^11.0.0",
+    "eslint": "^10.7.0",
+    "globals": "^16.0.0",
+    "tsx": "^4.19.0",
+    "typebox": "^1.3.11",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}

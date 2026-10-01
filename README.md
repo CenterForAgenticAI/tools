@@ -12,6 +12,7 @@ Public releases of [Pi](https://github.com/earendil-works/pi) extensions and ser
 | [pi-context-aware](packages/pi-context-aware) | extension | stable | Context-budget pressure markers, proactive compaction with handoff seeds, prior-session search, and a context cache. |
 | [pi-daemon](packages/pi-daemon) | service | experimental | Runs headless Pi sessions in-process behind a local socket, with durable replay, live streaming, and driver arbitration. |
 | [pi-delegate](packages/pi-delegate) | extension | stable | Subagent delegation: supervised forks, direct workers, chains, detached drivers, steering, and worktree isolation. |
+| [pi-intent](packages/pi-intent) | extension | experimental | Turns approved intent into rules a checker can prove, then checks whether the app's real code follows them. |
 | [pi-multi-account](packages/pi-multi-account) | extension | experimental | Routes Anthropic and OpenAI Codex requests across multiple OAuth accounts. |
 | [pi-prompt-graph](packages/pi-prompt-graph) | extension | experimental | Conditional, cyclic workflow graphs over Pi units, with bounded loops and fan-out. |
 | [pi-question](packages/pi-question) | extension | experimental | An `ask` tool for structured human questions that works in the TUI, headless hosts, and delegate workers. |

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "checks": [
+    {
+      "name": "identity",
+      "laws": ["identity"],
+      "model": ["bend", "intent/model/Rows.bend"],
+      "real": ["node", "intent/oracle/real.mjs"],
+      "broken": ["bend", "intent/model/Broken.bend"],
+      "cwd": ".",
+      "timeoutMs": 30000
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "checks": [
+    {
+      "name": "typescript",
+      "laws": [
+        "stopped_rejects",
+        "active_allows"
+      ],
+      "model": [
+        "bend",
+        "intent/model/Rows.bend"
+      ],
+      "real": [
+        "node",
+        "intent/oracle/typescript.mjs"
+      ],
+      "broken": [
+        "bend",
+        "intent/model/Broken.bend"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "name": "go",
+      "laws": [
+        "stopped_rejects",
+        "active_allows"
+      ],
+      "model": [
+        "bend",
+        "intent/model/Rows.bend"
+      ],
+      "real": [
+        "go",
+        "run",
+        "./intent/oracle/go"
+      ],
+      "broken": [
+        "bend",
+        "intent/model/Broken.bend"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "name": "python",
+      "laws": [
+        "stopped_rejects",
+        "active_allows"
+      ],
+      "model": [
+        "bend",
+        "intent/model/Rows.bend"
+      ],
+      "real": [
+        "python3",
+        "intent/oracle/python.py"
+      ],
+      "broken": [
+        "bend",
+        "intent/model/Broken.bend"
+      ],
+      "timeoutMs": 120000
+    },
+    {
+      "name": "rust",
+      "laws": [
+        "stopped_rejects",
+        "active_allows"
+      ],
+      "model": [
+        "bend",
+        "intent/model/Rows.bend"
+      ],
+      "real": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--manifest-path",
+        "rust/Cargo.toml"
+      ],
+      "broken": [
+        "bend",
+        "intent/model/Broken.bend"
+      ],
+      "timeoutMs": 120000
+    }
+  ]
+}
