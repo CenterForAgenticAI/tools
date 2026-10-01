@@ -830,12 +830,21 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, optio
       "accept-ranges": "bytes",
       "cache-control": "no-cache",
     };
-    if (genericEmbed) headers["content-security-policy"] = "sandbox";
+    // Raw content can open top-level in a new tab, including from an HTML artifact link.
+    // Script-capable inline types other than HTML and SVG (XML, XHTML) would otherwise run on
+    // the daemon origin, so every inline document except browser-native media and PDF is
+    // sandboxed. Media and PDF cannot run page script, and PDF viewers refuse sandboxing.
+    if (genericEmbed || (dispo === "inline" && !/^(image|video|audio)\/|^application\/pdf$/.test(resolved.mime))) {
+      headers["content-security-policy"] = "sandbox";
+    }
     if (a.kind === "html") {
       // `sandbox allow-scripts` keeps executable reports opaque even when opened as raw,
       // while preserving authored CSS/JS/image assets. The unique origin plus no CORS on
       // daemon APIs prevents artifact code from reading or mutating registry state.
-      headers["content-security-policy"] = "sandbox allow-scripts; default-src * data: blob:; script-src * 'unsafe-inline'; style-src * 'unsafe-inline'; img-src * data: blob:; font-src * data:; media-src * data: blob:; connect-src 'none'; form-action 'none'; frame-ancestors 'self'";
+      // `allow-popups-to-escape-sandbox` lets an authored target="_blank" link open a normal
+      // tab: most sites refuse to load inside the viewer frame. The opened page never gets
+      // the artifact's origin, and the artifact gains no top-level navigation.
+      headers["content-security-policy"] = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; default-src * data: blob:; script-src * 'unsafe-inline'; style-src * 'unsafe-inline'; img-src * data: blob:; font-src * data:; media-src * data: blob:; connect-src 'none'; form-action 'none'; frame-ancestors 'self'";
     }
     if (resolved.mime === "image/svg+xml") headers["content-security-policy"] = "sandbox; default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'self'";
 

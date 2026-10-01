@@ -362,7 +362,7 @@ test("HTML annotation frames inject a bridge before actual authored HTML in an o
     assert.match(framedHtml, /window\.evil.*attacker.*escape/s);
     assert.ok(framedHtml.indexOf("network is disabled") < framedHtml.indexOf("window.evil"), "bridge precedes authored markup and meta CSP");
     const raw = await fetch(`${srv.base}/raw/${registered.id}`);
-    assert.match(raw.headers.get("content-security-policy") || "", /sandbox allow-scripts;.*connect-src 'none'; form-action 'none'/);
+    assert.match(raw.headers.get("content-security-policy") || "", /^sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox;.*connect-src 'none'; form-action 'none'/);
     const svg = await json<{ id: string }>(await fetch(`${srv.base}/api/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: "server-tests", title: "Unsafe SVG", filename: "unsafe.svg", mode: "stored", contentBase64: Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>").toString("base64") }) }));
     assert.match((await fetch(`${srv.base}/raw/${svg.id}`)).headers.get("content-security-policy") || "", /^sandbox;/);
   } finally { await srv.close(); }
@@ -794,6 +794,38 @@ test("untrusted referenced registrations cannot expose daemon-local files", asyn
     fs.rmSync(source, { force: true });
     await srv.close();
   }
+});
+
+test("raw HTML may open new tabs while other inline raw content cannot run script on the daemon origin", async () => {
+  const srv = await listen();
+  try {
+    const register = async (filename: string, content: string) => json<{ id: string; version: number }>(await fetch(`${srv.base}/api/register`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ project: "server-tests", title: filename, filename, mode: "stored", contentBase64: Buffer.from(content).toString("base64") }),
+    }));
+    const sandboxTokens = (res: Response) => {
+      const match = /^sandbox(?: ([^;]*))?(?:;|$)/.exec(res.headers.get("content-security-policy") || "");
+      return match ? new Set((match[1] || "").split(/\s+/).filter(Boolean)) : null;
+    };
+
+    const html = await register("links.html", "<!doctype html><a href='https://example.com/' target='_blank' rel='noopener noreferrer'>out</a>");
+    const htmlRaw = await fetch(`${srv.base}/raw/${html.id}`);
+    assert.deepEqual(sandboxTokens(htmlRaw), new Set(["allow-scripts", "allow-popups", "allow-popups-to-escape-sandbox"]), "links in HTML artifacts can open new tabs; the artifact never gains the daemon origin or top navigation");
+    assert.match(htmlRaw.headers.get("content-security-policy") || "", /connect-src 'none'; form-action 'none'/);
+    const annotation = await fetch(`${srv.base}/annotation-frame/${html.id}/v/${html.version}`);
+    assert.deepEqual(sandboxTokens(annotation), new Set(["allow-scripts"]), "annotation mode keeps link navigation disabled");
+
+    const hostileXml = `<?xml version="1.0"?><r><script xmlns="http://www.w3.org/1999/xhtml">fetch("/api/health")</script></r>`;
+    for (const [filename, content] of [["hostile.xml", hostileXml], ["notes.md", "# Notes\n"], ["data.json", "{}"]]) {
+      const registered = await register(filename, content);
+      const raw = await fetch(`${srv.base}/raw/${registered.id}`);
+      assert.match(raw.headers.get("content-disposition") || "", /^inline;/, `${filename} renders inline`);
+      assert.deepEqual(sandboxTokens(raw), new Set(), `${filename} opened in a new tab cannot run script on the daemon origin`);
+    }
+
+    const pdf = await register("doc.pdf", "%PDF-1.4\n%%EOF\n");
+    assert.equal(sandboxTokens(await fetch(`${srv.base}/raw/${pdf.id}`)), null, "browser PDF viewers refuse sandboxed documents");
+  } finally { await srv.close(); }
 });
 
 test("generic browser rendering is sandboxed while direct raw access downloads", async () => {

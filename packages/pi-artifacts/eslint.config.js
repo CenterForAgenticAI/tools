@@ -9,7 +9,6 @@ export default tseslint.config(
       "node_modules/**",
       ".worktrees/**",
       ".pi-artifacts-data/**",
-      ".public-release-check/**",
       "web/vendor/**",
     ],
   },

@@ -5,6 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { normalizeReferenceManifest, transformGitLabReferences } from "./report-gl-refs.mjs";
+import { openExternalLinksInNewTab } from "./report-links.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const templateDir = path.join(root, "templates", "report");
@@ -45,11 +46,11 @@ export function generateReport({
   }
 
   const bodyReferences = transformGitLabReferences(renderedBody, referenceManifest, bodySource);
-  renderedBody = bodyReferences.html.trim();
+  renderedBody = openExternalLinksInNewTab(bodyReferences.html).trim();
   let referenceCount = bodyReferences.count;
   if (kind === "combined") {
     const evidenceReferences = transformGitLabReferences(renderedEvidence, referenceManifest, evidenceSource);
-    renderedEvidence = evidenceReferences.html.trim();
+    renderedEvidence = openExternalLinksInNewTab(evidenceReferences.html).trim();
     referenceCount += evidenceReferences.count;
   }
 

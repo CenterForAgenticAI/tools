@@ -250,7 +250,11 @@ function renderHtml(el) {
   annotationFrameChannel = annotationActive ? crypto.randomUUID() : null;
   const raw = rawUrl(false);
   const src = annotationActive ? `/annotation-frame/${id}/v/${annotationVersion()}?channel=${encodeURIComponent(annotationFrameChannel)}` : raw;
-  el.innerHTML = `<div class="html-print-notice">HTML artifacts cannot paginate inside the viewer frame. Open <a href="${raw}" target="_blank" rel="noopener noreferrer">the raw document</a>, then print that page for complete output.</div><iframe id="htmlframe" class="htmlframe" sandbox="allow-scripts" src="${src}" title="${esc(meta.title)}"></iframe>`;
+  // Most sites refuse to load inside this frame, so an authored target="_blank" link must open
+  // a normal tab. The artifact itself never gains same-origin access or top-level navigation.
+  // Annotation mode keeps links inert so selecting text cannot leave the page.
+  const sandbox = annotationActive ? "allow-scripts" : "allow-scripts allow-popups allow-popups-to-escape-sandbox";
+  el.innerHTML = `<div class="html-print-notice">HTML artifacts cannot paginate inside the viewer frame. Open <a href="${raw}" target="_blank" rel="noopener noreferrer">the raw document</a>, then print that page for complete output.</div><iframe id="htmlframe" class="htmlframe" sandbox="${sandbox}" src="${src}" title="${esc(meta.title)}"></iframe>`;
 }
 function renderPdf(el) {
   el.className = "full";

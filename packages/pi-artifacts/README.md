@@ -1,6 +1,6 @@
 # @centerforagenticai/pi-artifacts
 
-**Kind:** extension · **Status:** experimental · **Pi:** ^0.85.1 · **Node:** >=22
+**Kind:** extension · **Status:** experimental · **Pi:** ^0.99.2 · **Node:** >=22
 
 A cross-device registry and viewer for durable files produced by Pi sessions.
 
@@ -48,7 +48,7 @@ npm link
 pi-artifacts install
 ```
 
-Run `/reload` in Pi. This package needs Pi `^0.85.1` and Node `>=22`.
+Run `/reload` in Pi. This package needs Pi `^0.99.2` and Node `>=22`.
 For a remote client, daemon options, or installation without Tailscale, read the
 [operations reference](docs/operations.md).
 

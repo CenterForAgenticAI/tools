@@ -503,6 +503,67 @@ output #123 stays literal</code></pre>
   assert.doesNotMatch(html, /<(?:img|source|video|audio|iframe)\b[^>]*\bsrc=["']https?:\/\//i);
 });
 
+test("generator opens external links in a new tab without sending the referrer", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-report-links-"));
+  const fixture = writeFixture(directory, `
+<section id="sources"><h2>Sources</h2>
+  <p><a href="https://example.test/plain">plain source</a></p>
+  <p><a href="HTTP://example.test/upper" class="cite">upper-case scheme</a></p>
+  <p><a href="https://example.test/rel" rel="author">authored rel</a></p>
+  <p><a href="https://example.test/rel-kept" rel="noopener author">authored noopener</a></p>
+  <p><a href="https://example.test/self" target="_self">explicit target</a></p>
+  <p><a href="#sources">fragment</a> <a href="mailto:team@example.test">mail</a> <a data-gl-ref="#123"></a></p>
+  <pre><code>&lt;a href="https://example.test/code"&gt;</code></pre>
+</section>
+`, {
+    title: "Link report",
+    date: "2026-08-05",
+    companionHref: "link-detailed.html",
+  });
+  const referencesPath = path.join(directory, "references.json");
+  fs.writeFileSync(referencesPath, `${JSON.stringify({
+    defaultProject: "group/project",
+    references: {
+      "#123": { kind: "issue", iid: 123, title: "Open issue", state: "opened", url: "https://gitlab.example.test/group/project/-/work_items/123" },
+    },
+  }, null, 2)}\n`);
+
+  const result = runGenerator([
+    "--kind", "narrative",
+    "--body", fixture.bodyPath,
+    "--meta", fixture.metadataPath,
+    "--references", referencesPath,
+    "--out", fixture.outputPath,
+  ]);
+  assert.equal(result.status, 0, result.stderr);
+  const html = fs.readFileSync(fixture.outputPath, "utf8");
+  const startTag = (href: string) => {
+    const tags = [...html.matchAll(/<a\b[^>]*>/g)].map((match) => match[0]).filter((tag) => tag.includes(`href="${href}"`));
+    assert.equal(tags.length, 1, `exactly one anchor for ${href}`);
+    return tags[0];
+  };
+  const attribute = (tag: string, name: string) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1];
+  const relTokens = (tag: string) => new Set((attribute(tag, "rel") || "").split(/\s+/).filter(Boolean));
+
+  for (const href of ["https://example.test/plain", "HTTP://example.test/upper", "https://gitlab.example.test/group/project/-/work_items/123"]) {
+    const tag = startTag(href);
+    assert.equal(attribute(tag, "target"), "_blank", `${href} opens a new tab: the viewer frame cannot show most external sites`);
+    assert.deepEqual(relTokens(tag), new Set(["noopener", "noreferrer"]), `${href} gives the opened page no handle on the report`);
+  }
+  assert.match(startTag("HTTP://example.test/upper"), /class="cite"/, "authored attributes are kept");
+  assert.match(startTag("https://gitlab.example.test/group/project/-/work_items/123"), /class="gl-ref gl-ref-issue/, "generated GitLab references are opened the same way");
+  assert.deepEqual(relTokens(startTag("https://example.test/rel")), new Set(["author", "noopener", "noreferrer"]), "an authored rel is extended, never duplicated");
+  assert.equal((startTag("https://example.test/rel").match(/\srel=/g) || []).length, 1);
+  assert.deepEqual(relTokens(startTag("https://example.test/rel-kept")), new Set(["noopener", "author", "noreferrer"]));
+  assert.equal(attribute(startTag("https://example.test/self"), "target"), "_self", "an explicit authored target wins");
+  for (const href of ["#sources", "mailto:team@example.test"]) {
+    const tags = [...html.matchAll(/<a\b[^>]*>/g)].map((match) => match[0]).filter((tag) => tag.includes(`href="${href}"`));
+    assert.ok(tags.length > 0, `anchor for ${href}`);
+    for (const tag of tags) assert.equal(attribute(tag, "target"), undefined, `${href} stays in place`);
+  }
+  assert.match(html, /<pre><code>&lt;a href="https:\/\/example\.test\/code"&gt;<\/code><\/pre>/, "code text is never rewritten");
+});
+
 test("generator fails closed on an unknown GitLab token and names its source file", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-report-gl-ref-unknown-"));
   const fixture = writeFixture(directory, `

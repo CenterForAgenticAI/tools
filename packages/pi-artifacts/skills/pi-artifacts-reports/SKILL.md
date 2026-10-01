@@ -259,7 +259,9 @@ Each final report must work as one HTML file without the artifacts daemon or a n
 
 The generator rejects body scripts, remote CSS resources, non-inline resource attributes, and
 external companion links. It runs the same self-containment check over both combined fragments and
-the final HTML. Ordinary source links do not make the report dependent on the network.
+the final HTML. Ordinary source links do not make the report dependent on the network. The
+generator gives every `http(s)` link `target="_blank"` and adds `noopener noreferrer` to its `rel`,
+because most sites refuse to load inside the viewer frame. An authored `target` is kept.
 
 ## Accessibility checklist
 

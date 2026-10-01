@@ -38,7 +38,14 @@ controls, and other surrounding interface. Wide Markdown tables use a fixed page
 wrapped cells; Markdown and plain code wrap long lines instead of clipping them at the page edge.
 Printing also switches viewer-rendered content to a high-contrast light palette.
 
-Self-contained HTML artifacts run in a fixed-height sandboxed `<iframe>`. The frame cannot paginate
+Self-contained HTML artifacts run in a fixed-height sandboxed `<iframe>`. Most external sites,
+including GitHub and GitLab, refuse to load inside a frame, so an external link must open a new tab:
+write `target="_blank" rel="noopener noreferrer"`. The sandbox lets such a link open a normal,
+unsandboxed tab; the artifact itself never gains the daemon's origin or top-level navigation. While
+**Comments** is open, links stay inert so selecting text cannot leave the page. The house report
+generator adds the attributes to every `http(s)` link.
+
+The frame cannot paginate
 a long inner document, and `web/app.css` cannot style that document. Open **↗ raw** first and print
 that page for complete multipage output; printing the outer viewer shows this instruction instead
 of silently clipping the frame. The HTML artifact's own stylesheet must still include `@media print`

@@ -59,7 +59,8 @@ content; code wraps long lines rather than clipping them. Authors should still u
 headings, fenced code blocks with a language when known, and useful image alternative text.
 
 HTML artifacts are different: each one runs as its own document in a fixed-height sandboxed
-`<iframe>`. That frame cannot paginate a long inner document, and `web/app.css` cannot reach the
+`<iframe>`. Most external sites refuse to load in a frame, so give every external link
+`target="_blank" rel="noopener noreferrer"`; it then opens a normal tab. That frame cannot paginate a long inner document, and `web/app.css` cannot reach the
 HTML artifact's styles. For complete multipage output, open **↗ raw** in the viewer and print the raw
 document itself. Printing the outer viewer shows this instruction instead of silently clipping the
 frame. The HTML artifact must still include its own print rules. Start with this and adapt the
