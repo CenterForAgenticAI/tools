@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest a change to a package.
+labels: ["enhancement", "triage"]
+body:
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - "@centerforagenticai/pi-work"
+        - "@centerforagenticai/pi-artifacts"
+        - "@centerforagenticai/pi-context-aware"
+        - "@centerforagenticai/pi-delegate"
+        - "@centerforagenticai/pi-callbacks"
+        - "@centerforagenticai/pi-daemon"
+        - "@centerforagenticai/pi-multi-account"
+        - "@centerforagenticai/pi-prompt-graph"
+        - "@centerforagenticai/pi-question"
+        - "@centerforagenticai/pi-dev"
+        - "@centerforagenticai/pi-adaptive-thinking"
+        - "@centerforagenticai/pi-intent"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed-change
+    attributes:
+      label: Proposed change
+      description: Describe what you would like the package to do.
+    validations:
+      required: true

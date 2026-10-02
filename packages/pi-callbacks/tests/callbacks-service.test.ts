@@ -14,6 +14,7 @@ import {
 import piCallbacks from "../index.ts";
 import { upsertJob } from "../src/store.ts";
 import type { ExternalCallbackJob, PollJob, ReminderJob, ScriptJob, SessionRef } from "../src/types.ts";
+import { NO_DAEMON } from "./no-daemon.ts";
 
 interface FakeEvents {
   events: EventBus;
@@ -269,7 +270,7 @@ test("extension lifecycle registers and disposes the pending-work provider", (t)
   useTempCallbacksDir(t);
   const eventBus = fakeEvents();
   const { pi, handlers } = fakeExtensionPi(eventBus.events);
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
   const context = fakeExtensionContext(currentSession);
 
   handlers.get("session_start")!({}, context);
@@ -288,7 +289,7 @@ test("extension lifecycle disposes the old provider before rebinding to a new se
 
   const eventBus = fakeEvents();
   const { pi, handlers } = fakeExtensionPi(eventBus.events);
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
   const currentContext = fakeExtensionContext(currentSession);
   const otherContext = fakeExtensionContext(otherSession);
 
@@ -322,7 +323,7 @@ test("extension lifecycle is safe when the event bus is absent", (t) => {
   useTempCallbacksDir(t);
   const eventBus = fakeEvents();
   const { pi, handlers } = fakeExtensionPi();
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
   const context = fakeExtensionContext(currentSession);
 
   assert.doesNotThrow(() => handlers.get("session_start")!({}, context));

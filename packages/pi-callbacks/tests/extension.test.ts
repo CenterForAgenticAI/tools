@@ -8,6 +8,7 @@ import piCallbacks, { formatStatusSummary, handleAction } from "../index.ts";
 import { createJobWidgetLoop, formatJobWidgetLines, JOB_WIDGET_KEY, JOB_WIDGET_REFRESH_INTERVAL_MS, updateJobWidget } from "../src/job-widget.ts";
 import { appendDeliveryEvent, closeSessionPresence, getJob, listJobs, listPendingDeliveryEvents, loadStore, registerSessionPresence, removeJob, updateJob, upsertJob } from "../src/store.ts";
 import type { PollJob, ReminderJob, SessionPresence } from "../src/types.ts";
+import { NO_DAEMON } from "./no-daemon.ts";
 
 interface RegisteredCommand {
   description: string;
@@ -154,7 +155,7 @@ test("extension passes a check-in triggerTurn override to sendMessage", (t) => {
     ui: { notify: () => undefined, setStatus: () => undefined, setWidget: () => undefined },
     isIdle: () => true,
   };
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
 
   const job = upsertJob(reminderJob({
     id: "check-in-trigger-boundary",
@@ -190,7 +191,7 @@ test("poll delivery seam prefixes freshness, warning, and structured handoff det
     ui: { notify: () => undefined, setStatus: () => undefined, setWidget: () => undefined },
     isIdle: () => true,
   };
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
   const job = upsertJob({
     ...reminderJob({
       id: "poll-freshness-extension",
@@ -246,7 +247,7 @@ test("poll delivery seam supports custom, user, and notify-only outcomes", (t) =
     ui: { notify: (message) => { notifications.push(message); }, setStatus: () => undefined, setWidget: () => undefined },
     isIdle: () => true,
   };
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
 
   const pollJobFor = (id: string, delivery: PollJob["delivery"]): PollJob => ({
     ...reminderJob({
@@ -309,7 +310,7 @@ test("poll freshness warning starts only after more than three intervals", (t) =
     ui: { notify: () => undefined, setStatus: () => undefined, setWidget: () => undefined },
     isIdle: () => true,
   };
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
   const job = upsertJob({
     ...reminderJob({ id: "poll-warning-boundary", createdAt: 0, updatedAt: 0, sessionFile: session.sessionFile, origin: { ...session, cwd: process.cwd() } }),
     kind: "poll",
@@ -368,7 +369,7 @@ test("busy delivery final recheck releases a claim before retrying when idle", (
     ui: { notify: () => undefined, setStatus: () => undefined, setWidget: () => undefined },
     isIdle: () => ++idleChecks === 1,
   };
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
 
   handlers.get("session_start")!({ reason: "startup" }, ctx);
   assert.equal(listPendingDeliveryEvents()[0]?.claimedBy, undefined, "a final busy check releases the claim");
@@ -422,7 +423,7 @@ test("conversation delivery failure releases every unprocessed claim for a later
     ui: { notify: () => undefined, setStatus: () => undefined, setWidget: () => undefined },
     isIdle: () => true,
   };
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
 
   assert.throws(() => handlers.get("session_start")!({ reason: "startup" }, ctx), /conversation delivery unavailable/);
   const pendingAfterFailure = listPendingDeliveryEvents();
@@ -611,7 +612,7 @@ test("extension status boundary captures active, degraded, and clearing lifecycl
       return true;
     },
   };
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
 
   const completedJob = upsertJob(reminderJob({
     id: "rem_status_delivery",
@@ -687,7 +688,7 @@ test("bash sleep reminder is advisory, rate-limited, and command-private", (t) =
     isIdle: () => true,
   };
   upsertJob(reminderJob({ id: "sleep-reminder-existing", message: "existing safe job" }));
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
   assert.equal(toolHandlers.length, 1);
 
   const command = "sleep 10 # hostile-sleep-sentinel";
@@ -749,7 +750,7 @@ test("extension registers callback surfaces and slash commands operate on isolat
     sendUserMessage: () => { throw new Error("sendUserMessage should not be called by command tests"); },
   };
 
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
 
   assert.deepEqual(renderers, ["pi-callbacks"]);
   assert.ok(listeners.includes("session_start"));
@@ -868,7 +869,7 @@ test("callbacks list scopes discarded origin jobs to the current session unless 
     sendMessage: (message: { customType?: string; content?: string }) => { sentMessages.push(message); },
     sendUserMessage: () => undefined,
   };
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
   const ctx: FakeContext = {
     cwd: process.cwd(),
     hasUI: false,
@@ -909,7 +910,7 @@ test("session shutdown tears down delivery timers even when presence cleanup fai
     ui: { notify: () => undefined, setStatus: () => undefined, setWidget: () => undefined },
     isIdle: () => true,
   };
-  piCallbacks(pi as never);
+  piCallbacks(pi as never, NO_DAEMON);
   handlers.get("session_start")!({ reason: "startup" }, ctx);
   await new Promise((resolve) => setTimeout(resolve, 100));
 

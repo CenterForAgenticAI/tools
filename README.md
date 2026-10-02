@@ -42,6 +42,8 @@ The canonical source for each package is maintained in a private repository. A r
 
 Issues and pull requests are welcome. Maintainers review pull requests here and carry accepted changes into the source repository, so a change reaches this repository with the next release of that package rather than by merge.
 
+Use the [issue forms](https://github.com/CenterForAgenticAI/tools/issues/new/choose) to report a bug or suggest a feature. For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+
 ## License
 
 All packages in this repository are available under the MIT License.

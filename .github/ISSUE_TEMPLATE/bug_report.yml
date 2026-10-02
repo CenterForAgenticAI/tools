@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a problem with a package.
+labels: ["bug", "triage"]
+body:
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - "@centerforagenticai/pi-work"
+        - "@centerforagenticai/pi-artifacts"
+        - "@centerforagenticai/pi-context-aware"
+        - "@centerforagenticai/pi-delegate"
+        - "@centerforagenticai/pi-callbacks"
+        - "@centerforagenticai/pi-daemon"
+        - "@centerforagenticai/pi-multi-account"
+        - "@centerforagenticai/pi-prompt-graph"
+        - "@centerforagenticai/pi-question"
+        - "@centerforagenticai/pi-dev"
+        - "@centerforagenticai/pi-adaptive-thinking"
+        - "@centerforagenticai/pi-intent"
+    validations:
+      required: true
+  - type: input
+    id: package-version
+    attributes:
+      label: Package version
+    validations:
+      required: true
+  - type: input
+    id: pi-version
+    attributes:
+      label: Pi version
+      description: Run pi --version and paste the result.
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the steps needed to see the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Remove tokens, passwords, and other private information before sharing.
+      render: shell
+    validations:
+      required: false

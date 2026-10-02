@@ -5,7 +5,7 @@ import { Type, type Static } from "typebox";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { attemptBackgroundStoreOperation } from "./src/background-store.ts";
-import { ensureDaemon, type DaemonStatus as EnsuredDaemonStatus } from "./src/daemon-control.ts";
+import { daemonCliPath, daemonDownMessage, ensureDaemon, type DaemonStatus as EnsuredDaemonStatus } from "./src/daemon-control.ts";
 import { preflightPollSource, projectPollSource } from "./src/poll-sources.ts";
 import { loadCallbackConfig } from "./src/config.ts";
 import { detectLiteralSleep } from "./src/sleep-reminder.ts";
@@ -17,7 +17,7 @@ import { createCallbacksServiceV1, provideCallbacksServiceV1 } from "./src/callb
 import { formatJobBlock, newId, newToken, parseCondition, parseDuration, safeJson } from "./src/utils.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const BIN_PATH = path.join(__dirname, "bin", "pi-callbacks.ts");
+const BIN_PATH = daemonCliPath(__dirname);
 const DEFAULT_ENDPOINT = "http://127.0.0.1:47837/callback";
 
 const TOOL_SCHEMA = Type.Object({
@@ -72,7 +72,16 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const STORE_RETRY_BASE_MS = 750;
 const STORE_RETRY_MAX_MS = 30_000;
 
-export default function piCallbacks(pi: ExtensionAPI) {
+export interface PiCallbacksOptions {
+  /**
+   * Starts or finds the central daemon. Tests replace it so constructing the
+   * extension can never spawn a real daemon on the shared default port.
+   */
+  ensureDaemon?: (binPath: string) => Promise<EnsuredDaemonStatus>;
+}
+
+export default function piCallbacks(pi: ExtensionAPI, options: PiCallbacksOptions = {}) {
+  const launchDaemon = options.ensureDaemon ?? ensureDaemon;
   let sleepReminderSent = false;
 
   pi.registerMessageRenderer("pi-callbacks", (message, { expanded }, theme) => {
@@ -94,7 +103,7 @@ export default function piCallbacks(pi: ExtensionAPI) {
     if (pi.events) {
       disposeCallbacksService = provideCallbacksServiceV1(pi.events, createCallbacksServiceV1(currentSessionRef(ctx)));
     }
-    startDeliveryLoop(pi, ctx, { ensureDaemonHealthy: true });
+    startDeliveryLoop(pi, ctx, { ensureDaemonHealthy: () => launchDaemon(BIN_PATH) });
   });
 
   pi.on("session_compact", (_event, ctx) => {
@@ -172,7 +181,7 @@ export default function piCallbacks(pi: ExtensionAPI) {
     ],
     parameters: TOOL_SCHEMA,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      daemonStatus = displayDaemonStatus(await ensureDaemon(BIN_PATH));
+      daemonStatus = displayDaemonStatus(await launchDaemon(BIN_PATH));
       const result = handleAction(ctx, params);
       safeUpdateStatus(ctx);
       return { content: [{ type: "text", text: result.text }], details: result.details };
@@ -204,7 +213,7 @@ export default function piCallbacks(pi: ExtensionAPI) {
         safeNotify(ctx, undefined, "Usage: /remind-in <duration> <message>", "warning");
         return;
       }
-      daemonStatus = displayDaemonStatus(await ensureDaemon(BIN_PATH));
+      daemonStatus = displayDaemonStatus(await launchDaemon(BIN_PATH));
       const result = handleAction(ctx, { action: "remind", delay, message: rest.join(" ") });
       safeUpdateStatus(ctx);
       safeNotify(ctx, undefined, result.text, "info");
@@ -214,7 +223,7 @@ export default function piCallbacks(pi: ExtensionAPI) {
   pi.registerCommand("callback-token", {
     description: "Mint a token-based external callback. Usage: /callback-token [message]",
     handler: async (args, ctx) => {
-      daemonStatus = displayDaemonStatus(await ensureDaemon(BIN_PATH));
+      daemonStatus = displayDaemonStatus(await launchDaemon(BIN_PATH));
       const result = handleAction(ctx, { action: "callback", message: args.trim() || "External callback" });
       safeUpdateStatus(ctx);
       pi.sendMessage({ customType: "pi-callbacks", content: result.text, display: true, details: result.details }, { triggerTurn: false });
@@ -255,7 +264,7 @@ function displayDaemonStatus(status: EnsuredDaemonStatus): Exclude<DaemonStatus,
   return status === "down" ? "daemon down" : status;
 }
 
-function startDeliveryLoop(pi: ExtensionAPI, ctx: ExtensionContext, options?: { ensureDaemonHealthy?: boolean }): void {
+function startDeliveryLoop(pi: ExtensionAPI, ctx: ExtensionContext, options?: { ensureDaemonHealthy?: () => Promise<EnsuredDaemonStatus> }): void {
   if (deliveryInterval) clearInterval(deliveryInterval);
   if (heartbeatInterval) clearInterval(heartbeatInterval);
   jobWidgetLoop.stop();
@@ -283,11 +292,11 @@ function startDeliveryLoop(pi: ExtensionAPI, ctx: ExtensionContext, options?: { 
   if (!registration.ok) noteStoreContention(ctx, generation);
 
   if (options?.ensureDaemonHealthy) {
-    void ensureDaemon(BIN_PATH).then((status) => {
+    void options.ensureDaemonHealthy().then((status) => {
       if (!isCurrentSession(generation)) return;
       daemonStatus = displayDaemonStatus(status);
       safeUpdateStatus(ctx, generation);
-      if (status === "down") safeNotify(ctx, generation, "pi-callbacks daemon did not become reachable; callbacks may not fire", "warning");
+      if (status === "down") safeNotify(ctx, generation, daemonDownMessage(__dirname), "warning");
     });
   }
 
