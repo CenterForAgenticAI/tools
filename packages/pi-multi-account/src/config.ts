@@ -29,6 +29,7 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { sanitizeDiagnosticText } from "./diagnostics.js";
 import { PROJECT_KEY_PATTERN } from "./project-identity.js";
 import {
 	AccountRateHistoryError,
@@ -167,6 +168,15 @@ export interface CrossFamilyChain {
 	readonly to: AllowedFamily;
 }
 
+/** One exact, directional model-substitution egress authorization. */
+export interface ModelFallbackEgressAuthorization {
+	readonly sourceModelId: string;
+	readonly destinationModelId: string;
+}
+
+/** Exact source unified model id -> ordered exact fallback model ids. */
+export type ModelFallbackMap = Readonly<Record<string, readonly string[]>>;
+
 export interface MultiAccountConfig {
 	readonly accountLimit: number;
 	readonly sameFamilyFailover: boolean;
@@ -238,6 +248,10 @@ export interface MultiAccountConfig {
 	 */
 	readonly preferredModels: Readonly<Record<string, readonly string[]>>;
 	readonly tierModelMap: TierModelMap;
+	/** Explicit ordered fallback policy. Absent or empty disables model substitution. */
+	readonly modelFallbacks?: ModelFallbackMap;
+	/** Directional authorization required in addition to policy for cross-vendor edges. */
+	readonly modelFallbackEgress?: readonly ModelFallbackEgressAuthorization[];
 	/**
 	 * How close to expiry a credential may get before routing prefers a fresher
 	 * same-family account, in milliseconds. Pre-emption avoids spending a turn to
@@ -284,6 +298,8 @@ export const DEFAULT_CONFIG: MultiAccountConfig = {
 	accountRateHistory: {},
 	preferredModels: {},
 	tierModelMap: Object.freeze({}),
+	modelFallbacks: Object.freeze({}),
+	modelFallbackEgress: Object.freeze([]),
 	// Comfortably longer than a turn, short enough that accounts are not retired
 	// while they still have useful life.
 	preemptiveExpiryWindowMs: 120_000,
@@ -309,6 +325,8 @@ const CONFIG_KEYS = new Set<keyof MultiAccountConfig>([
 	"accountRateHistory",
 	"preferredModels",
 	"tierModelMap",
+	"modelFallbacks",
+	"modelFallbackEgress",
 	"preemptiveExpiryWindowMs",
 	"usageFetchEnabled",
 ]);
@@ -687,6 +705,135 @@ function isValidTierModelId(value: unknown): value is string {
 		value.trim().length > 0 &&
 		!TIER_MODEL_CONTROL_CHARACTER.test(value)
 	);
+}
+
+export const MAX_MODEL_FALLBACK_SOURCES = 128;
+export const MAX_MODEL_FALLBACK_DESTINATIONS = 16;
+export const MAX_MODEL_FALLBACK_EDGES = 256;
+/**
+ * Exact catalog ids: managed wire ids, OpenRouter `vendor/model[:variant]`
+ * slugs, and the `~vendor/...` and `@cf/...` forms in the pinned catalog.
+ */
+const MODEL_FALLBACK_ID_PATTERN = /^[A-Za-z0-9~@][A-Za-z0-9._:/@~-]{0,255}$/;
+
+/**
+ * A fallback id may later appear in routing diagnostics, so it is accepted only
+ * when the shared diagnostic sanitizer would leave it byte-for-byte unchanged.
+ * Anything the sanitizer would redact anywhere in the string (credential
+ * prefixes, JWTs, token/canary shapes, long opaque runs) is rejected here, and
+ * the rejection message never echoes the value.
+ */
+function isValidModelFallbackId(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		MODEL_FALLBACK_ID_PATTERN.test(value) &&
+		sanitizeDiagnosticText(value) === value
+	);
+}
+
+function invalidModelFallbackId(field: string): ConfigValidationError {
+	return new ConfigValidationError(
+		`${field} must use an exact, non-credential model id of at most 256 characters.`,
+	);
+}
+
+function parseModelFallbacks(value: unknown): ModelFallbackMap {
+	if (value === undefined) return DEFAULT_CONFIG.modelFallbacks ?? Object.freeze({});
+	if (!isPlainObject(value)) {
+		throw new ConfigValidationError("modelFallbacks must be a plain JSON object.");
+	}
+	const entries = Object.entries(value);
+	if (entries.length > MAX_MODEL_FALLBACK_SOURCES) {
+		throw new ConfigValidationError(
+			`modelFallbacks must contain at most ${MAX_MODEL_FALLBACK_SOURCES} sources.`,
+		);
+	}
+	const parsed = Object.create(null) as Record<string, readonly string[]>;
+	for (const [sourceModelId, rawDestinations] of entries) {
+		if (!isValidModelFallbackId(sourceModelId)) {
+			throw invalidModelFallbackId("modelFallbacks source ids");
+		}
+		if (!Array.isArray(rawDestinations) || rawDestinations.length === 0) {
+			throw new ConfigValidationError(
+				"modelFallbacks values must be non-empty arrays of model ids.",
+			);
+		}
+		if (rawDestinations.length > MAX_MODEL_FALLBACK_DESTINATIONS) {
+			throw new ConfigValidationError(
+				`modelFallbacks may contain at most ${MAX_MODEL_FALLBACK_DESTINATIONS} destinations per source.`,
+			);
+		}
+		const destinations: string[] = [];
+		const seen = new Set<string>();
+		for (const destinationModelId of rawDestinations) {
+			if (!isValidModelFallbackId(destinationModelId)) {
+				throw invalidModelFallbackId("modelFallbacks destination ids");
+			}
+			if (destinationModelId === sourceModelId) {
+				throw new ConfigValidationError(
+					"modelFallbacks cannot list the source model as its own destination.",
+				);
+			}
+			if (seen.has(destinationModelId)) {
+				throw new ConfigValidationError(
+					"modelFallbacks cannot contain duplicate destinations for one source.",
+				);
+			}
+			seen.add(destinationModelId);
+			destinations.push(destinationModelId);
+		}
+		parsed[sourceModelId] = Object.freeze(destinations);
+	}
+	return Object.freeze(parsed);
+}
+
+function parseModelFallbackEgress(
+	value: unknown,
+): readonly ModelFallbackEgressAuthorization[] {
+	if (value === undefined) return DEFAULT_CONFIG.modelFallbackEgress ?? Object.freeze([]);
+	if (!Array.isArray(value)) {
+		throw new ConfigValidationError("modelFallbackEgress must be an array.");
+	}
+	if (value.length > MAX_MODEL_FALLBACK_EDGES) {
+		throw new ConfigValidationError(
+			`modelFallbackEgress must contain at most ${MAX_MODEL_FALLBACK_EDGES} edges.`,
+		);
+	}
+	const parsed: ModelFallbackEgressAuthorization[] = [];
+	const seen = new Set<string>();
+	for (const candidate of value) {
+		if (!isPlainObject(candidate)) {
+			throw new ConfigValidationError("modelFallbackEgress entries must be plain objects.");
+		}
+		const unknownKeys = Object.keys(candidate).filter(
+			(key) => key !== "sourceModelId" && key !== "destinationModelId",
+		);
+		if (unknownKeys.length > 0) {
+			throw new ConfigValidationError(
+				"modelFallbackEgress entries contain an unsupported field.",
+			);
+		}
+		const sourceModelId = candidate["sourceModelId"];
+		const destinationModelId = candidate["destinationModelId"];
+		if (!isValidModelFallbackId(sourceModelId)) {
+			throw invalidModelFallbackId("modelFallbackEgress sourceModelId");
+		}
+		if (!isValidModelFallbackId(destinationModelId)) {
+			throw invalidModelFallbackId("modelFallbackEgress destinationModelId");
+		}
+		if (sourceModelId === destinationModelId) {
+			throw new ConfigValidationError(
+				"modelFallbackEgress cannot authorize a model to itself.",
+			);
+		}
+		const key = `${sourceModelId}\u0000${destinationModelId}`;
+		if (seen.has(key)) {
+			throw new ConfigValidationError("modelFallbackEgress cannot contain duplicate edges.");
+		}
+		seen.add(key);
+		parsed.push(Object.freeze({ sourceModelId, destinationModelId }));
+	}
+	return Object.freeze(parsed);
 }
 
 export function parseTierModelMap(value: unknown): TierModelMap {
@@ -1119,6 +1266,8 @@ export function parseConfig(value: unknown): MultiAccountConfig {
 	const accountRateHistory = parseAccountRateHistory(value["accountRateHistory"]);
 	const preferredModels = parsePreferredModels(value["preferredModels"]);
 	const tierModelMap = parseTierModelMap(value["tierModelMap"]);
+	const modelFallbacks = parseModelFallbacks(value["modelFallbacks"]);
+	const modelFallbackEgress = parseModelFallbackEgress(value["modelFallbackEgress"]);
 	const preemptiveExpiryWindowMs =
 		value["preemptiveExpiryWindowMs"] ??
 		DEFAULT_CONFIG.preemptiveExpiryWindowMs;
@@ -1206,6 +1355,8 @@ export function parseConfig(value: unknown): MultiAccountConfig {
 		accountRateHistory,
 		preferredModels,
 		tierModelMap,
+		modelFallbacks,
+		modelFallbackEgress,
 		preemptiveExpiryWindowMs,
 		usageFetchEnabled,
 	};

@@ -193,14 +193,81 @@ function withAliasEvent(
   }
 }
 
-function reattributeStream(
-  upstream: AssistantMessageEventStream,
+/**
+ * One attributed, sanitized error terminal for an upstream that failed before
+ * producing a stream (a synchronous throw, a rejected setup, or a throwing
+ * iterator). The shape matches the host's own setup-error terminal: no content,
+ * zero usage, no diagnostics. Only the bounded, redacted error text survives.
+ * A failure after the caller's signal fired is a cancellation: it ends as
+ * `aborted`, matching the maintained stream, so it never cools the account.
+ */
+function aliasSetupErrorMessage(
+  error: unknown,
   aliasModel: Model<Api>,
+  aborted: boolean,
+): AssistantMessage & { stopReason: "error" | "aborted" } {
+  let detail: string;
+  try {
+    detail = error instanceof Error ? error.message : String(error);
+  } catch {
+    detail = "Codex alias stream setup failed";
+  }
+  return {
+    role: "assistant",
+    content: [],
+    api: aliasModel.api,
+    provider: aliasModel.provider,
+    model: aliasModel.id,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: aborted ? "aborted" : "error",
+    errorMessage: sanitizeDiagnosticText(detail),
+    timestamp: Date.now(),
+  };
+}
+
+function isTerminalEvent(event: AssistantMessageEvent): boolean {
+  return event.type === "done" || event.type === "error";
+}
+
+/**
+ * Forwards upstream events with alias attribution. Every failure mode ends in
+ * exactly one terminal: a rejected setup or a throwing iterator before any
+ * terminal becomes one attributed error event, and the attributed stream always
+ * ends, so no failure escapes as an unhandled rejection or a hang.
+ */
+function reattributeStream(
+  upstream: AssistantMessageEventStream | PromiseLike<AssistantMessageEventStream>,
+  aliasModel: Model<Api>,
+  signal: AbortSignal | undefined,
 ): AssistantMessageEventStream {
   const attributed = createAssistantMessageEventStream();
   void (async () => {
-    for await (const event of upstream) {
-      attributed.push(withAliasEvent(event, aliasModel));
+    let sawTerminal = false;
+    try {
+      for await (const event of await upstream) {
+        if (sawTerminal) continue;
+        if (isTerminalEvent(event)) sawTerminal = true;
+        attributed.push(withAliasEvent(event, aliasModel));
+      }
+    } catch (error) {
+      if (!sawTerminal) {
+        sawTerminal = true;
+        const message = aliasSetupErrorMessage(
+          error,
+          aliasModel,
+          signal?.aborted === true,
+        );
+        attributed.push({ type: "error", reason: message.stopReason, error: message });
+      }
+    } finally {
+      attributed.end();
     }
   })();
   return attributed;
@@ -296,10 +363,17 @@ export function createCodexAliasStream(
       };
     }
 
-    return reattributeStream(
-      upstream(upstreamModel, upstreamContext, upstreamOptions),
-      aliasModel,
-    );
+    // Defensive only under the live host: its `lazyApi` stream catches a setup
+    // throw first and returns its own setup-error terminal. A non-lazy upstream
+    // (plain Node) can still throw synchronously; convert that into the same
+    // single attributed, sanitized terminal as any other failure (UPSTREAM.md).
+    let upstreamStream: ReturnType<CodexUpstreamStream>;
+    try {
+      upstreamStream = upstream(upstreamModel, upstreamContext, upstreamOptions);
+    } catch (error) {
+      upstreamStream = Promise.reject(error) as unknown as ReturnType<CodexUpstreamStream>;
+    }
+    return reattributeStream(upstreamStream, aliasModel, options?.signal);
   };
   return aliasStream as unknown as NonNullable<ProviderConfig["streamSimple"]>;
 }

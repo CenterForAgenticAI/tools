@@ -905,10 +905,14 @@ export class SharedUsageStore {
 
 	append(record: SharedUsageLogRecord): boolean {
 		try {
-			// Judge the caller's own value, not the projection: projecting slices
-			// the observer id, and a value this store would have to rewrite is
-			// not one the producer emitted.
-			if (!validObserverId((record as { observerId?: unknown }).observerId))
+			// The store is the ONLY producer of a persisted observer id
+			// (internal issue #133). The grammar check alone cannot keep a
+			// credential out: `sk-ant-api03-...` is a valid hostname-shaped id, and
+			// no character rule separates a hostname from a key. So a caller may
+			// only restate this store's own id, which the constructor validated;
+			// any other value, a peer's included, is refused rather than written.
+			// Judged on the caller's own value, before projection slices it.
+			if ((record as { observerId?: unknown }).observerId !== this.#observerId)
 				return false;
 			const projected = validExhaustionHoldRecord(record)
 				? projectExhaustionHold(record)
@@ -1063,15 +1067,28 @@ export class SharedUsageStore {
 		return latest;
 	}
 
+	/**
+	 * The newest attempt for an account that was observed at or before `nowMs`.
+	 *
+	 * An attempt observed in the future is ignored here, at the single source,
+	 * rather than by each reader (internal issue #133). Such a record always
+	 * sorts as the newest, so a reader that merely declined to be suppressed by
+	 * it still took its `failureCount` as the prior rung: every real failure
+	 * rewrote the same count, the next read returned the future record again,
+	 * and the backoff ladder froze. `nowMs` is required so each reader judges
+	 * against its own (possibly injected) clock.
+	 */
 	latestAttempt(
 		providerId: string,
 		family: AllowedFamily,
+		nowMs: number,
 	): SharedUsageAttemptRecord | undefined {
 		let latest: SharedUsageAttemptRecord | undefined;
 		for (const record of this.readAttempts()) {
 			if (
 				record.providerId === providerId &&
 				record.family === family &&
+				record.observedAtMs <= nowMs &&
 				(latest === undefined || record.observedAtMs >= latest.observedAtMs)
 			) {
 				latest = record;

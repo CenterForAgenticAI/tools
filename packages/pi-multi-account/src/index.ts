@@ -80,6 +80,7 @@ import {
 import { DiagnosticStore } from "./diagnostic-store.js";
 import { DeclarationNoticeMarker } from "./declaration-notice-marker.js";
 import { DiagnosticLog } from "./diagnostics.js";
+import { createRefusalAdvisor } from "./refusal-advice.js";
 import {
 	classifyProviderId,
 	createPublicAuthStorageAdapter,
@@ -4159,6 +4160,9 @@ export const createMultiAccountExtension =
 		const lastFailure = new Map<string, ProviderFailureSignal>();
 		const handledFailures = new WeakSet<object>();
 		const observedMessages = new WeakSet<object>();
+		// Operator advice for a structured refusal. A delegate-owned in-process
+		// session shares the foreground UI, so only the foreground advises.
+		const refusalAdvisor = createRefusalAdvisor({ foreground: !delegateOwnedSession });
 		const recordUsage = (
 			observation: () => UsageObservation | undefined,
 		): void => {
@@ -5153,6 +5157,17 @@ export const createMultiAccountExtension =
 						acceptedLogicalAssociation,
 					);
 				}
+				// Advice only: names the physical route that refused, never routes.
+				refusalAdvisor.advise(
+					originalMessage,
+					messageContext,
+					acceptedLogicalAssociation && logicalAssociation !== undefined
+						? {
+								providerId: logicalAssociation.route.providerId,
+								modelId: logicalAssociation.dispatchedModelId,
+							}
+						: {},
+				);
 
 				try {
 					const validOriginalMessage = originalMessage as AssistantMessage;
@@ -5240,6 +5255,8 @@ export const createMultiAccountExtension =
 			) {
 				return;
 			}
+			// Advice only: a managed account's structured refusal never routes.
+			refusalAdvisor.advise(event.message, messageContext, identity);
 			const subscriptionFamily = isRoutingEligibleAccountFamily(messageSlot)
 				? messageSlot.family
 				: undefined;

@@ -641,36 +641,27 @@ async function queryEndpoint(
 		: normalizeAnthropicUsagePayload(payload);
 }
 
-/**
- * The attempt's deadline, or undefined when no honest ladder could have set it.
- *
- * The store already bounds `nextAttemptAtMs` against the record's own
- * `observedAtMs` on append and read (internal issue #108). That span
- * check alone is not enough for a reader: a record whose ORIGIN sits centuries
- * ahead carries a legitimate-looking span and would still suppress polling for
- * that account forever. No honest deadline lies further than one capped rung
- * from now, so anything beyond that is ignored rather than trusted.
- */
-function plausibleAttemptDeadline(
-	attempt: SharedUsageAttemptRecord | undefined,
-	nowMs: number,
-): number | undefined {
-	if (attempt === undefined) return undefined;
-	if (attempt.nextAttemptAtMs > nowMs + MAX_USAGE_ATTEMPT_DELAY_MS) {
-		return undefined;
-	}
-	return attempt.nextAttemptAtMs;
-}
+// Every attempt a reader here sees comes from `SharedUsageStore.latestAttempt`
+// called with that reader's own clock, and that is what keeps a far-future
+// deadline (internal issue #108) from suppressing polling:
+//
+//  - the store refuses, on append and read, any attempt whose
+//    `nextAttemptAtMs - observedAtMs` exceeds MAX_USAGE_ATTEMPT_DELAY_MS; and
+//  - `latestAttempt` skips any attempt observed after `nowMs` (#133).
+//
+// Together these give `nextAttemptAtMs <= nowMs + MAX_USAGE_ATTEMPT_DELAY_MS`
+// for every record a reader receives. A per-reader "plausible deadline" check
+// used to restate that bound; once the origin filter moved into the store it
+// could no longer fail on any reachable input and was removed (#133,
+// CR-REFRESH-READER-BOUND-UNREACHABLE). Read attempts only through
+// `latestAttempt(providerId, family, nowMs)` with the clock the decision uses.
 
 function statusFromAttempt(
 	attempt: SharedUsageAttemptRecord | undefined,
 	enabled: boolean,
-	nowMs: number,
 ): UsageFetchStatus {
 	const nextAttemptAtMs =
-		attempt?.failureCount === 0
-			? undefined
-			: plausibleAttemptDeadline(attempt, nowMs);
+		attempt?.failureCount === 0 ? undefined : attempt?.nextAttemptAtMs;
 	const disabledReason = attempt?.failureReason;
 	return {
 		enabled,
@@ -853,9 +844,8 @@ export class UsageFetcher {
 	): UsageFetchStatus {
 		const enabled = config.usageFetchEnabled?.[family] ?? true;
 		return statusFromAttempt(
-			this.#sharedStore.latestAttempt(providerId, family),
+			this.#sharedStore.latestAttempt(providerId, family, this.#now()),
 			enabled,
-			this.#now(),
 		);
 	}
 
@@ -1017,25 +1007,20 @@ export class UsageFetcher {
 		// the debounce clause, so `already-answered` and `backoff` returned
 		// before it ran: an attempt with `observedAtMs` centuries ahead is
 		// trivially `>= failedAtMs`, and suppressed every failure refresh
-		// forever. The bound belongs here, on the record, before any clause
-		// reads it.
+		// forever. `latestAttempt(..., nowMs)` now refuses such a record at the
+		// source (#133), which also bounds `nextAttemptAtMs` to one capped rung
+		// past `nowMs` (see the note above `statusFromAttempt`).
 		//
-		// `nextAttemptAtMs` is bounded relative to `observedAtMs` by the store and
-		// checked again here before it may suppress a send. An honest record cannot
-		// have been OBSERVED in the future either.
+		// The failure trigger is not tied to `observedAtMs` by the store, so a
+		// record observed in the past can still name a failure in the future;
+		// such a marker cannot be honest and must not arm the debounce.
 		if (
-			attempt.observedAtMs > nowMs ||
-			(attempt.failureTriggeredAtMs !== undefined &&
-				attempt.failureTriggeredAtMs > nowMs)
+			attempt.failureTriggeredAtMs !== undefined &&
+			attempt.failureTriggeredAtMs > nowMs
 		) {
 			return undefined;
 		}
-		const nextAttemptAtMs = plausibleAttemptDeadline(attempt, nowMs);
-		if (
-			attempt.failureCount > 0 &&
-			nextAttemptAtMs !== undefined &&
-			nextAttemptAtMs > nowMs
-		) {
+		if (attempt.failureCount > 0 && attempt.nextAttemptAtMs > nowMs) {
 			return "backoff";
 		}
 		if (attempt.observedAtMs >= failedAtMs) return "already-answered";
@@ -1070,15 +1055,17 @@ export class UsageFetcher {
 		}
 
 		// Step 4/5: durable checks before the lease.
+		const beforeLeaseNowMs = this.#now();
 		const beforeLease = this.#sharedStore.latestAttempt(
 			account.providerId,
 			account.family,
+			beforeLeaseNowMs,
 		);
 		if (
 			this.#failureRefreshSuppressedBy(
 				beforeLease,
 				failedAtMs,
-				this.#now(),
+				beforeLeaseNowMs,
 			) !== undefined
 		) {
 			return { providerId: account.providerId, status: "not-due" };
@@ -1098,15 +1085,17 @@ export class UsageFetcher {
 		const leaseGuard: AntigravityLeaseGuard = { lease, handedOff: false };
 		try {
 			// Step 7: the same checks again, now that nobody else can write.
+			const underLeaseNowMs = this.#now();
 			const underLease = this.#sharedStore.latestAttempt(
 				account.providerId,
 				account.family,
+				underLeaseNowMs,
 			);
 			if (
 				this.#failureRefreshSuppressedBy(
 					underLease,
 					failedAtMs,
-					this.#now(),
+					underLeaseNowMs,
 				) !== undefined
 			) {
 				return { providerId: account.providerId, status: "not-due" };
@@ -1195,6 +1184,7 @@ export class UsageFetcher {
 		const prior = this.#sharedStore.latestAttempt(
 			account.providerId,
 			account.family,
+			nowMs,
 		);
 		// Backoff is checked BEFORE `disabled`, deliberately.
 		//
@@ -1217,12 +1207,7 @@ export class UsageFetcher {
 		// not it was disabled. A retry that fails again simply re-arms the ladder at
 		// its capped rung, so a genuinely dead endpoint is polled at most once per
 		// MAX_USAGE_ATTEMPT_DELAY_MS rather than hammered.
-		const priorDeadline = plausibleAttemptDeadline(prior, nowMs);
-		if (
-			prior !== undefined &&
-			priorDeadline !== undefined &&
-			priorDeadline > nowMs
-		) {
+		if (prior !== undefined && prior.nextAttemptAtMs > nowMs) {
 			await this.#persistWindowGap(
 				account,
 				nowMs,
@@ -1246,21 +1231,17 @@ export class UsageFetcher {
 		}
 		const leaseGuard: AntigravityLeaseGuard = { lease, handedOff: false };
 		try {
-			const current = this.#sharedStore.latestAttempt(
-				account.providerId,
-				account.family,
-			);
 			// Same ordering as the pre-lease check above: an elapsed backoff wins
 			// over a stale `disabled` flag, so a recovered account can be observed
 			// again. Re-read under the lease because a peer may have attempted in
 			// between.
 			const currentNowMs = this.#now();
-			const currentDeadline = plausibleAttemptDeadline(current, currentNowMs);
-			if (
-				current !== undefined &&
-				currentDeadline !== undefined &&
-				currentDeadline > currentNowMs
-			) {
+			const current = this.#sharedStore.latestAttempt(
+				account.providerId,
+				account.family,
+				currentNowMs,
+			);
+			if (current !== undefined && current.nextAttemptAtMs > currentNowMs) {
 				await this.#persistWindowGap(
 					account,
 					this.#now(),
@@ -1654,13 +1635,15 @@ export class UsageFetcher {
 			}
 			// REQ-WINDOW-CADENCE: enforce cross-process 15-minute floor.
 			// Check durable attempt record to prevent peer-process fetch within the window.
+			const cadenceNowMs = this.#now();
 			const prior = this.#sharedStore.latestAttempt(
 				account.providerId,
 				account.family,
+				cadenceNowMs,
 			);
 			if (
 				prior !== undefined &&
-				this.#now() - prior.observedAtMs < WINDOW_SAMPLE_INTERVAL_MS
+				cadenceNowMs - prior.observedAtMs < WINDOW_SAMPLE_INTERVAL_MS
 			) {
 				continue;
 			}

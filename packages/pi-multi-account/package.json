@@ -1,5 +1,5 @@
 {
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Global Anthropic and OpenAI Codex multi-account OAuth routing for Pi.",
   "type": "module",
   "bin": {

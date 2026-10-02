@@ -350,9 +350,14 @@ identified by `PI_DELEGATE_LINEAGE_*` cannot use this rung.
   it can still replace the file. `configure` narrows that window by re-reading
   under the lease, but a change landing between that read and the atomic rename
   is not detectable.
-- `google-antigravity` has no supported inner-retry behavior yet, so recovery
-  reserves zero inner retries for it, the same conservative default already
-  used for `openai` and `openai-codex`.
+- `google-antigravity` invocations have an unknown provider send count.
+  Recovery passes `maxRetries: 0`, but the vendored stream ignores it and can
+  resend inside one invocation across empty-response retries, runtime-model
+  candidates, and three endpoint fallbacks. Recovery therefore reserves an
+  unknown count for Antigravity, never uses an Antigravity candidate for the
+  recovery send, and stops with `uncertain-external-effects` after a failed
+  initial Antigravity attempt. The at-most-two-sends guarantee does not hold for
+  Antigravity calls; only the two-invocation bound does.
 - Automated verification never performs a real Google sign-in. Exercising a
   live `google-antigravity` account end to end is an operator action performed
   after `integration:verify` passes, the same deferred pattern already used for

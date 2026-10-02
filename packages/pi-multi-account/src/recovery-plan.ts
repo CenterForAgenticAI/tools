@@ -30,6 +30,9 @@ export type RecoveryCandidateTier =
 	| "owning-vendor-api"
 	| "cross-family-subscription";
 
+/** The one recovery dimension a candidate may change for this logical call. */
+export type RecoveryActionKind = "account" | "model";
+
 /** One finite provider/model pair. Logical and physical model identity stay distinct. */
 export interface RecoveryCandidate {
 	readonly providerId: string;
@@ -39,6 +42,7 @@ export interface RecoveryCandidate {
 	readonly selectedModelId: string;
 	readonly tier: RecoveryCandidateTier;
 	readonly substitution: "exact" | "configured";
+	readonly recoveryAction: RecoveryActionKind;
 	readonly capability: RecoveryModelCapability;
 }
 
@@ -91,7 +95,7 @@ function immutableCapability(model: RecoveryModelCapability): RecoveryModelCapab
 	});
 }
 
-/** Build the immutable, deterministic candidate sweep for one logical call. */
+/** Build the immutable, deterministic candidate order for one logical call. */
 export function buildRecoveryCandidatePlan(
 	request: RecoveryCandidatePlanRequest,
 ): readonly RecoveryCandidate[] {
@@ -146,6 +150,8 @@ export function buildRecoveryCandidatePlan(
 				selectedModelId: request.selectedModelId,
 				tier,
 				substitution,
+				recoveryAction:
+					model.modelId === request.selectedModelId ? "account" : "model",
 				capability: immutableCapability(model),
 			}),
 		);

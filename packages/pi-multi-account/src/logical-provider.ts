@@ -16,6 +16,7 @@
 import { logicalAccountEligible, recordFailureCooldown } from "./routing.js";
 import type { ManagedAccount } from "./routing.js";
 import {
+	isContextOverflow,
 	isRetryableAssistantError,
 	type AssistantMessage,
 	type ProviderResponse,
@@ -353,6 +354,36 @@ const EXHAUSTION_LENGTH_ALLOWANCE_MULTIPLIER = 8;
 const EXHAUSTION_LENGTH_MAX_CONTEXT_FRACTION = 0.8;
 const EXHAUSTION_LENGTH_ERROR_MESSAGE = "provider returned error (usage-limit)";
 
+/**
+ * Fixed public text for a setup-shaped context overflow. The pinned host's
+ * `isContextOverflow` matches it (so the host compacts and retries once) and
+ * `isRetryableAssistantError` does not (so the host does not fail over).
+ */
+export const SETUP_CONTEXT_OVERFLOW_MESSAGE = "context_length_exceeded (provider_error)";
+
+type SetupFailureDisposition = "context-overflow" | "retryable" | "host-final";
+
+/**
+ * How the pinned host treats the raw setup text. The host checks the two
+ * predicates separately: `_handlePostAgentRun` compacts and retries once on
+ * `isContextOverflow`, while `_isRetryableError` excludes overflow and fails
+ * over on `isRetryableAssistantError`. An unreadable predicate result counts
+ * as host-final.
+ */
+function setupFailureDisposition(
+	message: AssistantMessage,
+	raw: unknown,
+): SetupFailureDisposition {
+	if (typeof raw !== "string" || raw.length === 0) return "host-final";
+	try {
+		const probe = { ...message, errorMessage: raw };
+		if (isContextOverflow(probe, 0)) return "context-overflow";
+		return isRetryableAssistantError(probe) ? "retryable" : "host-final";
+	} catch {
+		return "host-final";
+	}
+}
+
 function finiteNonNegative(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0
 		? value
@@ -540,6 +571,54 @@ function projectFailureSignal(
 		...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
 		...(resetAtMs === undefined ? {} : { resetAtMs }),
 	};
+}
+
+/**
+ * Whether a physical terminal is the host's setup-error shape: the first event
+ * of the stream is an `error` with no content, all-zero usage, no diagnostics,
+ * no structured stop code, and no structured failure evidence.
+ *
+ * That is what pi-ai `lazyStream` (`createSetupErrorMessage`) publishes when a
+ * provider stream throws or rejects before it starts, so its `errorMessage` is
+ * raw exception text, not provider-authored failure prose. The production cause
+ * of the observed setup `TypeError` is not known (see UPSTREAM.md). The same
+ * shape also carries transient pre-start failures ("fetch failed", a 503 before
+ * `start`), so the caller decides retryability from the text, never publishes
+ * it. A real provider failure that carries a recognized code or status keeps
+ * its own text and routing.
+ */
+function isUnclassifiedSetupFailure(
+	message: AssistantMessage,
+	failure: ProviderFailureSignal,
+): boolean {
+	try {
+		if (message.stopReason !== "error") return false;
+		if (!Array.isArray(message.content) || message.content.length !== 0) return false;
+		const diagnostics = (message as { diagnostics?: unknown }).diagnostics;
+		if (diagnostics !== undefined && !(Array.isArray(diagnostics) && diagnostics.length === 0)) {
+			return false;
+		}
+		if ((message as { code?: unknown }).code !== undefined) return false;
+		const usage = projectTerminalUsage(message);
+		if (
+			usage === undefined ||
+			usage.input !== 0 ||
+			usage.output !== 0 ||
+			usage.cacheRead !== 0 ||
+			usage.cacheWrite !== 0 ||
+			usage.totalTokens !== 0 ||
+			usage.cost.total !== 0
+		) {
+			return false;
+		}
+		return (
+			failure.code === undefined &&
+			failure.httpStatus === undefined &&
+			failure.transportKind === undefined
+		);
+	} catch {
+		return false;
+	}
 }
 
 function safeProjectFailureSignal(
@@ -964,6 +1043,18 @@ export function createLogicalProvider(
 		return { ...candidate, [key]: projectMessage(value as AssistantMessage, modelId) };
 	};
 
+	const withPublicErrorMessage = (event: unknown, errorMessage: string): unknown => {
+		if (typeof event !== "object" || event === null) return event;
+		const candidate = event as Record<string, unknown>;
+		if (candidate.type !== "error" || typeof candidate.error !== "object" || candidate.error === null) {
+			return event;
+		}
+		return {
+			...candidate,
+			error: { ...(candidate.error as AssistantMessage), errorMessage },
+		};
+	};
+
 	const watchStream = (
 		stream: AsyncIterable<unknown>,
 		model: unknown,
@@ -975,6 +1066,7 @@ export function createLogicalProvider(
 	): AsyncIterable<unknown> => ({
 		async *[Symbol.asyncIterator]() {
 			let sawTerminal = false;
+			let sawEvent = false;
 			let failureReceipt: HostRetryCooldownReceipt | undefined;
 			const recordFailureOnce = (error: unknown): HostRetryCooldownReceipt => {
 				failureReceipt ??= coordinator.recordFailure({
@@ -1016,7 +1108,10 @@ export function createLogicalProvider(
 							? (event as { type?: unknown }).type
 							: undefined;
 					if (eventType === "done" || eventType === "error") sawTerminal = true;
+					const firstEvent = !sawEvent;
+					sawEvent = true;
 					const terminal = terminalAttribution(event);
+					let setupFailureMessage: string | undefined;
 					if (terminal !== undefined) {
 						const { message, outcome } = terminal;
 						if (outcome === "finish") {
@@ -1048,10 +1143,41 @@ export function createLogicalProvider(
 						} else {
 							const failure = safeProjectFailureSignal(message, dispatchedModelId);
 							attributeFailure(message, failure, recordFailureOnce(message));
+							if (firstEvent && isUnclassifiedSetupFailure(message, failure)) {
+								// The physical account is cooled above exactly like any other
+								// failure. Only the published text changes: the raw text is
+								// replaced by the bounded classified message the
+								// rejected-dispatch path uses, so it is never published. The
+								// setup shape is shared by transient pre-start failures ("fetch
+								// failed", a 503 before `start`), pre-start context overflows
+								// (a Codex 400 or Anthropic 413), and deterministic setup throws.
+								// The raw text decides the form: an overflow publishes a fixed
+								// overflow message so the host compacts instead of failing
+								// over; a host-retryable text keeps the retryable form and
+								// fails over; anything else is host-final (`provider_error`),
+								// so a deterministic fault is not repeated on the next account.
+								const disposition = setupFailureDisposition(message, message.errorMessage);
+								setupFailureMessage =
+									disposition === "context-overflow"
+										? SETUP_CONTEXT_OVERFLOW_MESSAGE
+										: classifiedErrorMessage(failure, disposition === "retryable");
+								try {
+									deps.onDiagnostic?.(
+										`logical dispatch for ${account.providerId} failed during stream setup; ` +
+											"published a classified failure instead of the raw setup error",
+									);
+								} catch {
+									// A diagnostic sink failure cannot replace a provider result.
+								}
+							}
 						}
 						await attempt.waitForTerminal();
 					}
-					const publicEvent = projectEvent(event, requestedModelId);
+					const projectedEvent = projectEvent(event, requestedModelId);
+					const publicEvent =
+						setupFailureMessage === undefined
+							? projectedEvent
+							: withPublicErrorMessage(projectedEvent, setupFailureMessage);
 					if (terminal !== undefined && publicEvent !== event) {
 						const publicTerminal = terminalAttribution(publicEvent);
 						if (publicTerminal !== undefined) {

@@ -10,6 +10,13 @@ export const REFUSAL_FALLBACK_MESSAGE = "The model refused to complete the reque
 export const UNKNOWN_STOP_FALLBACK_MESSAGE =
 	"Provider stopped with an unrecognized stop reason";
 
+/**
+ * Appended when a reworded unknown stop reason omits words a host predicate acts
+ * on, so the published reason does not read as complete. Neither pinned
+ * predicate matches it, and the marked message is probed again before use.
+ */
+export const PARTLY_WITHHELD_MARKER = " (partly withheld)";
+
 /** Upper bound on the normalized stop reason named in a reworded message. */
 const MAX_NAMED_REASON_LENGTH = 64;
 
@@ -23,7 +30,7 @@ const MAX_NAMED_REASON_LENGTH = 64;
  * An unreadable predicate result counts as a match, so the caller keeps looking
  * for a safer form.
  */
-function hostWouldRedispatch(message: AssistantMessage, text: string): boolean {
+export function hostWouldRedispatch(message: AssistantMessage, text: string): boolean {
 	try {
 		const probe = { ...message, errorMessage: text };
 		return isRetryableAssistantError(probe) || isContextOverflow(probe, 0);
@@ -68,8 +75,9 @@ function normalizedReasonWords(rawStopReason: unknown): string[] {
  * The first form keeps every normalized word. When that still matches a host
  * predicate (a reason containing "overloaded" or "timeout", say), the second
  * form admits words in order and drops each one whose addition would make the
- * message match. Every admitted prefix was probed, so the result is host-final
- * by construction. An empty result yields `undefined`.
+ * message match. When any word was dropped the result ends with
+ * `PARTLY_WITHHELD_MARKER`; that marked text is probed too, and an unsafe or
+ * empty result yields `undefined`.
  */
 function unknownStopNamingReason(
 	message: AssistantMessage,
@@ -84,7 +92,11 @@ function unknownStopNamingReason(
 		const tentative = namedReasonMessage([...kept, word].join(" "));
 		if (!hostWouldRedispatch(message, tentative)) kept.push(word);
 	}
-	return kept.length === 0 ? undefined : namedReasonMessage(kept.join(" "));
+	if (kept.length === 0) return undefined;
+	const named = namedReasonMessage(kept.join(" "));
+	if (kept.length === words.length) return named;
+	const marked = `${named}${PARTLY_WITHHELD_MARKER}`;
+	return hostWouldRedispatch(message, marked) ? undefined : marked;
 }
 
 /**

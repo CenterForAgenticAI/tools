@@ -10,7 +10,8 @@ import {
 	createAcceptedOutputStream,
 	type AcceptedOutputErrorCode,
 } from "./recovery-output.js";
-import type { RecoveryCandidate } from "./recovery-plan.js";
+import type { RecoveryActionKind, RecoveryCandidate } from "./recovery-plan.js";
+import { classifyCodexRecoverySendEvidence } from "./recovery-send-evidence.js";
 
 /** A request-owned timer. Cancelling it must prevent its callback from running. */
 export interface RecoveryTimer {
@@ -33,8 +34,16 @@ export type RecoveryPreDispatchDecision =
 
 export type RecoveryRetrySafety =
 	| {
-			readonly status: "retryable";
-			readonly reason: "generation-only-incomplete" | "definitively-rejected";
+			readonly status: "recoverable";
+			readonly action: "account";
+			readonly reason:
+				| "account-local-quota"
+				| "account-local-auth"
+				| "account-local-rate-limit";
+	  }
+	| {
+			readonly status: "model-policy";
+			readonly reason: "structured-provider-error";
 	  }
 	| {
 			readonly status: "unsafe";
@@ -42,8 +51,19 @@ export type RecoveryRetrySafety =
 				| "uncertain-external-effects"
 				| "completed-tool"
 				| "completed-call"
-				| "agent-run";
+				| "agent-run"
+				| "invalid-request"
+				| "refusal"
+				| "unknown";
 	  };
+
+export type RecoveryModelDecision =
+	| {
+			readonly status: "recoverable";
+			readonly action: "model";
+			readonly reason: "unsupported-model" | "unsupported-capability";
+	  }
+	| { readonly status: "none" };
 
 /** Request options after recovery has replaced the provider's inner retry allowance. */
 export type RecoveryBoundStreamOptions = SimpleStreamOptions & {
@@ -51,29 +71,20 @@ export type RecoveryBoundStreamOptions = SimpleStreamOptions & {
 };
 
 /**
- * A pre-send reservation is an upper bound, not an observed charge count.
- *
- * `deliberate` is part of the type so future accounting cannot "tighten" the
- * reservation to an optimistic count. Adaptive Anthropic may use three SDK
- * sends under the provenance-locked adapter. A Codex WebSocket-capable request
- * may send three socket frames and then one SSE request. Recovery reserves all
- * sends that could be charged even though fewer (often one) normally occur.
+ * Every supported bounded provider invocation reserves one possibly charged
+ * send. Pinned Codex non-SSE transport can reconnect or fall back internally,
+ * and the vendored Google Antigravity stream ignores `maxRetries` and loops over
+ * empty-response retries, runtime-model candidates and endpoint fallbacks, so
+ * both counts are explicitly unknown and can never authorize another send.
  */
 export type RecoverySendReservation =
 	| {
 			readonly maximumPossiblyChargedSends: 1;
-			readonly overReservation: "none";
-			readonly basis: "bounded-http";
+			readonly basis: "bounded-provider-invocation";
 	  }
 	| {
-			readonly maximumPossiblyChargedSends: 3;
-			readonly overReservation: "deliberate";
-			readonly basis: "adaptive-anthropic-provenance";
-	  }
-	| {
-			readonly maximumPossiblyChargedSends: 4;
-			readonly overReservation: "deliberate";
-			readonly basis: "codex-websocket-uncertain";
+			readonly maximumPossiblyChargedSends: "unknown";
+			readonly basis: "codex-non-sse-unknown" | "antigravity-inner-unknown";
 	  };
 
 export interface RecoverySendReservationRequest {
@@ -90,18 +101,20 @@ export interface RecoverySendReservationRequest {
 export type RecoveryChargedSendExposure =
 	| {
 			readonly status: "bounded";
-			readonly maximumPossiblyChargedSends: 1 | 3;
+			readonly maximumPossiblyChargedSends: 1;
 	  }
 	| {
 			readonly status: "unknown";
-			readonly reason: "codex-websocket-send";
+			readonly reason: "codex-non-sse-send-count" | "antigravity-inner-sends";
 	  };
 
 /**
  * One supported provider invocation. `retrySafety` must classify the final
  * outbound payload after caller payload replacement and every provider callback.
- * Recovery independently overrides that classification for WebSocket-capable
- * Codex attempts because a completed socket send has uncertain external effects.
+ * Recovery independently overrides that classification for non-SSE Codex
+ * attempts unless `classifyCodexRecoverySendEvidence` proves a single
+ * pre-execution rejection, because a socket send may have reconnected or fallen
+ * back to SSE with uncertain external effects.
  */
 export interface RecoveryPhysicalAttempt {
 	readonly output: AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>;
@@ -141,8 +154,37 @@ export interface RecoveryAttemptAccounting {
 	readonly cost: RecoveryCostCoverage;
 }
 
+/**
+ * Content-free structured projection of a failed terminal for model policy.
+ *
+ * The engine copies only these named fields; assistant content, thinking, tool
+ * calls, error text, raw stop reasons, response identifiers, usage and
+ * diagnostic messages/details never reach the hook. A policy must decide from
+ * these structured facts alone and must never scan provider or assistant text.
+ */
+export interface RecoveryModelFailure {
+	readonly stopReason: AssistantMessage["stopReason"];
+	readonly api: string;
+	readonly provider: string;
+	readonly model: string;
+	/** Only whether the terminal carried an error message, never its text. */
+	readonly hasErrorMessage: boolean;
+	/** Diagnostic `type` identifiers only, in terminal order. */
+	readonly diagnosticTypes: readonly string[];
+	/**
+	 * Structured provider stop code, copied only from the two-value allowlist.
+	 * Absent for any other value; never derived from error or assistant text.
+	 */
+	readonly code?: "refusal" | "unknown_stop";
+}
+
 export interface RecoveryEngineDependencies {
 	readonly clock: RecoveryClock;
+	/** #129 owns this structured policy hook. Omission means no model recovery. */
+	readonly classifyModelRecovery?: (
+		failure: RecoveryModelFailure,
+		signal: AbortSignal,
+	) => RecoveryModelDecision | Promise<RecoveryModelDecision>;
 	/** Re-read eligibility, live config authorization and credentials here. */
 	readonly recheck: (
 		candidate: RecoveryCandidate,
@@ -192,7 +234,10 @@ export type RecoveryTerminationReason =
 	| "uncertain-external-effects"
 	| "completed-tool"
 	| "completed-call"
-	| "agent-run";
+	| "agent-run"
+	| "invalid-request"
+	| "refusal"
+	| "unknown";
 
 export type RecoveryResult =
 	| {
@@ -202,11 +247,16 @@ export type RecoveryResult =
 			readonly terminal: AssistantMessage;
 			readonly output: AssistantMessageEventStream;
 	  }
-	| { readonly status: "exhausted"; readonly attempts: number }
+	| {
+			readonly status: "exhausted";
+			readonly attempts: number;
+			readonly errorMessage: string;
+	  }
 	| {
 			readonly status: "terminated";
 			readonly reason: RecoveryTerminationReason;
 			readonly attempts: number;
+			readonly errorMessage: string;
 	  };
 
 export interface RecoveryEngine {
@@ -236,14 +286,53 @@ const GAP_USAGE: RecoveryUsageCoverage = Object.freeze({ coverage: "gap" });
 const GAP_COST: RecoveryCostCoverage = Object.freeze({ coverage: "gap" });
 
 /**
+ * One unified logical call owns at most two provider invocations: the initial
+ * invocation plus one recovery invocation. Raising this value allows a third
+ * invocation and must fail the named `RECOVERY-TWO-SEND-CAP` regression.
+ *
+ * For the bounded HTTP/SSE families (Anthropic, OpenAI, Codex SSE) inner
+ * provider retries are forced to zero, so each invocation is one possibly
+ * charged send and the call makes at most two sends. Both Anthropic
+ * paths honour that zero: the adaptive adapter
+ * (`src/anthropic-adaptive-stream.ts`) and the vendored pinned stream
+ * (`packages/pi-anthropic-oauth/src/stream.ts`, local patch 0004) forward a
+ * finite non-negative integer `maxRetries` into `client.messages.create`.
+ *
+ * A Codex non-SSE (auto/WebSocket) invocation has an unknown internal send
+ * count: pinned pi-ai 0.84.4 may reconnect or fall back to SSE inside one
+ * invocation. The engine therefore never uses such an invocation for the
+ * recovery send, but it cannot control the internal count of a non-SSE initial
+ * invocation. Consumers, including the production cutover, must not claim the
+ * at-most-two-sends guarantee for Codex auto/WebSocket calls; only the
+ * two-invocation bound holds there. Routed Codex calls are currently pinned to
+ * SSE by `forceCodexSseOptions` (`src/codex-adapter.ts`), so a caller that
+ * passes the forced options here receives the bounded-HTTP reservation.
+ *
+ * A Google Antigravity invocation also has an unknown internal send count: the
+ * vendored stream (`packages/pi-antigravity/src/stream/stream.ts`) ignores
+ * `maxRetries` and can send once per empty-response retry (up to three), runtime
+ * model candidate, and `ENDPOINT_FALLBACKS` entry
+ * (`packages/pi-antigravity/src/client/client.ts`, three endpoints). The engine
+ * reserves it as unknown, never uses it for the recovery send, and terminates
+ * with `uncertain-external-effects` after a failed initial Antigravity
+ * invocation. Consumers must not claim the at-most-two-sends guarantee for
+ * Antigravity calls; only the two-invocation bound holds there.
+ */
+export const RECOVERY_MAX_PROVIDER_SENDS_PER_CALL = 2 as const;
+
+/**
  * Supported request-local retry controls. Keep every managed family's entry
  * separate: each provider path has its own compile-valid mutation control and
- * regression test. The provenance-locked adaptive Anthropic adapter ignores
- * this option, so its possible three SDK sends are over-reserved instead of
- * assumed away. Google Antigravity has no supported inner-retry behavior yet,
- * so it gets the same conservative zero the other non-Anthropic families use.
+ * regression test. Anthropic's zero bounds both Anthropic paths: the adaptive
+ * adapter (`ANTHROPIC-MAX-RETRIES-ZERO`) and the vendored pinned stream
+ * (`ANTHROPIC-PINNED-MAX-RETRIES`) each forward this request-local `maxRetries`
+ * into `client.messages.create`, so the SDK's two default retries never run.
+ * Google Antigravity receives the same fail-closed zero, but its vendored stream
+ * ignores it; its unknown inner send count is handled by the
+ * `antigravity-inner-unknown` reservation instead (see
+ * {@link RECOVERY_MAX_PROVIDER_SENDS_PER_CALL}).
  */
-const RECOVERY_INNER_RETRY_LIMITS = Object.freeze({
+export const RECOVERY_INNER_RETRY_LIMITS = Object.freeze({
 	anthropic: 0,
 	openai: 0,
 	"openai-codex": 0,
@@ -264,40 +353,63 @@ function sendReservationFor(
 	candidate: RecoveryCandidate,
 	options: RecoveryBoundStreamOptions,
 ): RecoverySendReservation {
-	if (candidate.family === "anthropic") {
-		// Recovery cannot see the model compat selector. Reserve the provenance-locked
-		// adaptive SDK's initial send plus two retries for every Anthropic candidate.
+	if (candidate.family === "openai-codex" && options.transport !== "sse") {
+		// Pinned pi-ai 0.84.4 can resend `response.create` once for
+		// previous_response_not_found, once for a connection-limit error, then fall
+		// back to one SSE send (`dist/api/openai-codex-responses.js:214-245`), so one
+		// invocation may make up to four sends. The supported terminal carries no
+		// trustworthy complete count, so this invocation can never authorize a send.
+		// Recovery cannot bound the internal sends of an initial non-SSE invocation
+		// and never forces SSE; that measured limit remains open for the cutover.
 		return Object.freeze({
-			maximumPossiblyChargedSends: 3,
-			overReservation: "deliberate",
-			basis: "adaptive-anthropic-provenance",
+			maximumPossiblyChargedSends: "unknown",
+			basis: "codex-non-sse-unknown",
 		});
 	}
-	if (candidate.family === "openai-codex" && options.transport !== "sse") {
-		// Pinned Codex can reconnect twice after socket.send, then fall back to one
-		// bounded SSE send. The supported API exposes no narrower send observation.
+	if (candidate.family === "google-antigravity") {
+		// The vendored stream ignores `maxRetries` and loops over empty-response
+		// retries, runtime-model candidates and endpoint fallbacks inside one
+		// invocation, so it can make several sends with no trustworthy count.
 		return Object.freeze({
-			maximumPossiblyChargedSends: 4,
-			overReservation: "deliberate",
-			basis: "codex-websocket-uncertain",
+			maximumPossiblyChargedSends: "unknown",
+			basis: "antigravity-inner-unknown",
 		});
 	}
 	return Object.freeze({
 		maximumPossiblyChargedSends: 1,
-		overReservation: "none",
-		basis: "bounded-http",
+		basis: "bounded-provider-invocation",
 	});
 }
 
 function chargedSendExposureFor(
 	reservation: RecoverySendReservation,
 ): RecoveryChargedSendExposure {
-	return reservation.basis === "codex-websocket-uncertain"
-		? Object.freeze({ status: "unknown", reason: "codex-websocket-send" })
-		: Object.freeze({
-				status: "bounded",
-				maximumPossiblyChargedSends: reservation.maximumPossiblyChargedSends,
-			});
+	switch (reservation.basis) {
+		case "codex-non-sse-unknown":
+			return Object.freeze({ status: "unknown", reason: "codex-non-sse-send-count" });
+		case "antigravity-inner-unknown":
+			return Object.freeze({ status: "unknown", reason: "antigravity-inner-sends" });
+		case "bounded-provider-invocation":
+			return Object.freeze({ status: "bounded", maximumPossiblyChargedSends: 1 });
+	}
+}
+
+/**
+ * Content-free terminal error text for an exhausted or terminated recovery.
+ *
+ * Host retries count toward the same two-send cap. Pinned pi-coding-agent 0.84.4
+ * `AgentSession._isRetryableError` (`dist/core/agent-session.js:2241-2246`)
+ * restarts the turn when `isRetryableAssistantError` from
+ * `@earendil-works/pi-ai/compat` matches the final `errorMessage`
+ * (`pi-ai/dist/utils/retry.js:166-173`, patterns at `:4-77`), and its overflow
+ * path compact-and-retries when `isContextOverflow` matches
+ * (`agent-session.js:1652-1690`, `pi-ai/dist/utils/overflow.js:130-156`). A
+ * production caller must surface this message, never a provider's own text, so
+ * neither host path can add a third send. The named `HOST-RETRY-BOUNDARY`
+ * regression checks both classifiers directly.
+ */
+export function buildBoundedRecoveryFinalErrorMessage(): string {
+	return "Unified recovery stopped after its bounded provider attempt.";
 }
 
 function finiteNonNegative(value: unknown): number | undefined {
@@ -352,6 +464,20 @@ function terminalFromEvent(event: unknown): unknown {
 	return undefined;
 }
 
+function assistantTerminal(value: unknown): AssistantMessage | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const terminal = value as Partial<AssistantMessage>;
+	return terminal.role === "assistant" &&
+		Array.isArray(terminal.content) &&
+		typeof terminal.api === "string" &&
+		typeof terminal.provider === "string" &&
+		typeof terminal.model === "string" &&
+		typeof terminal.stopReason === "string" &&
+		typeof terminal.timestamp === "number"
+		? (terminal as AssistantMessage)
+		: undefined;
+}
+
 const PROGRESS_EVENT_TYPES = new Set([
 	"start",
 	"text_start",
@@ -376,6 +502,7 @@ function isProgressEvent(event: unknown): boolean {
 function observedOutput(
 	upstream: AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>,
 	onProgress: () => void,
+	onTerminal: (terminal: AssistantMessage) => void,
 	onFacts: (facts: AttemptFacts) => void,
 ): AsyncIterable<unknown> {
 	return {
@@ -383,8 +510,12 @@ function observedOutput(
 			const source = await upstream;
 			for await (const event of source) {
 				if (isProgressEvent(event)) onProgress();
-				const facts = projectAttemptFacts(terminalFromEvent(event));
-				if (facts !== undefined) onFacts(facts);
+				const terminal = assistantTerminal(terminalFromEvent(event));
+				if (terminal !== undefined) {
+					onTerminal(terminal);
+					const facts = projectAttemptFacts(terminal);
+					if (facts !== undefined) onFacts(facts);
+				}
 				yield event;
 			}
 		},
@@ -451,8 +582,19 @@ function validCandidate(candidate: RecoveryCandidate): boolean {
 		// the way the prior hand-listed three-family check did for Google Antigravity.
 		isManagedFamily(candidate.family) &&
 		typeof candidate.modelId === "string" &&
-		candidate.modelId.length > 0
+		candidate.modelId.length > 0 &&
+		(candidate.recoveryAction === "account" || candidate.recoveryAction === "model")
 	);
+}
+
+function changesOnlyAuthorizedDimension(
+	initial: RecoveryCandidate,
+	candidate: RecoveryCandidate,
+	action: RecoveryActionKind,
+): boolean {
+	return action === "account"
+		? candidate.providerId !== initial.providerId && candidate.modelId === initial.modelId
+		: candidate.modelId !== initial.modelId;
 }
 
 function observeLatePhysicalAttempt(
@@ -478,6 +620,45 @@ function observeLatePhysicalAttempt(
 	);
 }
 
+/**
+ * The first send must use the call's selected model on an account candidate.
+ * A model change happens only through `classifyModelRecovery` after a
+ * structured failure, never because recheck skipped every exact-model account.
+ */
+function eligibleInitialCandidate(candidate: RecoveryCandidate): boolean {
+	return (
+		candidate.recoveryAction === "account" &&
+		candidate.modelId === candidate.selectedModelId
+	);
+}
+
+function projectModelFailure(terminal: AssistantMessage): RecoveryModelFailure {
+	const diagnostics: readonly unknown[] = Array.isArray(terminal.diagnostics)
+		? terminal.diagnostics
+		: [];
+	const diagnosticTypes: string[] = [];
+	for (const diagnostic of diagnostics) {
+		const type =
+			typeof diagnostic === "object" && diagnostic !== null
+				? (diagnostic as { type?: unknown }).type
+				: undefined;
+		if (typeof type === "string") diagnosticTypes.push(type);
+	}
+	const rawCode = (terminal as { code?: unknown }).code;
+	const code =
+		rawCode === "refusal" || rawCode === "unknown_stop" ? rawCode : undefined;
+	return Object.freeze({
+		stopReason: terminal.stopReason,
+		api: terminal.api,
+		provider: terminal.provider,
+		model: terminal.model,
+		hasErrorMessage:
+			typeof terminal.errorMessage === "string" && terminal.errorMessage.length > 0,
+		diagnosticTypes: Object.freeze(diagnosticTypes),
+		...(code === undefined ? {} : { code }),
+	});
+}
+
 function validPreDispatchDecision(value: unknown): value is RecoveryPreDispatchDecision {
 	if (typeof value !== "object" || value === null) return false;
 	const decision = value as Record<string, unknown>;
@@ -492,18 +673,38 @@ function validPreDispatchDecision(value: unknown): value is RecoveryPreDispatchD
 function validRetrySafety(value: unknown): value is RecoveryRetrySafety {
 	if (typeof value !== "object" || value === null) return false;
 	const safety = value as Record<string, unknown>;
-	if (safety.status === "retryable") {
+	if (safety.status === "recoverable") {
 		return (
-			safety.reason === "generation-only-incomplete" ||
-			safety.reason === "definitively-rejected"
+			safety.action === "account" &&
+			(safety.reason === "account-local-quota" ||
+				safety.reason === "account-local-auth" ||
+				safety.reason === "account-local-rate-limit")
 		);
+	}
+	if (safety.status === "model-policy") {
+		return safety.reason === "structured-provider-error";
 	}
 	return (
 		safety.status === "unsafe" &&
 		(safety.reason === "uncertain-external-effects" ||
 			safety.reason === "completed-tool" ||
 			safety.reason === "completed-call" ||
-			safety.reason === "agent-run")
+			safety.reason === "agent-run" ||
+			safety.reason === "invalid-request" ||
+			safety.reason === "refusal" ||
+			safety.reason === "unknown")
+	);
+}
+
+function validModelDecision(value: unknown): value is RecoveryModelDecision {
+	if (typeof value !== "object" || value === null) return false;
+	const decision = value as Record<string, unknown>;
+	return (
+		decision.status === "none" ||
+		(decision.status === "recoverable" &&
+			decision.action === "model" &&
+			(decision.reason === "unsupported-model" ||
+				decision.reason === "unsupported-capability"))
 	);
 }
 
@@ -558,16 +759,34 @@ async function runRecovery(
 	onProgress: () => void,
 ): Promise<RecoveryResult> {
 	let attempts = 0;
+	let initialCandidate: RecoveryCandidate | undefined;
+	let recoveryAction: RecoveryActionKind | undefined;
 	const terminated = (): RecoveryResult => ({
 		status: "terminated",
 		reason: request.reason ?? "callback-failure",
 		attempts,
+		errorMessage: buildBoundedRecoveryFinalErrorMessage(),
+	});
+	const exhausted = (): RecoveryResult => ({
+		status: "exhausted",
+		attempts,
+		errorMessage: buildBoundedRecoveryFinalErrorMessage(),
 	});
 	const consideredPairs = new Set<string>();
 
 	for (const candidate of [...input.candidates]) {
 		if (request.controller.signal.aborted) return terminated();
+		if (attempts >= RECOVERY_MAX_PROVIDER_SENDS_PER_CALL) return exhausted();
 		if (!validCandidate(candidate)) continue;
+		if (initialCandidate === undefined && !eligibleInitialCandidate(candidate)) continue;
+		if (
+			recoveryAction !== undefined &&
+			(initialCandidate === undefined ||
+				candidate.recoveryAction !== recoveryAction ||
+				!changesOnlyAuthorizedDimension(initialCandidate, candidate, recoveryAction))
+		) {
+			continue;
+		}
 		const pair = `${candidate.providerId}\u0000${candidate.modelId}`;
 		if (consideredPairs.has(pair)) continue;
 		consideredPairs.add(pair);
@@ -608,8 +827,16 @@ async function runRecovery(
 			abortRequest(request, "callback-failure");
 			return terminated();
 		}
+		if (attempts > 0 && reservation.maximumPossiblyChargedSends === "unknown") {
+			// The recovery send is the call's last send. A pinned Codex non-SSE or a
+			// vendored Antigravity invocation can make several internal sends, so it
+			// cannot fit a one-send remainder.
+			continue;
+		}
+		// A reservation keeps its ordinal even when the request aborts before dispatch.
+		const ordinal = attempts + 1;
 		const reserved = await reserveAttempt(deps, request, {
-			ordinal: attempts + 1,
+			ordinal,
 			candidate,
 			reservation,
 		});
@@ -625,6 +852,7 @@ async function runRecovery(
 			| { readonly terminal: AssistantMessage; readonly output: AssistantMessageEventStream }
 			| undefined;
 		let safety: RecoveryRetrySafety | undefined;
+		let terminal: AssistantMessage | undefined;
 		let callbackFailed = false;
 		const attemptController = new AbortController();
 		const abortAttempt = (): void => attemptController.abort();
@@ -635,6 +863,7 @@ async function runRecovery(
 		if (!request.controller.signal.aborted) {
 			try {
 				// A physical attempt begins exactly when this callback is invoked.
+				initialCandidate ??= candidate;
 				attempts += 1;
 				physicalValue = deps.dispatch({
 					candidate,
@@ -666,6 +895,9 @@ async function runRecovery(
 								physical.output,
 								onProgress,
 								(observed) => {
+									terminal = observed;
+								},
+								(observed) => {
 									facts = observed;
 								},
 							),
@@ -686,10 +918,18 @@ async function runRecovery(
 							}
 						}
 						if (accepted === undefined) {
-							if (reservation.basis === "codex-websocket-uncertain") {
-								// No supported hook distinguishes an unsent connection failure from
-								// a failure after socket.send. The latter may already be executing,
-								// so recovery must never dispatch another candidate.
+							if (
+								reservation.basis === "antigravity-inner-unknown" ||
+								(reservation.basis === "codex-non-sse-unknown" &&
+									(terminal === undefined ||
+										classifyCodexRecoverySendEvidence(terminal) !==
+											"pre-execution-rejected"))
+							) {
+								// A non-SSE Codex invocation may have reconnected or fallen back
+								// to SSE after socket.send; only structured proof of a single
+								// pre-execution rejection may consult the caller's classifier.
+								// An Antigravity invocation may already have sent to several
+								// endpoints or runtime models; no supported evidence bounds it.
 								safety = {
 									status: "unsafe",
 									reason: "uncertain-external-effects",
@@ -716,7 +956,7 @@ async function runRecovery(
 			}
 
 		const accounting = await accountAttempt(deps, request, {
-			ordinal: attempts,
+			ordinal,
 			candidate,
 			disposition: accepted === undefined ? "failed" : "accepted",
 			...(accepted === undefined ? { failureCode } : {}),
@@ -745,12 +985,47 @@ async function runRecovery(
 			abortRequest(request, "callback-failure");
 			return terminated();
 		}
+		if (safety.status === "recoverable") {
+			recoveryAction = safety.action;
+			continue;
+		}
 		if (safety.status === "unsafe") {
 			abortRequest(request, safety.reason);
 			return terminated();
 		}
+		// The recovery send was the last send; do not consult model policy for a
+		// third send that the call can never make.
+		if (attempts >= RECOVERY_MAX_PROVIDER_SENDS_PER_CALL) return exhausted();
+		if (terminal === undefined || deps.classifyModelRecovery === undefined) {
+			abortRequest(request, "unknown");
+			return terminated();
+		}
+		let modelValue: ReturnType<NonNullable<RecoveryEngineDependencies["classifyModelRecovery"]>>;
+		try {
+			modelValue = deps.classifyModelRecovery(
+				projectModelFailure(terminal),
+				request.controller.signal,
+			);
+		} catch {
+			abortRequest(request, "callback-failure");
+			return terminated();
+		}
+		const modelDecision = await awaitRequest(modelValue, request);
+		if (modelDecision.status === "aborted") return terminated();
+		if (
+			modelDecision.status === "rejected" ||
+			!validModelDecision(modelDecision.value)
+		) {
+			abortRequest(request, "callback-failure");
+			return terminated();
+		}
+		if (modelDecision.value.status === "none") {
+			abortRequest(request, "unknown");
+			return terminated();
+		}
+		recoveryAction = modelDecision.value.action;
 	}
-	return { status: "exhausted", attempts };
+	return exhausted();
 }
 
 export function createRecoveryEngine(
@@ -767,14 +1042,24 @@ export function createRecoveryEngine(
 	return {
 		async recover(input): Promise<RecoveryResult> {
 			if (shutdown) {
-				return { status: "terminated", reason: "shutdown", attempts: 0 };
+				return {
+					status: "terminated",
+					reason: "shutdown",
+					attempts: 0,
+					errorMessage: buildBoundedRecoveryFinalErrorMessage(),
+				};
 			}
 			if (
 				!validTiming(input.timing) ||
 				(input.deadlineMs !== undefined &&
 					(!Number.isFinite(input.deadlineMs) || input.deadlineMs < 0))
 			) {
-				return { status: "terminated", reason: "malformed-config", attempts: 0 };
+				return {
+					status: "terminated",
+					reason: "malformed-config",
+					attempts: 0,
+					errorMessage: buildBoundedRecoveryFinalErrorMessage(),
+				};
 			}
 
 			const activeRequest: ActiveRequest = { controller: new AbortController() };
@@ -833,6 +1118,7 @@ export function createRecoveryEngine(
 						status: "terminated",
 						reason: activeRequest.reason ?? "callback-failure",
 						attempts: 0,
+						errorMessage: buildBoundedRecoveryFinalErrorMessage(),
 					};
 				}
 				return await runRecovery(deps, input, activeRequest, resetIdle);

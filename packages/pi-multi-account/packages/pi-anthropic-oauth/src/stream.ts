@@ -221,10 +221,18 @@ export function streamAnthropicOAuth(
       // which throws under fine-grained-tool-streaming (input may be invalid
       // mid-flight) and aborts the turn. The raw stream yields the same
       // RawMessageStreamEvents; tool args are already parsed leniently below.
+      // A finite non-negative integer request-local maxRetries bounds the SDK's
+      // own retries (0 sends exactly once); any other value keeps the SDK default.
+      const maxRetries = options?.maxRetries;
       const { data: anthropicStream, response: httpResponse } =
         await client.messages
           .create(params, {
             signal: options?.signal,
+            ...(Number.isFinite(maxRetries) &&
+            Number.isInteger(maxRetries) &&
+            (maxRetries ?? -1) >= 0
+              ? { maxRetries }
+              : {}),
           })
           .withResponse();
 

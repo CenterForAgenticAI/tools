@@ -87,9 +87,11 @@ usage lease. A lease handed off to a background drain is kept renewed at the
 lease's own interval so a peer process can never acquire it and start a
 duplicate real call while one is still outstanding.
 
-Google Antigravity has no supported inner-retry behavior yet, so recovery uses
-the same conservative zero-retry default already used for every non-Anthropic
-family; it is not a product gap specific to this family. Reported model `cost`
+Google Antigravity's vendored stream ignores the recovery's zero-retry setting
+and can make several provider sends in one invocation, so recovery treats its
+send count as unknown: an Antigravity account is never the recovery send, and a
+failed initial Antigravity attempt stops without recovery. See
+[Routing](routing.md) for the send bound. Reported model `cost`
 fields from the upstream usage endpoint are API-style rate estimates, not
 retained subscription charges — this repository keeps retained provider cost
 separate from those estimates and reports an unpriced case as `unpriced`

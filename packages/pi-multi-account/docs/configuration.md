@@ -32,6 +32,17 @@ because extension event handlers are crash-isolated.
   "tierModelMap": {
     "openrouter": { "replace-with-a-source-model-id": "openrouter/replace-with-a-router-model-id" }
   },
+  "modelFallbacks": {
+    "replace-with-an-exact-source-unified-model-id": [
+      "replace-with-an-exact-fallback-model-id"
+    ]
+  },
+  "modelFallbackEgress": [
+    {
+      "sourceModelId": "replace-with-an-exact-source-unified-model-id",
+      "destinationModelId": "replace-with-an-exact-cross-vendor-model-id"
+    }
+  ],
   "watchdogIntervalMs": 30000,
   "cooldownMaxMs": 300000,
   "preemptiveExpiryWindowMs": 120000,
@@ -67,6 +78,8 @@ Key behavior:
 | `crossFamilyChains` | `[]` | Allowed cross-family transitions. Six directions are recognized, each its own explicit tuple: both `anthropic`↔`openai-codex` directions, and all four directions between `google-antigravity` and each of its two managed partners (`anthropic`, `openai-codex`). Direction matters — authorizing one direction never authorizes the reverse. |
 | `preferredModels` | `{}` | Ordered destination-family models for cross-family routing. |
 | `tierModelMap` | `{}` | Destination-keyed cross-tier model map (`anthropic`/`openai`/`openrouter` → `{ sourceId: destId }`). The source key is the ID shown by `unified`; the value is the same model's physical destination ID. Owning-vendor API and OpenRouter routing first use an exact catalog match, then this map, and fail closed when neither resolves. IDs are bounded to 256 characters and the map holds at most 256 entries total. The `"*"` source key is rejected. |
+| `modelFallbacks` | `{}` | **Not yet wired: no request path reads this key yet.** Exact source unified model ID to an ordered list of exact fallback model IDs. An absent or empty map authorizes no substitution. The parser accepts at most 128 sources and 16 destinations per source, rejects a source listed as its own destination and duplicate destinations, and rejects any ID the diagnostic sanitizer would redact, without echoing it. |
+| `modelFallbackEgress` | `[]` | **Not yet wired.** Exact directional `sourceModelId`→`destinationModelId` authorizations for a destination from another vendor or served through OpenRouter. One direction never authorizes the reverse. A same-vendor managed destination does not need an entry. The parser accepts at most 256 edges. |
 | `watchdogIntervalMs` | `30000` | No-progress interval before cancelling a continuation. |
 | `cooldownMaxMs` | `300000` | Maximum bounded cooldown. |
 | `preemptiveExpiryWindowMs` | `120000` | Prefer a fresher same-family credential before expiry. Set `0` to disable. |
