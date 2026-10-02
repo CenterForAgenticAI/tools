@@ -7,6 +7,7 @@ import * as path from "node:path";
 
 import type { AssistantMessage, Context, Model, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { stream as streamAnthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import {
 	convertToLlm,
 	estimateTokens,
@@ -255,7 +256,7 @@ async function captureAnthropicPayload(systemPrompt: string, messages: AgentMess
 		messages: convertToLlm(messages),
 		tools: [],
 	};
-	const events = streamAnthropic(anthropicModel, context, {
+	const events = streamAnthropic(anthropicModel, normalizeContext(context), {
 		apiKey: "test-only",
 		cacheRetention: "short",
 		client: {} as never,

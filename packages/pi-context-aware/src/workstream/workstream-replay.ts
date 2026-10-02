@@ -173,7 +173,11 @@ function inheritedProvenance(lineage: ReplayLineage | null): WorkstreamProvenanc
 export function replayWorkstreamEntries(entries: readonly unknown[], options: ReplayOptions = {}): ReplayResult {
 	if (!Array.isArray(entries)) return { snapshot: null, authority: null, candidates: [], rejected: 0, duplicateEventIds: 0, chainValid: false };
 	const maxEntries = options.maxEntries ?? MAX_REPLAY_ENTRIES;
-	const boundedEntries = entries.slice(0, Math.max(0, Math.min(maxEntries, MAX_REPLAY_ENTRIES)));
+	// The bound applies to workstream entries, not to the whole transcript: a long
+	// session holds far more ordinary entries than the bound, and counting those
+	// would drop workstream snapshots written after the cut.
+	const workstreamEntries = entries.filter((entry) => record(entry) && entry.type === "custom" && entry.customType === WORKSTREAM_ENTRY_TYPE);
+	const boundedEntries = workstreamEntries.slice(0, Math.max(0, Math.min(maxEntries, MAX_REPLAY_ENTRIES)));
 	const byEventId = new Map<string, ReplayCandidate>();
 	let rejected = Math.max(0, entries.length - boundedEntries.length);
 	let duplicateEventIds = 0;

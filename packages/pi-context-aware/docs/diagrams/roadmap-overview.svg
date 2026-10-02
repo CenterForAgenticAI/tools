@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 500" width="1200" height="500" role="img" aria-labelledby="roadmap-title roadmap-description" font-family="'IBM Plex Sans','Helvetica Neue',Arial,sans-serif">
+  <title id="roadmap-title">Proposed context-management roadmap</title>
+  <desc id="roadmap-description">A left-to-right roadmap. M0 is the minimum correctness and safety prerequisite. M1 adds native billion-context-style range compression, recoverable originals, hierarchical summaries, search, and status. M2 audits and safely migrates or continues supported legacy capabilities. M1 and M2 are the first usable replacement and integrate into a core. M3 adds selectable per-session modes. Linked-evidence retrieval is a secondary research workstream after the core; research may run in parallel, but its implementation and evaluation do not gate the core release. Deferred options include generic vector or knowledge-graph stores, learned compressors, automatic mode switching, and public plugins.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,1 L9,5 L0,9 z" fill="#0464cd"/></marker>
+    <marker id="dashed-arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,1 L9,5 L0,9 z" fill="#6b7280"/></marker>
+  </defs>
+  <rect x="0.5" y="0.5" width="1199" height="429" rx="8" fill="#fff" stroke="#dce6f5"/>
+  <text x="32" y="38" font-size="20" font-family="'Domine',Georgia,serif" fill="#010c3f">Proposed context-management roadmap</text>
+  <text x="1168" y="38" font-size="11" text-anchor="end" letter-spacing="0.12em" fill="#7a869f">PROPOSED</text>
+  <line x1="32" y1="54" x2="1168" y2="54" stroke="#dce6f5"/>
+
+  <path d="M207,148 L244,148" fill="none" stroke="#0464cd" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M439,148 L476,148" fill="none" stroke="#0464cd" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M671,148 L708,148" fill="none" stroke="#0464cd" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M903,148 L940,148" fill="none" stroke="#0464cd" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <g stroke="#032c7b" stroke-width="1.5">
+    <rect x="32" y="88" width="175" height="120" rx="6" fill="#eef5ff"/>
+    <rect x="244" y="88" width="195" height="120" rx="6" fill="#eef5ff"/>
+    <rect x="476" y="88" width="195" height="120" rx="6" fill="#eef5ff"/>
+    <rect x="708" y="88" width="195" height="120" rx="6" fill="#e8f5df"/>
+    <rect x="940" y="88" width="228" height="120" rx="6" fill="#d5eaff"/>
+  </g>
+  <g fill="#010c3f">
+    <text x="50" y="116" font-size="16" font-weight="700">M0</text>
+    <text x="50" y="139" font-size="13" font-weight="600">Correctness + safety</text>
+    <text x="50" y="161" font-size="11">Bounded replay</text>
+    <text x="50" y="178" font-size="11">Authority and lineage</text>
+    <text x="50" y="195" font-size="11">Hostile-text boundaries</text>
+
+    <text x="262" y="116" font-size="16" font-weight="700">M1</text>
+    <text x="262" y="139" font-size="13" font-weight="600">Native recovery</text>
+    <text x="262" y="161" font-size="11">Range compression</text>
+    <text x="262" y="178" font-size="11">Source-linked originals</text>
+    <text x="262" y="195" font-size="11">Search and savings</text>
+
+    <text x="494" y="116" font-size="16" font-weight="700">M2</text>
+    <text x="494" y="139" font-size="13" font-weight="600">Safe replacement</text>
+    <text x="494" y="161" font-size="11">Inventory + old formats</text>
+    <text x="494" y="178" font-size="11">Ownership detection</text>
+    <text x="494" y="195" font-size="11">Verified conversion</text>
+
+    <text x="726" y="116" font-size="16" font-weight="700">Core</text>
+    <text x="726" y="139" font-size="13" font-weight="600">M1 + M2 integration</text>
+    <text x="726" y="161" font-size="11">One authority</text>
+    <text x="726" y="178" font-size="11">Fallback or refusal</text>
+    <text x="726" y="195" font-size="11">Restart + branch safety</text>
+
+    <text x="958" y="116" font-size="16" font-weight="700">M3</text>
+    <text x="958" y="139" font-size="13" font-weight="600">Selectable per-session modes</text>
+    <text x="958" y="161" font-size="11">Recent history</text>
+    <text x="958" y="178" font-size="11">Shorten consumed output</text>
+    <text x="958" y="195" font-size="11">Recoverable summaries</text>
+  </g>
+
+  <path d="M1054,208 L1054,247" fill="none" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#dashed-arrow)"/>
+  <rect x="32" y="258" width="415" height="90" rx="6" fill="#fafafa" stroke="#6b7280" stroke-width="1.3" stroke-dasharray="6 5"/>
+  <text x="51" y="283" font-size="14" font-weight="700" fill="#28303f">Core experiment runner: M0 + M1</text>
+  <text x="51" y="303" font-size="11" fill="#28303f">Compression, recovery, safety, and compatibility.</text>
+  <text x="51" y="319" font-size="11" fill="#28303f">Fixed replay first; cold and warm cache separate.</text>
+  <text x="51" y="335" font-size="11" fill="#28303f">Retrieval comparisons are secondary, not a core gate.</text>
+
+  <rect x="476" y="258" width="692" height="90" rx="6" fill="#fff8e8" stroke="#9a6b00" stroke-width="1.3"/>
+  <text x="495" y="283" font-size="14" font-weight="700" fill="#5b4300">Deferred until evidence supports them</text>
+  <text x="495" y="303" font-size="11" fill="#5b4300">Generic vector/knowledge-graph stores · learned compressors · mode switching · plugins</text>
+  <text x="495" y="319" font-size="11" fill="#5b4300">Linked source graph and Jev-like traversal are in scope now.</text>
+  <text x="495" y="335" font-size="11" fill="#5b4300">No provider KV-cache manipulation claim.</text>
+
+  <rect x="32" y="370" width="1136" height="74" rx="6" fill="#eef8f8" stroke="#147d80" stroke-width="1.3"/>
+  <text x="51" y="395" font-size="14" font-weight="700" fill="#075b5d">Secondary research: linked-evidence retrieval</text>
+  <text x="51" y="415" font-size="11" fill="#075b5d">Research may run in parallel; implementation/evaluation do not gate the core.</text>
+  <text x="51" y="431" font-size="11" fill="#075b5d">Entry ranges + link graph · best-first traversal · consent before preview/scoring · erase invalidates caches/traces.</text>
+
+  <text x="1168" y="475" font-size="10" text-anchor="end" fill="#7a869f">Text equivalent and milestone exits are described in docs/roadmap.md</text>
+</svg>

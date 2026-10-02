@@ -317,6 +317,13 @@ test("fork/clone keeps workstream identity but isolates Pi session, while detach
 	assert.equal(detached.provenance?.inheritedWorkstreamId, source.workstreamId);
 });
 
+test("ordinary transcript entries do not count against the replay bound", () => {
+	const first = workstreamEntry(snapshot(1, "first"), { entryId: "entry-1", timestamp: now });
+	const filler = Array.from({ length: 150 }, (_, index) => ({ type: "message", id: `m-${index}` }));
+	const result = replayWorkstreamEntries([...filler, first], { maxEntries: 100 });
+	assert.equal(result.snapshot?.objective, "first");
+});
+
 test("legacy absence and bounded adversarial input remain neutral", () => {
 	assert.equal(replayWorkstreamEntries([]).snapshot, null);
 	assert.equal(replayWorkstreamEntries([null, 1, "legacy", { type: "message", data: "summary" }]).snapshot, null);

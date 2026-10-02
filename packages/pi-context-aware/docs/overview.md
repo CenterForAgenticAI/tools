@@ -48,7 +48,7 @@ under `packages`. The package's `dist/` directory is gitignored, so run
 restarting Pi. The manifest loads `./dist/index.js`; the `prepare` script builds
 `dist/` automatically during install and `npm pack`.
 
-The supported host version is exactly Pi 0.84.2
+The supported host version is exactly Pi 1.0.0
 (`@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai`) on Node 22.19
 or newer. Pi 0.83.0 is not compatible with release 0.2.3 or later; consumers
 must upgrade Pi. Release 0.2.0 remains the last release declaring Pi 0.80.6 or

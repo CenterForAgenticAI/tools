@@ -113,6 +113,17 @@ async function cleanup() {
 const childEnv = { ...process.env };
 delete childEnv.PI_CODING_AGENT_DIR;
 
+/**
+ * HOME is the other route to the operator's profile: Pi resolves its agent
+ * directory as `$HOME/.pi/agent`, so a test that leaves HOME alone reads the
+ * operator's real context-aware.json (for example a disabled proactive
+ * compaction) and fails on a developer machine while passing in CI. Each run
+ * gets an empty home inside its own run root, which cleanup removes with it.
+ */
+const runHome = path.join(runRoot, "home");
+fs.mkdirSync(runHome, { recursive: true });
+childEnv.HOME = runHome;
+
 const child = spawn(command, args, {
 	stdio: "inherit",
 	env: {

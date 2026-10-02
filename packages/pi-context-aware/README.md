@@ -34,7 +34,7 @@ Install the public package with Pi:
 pi install npm:@centerforagenticai/pi-context-aware
 ```
 
-Restart Pi or run `/reload`. The package declares Pi peer dependencies as `*`; its deterministic compatibility gate currently pins and tests Pi `0.84.2`. It needs Node `>=22.19.0`.
+Restart Pi or run `/reload`. The package declares Pi peer dependencies as `*`; its deterministic compatibility gate currently pins and tests Pi `1.0.0`. It needs Node `>=22.19.0`.
 
 For a local checkout, add its absolute path to the `packages` array in `~/.pi/agent/settings.json`, run `npm run build`, then restart Pi or run `/reload`. The manifest loads `./dist/index.js`.
 
@@ -104,6 +104,7 @@ npm test
 ## Documentation
 
 - [docs/overview.md](docs/overview.md): the previous README's detailed product overview and installation reference, preserved verbatim.
+- [docs/roadmap.md](docs/roadmap.md): proposed context-management direction, milestones, evidence, and open decisions.
 - [docs/commands-and-concepts.md](docs/commands-and-concepts.md): workflows, commands, compaction concepts, model routing, and recovery.
 - [docs/configuration.md](docs/configuration.md): complete configuration reference, defaults, precedence, and runtime overrides.
 - [docs/session-tasks.md](docs/session-tasks.md): task-list statuses, tool actions, continuation, and delegation contract.

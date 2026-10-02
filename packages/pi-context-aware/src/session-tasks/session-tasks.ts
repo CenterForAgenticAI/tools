@@ -743,6 +743,10 @@ export function appendTasksSnapshot(api: AppendEntryApi, snapshot: TasksSnapshot
 	api.appendEntry(TASKS_ENTRY_TYPE, parsed);
 }
 
+function isTasksEntry(value: unknown): boolean {
+	return isRecord(value) && value.type === "custom" && value.customType === TASKS_ENTRY_TYPE;
+}
+
 /** Extract a snapshot from a transcript custom entry, ignoring everything else. */
 export function parseTasksEntry(value: unknown): TasksSnapshot | null {
 	if (!isRecord(value)) return null;
@@ -756,6 +760,7 @@ export interface TasksReplayResult {
 	readonly rejected: number;
 }
 
+/** Upper bound on task snapshot entries examined; the newest ones are kept. */
 export const MAX_TASKS_REPLAY_ENTRIES = 10_000;
 
 /**
@@ -765,13 +770,27 @@ export const MAX_TASKS_REPLAY_ENTRIES = 10_000;
  * than by input order, so replay of the same transcript always produces the
  * same list — including on a fork, where two branches can hold the same
  * revision number.
+ *
+ * The bound applies to task snapshot entries, newest first, never to the whole
+ * transcript: a long session holds far more than `maxEntries` ordinary
+ * entries, and cutting from the start would hide every snapshot written after
+ * the cut. Snapshots are complete lists, so the newest ones are the ones that
+ * decide the result.
  */
 export function replayTasksEntries(entries: readonly unknown[], maxEntries = MAX_TASKS_REPLAY_ENTRIES): TasksReplayResult {
 	if (!Array.isArray(entries)) return { snapshot: null, authority: null, rejected: 0 };
-	const bounded = entries.slice(0, Math.max(0, Math.min(maxEntries, MAX_TASKS_REPLAY_ENTRIES)));
-	let rejected = Math.max(0, entries.length - bounded.length);
+	const limit = Math.max(0, Math.min(maxEntries, MAX_TASKS_REPLAY_ENTRIES));
+	let rejected = 0;
+	let examined = 0;
 	let best: TasksSnapshot | null = null;
-	for (const entry of bounded) {
+	for (let index = entries.length - 1; index >= 0; index -= 1) {
+		const entry = entries[index];
+		if (!isTasksEntry(entry)) continue;
+		if (examined >= limit) {
+			rejected += 1;
+			continue;
+		}
+		examined += 1;
 		const snapshot = parseTasksEntry(entry);
 		if (!snapshot) {
 			rejected += 1;
