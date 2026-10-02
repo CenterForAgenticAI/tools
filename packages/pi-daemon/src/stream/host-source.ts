@@ -74,13 +74,13 @@ class SessionFileStreamSource implements BindableStreamSessionSource {
     const summary = this.getSummary();
     return {
       epoch: summary.epoch,
-      generation: this.#host?.generation ?? summary.generation,
+      generation: this.currentHost(summary)?.generation ?? summary.generation,
     };
   }
 
   capture(): StreamSessionCapture {
     const storedSummary = this.getSummary();
-    const host = this.#host;
+    const host = this.currentHost(storedSummary);
     const summary = isStatefulHost(host)
       ? {
           ...storedSummary,
@@ -105,7 +105,7 @@ class SessionFileStreamSource implements BindableStreamSessionSource {
     const leafId = committedManager?.getLeafId() ?? null;
     return {
       epoch: summary.epoch,
-      generation: this.#host?.generation ?? summary.generation,
+      generation: host?.generation ?? summary.generation,
       leafId,
       activeBranch,
       allEntries,
@@ -204,6 +204,16 @@ class SessionFileStreamSource implements BindableStreamSessionSource {
     this.#pendingUiQuestions.clear();
     this.#knownCommittedEntryIds.clear();
     this.#syntheticCatchupEntryIds.clear();
+  }
+
+  /**
+   * The bound host, unless the registry has moved past its generation. A host
+   * left bound after it slept (the registry generation advances on every sleep)
+   * never supplies session state; the stored summary does.
+   */
+  private currentHost(summary: SessionSummary): AwakeSessionHost | undefined {
+    const host = this.#host;
+    return host !== undefined && host.generation >= summary.generation ? host : undefined;
   }
 
   private getSummary(): SessionSummary {

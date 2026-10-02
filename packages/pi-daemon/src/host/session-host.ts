@@ -202,6 +202,12 @@ export interface SessionHostControllerOptions {
   >;
   readonly sdkCompatibility?: HostSdkCompatibility;
   readonly onExternalWriter?: (frame: HostExternalWriterFrame) => void;
+  /**
+   * Called after the controller stops tracking a session's awake host on any
+   * path (explicit or idle-timeout sleep, failed sleep, external writer), so
+   * stream sources can unbind it. A released host never supplies session state.
+   */
+  readonly onHostReleased?: (sessionId: string) => void;
 }
 
 export type ExplicitSleepRequest = Omit<
@@ -736,6 +742,7 @@ export class SessionHostController {
   readonly #resourceLoaderOptions: SessionHostControllerOptions["resourceLoaderOptions"];
   readonly #sdkCompatibility: HostSdkCompatibility;
   readonly #onExternalWriter: SessionHostControllerOptions["onExternalWriter"];
+  readonly #onHostReleased: SessionHostControllerOptions["onHostReleased"];
   readonly #leaseArbiter: Pick<LeaseArbiter, "assertSleepRecoverAuthority">;
   readonly #now: () => number;
   readonly #hosts = new Map<string, BoundSessionHost>();
@@ -766,6 +773,7 @@ export class SessionHostController {
     this.#sdkCompatibility =
       options.sdkCompatibility ?? defaultHostSdkCompatibility;
     this.#onExternalWriter = options.onExternalWriter;
+    this.#onHostReleased = options.onHostReleased;
     this.#now = options.now ?? Date.now;
     this.#leaseArbiter =
       options.leaseArbiter ??
@@ -1685,6 +1693,7 @@ export class SessionHostController {
     const uiBinding = this.#uiBindings.get(sessionId);
     uiBinding?.stopForwarding();
     this.#uiBindings.delete(sessionId);
+    this.#onHostReleased?.(sessionId);
   }
 
   private recordActivity(
@@ -2195,6 +2204,7 @@ export class SessionHostController {
     uiBinding?.stopForwarding();
     this.#uiBindings.delete(sessionId);
     this.#ownerships.delete(sessionId);
+    this.#onHostReleased?.(sessionId);
   }
 
   private createManager(record: SessionRecord): SessionManager {

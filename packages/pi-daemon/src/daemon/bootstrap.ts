@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
@@ -37,7 +38,20 @@ import {
   type DaemonShutdownRequest,
 } from "./dispatch.js";
 
-export const DAEMON_VERSION = "0.0.0";
+const packageJson: unknown = JSON.parse(
+  readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+);
+if (
+  packageJson === null ||
+  typeof packageJson !== "object" ||
+  !("version" in packageJson) ||
+  typeof packageJson.version !== "string" ||
+  packageJson.version.length === 0
+) {
+  throw new Error("pi-daemon package has no string version");
+}
+export const DAEMON_VERSION: string = packageJson.version;
+const DAEMON_LAUNCH_PATH = fileURLToPath(import.meta.url);
 export const GATE_MODEL_RUNTIME_MODULE_ENV = "PI_DAEMON_MODEL_RUNTIME_MODULE";
 
 /** Result required from an explicitly enabled gate model-runtime module. */
@@ -281,6 +295,7 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<Running
         sdkVersion,
         protocolVersion,
         socketPath,
+        launchPath: DAEMON_LAUNCH_PATH,
       },
       onShutdownAccepted: beginProtocolShutdown,
       ...(sessionOptions === undefined ? {} : { sessionOptions }),

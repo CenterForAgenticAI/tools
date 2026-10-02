@@ -9,6 +9,7 @@ import {
 } from "../client/index.js";
 import { DAEMON_VERSION, runDaemon } from "../daemon/bootstrap.js";
 import { STAMPED_HOST_SDK_VERSION } from "../host/sdk-stamp.js";
+import { runTui } from "../tui/index.js";
 
 const CONNECTION_TIMEOUT_MS = 300;
 const STOP_CLEANUP_ALLOWANCE_MS = 1_000;
@@ -43,6 +44,10 @@ export async function runCli(argv: readonly string[], io: CliIo = {}): Promise<n
     const [command, ...args] = argv;
     if (command === undefined) throw new CliUsageError("a command is required");
     switch (command) {
+      case "tui":
+        if (args.length !== 0) throw new CliUsageError("usage: pi-daemon tui");
+        await runTui({ environment: resolvedIo.environment });
+        return 0;
       case "start":
         return await startCommand(args, resolvedIo);
       case "stop":
@@ -73,22 +78,65 @@ export async function runCli(argv: readonly string[], io: CliIo = {}): Promise<n
 }
 
 async function startCommand(args: readonly string[], io: ResolvedCliIo): Promise<number> {
-  if (args.length > 1 || (args.length === 1 && args[0] !== "--foreground")) {
-    throw new CliUsageError("usage: pi-daemon start [--foreground]");
+  if (
+    args.length > 1 ||
+    (args.length === 1 && args[0] !== "--foreground" && args[0] !== "--replace")
+  ) {
+    throw new CliUsageError("usage: pi-daemon start [--foreground | --replace]");
   }
   const foreground = args[0] === "--foreground";
+  const replace = args[0] === "--replace";
   if (!foreground) {
-    const client = await connect(io.environment, true);
+    let client = await connect(io.environment, true);
     try {
-      const result = await client.request("status", {});
+      let result = await client.request("status", { verbose: replace });
       if (!("daemon" in result)) throw new Error("daemon returned session status without a session");
+      if (client.hello.sdkVersion !== STAMPED_HOST_SDK_VERSION && replace) {
+        const busy =
+          result.sessions === undefined ||
+          result.sessions.some(
+            ({ observedPhase }) => observedPhase === "working" || observedPhase === "blocked",
+          ) ||
+          typeof result.counts.readers !== "number" ||
+          result.counts.readers > 0;
+        if (busy) {
+          writeJson(io.stdout, incompatibleSdk(result.daemon, true));
+          return 1;
+        }
+        try {
+          const shutdown = await client.request("shutdown", { ifIdle: true });
+          client.close();
+          const released = await waitForPathToDisappear(
+            resolveStatePath(io.environment, "daemon.lock"),
+            Date.parse(shutdown.deadline) + STOP_CLEANUP_ALLOWANCE_MS,
+          );
+          if (!released) {
+            writeJson(io.stdout, {
+              ...incompatibleSdk(result.daemon),
+              message: "daemon did not exit before shutdown deadline",
+            });
+            return 1;
+          }
+        } catch (error) {
+          if (error instanceof DaemonRequestError && error.code === "busy") {
+            writeJson(io.stdout, incompatibleSdk(result.daemon, true));
+            return 1;
+          }
+          if (error instanceof DaemonRequestError && error.code === "invalid_request") {
+            writeJson(io.stdout, {
+              ...incompatibleSdk(result.daemon),
+              message: "daemon does not support guarded replacement; stop it manually when idle, then start",
+            });
+            return 1;
+          }
+          throw error;
+        }
+        client = await connect(io.environment, true);
+        result = await client.request("status", {});
+        if (!("daemon" in result)) throw new Error("daemon returned session status without a session");
+      }
       if (client.hello.sdkVersion !== STAMPED_HOST_SDK_VERSION) {
-        writeJson(io.stdout, {
-          status: "incompatible",
-          reason: "sdk_version",
-          expectedSdkVersion: STAMPED_HOST_SDK_VERSION,
-          daemon: result.daemon,
-        });
+        writeJson(io.stdout, incompatibleSdk(result.daemon));
         return 1;
       }
       writeJson(io.stdout, { status: "healthy", ...result });
@@ -196,12 +244,7 @@ async function statusCommand(args: readonly string[], io: ResolvedCliIo): Promis
     const result = await client.request("status", { verbose: true });
     if (!("daemon" in result)) throw new Error("daemon returned session status without a session");
     if (client.hello.sdkVersion !== STAMPED_HOST_SDK_VERSION) {
-      writeJson(io.stdout, {
-        status: "incompatible",
-        reason: "sdk_version",
-        expectedSdkVersion: STAMPED_HOST_SDK_VERSION,
-        daemon: result.daemon,
-      });
+      writeJson(io.stdout, incompatibleSdk(result.daemon));
       return 1;
     }
     const busy = result.sessions?.some(
@@ -212,6 +255,22 @@ async function statusCommand(args: readonly string[], io: ResolvedCliIo): Promis
   } finally {
     client.close();
   }
+}
+
+function incompatibleSdk(
+  daemon: { readonly pid: number; readonly sdkVersion: string },
+  busy = false,
+) {
+  return {
+    status: "incompatible",
+    reason: "sdk_version",
+    expectedSdkVersion: STAMPED_HOST_SDK_VERSION,
+    daemon,
+    hint: "pi-daemon start --replace",
+    ...(busy
+      ? { busy: true, message: "daemon has active work or attached readers; replacement refused" }
+      : {}),
+  };
 }
 
 async function openCommand(args: readonly string[], io: ResolvedCliIo): Promise<number> {

@@ -22,13 +22,14 @@ Stop it cleanly with:
 npx pi-daemon stop
 ```
 
-All CLI output is one JSON object per line. A command exits non-zero for an unhealthy, busy, incompatible, or failed result.
+Operational CLI commands output one JSON object per line. `pi-daemon tui` is an interactive alternate-screen client instead; it exits to the normal terminal and never sleeps or aborts a session on quit. A command exits non-zero for an unhealthy, busy, incompatible, or failed result. For an SDK mismatch, `status` and `start` preserve `status:"incompatible"`, `reason:"sdk_version"`, `expectedSdkVersion`, and `daemon`, adding `hint:"pi-daemon start --replace"`. The daemon's `launchPath` is reported if available from its status protocol; older builds may omit it. `start --replace` refuses to stop a daemon with working/blocked sessions or attached readers (`busy:true`); if the old daemon lacks guarded shutdown support, it refuses automatic replacement and asks you to stop that daemon manually when idle. It waits for the old lock to release before launching this build; never run separate daemons against the same state directory.
 
 ### CLI commands
 
 | Command | Purpose |
 | --- | --- |
-| `pi-daemon start [--foreground]` | Start the singleton for the selected state directory. |
+| `pi-daemon tui` | Connect or auto-spawn and observe the focused session's committed history and best-effort live text. Quit with `q`, Ctrl+C, or Ctrl+D. This initial shell has no editor authority, session picker, or in-TUI create action; use the client API to create sessions. |
+| `pi-daemon start [--foreground \| --replace]` | Start the singleton for the selected state directory. `--replace` replaces an SDK-incompatible idle owner only when no readers are attached. |
 | `pi-daemon stop [--grace-ms N]` | Stop accepting work, let claimed work settle until the deadline, and shut down. |
 | `pi-daemon status` | Report daemon health and session counts. Returns exit 1 while work is active. |
 | `pi-daemon list [--phase PHASE] [--cwd PATH]` | List registered sessions. Repeat `--phase` to select more than one observed phase. |
@@ -179,5 +180,5 @@ Use the exported validators instead of accepting untrusted frames by shape alone
 - Remote TCP or WebSocket transport, token authentication, and multi-user authorization are not implemented.
 - Several sessions may be awake in one process. Extensions share ES-module state, `cwd`, environment variables, listeners, timers, and other process-global resources. Run only extensions you trust to share that process.
 - Live token and tool updates can be lost; committed entries and explicit daemon custom entries are the durable contract.
-- For a brand-new session file, pi 0.87.1 may dispatch the first prompt before its claim reaches the JSONL file. A normal crash can retain a pending SQLite row, but file-only crash recovery is guaranteed only after the session file has materialized. Never infer that `unknown` means the first prompt did not run.
+- For a brand-new session file, pi 0.99.2 may dispatch the first prompt before its claim reaches the JSONL file. A normal crash can retain a pending SQLite row, but file-only crash recovery is guaranteed only after the session file has materialized. Never infer that `unknown` means the first prompt did not run.
 - The daemon exact-pins its pi SDK version because it observes internal persistence seams. Do not bypass the compatibility stamp when updating the SDK.

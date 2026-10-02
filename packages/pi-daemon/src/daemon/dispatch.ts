@@ -52,6 +52,7 @@ export interface DaemonDispatchOptions {
     readonly sdkVersion: string;
     readonly protocolVersion: string;
     readonly socketPath: string;
+    readonly launchPath: string;
   };
   readonly onShutdownAccepted: (request: DaemonShutdownRequest) => void | Promise<void>;
   readonly sessionOptions?: SessionHostControllerOptions["sessionOptions"];
@@ -140,6 +141,9 @@ export function createDaemonDispatch(options: DaemonDispatchOptions): DaemonDisp
     ...(options.sdkCompatibility === undefined
       ? {}
       : { sdkCompatibility: options.sdkCompatibility }),
+    // Every sleep path (idle timeout included) must unbind the stream source,
+    // or a cached broker keeps reporting the disposed host.
+    onHostReleased: (sessionId) => sources.get(sessionId)?.bindHost(undefined),
   });
   hostReference.current = hostController;
 
@@ -399,6 +403,7 @@ export function createDaemonDispatch(options: DaemonDispatchOptions): DaemonDisp
         sdkVersion: options.daemon.sdkVersion,
         protocol: options.daemon.protocolVersion,
         socket: options.daemon.socketPath,
+        launchPath: options.daemon.launchPath,
       },
       counts: {
         sessions: sessions.length,
@@ -410,6 +415,7 @@ export function createDaemonDispatch(options: DaemonDispatchOptions): DaemonDisp
   };
 
   let shutdownDeadlineMs: number | undefined;
+  let activeRequests = 0;
   const shutdownDispatch: RequestDispatcher = (request, context) => {
     if (request.op !== "shutdown") {
       throw new ServerRequestError(
@@ -422,6 +428,15 @@ export function createDaemonDispatch(options: DaemonDispatchOptions): DaemonDisp
         "shutdown_in_progress",
         "daemon shutdown is already in progress",
       );
+    }
+    if (request.params.ifIdle === true) {
+      const hasWork = options.registry.listSessions().some((session) => {
+        const { observedPhase } = projectSessionSummary(session);
+        return observedPhase === "working" || observedPhase === "blocked";
+      });
+      if (hasWork || attachments.size > 0 || activeRequests > 1) {
+        throw new ServerRequestError("busy", "daemon has active work or attached readers");
+      }
     }
     const requestedGraceMs = request.params.graceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     shutdownDeadlineMs = Math.min(MAXIMUM_DATE_MS, now() + requestedGraceMs);
@@ -504,11 +519,19 @@ export function createDaemonDispatch(options: DaemonDispatchOptions): DaemonDisp
 
   return {
     dispatch: async (request, context): Promise<JsonValue> => {
+      if (shutdownDeadlineMs !== undefined && request.op !== "shutdown") {
+        throw new ServerRequestError("unavailable", "daemon shutdown is in progress");
+      }
       const registration = routes.get(request.op);
       if (registration === undefined) {
         throw new ServerRequestError("unavailable", `operation ${request.op} is unavailable`);
       }
-      return await registration.dispatch(request, context);
+      activeRequests += 1;
+      try {
+        return await registration.dispatch(request, context);
+      } finally {
+        activeRequests -= 1;
+      }
     },
     async restoreAfterCrash(): Promise<void> {
       await hostController.restoreAfterCrash();

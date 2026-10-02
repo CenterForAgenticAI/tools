@@ -11,7 +11,7 @@ import {
 
 import type { HostSdkCompatibility } from "./session-host.js";
 
-export const STAMPED_HOST_SDK_VERSION = "0.87.1";
+export const STAMPED_HOST_SDK_VERSION = "0.99.2";
 
 export class SdkCompatibilityError extends Error {
   readonly code = "sdk_incompatible";

@@ -1,6 +1,6 @@
 # @centerforagenticai/pi-daemon
 
-**Kind:** service · **Status:** experimental · **Pi:** 0.87.1 · **Node:** >=24
+**Kind:** service · **Status:** experimental · **Pi:** 0.99.2 · **Node:** >=24
 
 ## What it does
 
@@ -28,9 +28,9 @@ npx pi-daemon start
 npx pi-daemon status
 ```
 
-The package requires Pi `0.87.1`, Node `>=24`, and Linux with Unix-domain sockets, `/proc`, and user ownership checks. The daemon needs a Pi agent directory and provider configuration before a session can call a model. It uses `~/.pi/agent` by default.
+The package requires Pi `0.99.2`, Node `>=24`, and Linux with Unix-domain sockets, `/proc`, and user ownership checks. The daemon needs a Pi agent directory and provider configuration before a session can call a model. It uses `~/.pi/agent` by default.
 
-`start` launches a detached daemon. Use `npx pi-daemon start --foreground` under a process supervisor. See the [CLI and client reference](docs/reference.md) for stop, list, open, sleep, and wake commands.
+`start` launches a detached daemon. Use `npx pi-daemon start --foreground` under a process supervisor. If `status` or `start` reports an SDK-incompatible daemon, its JSON includes a recovery hint; `npx pi-daemon start --replace` replaces it only when there is no working/blocked session and no attached reader. Older daemons without guarded shutdown must be stopped manually when idle. See the [CLI and client reference](docs/reference.md) for stop, list, open, sleep, and wake commands.
 
 ## Surface
 

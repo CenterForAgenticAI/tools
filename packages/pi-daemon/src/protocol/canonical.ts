@@ -602,6 +602,7 @@ const operationSource = {
           sdkVersion: stringSchema,
           protocol: protocolVersionSchema,
           socket: stringSchema,
+          launchPath: optional(stringSchema),
         }),
         counts: jsonObject,
         sessions: optional(array(sessionSummarySchema)),
@@ -619,7 +620,7 @@ const operationSource = {
   }),
   shutdown: operation({
     session: "forbidden",
-    params: object({ graceMs: optional(nonNegativeInteger) }),
+    params: object({ graceMs: optional(nonNegativeInteger), ifIdle: optional(booleanSchema) }),
     result: object({ accepted: literal(true), deadline: timestamp }),
     errorGroups: ["request"],
     extraErrors: ["shutdown_in_progress", "busy"],

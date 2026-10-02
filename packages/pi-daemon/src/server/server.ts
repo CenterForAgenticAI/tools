@@ -109,6 +109,10 @@ export class NodeUnixSocketServer implements UnixSocketServer {
   readonly #keepaliveMs: number;
   #listening = false;
   #closed = false;
+  #stopRequested = false;
+  // Connections the kernel accepted after bind but before listen() verified the
+  // socket. They stay paused (pauseOnConnect) until verification settles.
+  #heldDuringListen: Socket[] | undefined;
   #listenerClosePromise: Promise<void> | undefined;
 
   constructor(options: UnixSocketServerOptions) {
@@ -149,8 +153,10 @@ export class NodeUnixSocketServer implements UnixSocketServer {
   async listen(): Promise<void> {
     if (this.#closed) throw new Error("server is closed");
     if (this.#listening) throw new Error("server is already listening");
+    if (this.#stopRequested) throw new Error("server has stopped accepting");
     await prepareSocketEndpoint(this.socketPath);
 
+    this.#heldDuringListen = [];
     await new Promise<void>((resolveListen, rejectListen) => {
       const onError = (error: Error) => {
         cleanup();
@@ -160,22 +166,30 @@ export class NodeUnixSocketServer implements UnixSocketServer {
         void (async () => {
           try {
             await secureBoundSocket(this.socketPath);
+            if (this.#closed) throw new Error("server closed during listen");
+            if (this.#stopRequested) throw new Error("server stopped accepting during listen");
             this.#listening = true;
             cleanup();
+            this.#releaseHeldConnections(true);
             resolveListen();
           } catch (error) {
             cleanup();
+            this.#releaseHeldConnections(false);
             await closeNetServer(this.#netServer);
             rejectListen(error instanceof Error ? error : new Error(String(error)));
           }
         })();
       };
       const cleanup = () => {
-        this.#netServer.off("error", onError);
+        this.#netServer.off("error", onErrorBeforeListening);
         this.#netServer.off("listening", onListening);
       };
 
-      this.#netServer.once("error", onError);
+      const onErrorBeforeListening = (error: Error) => {
+        this.#releaseHeldConnections(false);
+        onError(error);
+      };
+      this.#netServer.once("error", onErrorBeforeListening);
       this.#netServer.once("listening", onListening);
       const previousUmask = process.umask(0o177);
       try {
@@ -190,6 +204,9 @@ export class NodeUnixSocketServer implements UnixSocketServer {
   }
 
   stopAccepting(): void {
+    // Latched so an in-flight listen() cannot start accepting after this returns.
+    this.#stopRequested = true;
+    this.#releaseHeldConnections(false);
     if (this.#closed || !this.#listening) return;
     this.#listening = false;
     this.#listenerClosePromise ??= closeNetServer(this.#netServer);
@@ -203,13 +220,27 @@ export class NodeUnixSocketServer implements UnixSocketServer {
     if (this.#closed) return;
     this.#closed = true;
     this.#listening = false;
+    this.#releaseHeldConnections(false);
     this.#listenerClosePromise ??= closeNetServer(this.#netServer);
     for (const connection of this.#connections) connection.socket.destroy();
     this.#connections.clear();
     await this.#listenerClosePromise;
   }
 
+  #releaseHeldConnections(serve: boolean): void {
+    const held = this.#heldDuringListen;
+    this.#heldDuringListen = undefined;
+    for (const socket of held ?? []) {
+      if (serve && !socket.destroyed) this.#accept(socket);
+      else socket.destroy();
+    }
+  }
+
   #accept(socket: Socket): void {
+    if (!this.#listening && !this.#closed && this.#heldDuringListen !== undefined) {
+      this.#heldDuringListen.push(socket);
+      return;
+    }
     if (!this.#listening || this.#closed) {
       socket.destroy();
       return;

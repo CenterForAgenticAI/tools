@@ -105,6 +105,14 @@ An attached client without a driver lease. Any number may list, inspect, replay,
 
 Server-derived actor identity plus an optional sanitized live display label, kept separate from model-visible content. Only server-assigned actor/connection IDs are durable; labels are not. Attribution helps people see who submitted, steered, or queued a follow-up, carries no authority, and cannot be forged by writing label-like text in a message.
 
+### Roster
+
+The daemon's list of clients attached to one session: each client's actor ID, grant subject when present, role (watcher or driver), and any pending control request. Online, idle, and typing status is not part of it. Proposed in [ADR 0007](docs/adr/0007-host-owned-workspaces.md).
+
+### Workspace
+
+A host application's grouping of sessions, a working directory, an environment, and members. The host owns it. The daemon stores only an opaque `workspaceId` on each session and never interprets it. Proposed in [ADR 0007](docs/adr/0007-host-owned-workspaces.md).
+
 ## Lifecycle and storage
 
 ### Wake
@@ -129,7 +137,7 @@ The daemon's small local `node:sqlite` database for session lookup, generations,
 
 ### Idempotency key
 
-A caller-chosen opaque value that identifies one prompt submission within one session. Once the daemon appends a `pi-daemon/prompt-claim`, equal key and canonical payload return the indexed pending or terminal result; reusing it with different content is an error. Once committed to the pi file, the key supports file-only index rebuild. SDK 0.87.1 still delays that commit for a new file's first prompt until first assistant output (verified by `test/prompt-claim-ordering.test.ts`); an ordinary crash may retain a pending database row but cannot promise file-only recovery in that window (O10). Callers must not place credentials in the key. A known, received pre-claim refusal, including `busy`, permits re-evaluating its key. After uncertain delivery, retain the original `sessionId` and idempotency key, then query prompt status. Do not automatically resubmit a `pending` or `unknown` result: `unknown` means no matching indexed claim is available, not that provider work never started. See the [client recovery guidance](docs/reference.md#use-the-client-library).
+A caller-chosen opaque value that identifies one prompt submission within one session. Once the daemon appends a `pi-daemon/prompt-claim`, equal key and canonical payload return the indexed pending or terminal result; reusing it with different content is an error. Once committed to the pi file, the key supports file-only index rebuild. SDK 0.99.2 still delays that commit for a new file's first prompt until first assistant output (verified by `test/prompt-claim-ordering.test.ts`); an ordinary crash may retain a pending database row but cannot promise file-only recovery in that window (O10). Callers must not place credentials in the key. A known, received pre-claim refusal, including `busy`, permits re-evaluating its key. After uncertain delivery, retain the original `sessionId` and idempotency key, then query prompt status. Do not automatically resubmit a `pending` or `unknown` result: `unknown` means no matching indexed claim is available, not that provider work never started. See the [client recovery guidance](docs/reference.md#use-the-client-library).
 
 ### Settlement
 

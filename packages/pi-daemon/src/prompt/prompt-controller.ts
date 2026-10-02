@@ -673,9 +673,10 @@ export class PromptController {
       expandPromptTemplates: canonical.options.expandPromptTemplates,
       source: canonical.options.source,
       ...(disposition === "queued" ? { streamingBehavior: "followUp" as const } : {}),
-      preflightResult: (success) => {
+      preflightResult: (result) => {
+        const success = true;
         const queuedBySdk =
-          success && disposition === "queued" && host.session.pendingMessageCount > 0;
+          result === "queued" && disposition === "queued" && host.session.pendingMessageCount > 0;
         this.track(
           this.queueFor(input.sessionId).enqueue(() =>
             this.handlePreflight(state, success, queuedBySdk),
