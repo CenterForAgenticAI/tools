@@ -3,7 +3,7 @@ name: intent-judge
 description: "Advisory adjudicator for a stuck prover; distinct from the Jev fidelity receipt produced by kit/intent-receipt.mjs."
 model: gpt-6-astra
 tools: [read, write]
-skills: [intent-records, compiled-intent, intent-conformance]
+skills: [intent-records, compiled-intent-model, intent-conformance]
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false

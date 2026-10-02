@@ -10,11 +10,11 @@ const distEntry = join(repoRoot, "dist", "index.js");
 const distTypes = join(repoRoot, "dist", "index.d.ts");
 const npmExecutable = process.platform === "win32" ? "npm.cmd" : "npm";
 const expectedCommands = ["intent-prereqs"];
-const expectedSkills = ["compiled-intent", "intent-conformance", "intent-records"];
+const expectedSkills = ["compiled-intent-model", "intent-conformance", "intent-records"];
 const expectedAgents = {
-	"intent-lawyer": { model: "claude-opus-5-5", tools: ["read", "edit", "write"], skills: ["intent-records", "compiled-intent"] },
-	"intent-prover": { model: "gpt-6.1-sol", tools: ["read", "bash", "edit", "write"], skills: ["compiled-intent", "intent-conformance"] },
-	"intent-judge": { model: "gpt-6-astra", tools: ["read", "write"], skills: ["intent-records", "compiled-intent", "intent-conformance"] },
+	"intent-lawyer": { model: "claude-opus-5-5", tools: ["read", "edit", "write"], skills: ["intent-records", "compiled-intent-model"] },
+	"intent-prover": { model: "gpt-6.1-sol", tools: ["read", "bash", "edit", "write"], skills: ["compiled-intent-model", "intent-conformance"] },
+	"intent-judge": { model: "gpt-6-astra", tools: ["read", "write"], skills: ["intent-records", "compiled-intent-model", "intent-conformance"] },
 };
 const expectedKit = ["gen-enums", "intent-check", "intent-conform", "intent-core", "intent-gate", "intent-receipt", "inventory"];
 const expectedTemplates = ["conform.json", "records/0001-change.md", "model/LAWS.bend", "model/PROOF.bend", "model/laws.sha256", "model/neg/identity.bend", "receipts/example.json"];
@@ -71,7 +71,7 @@ try {
 	assert.ok(packRecord?.filename, `npm pack --json gave no filename: ${JSON.stringify(packJson).slice(0, 200)}`);
 	const tarball = join(packDirectory, packRecord.filename);
 	const entries = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8", timeout: 30000 }).trim().split("\n");
-	for (const required of ["package/package.json", "package/README.md", "package/LICENSE", "package/SPEC.md", "package/dist/index.js", "package/dist/index.d.ts", "package/bin/pi-intent.mjs", "package/kit/Lib.bend", "package/skills/compiled-intent/REFERENCE.md", ...expectedSkills.map(skill => `package/skills/${skill}/SKILL.md`), ...Object.keys(expectedAgents).map(name => `package/agents/${name}.md`), ...expectedKit.map(name => `package/kit/${name}.mjs`), ...expectedTemplates.map(name => `package/templates/${name}`)]) {
+	for (const required of ["package/package.json", "package/README.md", "package/LICENSE", "package/SPEC.md", "package/dist/index.js", "package/dist/index.d.ts", "package/bin/pi-intent.mjs", "package/kit/Lib.bend", "package/skills/compiled-intent-model/REFERENCE.md", ...expectedSkills.map(skill => `package/skills/${skill}/SKILL.md`), ...Object.keys(expectedAgents).map(name => `package/agents/${name}.md`), ...expectedKit.map(name => `package/kit/${name}.mjs`), ...expectedTemplates.map(name => `package/templates/${name}`)]) {
 		assert.ok(entries.includes(required), `packed artifact is missing ${required}`);
 	}
 	for (const forbidden of ["package/src/", "package/tests/", "package/.test-dist/", "package/node_modules/"]) {

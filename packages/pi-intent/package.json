@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Intent records, compiled-intent Bend models and Jev evaluation receipts for pi.",
   "keywords": [
     "pi-package"
@@ -18,7 +18,8 @@
     "SPEC.md",
     "examples",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

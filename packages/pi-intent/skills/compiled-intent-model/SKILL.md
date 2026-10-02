@@ -1,5 +1,5 @@
 ---
-name: compiled-intent
+name: compiled-intent-model
 description: Author or change a finite Bend model from an approved intent record, review its meaning, obtain human law approval, and produce an offline-verifiable Jev receipt. Load for model-change nodes, not for emergent runtime behaviour.
 ---
 

@@ -64,7 +64,7 @@ npx pi-intent vendor .
 
 Update build hooks, workspec paths and oracle/manifest command paths to `.intent/`. Receipts remain valid when file contents stay unchanged: they bind record and law contents, not paths.
 
-Read [SPEC.md](SPEC.md) for the first format version. The three shipped skills guide drafting (`intent-records`), Bend authoring (`compiled-intent`) and app parity (`intent-conformance`). New projects draft then approve a record; retrofits describe actual behaviour first, then ask which behaviour to keep.
+Read [SPEC.md](SPEC.md) for the first format version. The three shipped skills guide drafting (`intent-records`), Bend authoring (`compiled-intent-model`) and app parity (`intent-conformance`). New projects draft then approve a record; retrofits describe actual behaviour first, then ask which behaviour to keep.
 
 ## Three checks
 
