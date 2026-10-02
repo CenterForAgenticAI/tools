@@ -1,5 +1,5 @@
 {
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Multi-shape pi subagent delegation: supervised forks, direct workers, chain steps, detached drivers, steering, and worktree isolation.",
   "type": "module",
   "main": "dist/index.js",

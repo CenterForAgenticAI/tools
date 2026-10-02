@@ -42,7 +42,6 @@ export const PI_DELEGATE_PACKAGE_NAME = PI_DELEGATE_PACKAGE_NAMES[0];
 export const PI_DELEGATE_NPM_SOURCES: readonly string[] = PI_DELEGATE_PACKAGE_NAMES.map((name) => `npm:${name}`);
 const PI_DELEGATE_PACKAGE_NAME_SET = new Set<string>(PI_DELEGATE_PACKAGE_NAMES);
 const PI_DELEGATE_NPM_SOURCE_SET = new Set<string>(PI_DELEGATE_NPM_SOURCES);
-const PI_DELEGATE_GIT_SOURCE = "git:git.example.invalid/pi-delegate";
 
 export interface ExtensionPolicyCandidate {
 	path: string;
@@ -200,21 +199,13 @@ function canonicalSource(
 	}
 	if (/^(?:git:|https?:\/\/|ssh:\/\/|git:\/\/)/i.test(sourceInfo.source)) {
 		const git = normalizeGitIdentity(sourceInfo.source);
-		if (git) {
-			if (git === PI_DELEGATE_GIT_SOURCE && sourceInfo.source !== sourceInfo.source.trim()) {
-				return sourceInfo.source;
-			}
-			return git;
-		}
+		if (git) return git;
 	}
 	// Local checkouts deliberately prefer declared repository metadata over
 	// whatever remote happens to be configured on this machine.
 	const declaredSource = manifest?.repository;
 	const declared = declaredSource ? normalizeGitIdentity(declaredSource) : undefined;
-	if (declared) {
-		if (declared === PI_DELEGATE_GIT_SOURCE && declaredSource !== declaredSource.trim()) return declaredSource;
-		return declared;
-	}
+	if (declared) return declared;
 	const origin = manifest ? gitOrigin(manifest.root) : undefined;
 	return origin ? normalizeGitIdentity(origin) : undefined;
 }
@@ -495,8 +486,7 @@ export function isPiDelegatePackageIdentifier(value: string): boolean {
  */
 export function isPiDelegateExtensionIdentity(identity: PortableExtensionIdentity): boolean {
 	return (identity.packageName !== undefined && isPiDelegatePackageIdentifier(identity.packageName)) ||
-		(identity.source !== undefined && isPiDelegatePackageIdentifier(identity.source)) ||
-		identity.source === PI_DELEGATE_GIT_SOURCE;
+		(identity.source !== undefined && isPiDelegatePackageIdentifier(identity.source));
 }
 
 /**

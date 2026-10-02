@@ -20,7 +20,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { logDelegateDiagnostic } from "./diagnostics.js";
+import { logDelegateDiagnostic } from "./diagnostics-file.js";
 import { deserializeLineage, mintCapToken, serializeLineage } from "./lineage.js";
 
 /** Conservative fallback used when a fresh root has no explicit depth policy. */

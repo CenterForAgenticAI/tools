@@ -12,6 +12,7 @@
  * running extension.
  */
 
+import type { EscalationKind } from "./escalation-store.js";
 import { runtimeOperations, resolveRuntimeForkName } from "./runtime-operations.js";
 import { RuntimeStatusSchema, RuntimeSteerSchema, RuntimeCancelSchema, assertRuntimeCorrespondence, RuntimeResultContractError, decodeRuntimeResult, type DelegateRuntimeCapability, type DelegateRuntimeStatus, type DelegateRuntimeControlResult } from "./runtime-contract.js";
 export * from "./runtime-contract.js";
@@ -171,6 +172,7 @@ export interface DelegateRuntimeToolResult {
 }
 
 interface InstalledRuntimeCore {
+	configureHostEscalationDelivery?(kinds: readonly EscalationKind[]): void;
 	capabilities?: readonly DelegateRuntimeCapability[];
 	bindContext?(context: ExtensionContext): RuntimeContextBinding;
 	observe?(runId: string, invocation: RuntimeInvocation, context?: ExtensionContext): () => void;
@@ -355,7 +357,16 @@ function recordDetails(value: unknown): Record<string, unknown> {
 		: {};
 }
 
+/** Emitted synchronously at foreground start, before durable wakes replay. */
+export interface DelegateHostEscalationDeliveryEvent {
+	readonly context: ExtensionContext;
+	/** Claim selected user-held kinds for this session; call synchronously. */
+	readonly configure: (kinds: readonly EscalationKind[]) => void;
+}
+
 export interface DelegateRuntimeClient extends ReturnType<typeof runtimeOperations> {
+	/** Replace host-owned user-held kinds for this live session; [] releases ownership. */
+	configureHostEscalationDelivery(kinds: readonly EscalationKind[]): void;
 	readonly capabilities: readonly DelegateRuntimeCapability[];
 	/** Canonical entry point. The request selects the execution mode. */
 	dispatch(request: DelegateRuntimeDispatchRequest, options?: DelegateRuntimeInvocationOptions): Promise<DelegateRuntimeReceipt>;
@@ -530,6 +541,17 @@ export function createDelegateRuntimeClient(options: {
 
 	return {
 		...runtimeOperations({ agentDir, binding: () => binding!, invoke, call: (name, params, invocation) => core!.invoke(name, params, context, invocation), observe: (runId, invocation) => core!.observe!(runId, invocation, context), observeDetached: (runId, invocation) => core?.observeDetached?.(runId, invocation) ?? Promise.resolve(false), inspectWait: runId => { if (!core?.inspectWait) throw new DelegateRuntimeError("unsupported-capability", "Installed core lacks read-only wait inspection"); return core.inspectWait(runId, context); }, require: requireSuccessful, supports: capability => core?.capabilities?.includes(capability) === true }),
+		configureHostEscalationDelivery(kinds) {
+			requireCore();
+			if (installedCore !== core) throw new DelegateRuntimeError("stale-context", "Runtime client belongs to a replaced core");
+			if (bindingError) throw bindingError;
+			binding!.assertCurrent();
+			if (!Array.isArray(kinds) || kinds.some((kind) => kind !== "decision" && kind !== "blocker" && kind !== "amendment")) {
+				throw new DelegateRuntimeError("invalid-request", "Host escalation kinds must be an array of decision, blocker, or amendment");
+			}
+			if (!core!.configureHostEscalationDelivery) throw new DelegateRuntimeError("unsupported-capability", "Installed core does not support host escalation delivery");
+			core!.configureHostEscalationDelivery(kinds);
+		},
 		capabilities: Object.freeze([...(core?.capabilities ?? [])]),
 		dispatch,
 		direct: dispatch,

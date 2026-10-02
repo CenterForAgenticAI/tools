@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { logDelegateDiagnostic } from "./diagnostics.js";
+import { logDelegateDiagnostic } from "./diagnostics-file.js";
 import type { EnvOverrides } from "./env-overrides.js";
 
 export interface WorktreeSetup {

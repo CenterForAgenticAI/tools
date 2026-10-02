@@ -104,7 +104,7 @@ import {
 	cleanupEscalationsForRun,
 	purgeLegacyDecisionState,
 } from "./escalation-runtime.js";
-import type { EscalationRequest } from "./escalation-store.js";
+import type { EscalationKind, EscalationRequest } from "./escalation-store.js";
 import { applyAgentOverrides } from "./agent-overrides.js";
 import { mergeEnvOverrides, type EnvOverrides } from "./env-overrides.js";
 import {
@@ -390,6 +390,7 @@ export type {
 	DelegateRuntimeApiHandle,
 	DelegateRuntimeCancelRequest,
 	DelegateRuntimeClient,
+	DelegateHostEscalationDeliveryEvent,
 	DelegateRuntimeDispatchRequest,
 	DelegateRuntimeErrorCode,
 	DelegateRuntimeForkProvenance,
@@ -4164,6 +4165,7 @@ export default function (pi: ExtensionAPI) {
 	let assertControlVisibilityHook: () => void = () => {};
 	let currentForegroundSessionId: string | undefined;
 	let currentForegroundContext: ExtensionContext | undefined;
+	let hostEscalationKinds = new Set<EscalationKind>();
 	let recoveryAuthorityEpoch = 0;
 	const invocationAuthority = createInvocationAuthority();
 	const deliveredEscalationHops = new Set<string>();
@@ -4306,6 +4308,8 @@ export default function (pi: ExtensionAPI) {
 		delivered: deliveredEscalationHops,
 		agentDir: getAgentDir(),
 		ui: escalationUI,
+		hostOwnsUserEscalation: (pending) => currentForegroundSessionId !== undefined &&
+			pending.ownerSessionId === currentForegroundSessionId && hostEscalationKinds.has(pending.kind),
 		// The prompt is rendered in pi's editor container, which sits
 		// *underneath* the transcript inspector when that overlay is
 		// mounted. Left alone, the operator gets a question they cannot see
@@ -8148,6 +8152,7 @@ export default function (pi: ExtensionAPI) {
 		capabilities: DELEGATE_RUNTIME_CAPABILITIES,
 		sharedPreparation: true,
 		bindContext: (ctx) => invocationAuthority.bind(ctx),
+		configureHostEscalationDelivery: (kinds) => { hostEscalationKinds = new Set(kinds); },
 		observeDetached: async (runId, invocation) => {
 			if (!readDaemonDriverRecord(getAgentDir(), runId)) return false;
 			await observeDaemonDriver(getAgentDir(), runId, invocation);
@@ -8391,6 +8396,7 @@ export default function (pi: ExtensionAPI) {
 		// A second start in this module is a replacement boundary even when Pi
 		// reuses the same durable session id. Live recovery closures never cross it.
 		if (currentForegroundContext !== undefined) invalidateOwnedRecoveryDescriptors();
+		hostEscalationKinds.clear();
 		currentForegroundContext = ctx;
 		invocationAuthority.replace(ctx);
 		// Publish the runtime API for this foreground instance. Workers returned
@@ -8406,6 +8412,13 @@ export default function (pi: ExtensionAPI) {
 		currentForegroundSessionId = delegateChild
 			? process.env[ORCHESTRATE_OWNER_SESSION_ENV]
 			: exactSessionId(ctx);
+		if (!delegateChild && currentForegroundSessionId !== undefined) {
+			const hostClient = createDelegateRuntimeClient({ context: ctx, agentDir: getAgentDir() });
+			pi.events.emit(DELEGATE_EVENTS.hostEscalationDelivery, {
+				context: ctx,
+				configure: hostClient.configureHostEscalationDelivery,
+			});
+		}
 		// Worker-child guard: a spawned `pi` worker child (orchestrate hosted
 		// agent, or any delegate-spawned child) is NOT a foreground session and
 		// must NOT run foreground-only startup logic. Running hydrate-and-deliver
@@ -8754,6 +8767,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 		}
+		hostEscalationKinds.clear();
 		currentForegroundContext = undefined;
 		currentForegroundSessionId = undefined;
 		// Keep fabricSuppressedTools: if Pi reuses this tool registry, the next

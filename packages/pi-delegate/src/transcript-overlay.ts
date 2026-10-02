@@ -15,7 +15,7 @@
  */
 
 import { DELEGATE_EVENTS } from "./events.js";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, Focusable, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -4170,7 +4170,7 @@ export function setupTranscriptOverlay(
 	// handle; a later setup call creates a fresh object from config.
 	const config: DelegateConfig = (() => {
 		try {
-			return loadConfig();
+			return loadConfig(getAgentDir());
 		} catch {
 			return {};
 		}

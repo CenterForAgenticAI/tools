@@ -419,6 +419,11 @@ Delivery re-reads canonical holder state before acting:
 
 - a user-held request in a live interactive foreground session uses the native
   UI adapter by default;
+- a live session host may claim selected user-held kinds through
+  `client.configureHostEscalationDelivery(["decision"])`. Only requests with
+  that session's owner ID bypass native prompts and root wakes; other kinds and
+  sessions remain unchanged. See [runtime API](runtime-api.md). Releasing the
+  claim leaves pending hops available for native delivery on the next scan.
 - with `nativeEscalationUi: false` in
   `<agentDir>/config/pi-delegate/config.json`, an external operator surface owns
   user-held answers. The request is not prompted natively and does not wake the

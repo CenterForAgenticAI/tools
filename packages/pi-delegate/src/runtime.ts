@@ -34,7 +34,7 @@ import {
 	projectLifecycleActivity,
 	type ActivityStatusEntry,
 } from "./activity-status.js";
-import { logDelegateDiagnostic } from "./diagnostics.js";
+import { logDelegateDiagnostic } from "./diagnostics-file.js";
 import { readBusEvents, type BusEvent } from "./event-bus.js";
 import {
 	preserveCorruptFile,

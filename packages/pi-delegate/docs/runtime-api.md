@@ -18,6 +18,36 @@ control, escalation and definition-management operations:
 - `listEscalations`, `resolveEscalation`, and `passUpEscalations`: durable escalation controls.
 - `manage` and `health`: explicit definition management and diagnostics.
 
+A host extension with its own operator feed can claim selected user-held kinds.
+Subscribe at extension load, before foreground startup:
+
+```ts
+import { DELEGATE_EVENTS } from "@centerforagenticai/pi-delegate/events";
+import type { DelegateHostEscalationDeliveryEvent } from "@centerforagenticai/pi-delegate";
+
+pi.events.on(DELEGATE_EVENTS.hostEscalationDelivery, (payload) => {
+  const { context, configure } = payload as DelegateHostEscalationDeliveryEvent;
+  if (hostOwnsThisSession(context)) configure(["decision"]);
+});
+```
+
+The event runs synchronously after the foreground core is installed and before
+restored wakes replay. Register the claim synchronously; an asynchronous handler
+cannot protect startup delivery. For later changes use a live bound client's
+`configureHostEscalationDelivery(kinds)` method.
+
+Claims affect only durable user-held requests owned by that session. Other
+kinds, other sessions, and requests without an owner ID retain normal delivery.
+Pass `[]` to release the claim; the next scan may prompt pending requests.
+Claims reset on session start/replacement and shutdown, including replacement
+with the same durable session ID. A retained client or event callback cannot
+change the successor's policy. The host re-registers on every startup or reload;
+this is session adapter policy, not durable escalation state. It neither answers
+requests nor claims mailbox leases, and final-hop timeouts continue normally.
+
+`nativeEscalationUi: false` remains the directory-wide policy for hosts that own
+all user-held kinds. Host claims are additive and do not override that setting.
+
 `dispatch` forces asynchronous mode and rejects an
 `edit` claim because pi-delegate does not enforce one.
 Submission/control failures throw `DelegateRuntimeError` with a stable `code`

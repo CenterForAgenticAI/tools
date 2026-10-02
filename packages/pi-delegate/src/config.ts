@@ -25,8 +25,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { logDelegateDiagnostic } from "./diagnostics.js";
+import { defaultAgentDir, logDelegateDiagnostic } from "./diagnostics-file.js";
 import type {
 	EscalationAuthority,
 	EscalationHoldStrategy,
@@ -578,22 +577,22 @@ export const DEFAULT_CANCEL_CONFIRM_COST_USD = 0.10;
 export const DEFAULT_CANCEL_CONFIRM_RUNTIME_MS = 300_000;
 
 /** Resolve the current on-disk config directory for delegate. */
-export function getConfigDir(agentDir: string = getAgentDir()): string {
+export function getConfigDir(agentDir: string = defaultAgentDir()): string {
 	return path.join(agentDir, "config", "pi-delegate");
 }
 
 /** Resolve the legacy config directory used before package/state separation. */
-export function getLegacyConfigDir(agentDir: string = getAgentDir()): string {
+export function getLegacyConfigDir(agentDir: string = defaultAgentDir()): string {
 	return path.join(agentDir, "extensions", "pi-delegate");
 }
 
 /** Resolve the on-disk config file path for delegate. */
-export function getConfigPath(agentDir: string = getAgentDir()): string {
+export function getConfigPath(agentDir: string = defaultAgentDir()): string {
 	return path.join(getConfigDir(agentDir), "config.json");
 }
 
 /** Resolve the legacy base config path for migration/backward compatibility. */
-export function getLegacyConfigPath(agentDir: string = getAgentDir()): string {
+export function getLegacyConfigPath(agentDir: string = defaultAgentDir()): string {
 	return path.join(getLegacyConfigDir(agentDir), "config.json");
 }
 
@@ -602,12 +601,12 @@ export function getLegacyConfigPath(agentDir: string = getAgentDir()): string {
  * must not rewrite the base operator config. Mutable state lives in this
  * sibling overlay, merged over `config.json` at load time (overlay wins).
  */
-export function getLocalConfigPath(agentDir: string = getAgentDir()): string {
+export function getLocalConfigPath(agentDir: string = defaultAgentDir()): string {
 	return path.join(getConfigDir(agentDir), "config.local.json");
 }
 
 /** Resolve the legacy local overlay path for migration/backward compatibility. */
-export function getLegacyLocalConfigPath(agentDir: string = getAgentDir()): string {
+export function getLegacyLocalConfigPath(agentDir: string = defaultAgentDir()): string {
 	return path.join(getLegacyConfigDir(agentDir), "config.local.json");
 }
 
@@ -631,7 +630,7 @@ function fileExists(file: string): boolean {
  * file is renamed in place; if both old and new files exist, the new file wins
  * and the old file is left untouched for a human merge.
  */
-export function migrateLegacyConfigFiles(agentDir: string = getAgentDir()): void {
+export function migrateLegacyConfigFiles(agentDir: string = defaultAgentDir()): void {
 	for (const [legacyPath, currentPath] of [
 		[getLegacyConfigPath(agentDir), getConfigPath(agentDir)],
 		[getLegacyLocalConfigPath(agentDir), getLocalConfigPath(agentDir)],
@@ -970,7 +969,7 @@ export interface LoadConfigOptions {
 	readonly?: boolean;
 }
 
-export function loadConfig(agentDir: string = getAgentDir(), options: LoadConfigOptions = {}): DelegateConfig {
+export function loadConfig(agentDir: string = defaultAgentDir(), options: LoadConfigOptions = {}): DelegateConfig {
 	const previousDiagnosticSink = configDiagnosticSink;
 	configDiagnosticSink = options.readonly ? undefined : (message, diagnosticOptions) =>
 		logDelegateDiagnostic(message, { agentDir, level: "warn", ...diagnosticOptions });
@@ -1366,6 +1365,6 @@ export function loadConfig(agentDir: string = getAgentDir(), options: LoadConfig
  * normal loader this never migrates legacy files, creates directories, or
  * emits diagnostics; callers may safely discard it on a rejected call.
  */
-export function loadConfigReadOnly(agentDir: string = getAgentDir()): DelegateConfig {
+export function loadConfigReadOnly(agentDir: string = defaultAgentDir()): DelegateConfig {
 	return loadConfig(agentDir, { readonly: true });
 }

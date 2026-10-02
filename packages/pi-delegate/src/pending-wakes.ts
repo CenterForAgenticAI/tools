@@ -58,7 +58,7 @@ import {
 	sweepStaleClaims,
 	unclaimPendingResult,
 } from "./detached-spawn.js";
-import { logDelegateDiagnostic } from "./diagnostics.js";
+import { logDelegateDiagnostic } from "./diagnostics-file.js";
 import { DELEGATE_COMPLETE_CUSTOM_TYPE } from "./events.js";
 import { captureCurrentAsyncContext } from "./depth-guard.js";
 import { pidAlive } from "./event-bus.js";

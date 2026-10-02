@@ -563,6 +563,8 @@ export function passHeldEscalation(args: {
 export interface EscalationHolderDeliveryDeps {
 	/** Hops already delivered in this process; keyed per holder and trace depth. */
 	delivered: Set<string>;
+	/** Live session host owns these user-held requests instead of native/root delivery. */
+	hostOwnsUserEscalation?: (request: EscalationRequest) => boolean;
 	/** Agent directory whose config decides `nativeEscalationUi`, read once per delivery. */
 	agentDir: string;
 	/** A native UI when a live interactive foreground exists. */
@@ -597,7 +599,7 @@ export async function deliverEscalationToHolder(
 	const hopKey = `${request.rootRunId}\u0000${request.requestId}\u0000${holder.id}\u0000${request.trace.length}`;
 	if (deps.delivered.has(hopKey)) return true;
 	if (holder.kind === "user") {
-		if (loadConfigReadOnly(deps.agentDir).nativeEscalationUi === false) return true;
+		if (deps.hostOwnsUserEscalation?.(request) || loadConfigReadOnly(deps.agentDir).nativeEscalationUi === false) return true;
 		// Native UI and agent mediation are adapters over the same mailbox
 		// lease (§2.5). Prefer UI only while a live foreground UI exists.
 		const ui = deps.ui();

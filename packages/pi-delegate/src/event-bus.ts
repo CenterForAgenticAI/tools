@@ -65,7 +65,7 @@ import { currentLineageFrame, type DepthFrame } from "./depth-guard.js";
 import {
 	__resetDelegateDiagnosticsForTests,
 	emitDelegateDiagnosticToFile,
-} from "./diagnostics.js";
+} from "./diagnostics-file.js";
 import { deserializeLineage, lineageAncestorPath, lineagePath } from "./lineage.js";
 import {
 	captureProcessIdentity,

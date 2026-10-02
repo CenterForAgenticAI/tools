@@ -43,6 +43,11 @@ export const DELEGATE_EVENTS = Object.freeze({
 	/** An orphaned synchronous run was surfaced for recovery. Payload: `{ runId, surfacedAt }`. */
 	syncOrphanRecoverySurfaced: "delegate:sync-orphan-recovery-surfaced",
 	/**
+	 * A foreground session started; a host may claim user-held escalation kinds
+	 * synchronously, before restored delivery. Payload: `{ context, configure }`.
+	 */
+	hostEscalationDelivery: "delegate:host-escalation-delivery",
+	/**
 	 * Inbound: ask pi-delegate to show its control tools now. No payload.
 	 * The only channel pi-delegate listens to rather than emits.
 	 */

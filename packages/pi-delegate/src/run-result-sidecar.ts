@@ -36,7 +36,7 @@ import {
 	type WorkerArtifactReference,
 } from "./artifact-workspace.js";
 import { projectRunResults } from "./run-result-boundary.js";
-import { logDelegateDiagnostic } from "./diagnostics.js";
+import { logDelegateDiagnostic } from "./diagnostics-file.js";
 import { isSafeRunId } from "./run-id.js";
 import {
 	readJsonFile,

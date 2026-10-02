@@ -49,7 +49,7 @@ import type { DepthFrame } from "./depth-guard.js";
 import {
 	__resetDelegateDiagnosticsForTests,
 	logDelegateDiagnostic,
-} from "./diagnostics.js";
+} from "./diagnostics-file.js";
 import { lineagePath, verifyCapToken } from "./lineage.js";
 import {
 	acquireOrchestrateRecoveryLock,
