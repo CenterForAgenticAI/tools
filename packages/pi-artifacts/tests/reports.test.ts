@@ -11,6 +11,12 @@ const templateDir = path.join(root, "templates", "report");
 const generator = path.join(root, "scripts", "make-report.mjs");
 const glRefsHelper = path.join(root, "scripts", "gl-refs.mjs");
 
+// Generic shapes of private references, spelled without naming any real host, group, or tailnet:
+// a self-hosted GitLab host (gitlab.<domain> or gitlab-ssh.<domain>, but not gitlab.com),
+// a GitLab-style project reference (group/project#123 or group/project!123), and a tailnet URL (*.ts.net).
+const internalReferencePattern =
+  /\bgitlab(?:-ssh)?\.(?!com\b)[a-z0-9-]+(?:\.[a-z0-9-]+)+|\b[\w.-]+\/[\w.-]+[#!]\d+\b|\b[a-z0-9-]+\.ts\.net\b/i;
+
 function runGenerator(args: string[]) {
   return spawnSync(process.execPath, [generator, ...args], {
     cwd: root,
@@ -35,6 +41,28 @@ function writeFixture(directory: string, body: string, metadata: Record<string, 
   fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
   return { bodyPath, metadataPath, outputPath };
 }
+
+test("generic internal-reference pattern catches private shapes without naming them", () => {
+  for (const sample of [
+    "clone from gitlab.example.org",
+    "ssh://git@gitlab-ssh.example.org:2222/acme/tools.git",
+    "see acme/tools#12",
+    "merged in acme/tools!34",
+    // Built at run time because the release guard rejects any literal tailnet domain, even a placeholder.
+    ["open https://host.tail0000", "ts.net/view/1"].join("."),
+  ]) {
+    assert.match(sample, internalReferencePattern, sample);
+  }
+  for (const sample of [
+    "hosted on gitlab.com",
+    "https://gitlab.com/acme/tools",
+    "Register the file, then open it in the viewer.",
+    "Use the reader's next action to pick a format.",
+    "Issue #12 is fixed.",
+  ]) {
+    assert.doesNotMatch(sample, internalReferencePattern, sample);
+  }
+});
 
 test("report templates and reader runtime expose the house-standard hooks", () => {
   const narrative = fs.readFileSync(path.join(templateDir, "narrative-template.html"), "utf8");
@@ -800,8 +828,9 @@ test("artifact-format guidance has one canonical table and optional small-output
   assert.deepEqual(actionRows, ["Choose", "Understand", "Sort/find", "Compare", "Execute/resume", "Verify"]);
   assert.match(authoring, /companion development-tools package|This package owns/i);
   assert.match(authoring, /related work|project history/i);
-  assert.doesNotMatch(authoring, /(?:\bgitlab(?:-ssh)?\.(?!com\b)[a-z0-9-]+(?:\.[a-z0-9-]+)+|\b[\w.-]+\/[\w.-]+[#!]\d+\b|\b[a-z0-9-]+\.ts\.net\b)/i);
-  assert.doesNotMatch(fs.readFileSync(path.join(root, "README.md"), "utf8"), /@caair\/|(?:\bgitlab(?:-ssh)?\.(?!com\b)[a-z0-9-]+(?:\.[a-z0-9-]+)+|\b[\w.-]+\/[\w.-]+[#!]\d+\b|\b[a-z0-9-]+\.ts\.net\b)/i);
+  assert.doesNotMatch(authoring, internalReferencePattern);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "README.md"), "utf8"), internalReferencePattern);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "README.md"), "utf8"), /@caair\//i);
   assert.match(authoring, /register it directly/i);
 
   const aidLinks = [...authoring.matchAll(/\]\((aids\/[^)]+\.md)\)/g)].map((match) => match[1]);
