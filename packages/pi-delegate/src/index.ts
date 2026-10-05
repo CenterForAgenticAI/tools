@@ -71,6 +71,7 @@ import {
 	setWakeDeliveryObserver,
 	setWakeDeliveryBarrier,
 	deliverPendingDispatchWakes,
+	scanPendingWakes,
 	getLiveWakeSink,
 	getLiveWakeSinkOwnerSessionId,
 	notifyCompletion as notifyCompletionViaPendingWakes,
@@ -358,6 +359,8 @@ import {
 	isHydratedRun,
 	listRuns,
 	markOrphanedDispatchWakeSurfaced,
+	acknowledgeCompletionResult,
+	completionResultWasRead,
 	markSyncOrphanRecoverySurfaced,
 	pushPendingGuidance,
 	recordRunCompletedResult,
@@ -3098,7 +3101,7 @@ export async function executeChainShape(args: ExecuteChainShapeArgs): Promise<{
 	isError?: boolean;
 }> {
 	const { pi, ctx, signal } = args;
-	const wakeSink = bindWakeSinkToCurrentContext(pi);
+	const wakeSink = bindWakeSinkToCurrentContext(pi, () => ctx.isIdle?.() ?? true);
 	const runId = deriveRunId(args.toolCallId);
 
 	// Sweep stale chain dirs opportunistically (24h+).
@@ -3406,7 +3409,7 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 }> {
 	const { pi, ctx, signal } = args;
 	let { config } = args;
-	const wakeSink = bindWakeSinkToCurrentContext(pi);
+	const wakeSink = bindWakeSinkToCurrentContext(pi, () => ctx.isIdle?.() ?? true);
 	const tasks = args.tasks;
 	const runId = deriveRunId(args.toolCallId);
 	const executionCwd = args.ctxCwd ?? ctx.cwd;
@@ -4425,7 +4428,7 @@ export default function (pi: ExtensionAPI) {
 		const recoveryInvocationEpoch = recoveryAuthorityEpoch;
 		// Capture before any run entry enters runWithDepth. Later failure/completion
 		// callbacks must trigger the originator in this recipient context.
-		const wakeSink = bindWakeSinkToCurrentContext(pi);
+		const wakeSink = bindWakeSinkToCurrentContext(pi, () => ctx.isIdle?.() ?? true);
 		// Execution ingress (spec §4, consumer 2). The model ingress already ran
 		// `prepareArguments`, and the normalizer is idempotent, so this pass exists
 		// for direct/internal callers (tests, runtime API, future callers) that
@@ -7866,7 +7869,14 @@ export default function (pi: ExtensionAPI) {
 				isError: true,
 			};
 		}
-		return execute(toolCallId, forwardedParams(params), signal, onUpdate, ctx);
+		const result = await execute(toolCallId, forwardedParams(params), signal, onUpdate, ctx);
+		const details = result.details;
+		if (route === CONTROL_ROUTE.result && details && typeof details === "object" &&
+			"status" in details && typeof details.status === "string" && details.status.startsWith("terminal-") &&
+			"runId" in details && typeof details.runId === "string") {
+			acknowledgeCompletionResult(details.runId, ctx ? exactSessionId(ctx) : undefined);
+		}
+		return result;
 	};
 
 	registerDeferredTool({
@@ -8113,7 +8123,20 @@ export default function (pi: ExtensionAPI) {
 	// orchestrate results, and periodic maintenance all deliver this way, and
 	// each one can trigger a foreground turn that needs the control tool.
 	setWakeDeliveryBarrier(assertControlVisibility);
-	setWakeDeliveryObserver(pi, registerChildCompletionGate(pi));
+	setWakeDeliveryObserver(pi, registerChildCompletionGate(pi, {
+		hasPendingCompletion: (ownerSessionId) => scanPendingWakes(getAgentDir()).some(({ record }) => {
+			const run = getRun(record.runId);
+			return (record.kind ?? "completion") === "completion" && record.ownerSessionId === ownerSessionId &&
+				run !== undefined && hasLocalRunAuthority(run) && run.completedAt !== undefined &&
+				!completionResultWasRead(record.runId, ownerSessionId);
+		}),
+	}));
+	pi.on("agent_end", (_event, ctx) => {
+		if (ctx.signal?.aborted || ctx.hasPendingMessages()) return;
+		deliverPendingDispatchWakes(bindWakeSinkToCurrentContext(pi), getAgentDir(), {
+			currentSessionId: exactSessionId(ctx), atTurnBoundary: true,
+		});
+	});
 
 	// `before_agent_start` alone is not enough (#265). It fires once per agent
 	// loop, but a run REGISTERS during execution of the `delegate` call — after
@@ -8458,7 +8481,7 @@ export default function (pi: ExtensionAPI) {
 		// reload). A detached dispatch run started by a PREDECESSOR session in
 		// this process whose wake bounces off its stale captured ctx retries
 		// through this sink and delivers immediately.
-		setLiveWakeSink(pi, currentForegroundSessionId);
+		setLiveWakeSink(pi, currentForegroundSessionId, () => ctx.isIdle?.() ?? true);
 		// The live active-work producer must never answer from a predecessor
 		// session while this replacement is hydrating. Install its successor only
 		// after runtime configuration/hydration has completed.

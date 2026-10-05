@@ -17,7 +17,6 @@
 import {
 	type AgentSession,
 	createAgentSession,
-	createEventBus,
 	DefaultResourceLoader,
 	type ExtensionUIContext,
 	type EventBusController,
@@ -85,6 +84,7 @@ import {
 	resolveTextCompletionModel,
 } from "./model-completion.js";
 import { type CancelReason, type RunLiveState, updateRunState } from "./runtime.js";
+import { dropTrailingLiveAssistant, isPiSystemMessage, seedLiveContext } from "./live-context.js";
 import { buildSeedMessages, type CloneMode, type DirectFirstTurnExchange } from "./seed.js";
 import { DEFAULT_TASK_DELIVERY_MODE, type TaskDeliveryMode } from "./delegate-runs.js";
 import {
@@ -215,6 +215,7 @@ import {
 	makeSupervisorEscalationTools,
 } from "./escalation-tools.js";
 import { listMailbox } from "./escalation-store.js";
+import { createFabricHostPolicyEventBus, requestFabricHostPolicy } from "./fabric-protocol.js";
 import {
 	ASK_TOOL_NAME,
 	makeWorkerAskRoutingTool,
@@ -959,7 +960,7 @@ export async function prepareWorkerSessionResources(
 	thinkingPolicyContext: WorkerThinkingPolicyContext | undefined;
 }> {
 	assertValidExtensionToolSelectors(surface);
-	const eventBus = createEventBus();
+	const eventBus = createFabricHostPolicyEventBus();
 	const thinkingPolicyContext = createWorkerThinkingPolicyContext(agent, eventBus);
 	const loaderOptions = buildWorkerLoaderOptions(agent, base);
 	if (base.settingsManager) loaderOptions.settingsManager = base.settingsManager;
@@ -996,6 +997,8 @@ export async function prepareWorkerSessionResources(
 			workerGrantedToolNames: base.workerGrantedToolNames,
 			artifactWriterRequirement: base.artifactWriterRequirement,
 			writeConfined: base.confinement !== undefined,
+			requestFabricHostPolicy: (policy, fabricResolvedPath) =>
+				requestFabricHostPolicy(eventBus, policy, fabricResolvedPath),
 		});
 		// Resolve trusted ownership before registering deferred controls in this worker's registry.
 		if (toolScope.delegateOptIn && toolScope.delegateToolSelectorIndexes.some((index) =>
@@ -2553,7 +2556,7 @@ async function runForkInner(
 					}
 					return;
 				}
-				if (ev.type !== "message_end" || !ev.message) return;
+				if (ev.type !== "message_end" || !ev.message || isPiSystemMessage(ev.message)) return;
 				// Heartbeat: feed the channel before the overlay so heartbeat state
 				// is in sync with what the supervisor will see reflected.
 				try {
@@ -2949,13 +2952,10 @@ async function runForkInner(
 			});
 			if (!retryAllowed) return sanitizedFailure();
 
-			const messages = attempt.session.agent.state.messages as AgentMessage[];
-			const last = messages[messages.length - 1];
-			if (last?.role !== "assistant") return sanitizedFailure();
 			// Keep the error in the file-backed session history, but remove it from
 			// live agent context exactly as Pi's own retry seam does. continue() then
 			// resumes after the existing user/toolResult and cannot replay tools.
-			attempt.session.agent.state.messages = messages.slice(0, -1);
+			if (!dropTrailingLiveAssistant(attempt.session)) return sanitizedFailure();
 			const cursor = attempt.session.messages.length;
 			try {
 				const continueRequest = () => attempt.session.agent.continue();
@@ -4285,7 +4285,7 @@ async function runForkInner(
 
 		// Seed the clone's prior history (empty for task_only/snippet modes).
 		if (seed.priorMessages.length > 0) {
-			cloneSession.agent.state.messages = seed.priorMessages as any;
+			seedLiveContext(cloneSession, seed.priorMessages);
 			// Replay the seeded history as transcript entries so the overlay
 			// shows the supervisor's starting context immediately (before the
 			// first `message_end` fires).

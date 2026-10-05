@@ -26,7 +26,7 @@ export type { DispatchAcceptance, DispatchFailureEvidence, DispatchStepEvidence 
 import * as path from "node:path";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { CancelReason, DelegateDispatchSnapshot } from "./runtime.js";
-import { getRunSnapshot } from "./runtime.js";
+import { acknowledgeCompletionResult, getRunSnapshot } from "./runtime.js";
 import { isSafeRunId } from "./run-id.js";
 import { readJsonFile, replaceJsonFile, resolveDelegateStateDir } from "./state-io.js";
 import { normalizeDelegateParams } from "./delegate-normalize.js";
@@ -563,7 +563,9 @@ export function createDelegateRuntimeClient(options: {
 			return result;
 		}),
 		harvest: (runId, options) => invoke(options, false, async (invocation) => {
-			return publishDelegateRuntimeResult(agentDir, runId, await core!.invoke("delegate_result", { runId }, context, invocation));
+			const result = publishDelegateRuntimeResult(agentDir, runId, await core!.invoke("delegate_result", { runId }, context, invocation));
+			if (result.state.startsWith("terminal-")) acknowledgeCompletionResult(runId, context.sessionManager?.getSessionId?.());
+			return result;
 		}),
 		steer: (request, options) => invoke(options, false, async (invocation) => {
 			const forkName = resolveRuntimeForkName("steer", request.runId, request.forkName);

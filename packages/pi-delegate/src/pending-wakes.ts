@@ -93,7 +93,7 @@ import type { WorkerErrorKind, WorkerFailureCause } from "./refusal.js";
 import { sanitizeRecoveryText, truncateRecoveryText } from "./fork-recovery.js";
 import { getDelegatePresentationTerminology } from "./footer-presentation.js";
 import { getProcessNonce, wakeOwnerAlive } from "./process-identity.js";
-import { getRun, listRuns, type RunLiveStatus } from "./runtime.js";
+import { completionResultWasRead, getRun, listRuns, type RunLiveStatus } from "./runtime.js";
 import { buildRetryProjection, MAX_RETRY_PROJECTION_ENTRIES, RETRY_PROJECTION_USAGE_KEYS, type RetryProjectionFork } from "./retry-projection.js";
 import { controlHints, inheritModelInterfaceProbe, modelInterfaceFor, type DelegateModelInterface } from "./model-interface.js";
 
@@ -107,6 +107,7 @@ export interface NotifyCompletionSink {
 	sendMessage: ExtensionAPI["sendMessage"];
 	/** Optional fresh-session durable metadata append surface (ExtensionAPI.appendEntry). */
 	appendEntry?: ExtensionAPI["appendEntry"];
+	isIdle?: () => boolean;
 }
 
 /**
@@ -120,6 +121,7 @@ export interface NotifyCompletionSink {
  */
 export function bindWakeSinkToCurrentContext(
 	sink: NotifyCompletionSink,
+	isIdle?: () => boolean,
 ): NotifyCompletionSink {
 	const runInRecipientContext = captureCurrentAsyncContext();
 	const bound: NotifyCompletionSink = {
@@ -130,6 +132,7 @@ export function bindWakeSinkToCurrentContext(
 		bound.appendEntry = (customType, data) =>
 			runInRecipientContext(() => sink.appendEntry!(customType, data));
 	}
+	if (isIdle || sink.isIdle) bound.isIdle = isIdle ?? (() => sink.isIdle!());
 	const observer = wakeDeliveryObservers.get(sink);
 	if (observer) wakeDeliveryObservers.set(bound, observer);
 	inheritModelInterfaceProbe(sink, bound);
@@ -148,14 +151,19 @@ const WAKE_DELIVERY_OBSERVERS_KEY = Symbol.for("pi-delegate.wakeDeliveryObserver
 const wakeDeliveryObservers = (() => {
 	const shared = globalThis as Record<symbol, unknown>;
 	const existing = shared[WAKE_DELIVERY_OBSERVERS_KEY];
-	if (existing instanceof WeakMap) return existing as WeakMap<object, () => void>;
-	const observers = new WeakMap<object, () => void>();
+	if (existing instanceof WeakMap) return existing as WeakMap<object, (completedRunId?: string) => void>;
+	const observers = new WeakMap<object, (completedRunId?: string) => void>();
 	shared[WAKE_DELIVERY_OBSERVERS_KEY] = observers;
 	return observers;
 })();
 
-export function setWakeDeliveryObserver(sink: object, observer: () => void): void {
+export function setWakeDeliveryObserver(sink: object, observer: (completedRunId?: string) => void): void {
 	wakeDeliveryObservers.set(sink, observer);
+}
+
+function releaseCompletionWait(sink: NotifyCompletionSink, runId?: string): void {
+	try { wakeDeliveryObservers.get(sink)?.(runId); }
+	catch { /* bookkeeping must not stop completion delivery */ }
 }
 
 /**
@@ -193,11 +201,7 @@ export function deliverWakeMessage(
 	// synthesis turn. Early failure, escalation, and recovery wakes may trigger a
 	// turn, but must leave the completion gate parked for the terminal wake.
 	if (message.customType === DELEGATE_COMPLETE_CUSTOM_TYPE) {
-		try {
-			wakeDeliveryObservers.get(sink)?.();
-		} catch {
-			// Observer bookkeeping must not turn a delivered wake into a retry.
-		}
+		releaseCompletionWait(sink);
 	}
 }
 
@@ -607,6 +611,10 @@ export function notifyCompletion(
 	opts?: { agentDir?: string; ownerSessionId?: string },
 ): void {
 	const { runId } = input;
+	if (completionResultWasRead(runId, opts?.ownerSessionId)) {
+		appendCompletionUsageMetadata(sink, input, opts?.agentDir);
+		return;
+	}
 	const wakeRetry = retryProjectionForWake(runId, input.finalResults);
 	const effectiveInput: NotifyCompletionInput = {
 		...input,
@@ -620,9 +628,16 @@ export function notifyCompletion(
 	// terminal transition; durable redelivery is serialized by the file claim.
 	// No secondary in-memory dedup key set is maintained here.
 	const message = buildCompletionMessage(effectiveInput);
+	const deliver = (recipient: NotifyCompletionSink) => {
+		if (opts?.agentDir && !wakeSinkIsIdle(recipient) && writePendingWake(opts.agentDir, effectiveInput, { ownerSessionId: opts.ownerSessionId })) {
+			releaseCompletionWait(recipient, runId);
+			return;
+		}
+		deliverWakeMessage(recipient, message);
+		appendCompletionUsageMetadata(recipient, effectiveInput, opts?.agentDir);
+	};
 	try {
-		deliverWakeMessage(sink, message);
-		appendCompletionUsageMetadata(sink, effectiveInput, opts?.agentDir);
+		deliver(sink);
 	} catch (err) {
 		if (String((err as Error)?.message ?? "").includes("stale after session replacement")) {
 			const live = getLiveWakeSink();
@@ -631,10 +646,9 @@ export function notifyCompletion(
 				!opts?.ownerSessionId || liveOwnerSessionId === opts.ownerSessionId;
 			if (live && live !== sink && liveOwnerMatches) {
 				try {
-					deliverWakeMessage(live, message);
-					appendCompletionUsageMetadata(live, effectiveInput, opts?.agentDir);
+					deliver(live);
 					logDelegateDiagnostic(
-						`dispatch auto-wake redelivered via live session ctx (runId=${runId})`,
+						`dispatch auto-wake handled via live session ctx (runId=${runId})`,
 						{ agentDir: opts?.agentDir, level: "log" },
 					);
 					return;
@@ -792,11 +806,20 @@ export function notifyForkFailed(
 const LIVE_WAKE_SINK_KEY = Symbol.for("pi-delegate.liveWakeSink");
 const LIVE_WAKE_SINK_OWNER_SESSION_KEY = Symbol.for("pi-delegate.liveWakeSink.ownerSessionId");
 const LIVE_WAKE_SINK_CONTEXT_KEY = Symbol.for("pi-delegate.liveWakeSink.asyncContext");
+const LIVE_WAKE_SINK_IDLE_KEY = Symbol.for("pi-delegate.liveWakeSink.isIdle");
+
+function wakeSinkIsIdle(sink: NotifyCompletionSink): boolean {
+	if (sink.isIdle) return sink.isIdle();
+	const shared = globalThis as Record<symbol, unknown>;
+	const probe = shared[LIVE_WAKE_SINK_IDLE_KEY];
+	return sink === shared[LIVE_WAKE_SINK_KEY] && typeof probe === "function" ? probe() : true;
+}
 
 /** Register the current foreground session's ctx as the live wake sink. */
-export function setLiveWakeSink(sink: NotifyCompletionSink, ownerSessionId?: string): void {
+export function setLiveWakeSink(sink: NotifyCompletionSink, ownerSessionId?: string, isIdle?: () => boolean): void {
 	const g = globalThis as Record<symbol, unknown>;
 	g[LIVE_WAKE_SINK_KEY] = sink;
+	g[LIVE_WAKE_SINK_IDLE_KEY] = isIdle;
 	// Capture the replacement recipient too: a stale child callback that retries
 	// through this global sink must not carry the child's ALS frame into the new
 	// foreground session.
@@ -831,6 +854,7 @@ export function clearLiveWakeSink(sink: NotifyCompletionSink): void {
 		delete g[LIVE_WAKE_SINK_KEY];
 		delete g[LIVE_WAKE_SINK_OWNER_SESSION_KEY];
 		delete g[LIVE_WAKE_SINK_CONTEXT_KEY];
+		delete g[LIVE_WAKE_SINK_IDLE_KEY];
 	}
 }
 
@@ -1544,12 +1568,16 @@ export function __setPendingWakeAfterScanHookForTests(hook: (() => void) | undef
 export function deliverPendingDispatchWakes(
 	sink: NotifyCompletionSink,
 	agentDir: string,
-	opts?: { currentSessionId?: string },
+	opts?: { currentSessionId?: string; atTurnBoundary?: boolean },
 ): number {
 	const pending = scanPendingWakes(agentDir);
 	afterPendingWakeScanForTests?.();
 	let delivered = 0;
+	let completionDelivered = false;
 	for (const { file, record, fileDev, fileIno, revision } of pending) {
+		if ((record.kind ?? "completion") === "completion" && !opts?.atTurnBoundary && !wakeSinkIsIdle(sink)) continue;
+		if (opts?.atTurnBoundary && completionDelivered && (record.kind ?? "completion") === "completion" &&
+			!completionResultWasRead(record.runId, record.ownerSessionId)) continue;
 		const ours = record.owningPid === process.pid && record.owningNonce === getProcessNonce();
 		const ownerAlive = wakeOwnerAlive(
 			{ pid: record.owningPid, nonce: record.owningNonce, sessionId: record.ownerSessionId },
@@ -1618,6 +1646,7 @@ export function deliverPendingDispatchWakes(
 				unclaimPendingResult(claimed);
 				continue;
 			}
+			const acknowledged = (record.kind ?? "completion") === "completion" && completionResultWasRead(record.runId, record.ownerSessionId);
 			if (record.kind === "escalation-pending") {
 				deliverWakeMessage(sink, buildEscalationPendingMessage(record.payload));
 			} else if (record.kind === "fork-failed") {
@@ -1627,7 +1656,10 @@ export function deliverPendingDispatchWakes(
 					...record.input,
 					completionNotifyStrategy: resolveCompletionNotifyStrategy(record.input.completionNotifyStrategy),
 				};
-				deliverWakeMessage(sink, buildCompletionMessage(effectiveInput));
+				if (!acknowledged) {
+					deliverWakeMessage(sink, buildCompletionMessage(effectiveInput));
+					completionDelivered = true;
+				}
 				appendCompletionUsageMetadata(sink, effectiveInput, agentDir);
 			}
 			// Transfer retention only after the receiver accepted the wake, while the
@@ -1652,7 +1684,7 @@ export function deliverPendingDispatchWakes(
 					);
 				continue;
 			}
-			delivered++;
+			if (!acknowledged) delivered++;
 		} catch (err) {
 			unclaimPendingResult(claimed);
 			logDelegateDiagnostic(

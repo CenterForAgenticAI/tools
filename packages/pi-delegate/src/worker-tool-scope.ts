@@ -32,6 +32,7 @@ import {
 import { ToolSelectorDiagnosticCode, toolSelectorDiagnostic } from "./tool-selector.js";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { PARENT_TRANSCRIPT_SEARCH_TOOL_NAME } from "./parent-transcript-search.js";
+import type { FabricHostPolicyV1 } from "./fabric-protocol.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -207,6 +208,62 @@ export function describeToolDeclarationMismatch(
 	return `Worker tool floor: the provider request declares tools outside the final worker tool set; unexpected: ${extra.join(", ")}.`;
 }
 
+type TranscriptToolRef = { name?: unknown };
+type TranscriptSystemMessage = {
+	role: "system";
+	content?: unknown;
+	sections?: Record<string, unknown>;
+	toolsAdded?: TranscriptToolRef[];
+	toolsRemoved?: TranscriptToolRef[];
+};
+
+function hasSystemText(message: TranscriptSystemMessage): boolean {
+	const { content } = message;
+	if (typeof content === "string") return content.length > 0;
+	return Array.isArray(content) && content.length > 0;
+}
+
+/**
+ * Remove tool declarations outside `allowed` from a Pi >= 0.86 transcript.
+ * Pi computes the transcript's tool delta before `turn_start`, so a tool an
+ * extension registers in `before_agent_start` can be declared even though the
+ * floor has already removed it from the executable set. Dropping the stale
+ * names narrows what the model is told to match what the worker can run.
+ * Returns the context unchanged when nothing outside `allowed` is declared.
+ */
+export function narrowTranscriptToolDeclarations<T>(context: T, allowed: readonly string[]): T {
+	const messages = (context as { messages?: unknown } | null | undefined)?.messages;
+	if (!Array.isArray(messages)) return context;
+	const allowedSet = new Set(allowed);
+	const keep = (tool: TranscriptToolRef) => typeof tool?.name === "string" && allowedSet.has(tool.name);
+	let changed = false;
+	const narrowed: unknown[] = [];
+	for (const message of messages as unknown[]) {
+		const system = message as TranscriptSystemMessage | null;
+		if (system?.role !== "system" || (!system.toolsAdded && !system.toolsRemoved)) {
+			narrowed.push(message);
+			continue;
+		}
+		const added = system.toolsAdded?.filter(keep) ?? [];
+		const removed = system.toolsRemoved?.filter(keep) ?? [];
+		if (added.length === (system.toolsAdded?.length ?? 0) && removed.length === (system.toolsRemoved?.length ?? 0)) {
+			narrowed.push(message);
+			continue;
+		}
+		changed = true;
+		const { toolsAdded: _added, toolsRemoved: _removed, ...rest } = system;
+		const next: TranscriptSystemMessage = {
+			...rest,
+			...(added.length > 0 ? { toolsAdded: added } : {}),
+			...(removed.length > 0 ? { toolsRemoved: removed } : {}),
+		};
+		// A pure tool-delta message that now declares nothing carries no content.
+		const empty = !hasSystemText(next) && !next.sections && added.length === 0 && removed.length === 0;
+		if (!empty) narrowed.push(next);
+	}
+	return changed ? ({ ...(context as object), messages: narrowed } as T) : context;
+}
+
 function createFinalFloorErrorStream(errorMessage: string): ReturnType<AgentStreamFunction> {
 	const stream = createAssistantMessageEventStream();
 	const error: AssistantMessage = {
@@ -292,16 +349,17 @@ function installFinalWorkerToolFloor(
 		const context = args[1];
 		// Pi >= 0.86 passes a normalized transcript: tool declarations travel as
 		// `toolsAdded`/`toolsRemoved` on system messages and `context.tools` is
-		// ignored by every provider, so rewriting it cannot narrow what the model
-		// is told. Verify the declaration instead and fail closed on any drift.
-		const declared = transcriptDeclaredToolNames(context);
-		if (declared) {
+		// ignored by every provider. Narrow those declarations to the final worker
+		// set, then verify the result and fail closed if anything still widens it.
+		if (transcriptDeclaredToolNames(context)) {
+			const finalNames = snapshot.definitions.map((tool) => tool.name);
+			const narrowedContext = narrowTranscriptToolDeclarations(context, finalNames);
 			const mismatch = describeToolDeclarationMismatch(
-				declared,
-				snapshot.definitions.map((tool) => tool.name),
+				transcriptDeclaredToolNames(narrowedContext) ?? [],
+				finalNames,
 			);
 			if (mismatch) return createFinalFloorErrorStream(mismatch);
-			return previousProvider(...args);
+			return previousProvider(...([args[0], narrowedContext, args[2]] as AgentStreamArguments));
 		}
 		const nextArgs = [args[0], { ...context, tools: snapshot.definitions }, args[2]] as AgentStreamArguments;
 		return previousProvider(...nextArgs);
@@ -513,7 +571,17 @@ function selectedExtensionAllowsTool(
 export function prepareWorkerToolScope(
 	surface: Pick<ResolvedToolSurface, "tools" | "extSelectors"> & Partial<Pick<ResolvedToolSurface, "deniedToolNames" | "actionGrants" | "delegateOptIn" | "hasExplicitAllowlist">>,
 	extensions: readonly Extension[],
-	options: { workerGrantedToolNames?: readonly string[]; artifactWriterRequirement?: ArtifactWriterRequirement; writeConfined?: boolean } = {},
+	options: {
+		workerGrantedToolNames?: readonly string[];
+		artifactWriterRequirement?: ArtifactWriterRequirement;
+		writeConfined?: boolean;
+		/**
+		 * Ask the worker's Fabric to enforce this scope's restrictions. Returns
+		 * true only when Fabric acknowledged the policy; without it, a restricted
+		 * worker never receives fabric_exec.
+		 */
+		requestFabricHostPolicy?: (policy: FabricHostPolicyV1, fabricResolvedPath: string) => boolean;
+	} = {},
 ): PreparedWorkerToolScope {
 	const requestedSelectors = [...surface.extSelectors];
 	// Production callers provide the resolved flag. Compatibility literals infer
@@ -554,10 +622,21 @@ export function prepareWorkerToolScope(
 		(selector) => isOptionalGlobalExtensionSelector(surface as ResolvedToolSurface, selector),
 	);
 	const selectors = resolution.bindings.map(({ selector }) => selector);
-	// Fabric providers bypass this scope's native veto. Denied names cannot be
-	// preserved through full Fabric, even when the agent omitted a tools list.
-	const fabricAllowed = !hasExplicitAllowlist && requestedToolNames === undefined && !dynamic &&
-		deniedToolNames.size === 0 && options.writeConfined !== true;
+	// Fabric providers other than pi.* and extensions.* bypass this scope's
+	// native veto and the write-confinement tool_call hook. A restricted worker
+	// therefore gets full Fabric only when its Fabric acknowledges a host policy
+	// that refuses the denied names and every unhooked non-read action.
+	const fabricUnrestrictedShape = !hasExplicitAllowlist && requestedToolNames === undefined && !dynamic;
+	const fabricRestricted = deniedToolNames.size > 0 || options.writeConfined === true;
+	const fabricAllowed = fabricUnrestrictedShape && (
+		!fabricRestricted ||
+		(workerFabricRuntimePath !== undefined && options.requestFabricHostPolicy?.({
+			owner: "pi-delegate",
+			reason: options.writeConfined === true ? "write-confined delegate worker" : "restricted delegate worker",
+			deniedTools: [...deniedToolNames],
+			allowedUnhookedRisks: ["read"],
+		}, workerFabricRuntimePath) === true)
+	);
 	const selectedExtensions = resolution.selectedExtensions;
 	const selectorExtensions = resolution.bindings.map(({ extension }) => extension);
 	const diagnostics = resolution.diagnostics;

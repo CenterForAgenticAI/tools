@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
 
+import { dropTrailingLiveAssistant } from "./live-context.js";
 import { isCapacityFailureMessage } from "./refusal.js";
 
 type CapacityMessage = AgentSession["messages"][number];
@@ -150,6 +151,12 @@ function sessionBusyDetail(session: AgentSession): string | undefined {
 
 function sameRoute(left: AgentSession["model"], right: CapacityModel): boolean {
 	return left?.provider === right.provider && left.id === right.id;
+}
+
+function prefixStillLive(snapshot: CapacityContinuationSnapshot): boolean {
+	const messages = snapshot.session.agent.state.messages;
+	if (messages.length !== snapshot.prefix.length) return false;
+	return snapshot.prefix.every((message, index) => messages[index] === message);
 }
 
 function liveSnapshotMatches(snapshot: CapacityContinuationSnapshot): boolean {
@@ -299,7 +306,8 @@ export function inspectCapacityContinuation(
 
 /**
  * Resume one already-validated request from its user/toolResult boundary.
- * Persisted entries are append-only: only Agent.state.messages is pruned.
+ * Persisted entries are append-only: the failed assistant is only excluded from
+ * live context (a context edit on Pi >=0.86, an Agent.state.messages prune before).
  */
 export async function continueCapacityRequest(
 	snapshot: CapacityContinuationSnapshot,
@@ -333,7 +341,9 @@ export async function continueCapacityRequest(
 			throw new Error("capacity fallback could not continue safely: stale snapshot after model switch");
 		}
 
-		snapshot.session.agent.state.messages = [...snapshot.prefix];
+		if (!dropTrailingLiveAssistant(snapshot.session) || !prefixStillLive(snapshot)) {
+			throw new Error("capacity fallback could not continue safely: failed assistant could not be excluded from live context");
+		}
 		await snapshot.session.agent.continue();
 		if (options.signal.aborted) throw abortError();
 		return Object.freeze(snapshot.session.agent.state.messages.slice(snapshot.prefix.length));

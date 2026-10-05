@@ -10,7 +10,7 @@ import {
 } from "./delegate-session-scope.js";
 import { getLastAssistantError } from "./harvest-outcome.js";
 import type { NestedDelegateCallerPolicy } from "./nested-delegate-policy.js";
-import { hasLocalRunAuthority, listRuns } from "./runtime.js";
+import { getRun, hasLocalRunAuthority, listRuns } from "./runtime.js";
 
 /** Maximum time to wait for worker extensions before invalidating their session. */
 export const DEFAULT_WORKER_SESSION_SHUTDOWN_TIMEOUT_MS = 1_000;
@@ -76,6 +76,7 @@ export interface ChildCompletionGateScheduler {
 export interface ChildCompletionGateOptions {
 	scheduler?: ChildCompletionGateScheduler;
 	pollIntervalMs?: number;
+	hasPendingCompletion?: (ownerSessionId: string) => boolean;
 }
 
 const productionChildCompletionGateScheduler: ChildCompletionGateScheduler = {
@@ -139,7 +140,7 @@ function createChildCompletionWait(
 export function registerChildCompletionGate(
 	pi: ExtensionAPI,
 	options: ChildCompletionGateOptions = {},
-): () => void {
+): (completedRunId?: string) => void {
 	const scheduler = options.scheduler ?? productionChildCompletionGateScheduler;
 	const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_CHILD_COMPLETION_INPUT_POLL_INTERVAL_MS;
 	let activeWait: ChildCompletionWait | undefined;
@@ -169,7 +170,7 @@ export function registerChildCompletionGate(
 		if (unfinishedOwnedChildren(ctx).length === 0) return;
 		const signal = ctx.signal;
 		if (signal?.aborted || getLastAssistantError(event.messages)) return;
-		if (ctx.hasPendingMessages()) return;
+		if (ctx.hasPendingMessages() || options.hasPendingCompletion?.(ctx.sessionManager.getSessionId())) return;
 
 		const wait = createChildCompletionWait(ctx, scheduler, pollIntervalMs);
 		activeWait?.settle();
@@ -182,8 +183,10 @@ export function registerChildCompletionGate(
 		}
 	});
 
-	return () => {
+	return (completedRunId) => {
 		const wait = activeWait;
-		if (wait && unfinishedOwnedChildren(wait.context).length === 0) wait.settle();
+		const completed = completedRunId ? getRun(completedRunId) : undefined;
+		if (wait && (unfinishedOwnedChildren(wait.context).length === 0 ||
+			(completed?.completedAt !== undefined && completed.ownerSessionId === wait.context.sessionManager.getSessionId()))) wait.settle();
 	};
 }

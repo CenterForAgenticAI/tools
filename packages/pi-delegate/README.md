@@ -1,6 +1,6 @@
 # @centerforagenticai/pi-delegate
 
-**Kind:** extension · **Status:** stable · **Pi:** 0.80.6, 0.83.0, 0.84.1, 0.84.2, 0.85.1, 0.99.1, or 0.99.2 · **Node:** >=22.19
+**Kind:** extension · **Status:** stable · **Pi:** latest · **Node:** >=22.19
 
 ## What it does
 

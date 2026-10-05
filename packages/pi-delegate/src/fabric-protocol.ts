@@ -13,7 +13,11 @@
  * member omitted here is optional on the Fabric side, which the contract test
  * also checks.
  */
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, EventBusController } from "@earendil-works/pi-coding-agent";
+import { createEventBus } from "@earendil-works/pi-coding-agent";
+import { readFileSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const FABRIC_PROVIDER_REGISTER_EVENT = "pi-fabric:provider:register:v1";
 export const FABRIC_PROVIDER_DISCOVER_EVENT = "pi-fabric:provider:discover:v1";
@@ -105,4 +109,153 @@ export function readFabricProviderDiscovery(value: unknown): FabricProviderDisco
 		return { kind: "unsupported", reason: "discovery payload has no register function" };
 	}
 	return { kind: "supported", discovery: value as FabricProviderDiscovery };
+}
+
+/**
+ * Host policy handshake, mirrored from pi-fabric `FABRIC_HOST_POLICY_EVENT`.
+ * Fabric replies synchronously once the policy is in force. Fabric builds
+ * without the handshake never reply, so callers must treat silence as refusal.
+ */
+export const FABRIC_HOST_POLICY_EVENT = "pi-fabric:host-policy:v1";
+
+export interface FabricHostPolicyV1 {
+	owner: string;
+	reason: string;
+	deniedTools?: string[];
+	deniedProviders?: string[];
+	allowedUnhookedRisks?: FabricRisk[];
+}
+
+export interface FabricHostPolicyAckV1 {
+	version: 1;
+	accepted: true;
+}
+
+type EventHandler = (data: unknown) => void;
+
+interface AttributedHostPolicyHandler {
+	handler: EventHandler;
+	registrationStack: string;
+}
+
+const hostPolicyHandlers = new WeakMap<EventBusController, Set<AttributedHostPolicyHandler>>();
+
+function captureRegistrationStack(): string {
+	const previousLimit = Error.stackTraceLimit;
+	try {
+		Error.stackTraceLimit = Math.max(previousLimit, 50);
+		return new Error().stack ?? "";
+	} finally {
+		Error.stackTraceLimit = previousLimit;
+	}
+}
+
+/** Create the worker event bus while retaining host-policy subscription provenance. */
+export function createFabricHostPolicyEventBus(): EventBusController {
+	const raw = createEventBus();
+	const attributed = new Set<AttributedHostPolicyHandler>();
+	const events: EventBusController = {
+		emit: (channel, data) => raw.emit(channel, data),
+		on: (channel, handler) => {
+			const record = channel === FABRIC_HOST_POLICY_EVENT
+				? { handler, registrationStack: captureRegistrationStack() }
+				: undefined;
+			if (record) attributed.add(record);
+			const unsubscribeRaw = raw.on(channel, handler);
+			let active = true;
+			return () => {
+				if (!active) return;
+				active = false;
+				if (record) attributed.delete(record);
+				unsubscribeRaw();
+			};
+		},
+		clear: () => {
+			attributed.clear();
+			raw.clear();
+		},
+	};
+	hostPolicyHandlers.set(events, attributed);
+	return events;
+}
+
+function canonicalPath(path: string): string {
+	try {
+		return realpathSync.native(path);
+	} catch {
+		return resolve(path);
+	}
+}
+
+function fabricPackageDirectory(resolvedPath: string): string | undefined {
+	let current = dirname(canonicalPath(resolvedPath));
+	while (true) {
+		try {
+			const manifest = JSON.parse(readFileSync(resolve(current, "package.json"), "utf8")) as { name?: unknown };
+			if (manifest.name === "pi-fabric") return canonicalPath(current);
+		} catch {
+			// Keep walking: extension entrypoints normally live below the package root.
+		}
+		const parent = dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
+function stackFramePaths(stack: string): string[] {
+	return stack.split("\n").flatMap((line) => {
+		const match = line.match(/((?:file:\/\/\/|\/|[A-Za-z]:[\\/]).+):\d+:\d+\)?$/);
+		if (!match) return [];
+		const location = match[1]!;
+		try {
+			return [canonicalPath(location.startsWith("file:///") ? fileURLToPath(location) : location)];
+		} catch {
+			return [];
+		}
+	});
+}
+
+function registrationIsInsidePackage(registrationStack: string, packageDirectory: string): boolean {
+	return stackFramePaths(registrationStack).some((framePath) => {
+		const pathFromPackage = relative(packageDirectory, framePath);
+		return pathFromPackage === "" || (!pathFromPackage.startsWith("..") && !isAbsolute(pathFromPackage));
+	});
+}
+
+/**
+ * Ask the worker's loaded Fabric to enforce `policy`. Returns true only after
+ * exactly one handler registered from that Fabric package replies synchronously
+ * with a version 1 acknowledgement.
+ */
+export function requestFabricHostPolicy(
+	events: EventBusController,
+	policy: FabricHostPolicyV1,
+	fabricResolvedPath: string,
+): boolean {
+	const packageDirectory = fabricPackageDirectory(fabricResolvedPath);
+	const attributed = hostPolicyHandlers.get(events);
+	if (!packageDirectory || !attributed) return false;
+	const handlers = [...attributed].filter(({ registrationStack }) =>
+		registrationIsInsidePackage(registrationStack, packageDirectory));
+	if (handlers.length !== 1) return false;
+
+	let acceptingReply = true;
+	let replied = false;
+	let accepted = false;
+	try {
+		handlers[0]!.handler({
+			policy: structuredClone(policy),
+			reply: (ack: unknown) => {
+				if (!acceptingReply || replied) return;
+				replied = true;
+				const record = ack as Partial<FabricHostPolicyAckV1> | null;
+				accepted = record !== null && typeof record === "object" && record.version === 1 && record.accepted === true;
+			},
+		});
+	} catch {
+		return false;
+	} finally {
+		acceptingReply = false;
+	}
+	return replied && accepted;
 }

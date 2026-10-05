@@ -558,6 +558,8 @@ export interface DelegateDispatchState {
 	 * hydrate-orphaned background run reached its owning session.
 	 */
 	orphanWakeSurfacedAt?: number;
+	/** Exact completion timestamp acknowledged by the owning result reader. */
+	completionReadFor?: number;
 	/** OS pid of the process that owns this in-process run. */
 	owningPid?: number;
 	/** Linux `/proc/<pid>/stat` field 22 for the owning process generation. */
@@ -745,6 +747,8 @@ interface PersistedRunState {
 	orphanedAt?: number;
 	syncOrphanRecoverySurfacedAt?: number;
 	orphanWakeSurfacedAt?: number;
+	/** Exact completion timestamp acknowledged by the owning result reader. */
+	completionReadFor?: number;
 	/** See `DelegateDispatchState.owningPid`. */
 	owningPid?: number;
 	owningStartTicks?: string;
@@ -1005,6 +1009,7 @@ const PERSISTED_RUN_REQUIRED_KEYS = [
 	"orphanedAt",
 	"syncOrphanRecoverySurfacedAt",
 	"orphanWakeSurfacedAt",
+	"completionReadFor",
 	"owningPid",
 	"owningStartTicks",
 	"owningBootId",
@@ -2250,6 +2255,7 @@ function applyPersistedTerminalRunToMemory(run: DelegateDispatchState, saved: Pe
 	run.orphanedAt = saved.orphanedAt;
 	run.syncOrphanRecoverySurfacedAt = saved.syncOrphanRecoverySurfacedAt;
 	run.orphanWakeSurfacedAt = saved.orphanWakeSurfacedAt;
+	run.completionReadFor = saved.completionReadFor;
 	run.owningPid = saved.owningPid;
 	run.owningStartTicks = saved.owningStartTicks;
 	run.owningBootId = saved.owningBootId;
@@ -2357,6 +2363,7 @@ function runtimeRunFromPersisted(saved: PersistedRunState): DelegateDispatchStat
 		orphanedAt: saved.orphanedAt,
 		syncOrphanRecoverySurfacedAt: saved.syncOrphanRecoverySurfacedAt,
 		orphanWakeSurfacedAt: saved.orphanWakeSurfacedAt,
+		completionReadFor: saved.completionReadFor,
 		owningPid: saved.owningPid,
 		owningStartTicks: saved.owningStartTicks,
 		owningBootId: saved.owningBootId,
@@ -2656,6 +2663,7 @@ function sanitizeRunForPersistence(run: DelegateDispatchState): PersistedRunStat
 		orphanedAt: run.orphanedAt,
 		syncOrphanRecoverySurfacedAt: run.syncOrphanRecoverySurfacedAt,
 		orphanWakeSurfacedAt: run.orphanWakeSurfacedAt,
+		completionReadFor: run.completionReadFor,
 		...projectProcessOwnerFields(run),
 		forks: persistedEntries,
 		// #470 — shed the heavy inline finalResult once the per-run sidecar holds
@@ -3432,6 +3440,7 @@ function isPersistedRunStateRecord(value: unknown): value is PersistedRunState {
 		(value.owningNonce === undefined || isValidProcessNonce(value.owningNonce)) &&
 		isFiniteNumber(value.createdAt) &&
 		(value.completedAt === undefined || isFiniteNumber(value.completedAt)) &&
+		(value.completionReadFor === undefined || isFiniteNumber(value.completionReadFor)) &&
 		isRecordValue(value.forks) &&
 		Object.values(value.forks).every((entry) => isPersistedRunLiveStateRecord(entry)) &&
 		(value.finalResult === undefined || (
@@ -4146,6 +4155,7 @@ function projectRegisteredRun(state: DelegateDispatchState): DelegateDispatchSta
 		...(finite(state.orphanedAt) !== undefined ? { orphanedAt: finite(state.orphanedAt) } : {}),
 		...(finite(state.syncOrphanRecoverySurfacedAt) !== undefined ? { syncOrphanRecoverySurfacedAt: finite(state.syncOrphanRecoverySurfacedAt) } : {}),
 		...(finite(state.orphanWakeSurfacedAt) !== undefined ? { orphanWakeSurfacedAt: finite(state.orphanWakeSurfacedAt) } : {}),
+		...(finite(state.completionReadFor) !== undefined ? { completionReadFor: finite(state.completionReadFor) } : {}),
 		...projectProcessOwnerFields(state),
 		forks: entries,
 		...(Array.isArray(state.finalResult) ? { finalResult: state.finalResult.map((result) => cloneRunResult(result)) } : {}),
@@ -4252,6 +4262,26 @@ export function registerRun(state: DelegateDispatchState): void {
 	// never read or hydrated, a completing successor overwrites it (same path), and
 	// the retention sweep reclaims any orphan. No delete is needed, so none is done.
 	emit("delegate:register", { runId: state.runId });
+}
+
+/** A result read acknowledges only the current completion in its owning session. */
+export function acknowledgeCompletionResult(runId: string, ownerSessionId?: string): boolean {
+	const run = runs.get(runId);
+	if (!ownerSessionId || !run || run.ownerSessionId !== ownerSessionId || run.completedAt === undefined) return false;
+	if (run.completionReadFor === run.completedAt) return true;
+	run.completionReadFor = run.completedAt;
+	try { return flushRuntimePersistence(); }
+	catch (error) {
+		if (!(error instanceof StateLockTimeoutError)) throw error;
+		schedulePersist();
+		return false;
+	}
+}
+
+export function completionResultWasRead(runId: string, ownerSessionId?: string): boolean {
+	const run = runs.get(runId);
+	return Boolean(ownerSessionId && run && run.ownerSessionId === ownerSessionId &&
+		run.completedAt !== undefined && run.completionReadFor === run.completedAt);
 }
 
 export function getRun(runId: string): DelegateDispatchState | undefined {
@@ -4786,6 +4816,7 @@ function isRecoveryDeliveryCandidate(
 ): boolean {
 	if (!isValidOwnerSessionId(run.ownerSessionId) || run.ownerSessionId !== ownerSessionId) return false;
 	if (!Number.isFinite(run.createdAt)) return false;
+	if (!allowAcknowledged && run.completedAt !== undefined && run.completionReadFor === run.completedAt) return false;
 	if (!Number.isFinite(run.orphanedAt) || !Number.isFinite(run.completedAt)) return false;
 	if (kind === "orphaned-dispatch-wake" && !isSupportedRecoveryShape(run.shape)) return false;
 	// A top-level completion timestamp cannot authorize delivery while any real
@@ -4833,6 +4864,7 @@ function recoveryDeliveryFingerprint(run: DelegateDispatchState): string {
 	const projected = sanitizeRunForPersistence({ ...run, resultSidecarDurable: false });
 	delete projected.syncOrphanRecoverySurfacedAt;
 	delete projected.orphanWakeSurfacedAt;
+	delete projected.completionReadFor;
 	return JSON.stringify(projected);
 }
 

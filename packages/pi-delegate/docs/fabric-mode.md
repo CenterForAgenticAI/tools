@@ -121,6 +121,37 @@ Host limits, stated plainly:
 - Updating either extension still needs a Pi restart or `/reload`, as for any
   extension.
 
+## Fabric inside a worker
+
+A worker whose profile loads Fabric gets `fabric_exec` when its tool surface
+leaves Fabric room: no explicit `tools` list and no extension selectors.
+
+Most workers are also restricted. An ordinary worker has the delegate family
+denied, and a `readOnly` or write-confined worker has write confinement.
+Several Fabric providers (`agents`, `mcp`, `sessions`, `jev` and others)
+do not replay Pi `tool_call` hooks, so neither restriction would see them.
+Before such a worker gets `fabric_exec`, pi-delegate sends the worker's Fabric
+a host policy (`pi-fabric:host-policy:v1`). The policy refuses:
+
+- the denied tool names through `pi.*` and `extensions.*`;
+- every non-read action of the other providers;
+- native executors (CPython, `node-process`, `bun-process`).
+
+`pi.*` and `extensions.*` calls still replay `tool_call`, so write
+confinement guards `write`, `edit` and `bash` inside programs as it does
+outside them.
+
+The worker gets `fabric_exec` only after Fabric acknowledges the policy. A
+Fabric build without the handshake never replies, and such a worker keeps the
+native tools without `fabric_exec`, as before.
+
+pi-delegate delivers this request directly to the single listener registered
+from the loaded `pi-fabric` package instead of broadcasting it on the worker's
+event bus. This binding prevents broadcast exposure and accidental or naive
+spoofing by other extensions; it is not a sandbox, and in-process extension
+code — including code running inside Fabric's package — remains trusted with
+Node authority.
+
 ## Using it from `fabric_exec`
 
 ```ts

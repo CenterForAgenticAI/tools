@@ -129,6 +129,7 @@ import { boundHistoryErrorMessage, recordPreflightFailure, recordRun, type RunHi
 import { StateLockTimeoutError } from "./state-io.js";
 import { diagnosticsWithGenerated, normalizeUsageCounters, saturatingAdd } from "./usage-rollup.js";
 import { boundRunTimeoutTranscript, buildRunTimeoutCollapse } from "./fork-activity.js";
+import { dropTrailingLiveAssistant, isPiSystemMessage } from "./live-context.js";
 import { projectRunResult } from "./run-result-boundary.js";
 import {
 	PROMPT_REPAIR_ACTIVITY_CHANNEL,
@@ -844,6 +845,7 @@ async function runDirectWorkerInner(
 	let deadlineLifecycleArmed = false;
 	let absoluteDeadlineAtMs: number | undefined;
 	let lastActivityAt = 0;
+	let awaitingEscalations = 0;
 	let activeWindDownReason: "heartbeat" | "wall-clock" | undefined;
 	let wallClockWindDownHandled = false;
 	let cancellationSource: "caller" | "timeout" | "heartbeat" | undefined;
@@ -1045,7 +1047,7 @@ async function runDirectWorkerInner(
 		if (absoluteDeadlineAtMs !== undefined && !wallClockWindDownHandled) {
 			deadlines.push(absoluteDeadlineAtMs);
 		}
-		if (silenceGuardEnabled && lastActivityAt > 0) {
+		if (silenceGuardEnabled && awaitingEscalations === 0 && lastActivityAt > 0) {
 			deadlines.push(lastActivityAt + DEFAULT_DIRECT_WORKER_SILENCE_TIMEOUT_MS);
 		}
 		if (deadlines.length === 0) return;
@@ -1123,6 +1125,7 @@ async function runDirectWorkerInner(
 		}
 		if (
 			silenceGuardEnabled &&
+			awaitingEscalations === 0 &&
 			lastActivityAt > 0 &&
 			actorActivitySilenceMs(lastActivityAt, now) >= DEFAULT_DIRECT_WORKER_SILENCE_TIMEOUT_MS
 		) {
@@ -1252,11 +1255,16 @@ async function runDirectWorkerInner(
 	};
 	const directEscalationActivityChannel = {
 		enterAwaitingEscalation: () => {
+			awaitingEscalations += 1;
+			observeActivity(deadlineClock.now());
 			actorActivity?.publish("worker", { phase: "awaiting-escalation" });
 			emit({ status: "awaiting-escalation" });
 		},
 		resolveAwaitingEscalation: () => {
+			awaitingEscalations -= 1;
 			if (cancellationSignal.aborted || result.status !== "running") return;
+			observeActivity(deadlineClock.now());
+			if (awaitingEscalations > 0) return;
 			actorActivity?.publish("worker", { phase: "waiting-model" });
 			emit({ status: "running" });
 		},
@@ -1330,11 +1338,7 @@ async function runDirectWorkerInner(
 	};
 	const removeRetryableAssistantFromAgentState = (): boolean => {
 		if (!workerSession) return false;
-		const messages = workerSession.agent.state.messages as AgentMessage[];
-		const last = messages[messages.length - 1];
-		if (last?.role !== "assistant") return false;
-		workerSession.agent.state.messages = messages.slice(0, -1);
-		return true;
+		return dropTrailingLiveAssistant(workerSession);
 	};
 	const sanitizePromptCredentialFailures = (): void => {
 		if (!promptMessages) return;
@@ -1861,7 +1865,7 @@ async function runDirectWorkerInner(
 				}
 				return;
 			}
-			if (ev.type !== "message_end" || !ev.message) return;
+			if (ev.type !== "message_end" || !ev.message || isPiSystemMessage(ev.message)) return;
 			// Event-bus `updated` (spec 0004 / REQ-BUS-1): emit BEFORE the
 			// transcript-callback guard so the bus records activity even when no
 			// onTranscriptEntry is wired — the bus is the authoritative nested
