@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import type { HostUiRequest } from "../host/index.js";
+import { isCustomEntryData } from "../protocol/index.js";
 import type {
   Cursor,
   JsonObject,
@@ -200,6 +201,18 @@ class SessionStreamBroker {
         const state = this.source.currentState();
         this.syncGeneration(state.generation);
         this.#sequence += 1;
+        const entrySequence = this.#sequence;
+        const modelData =
+          committed.entry.type === "custom" &&
+          committed.entry.customType === "pi-daemon/model" &&
+          isCustomEntryData("pi-daemon/model", committed.entry.data)
+            ? committed.entry.data
+            : undefined;
+        let modelSequence: number | undefined;
+        if (modelData !== undefined) {
+          this.#sequence += 1;
+          modelSequence = this.#sequence;
+        }
         this.#lastLiveFrameAt = this.#now().getTime();
         for (const reader of this.#readers.values()) {
           const frame: StreamFrame = {
@@ -209,12 +222,26 @@ class SessionStreamBroker {
             kind: "entry",
             generation: state.generation,
             epoch: state.epoch,
-            seq: this.#sequence,
+            seq: entrySequence,
             cursor: cursorAt(committed.entry.id, state.epoch),
             entry: entryObject(committed.entry),
             origin: "live",
           };
           this.routeLive(reader, frame);
+          if (modelData !== undefined && modelSequence !== undefined) {
+            this.routeLive(reader, {
+              t: "ev",
+              session: this.source.sessionId,
+              attachmentId: reader.attachmentId,
+              kind: "daemon",
+              generation: state.generation,
+              epoch: state.epoch,
+              seq: modelSequence,
+              name: "model",
+              data: modelData,
+              sourceEntryId: committed.entry.id,
+            });
+          }
         }
       },
     );

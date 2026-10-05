@@ -3,6 +3,7 @@ import type { ErrorCode } from "../protocol/index.js";
 export type SessionOperationErrorCode = Extract<
   ErrorCode,
   | "duplicate_session"
+  | "invalid_request"
   | "gone"
   | "path_mismatch"
   | "sdk_incompatible"

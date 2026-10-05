@@ -11,7 +11,12 @@ import {
 
 import type { HostSdkCompatibility } from "./session-host.js";
 
-export const STAMPED_HOST_SDK_VERSION = "0.99.2";
+/**
+ * Oldest Pi SDK whose in-process host seams this daemon has verified. Newer
+ * releases are accepted when the capability probe passes; older ones are
+ * refused before any session is hosted (I29).
+ */
+export const MINIMUM_HOST_SDK_VERSION = "1.0.0";
 
 export class SdkCompatibilityError extends Error {
   readonly code = "sdk_incompatible";
@@ -35,6 +40,35 @@ function installedSdkVersion(): string {
     throw new Error("installed SDK package has no string version");
   }
   return packageJson.version;
+}
+
+/**
+ * Version of the Pi SDK installed beside this daemon, as reported in hello.
+ * An unreadable install reports "unknown", which the startup check refuses.
+ */
+export const HOST_SDK_VERSION: string = (() => {
+  try {
+    return installedSdkVersion();
+  } catch {
+    return "unknown";
+  }
+})();
+
+const RELEASE_VERSION = /^(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
+
+/**
+ * True when `version` is a release at or above MINIMUM_HOST_SDK_VERSION. A
+ * prerelease of the minimum itself is below it; unparseable versions fail.
+ */
+export function isSupportedSdkVersion(version: string): boolean {
+  const candidate = RELEASE_VERSION.exec(version.trim());
+  const minimum = RELEASE_VERSION.exec(MINIMUM_HOST_SDK_VERSION);
+  if (candidate === null || minimum === null) return false;
+  for (let index = 1; index <= 3; index += 1) {
+    const difference = Number(candidate[index]) - Number(minimum[index]);
+    if (difference !== 0) return difference > 0;
+  }
+  return candidate[4] === undefined;
 }
 
 function probeSdkSurface(): void {
@@ -67,9 +101,9 @@ export async function assertSdkCompatible(
       `sdk_incompatible: cannot read installed SDK version: ${errorMessage(error)}`,
     );
   }
-  if (installedVersion !== STAMPED_HOST_SDK_VERSION) {
+  if (!isSupportedSdkVersion(installedVersion)) {
     throw new SdkCompatibilityError(
-      `sdk_incompatible: SDK ${installedVersion} has no passing host stamp`,
+      `sdk_incompatible: SDK ${installedVersion} is below the minimum supported ${MINIMUM_HOST_SDK_VERSION}`,
     );
   }
   try {

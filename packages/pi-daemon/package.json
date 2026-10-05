@@ -1,5 +1,5 @@
 {
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Run headless pi agent sessions in-process with local socket clients, durable replay, live streaming, and explicit driver arbitration.",
   "type": "module",
   "bin": {
@@ -41,8 +41,6 @@
     "lint": "eslint . --cache --cache-location node_modules/.cache/eslint/",
     "check": "npm run lint && npm run typecheck && npm run test:coverage",
     "ci": "node scripts/gate.mjs",
-    "sdk:status": "node scripts/sdk-upgrade.mjs status",
-    "sdk:check": "node scripts/sdk-upgrade.mjs check",
     "generate:protocol-schema": "node scripts/generate-protocol-schema.mjs",
     "test:coverage": "npm run build && vitest run --coverage"
   },
@@ -64,8 +62,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.99.2",
-    "@earendil-works/pi-tui": "0.99.2"
+    "@earendil-works/pi-coding-agent": "^1.0.0",
+    "@earendil-works/pi-tui": "^1.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

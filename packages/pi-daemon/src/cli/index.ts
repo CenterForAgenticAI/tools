@@ -8,7 +8,7 @@ import {
   type DaemonClient,
 } from "../client/index.js";
 import { DAEMON_VERSION, runDaemon } from "../daemon/bootstrap.js";
-import { STAMPED_HOST_SDK_VERSION } from "../host/sdk-stamp.js";
+import { HOST_SDK_VERSION } from "../host/sdk-stamp.js";
 import { runTui } from "../tui/index.js";
 
 const CONNECTION_TIMEOUT_MS = 300;
@@ -91,7 +91,7 @@ async function startCommand(args: readonly string[], io: ResolvedCliIo): Promise
     try {
       let result = await client.request("status", { verbose: replace });
       if (!("daemon" in result)) throw new Error("daemon returned session status without a session");
-      if (client.hello.sdkVersion !== STAMPED_HOST_SDK_VERSION && replace) {
+      if (client.hello.sdkVersion !== HOST_SDK_VERSION && replace) {
         const busy =
           result.sessions === undefined ||
           result.sessions.some(
@@ -135,7 +135,7 @@ async function startCommand(args: readonly string[], io: ResolvedCliIo): Promise
         result = await client.request("status", {});
         if (!("daemon" in result)) throw new Error("daemon returned session status without a session");
       }
-      if (client.hello.sdkVersion !== STAMPED_HOST_SDK_VERSION) {
+      if (client.hello.sdkVersion !== HOST_SDK_VERSION) {
         writeJson(io.stdout, incompatibleSdk(result.daemon));
         return 1;
       }
@@ -243,7 +243,7 @@ async function statusCommand(args: readonly string[], io: ResolvedCliIo): Promis
   try {
     const result = await client.request("status", { verbose: true });
     if (!("daemon" in result)) throw new Error("daemon returned session status without a session");
-    if (client.hello.sdkVersion !== STAMPED_HOST_SDK_VERSION) {
+    if (client.hello.sdkVersion !== HOST_SDK_VERSION) {
       writeJson(io.stdout, incompatibleSdk(result.daemon));
       return 1;
     }
@@ -264,7 +264,7 @@ function incompatibleSdk(
   return {
     status: "incompatible",
     reason: "sdk_version",
-    expectedSdkVersion: STAMPED_HOST_SDK_VERSION,
+    expectedSdkVersion: HOST_SDK_VERSION,
     daemon,
     hint: "pi-daemon start --replace",
     ...(busy

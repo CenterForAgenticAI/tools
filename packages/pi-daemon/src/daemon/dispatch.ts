@@ -118,14 +118,19 @@ export function createDaemonDispatch(options: DaemonDispatchOptions): DaemonDisp
   const coldSessions = new ColdSessionOperations({
     registry: options.registry,
     lockRegistry,
+    agentDir: options.agentDir,
   });
   const sources = new Map<string, BindableStreamSessionSource>();
   const attachments = new Map<string, AttachmentRecord>();
   const hostReference: { current?: SessionHostController } = {};
+  const pendingModelDrop: { controller?: PromptController } = {};
   const leaseArbiter = new LeaseArbiter({
     registry: options.registry,
     defaultTtlMs: DEFAULT_LEASE_TTL_MS,
     getAwakeHost: (sessionId) => hostReference.current?.get(sessionId),
+    onLeaseChanged: async (sessionId, reason) => {
+      await pendingModelDrop.controller?.dropPendingModel(sessionId, reason);
+    },
   });
   const hostController = new SessionHostController({
     registry: options.registry,
@@ -199,6 +204,7 @@ export function createDaemonDispatch(options: DaemonDispatchOptions): DaemonDisp
     getAwakeHost: (sessionId) => hostController.get(sessionId),
     assertAttached,
   });
+  pendingModelDrop.controller = promptController;
   const rawUiAnswerDispatch = createUiAnswerRequestDispatcher({ leaseArbiter, hostController });
   const connectionBoundUiAnswerDispatch: RequestDispatcher = async (request, context) => {
     if (request.op === "ui_answer") {
@@ -478,7 +484,7 @@ export function createDaemonDispatch(options: DaemonDispatchOptions): DaemonDisp
     },
     {
       name: "control",
-      operations: ["steer", "follow_up", "abort"],
+      operations: ["steer", "follow_up", "set_model", "abort"],
       dispatch: createControlRequestDispatcher(promptController),
     },
     {

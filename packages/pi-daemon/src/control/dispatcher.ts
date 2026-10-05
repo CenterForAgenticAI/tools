@@ -49,6 +49,12 @@ export function createControlRequestDispatcher(
           ? await controller.steer(input)
           : await controller.followUp(input);
       }
+      case "set_model":
+        return await controller.setModel({
+          sessionId: requiredSession(request), connectionId: context.connectionId,
+          attachmentId: request.params.attachmentId, leaseId: request.params.leaseId, generation: request.params.generation,
+          model: request.params.model, ...(request.params.thinkingLevel === undefined ? {} : { thinkingLevel: request.params.thinkingLevel }),
+        });
       case "abort":
         return await controller.abort({
           sessionId: requiredSession(request),

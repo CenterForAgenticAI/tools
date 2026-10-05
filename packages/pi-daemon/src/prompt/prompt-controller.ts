@@ -75,6 +75,11 @@ export interface QueuedInputSubmission {
   readonly attribution: ControlAttribution;
 }
 
+export interface SetModelSubmission {
+  readonly sessionId: string; readonly connectionId: string; readonly attachmentId: string; readonly leaseId: string; readonly generation: number;
+  readonly model: { readonly provider: string; readonly id: string }; readonly thinkingLevel?: string;
+}
+
 export interface AbortSubmission {
   readonly sessionId: string;
   readonly connectionId: string;
@@ -119,6 +124,8 @@ interface PromptDispatchState {
   readonly payloadHash: string;
   readonly promptId: string;
   readonly text: string;
+  readonly leaseId: string;
+  readonly options: CanonicalPromptPayload["options"];
   readonly acceptedAtMs: number;
   readonly disposition: "started" | "queued";
   readonly host: AwakeSessionHost;
@@ -127,6 +134,7 @@ interface PromptDispatchState {
   readonly claimEntryId: string;
   readonly deliveryOrder: number;
   promptPromise: Promise<void>;
+  promptLaunched: boolean;
   preflightAccepted: boolean | undefined;
   queuedBySdk: boolean;
   agentStarted: boolean;
@@ -299,6 +307,7 @@ export class PromptController {
   readonly #backgroundTasks = new Map<Promise<void>, string>();
   readonly #backgroundErrors = new Map<string, unknown>();
   readonly #abortSettlements = new Map<string, SettlementBarrier>();
+  readonly #pendingModels = new Map<string, { leaseId: string; model: { provider: string; id: string }; thinkingLevel?: string }>();
   readonly #abortSettlementFailures = new Map<string, ServerRequestError>();
   #nextDeliveryOrder = 1;
   #disposed = false;
@@ -348,6 +357,56 @@ export class PromptController {
     return await this.queueInput("follow_up", input);
   }
 
+  async setModel(input: SetModelSubmission): Promise<OperationResult<"set_model">> {
+    try {
+      this.assertActive();
+      return await this.queueFor(input.sessionId).enqueue(async () => {
+        this.requireCurrentGeneration(input.sessionId, input.generation);
+        await this.#assertAttached({ sessionId: input.sessionId, connectionId: input.connectionId, attachmentId: input.attachmentId });
+        await this.#leaseArbiter.assertDriver({ sessionId: input.sessionId, attachmentId: input.attachmentId, leaseId: input.leaseId, generation: input.generation, nowMs: this.#now() });
+        const host = this.requireAwakeHost(input.sessionId);
+        if (host.validateModel === undefined) throw new ServerRequestError("unavailable", "live model changes are unavailable");
+        host.validateModel({ provider: input.model.provider, id: input.model.id });
+        const busy = host.session.isStreaming || [...this.#statesByKey.values()].some((state) => state.sessionId === input.sessionId && !state.terminal);
+        if (busy) {
+          const pending = { leaseId: input.leaseId, model: { provider: input.model.provider, id: input.model.id }, ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }) };
+          const previous = this.#pendingModels.get(input.sessionId);
+          this.#pendingModels.set(input.sessionId, pending);
+          if (previous !== undefined) {
+            await host.appendDaemonEntry("pi-daemon/model", { v: 1, state: "dropped", reason: "replaced", model: previous.model, ...(previous.thinkingLevel === undefined ? {} : { thinkingLevel: previous.thinkingLevel }) });
+          }
+          await host.appendDaemonEntry("pi-daemon/model", { v: 1, state: "pending", model: pending.model, ...(pending.thinkingLevel === undefined ? {} : { thinkingLevel: pending.thinkingLevel }) });
+          return { state: "queued", model: input.model, ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }) };
+        }
+        if (host.setModel === undefined) throw new ServerRequestError("unavailable", "live model changes are unavailable");
+        await host.setModel(input.model, input.thinkingLevel);
+        await host.appendDaemonEntry("pi-daemon/model", {
+          v: 1,
+          state: "applied",
+          model: input.model,
+          ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }),
+        });
+        return { state: "applied", model: input.model, ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }) };
+      });
+    } catch (error) { throw requestError(error); }
+  }
+
+  async dropPendingModel(sessionId: string, reason: "lease_changed" | "lease_released" | "lease_expired"): Promise<void> {
+    const pending = this.#pendingModels.get(sessionId);
+    if (pending === undefined) return;
+    this.#pendingModels.delete(sessionId);
+    const host = this.#getAwakeHost(sessionId);
+    if (host !== undefined) {
+      await host.appendDaemonEntry("pi-daemon/model", {
+        v: 1,
+        state: "dropped",
+        reason,
+        model: pending.model,
+        ...(pending.thinkingLevel === undefined ? {} : { thinkingLevel: pending.thinkingLevel }),
+      });
+    }
+  }
+
   async abort(input: AbortSubmission): Promise<OperationResult<"abort">> {
     this.assertAbortSettlementHealthy(input.sessionId);
     let precedingAbort = this.#abortSettlements.get(input.sessionId);
@@ -382,6 +441,21 @@ export class PromptController {
         // The SDK now preserves undelivered steering and follow-ups on abort.
         // Discard them only after the run settles so they cannot reach a later prompt.
         host.session.clearQueue();
+        for (const state of this.#statesByKey.values()) {
+          if (
+            state.sessionId === input.sessionId &&
+            !state.promptLaunched &&
+            !state.terminal &&
+            !state.settlementScheduled
+          ) {
+            this.scheduleTerminal(state, { outcome: "aborted", errorCode: "aborted" });
+          }
+        }
+        const pendingModel = this.#pendingModels.get(input.sessionId);
+        if (pendingModel !== undefined) {
+          this.#pendingModels.delete(input.sessionId);
+          await host.appendDaemonEntry("pi-daemon/model", { v: 1, state: "dropped", reason: "aborted", model: pendingModel.model, ...(pendingModel.thinkingLevel === undefined ? {} : { thinkingLevel: pendingModel.thinkingLevel }) });
+        }
         await host.drain();
         return { aborted, host };
       });
@@ -512,6 +586,28 @@ export class PromptController {
     }
   }
 
+  private async applyPendingModel(
+    sessionId: string,
+    host: AwakeSessionHost,
+    leaseId?: string,
+  ): Promise<void> {
+    const pendingModel = this.#pendingModels.get(sessionId);
+    if (
+      host.session.isStreaming ||
+      pendingModel === undefined ||
+      (leaseId !== undefined && pendingModel.leaseId !== leaseId)
+    ) return;
+    if (host.setModel === undefined) throw new ServerRequestError("unavailable", "live model changes are unavailable");
+    await host.setModel(pendingModel.model, pendingModel.thinkingLevel);
+    this.#pendingModels.delete(sessionId);
+    await host.appendDaemonEntry("pi-daemon/model", {
+      v: 1,
+      state: "applied",
+      model: pendingModel.model,
+      ...(pendingModel.thinkingLevel === undefined ? {} : { thinkingLevel: pendingModel.thinkingLevel }),
+    });
+  }
+
   private assertAbortSettlementHealthy(sessionId: string): void {
     if (this.#abortSettlementFailures.has(sessionId)) {
       throw new ServerRequestError(
@@ -615,6 +711,7 @@ export class PromptController {
     if (busy && input.whenBusy === "reject") {
       throw new ServerRequestError("busy", `session is busy: ${input.sessionId}`);
     }
+    if (!busy) await this.applyPendingModel(input.sessionId, host, input.leaseId);
     const disposition = busy ? "queued" : "started";
     const promptId = this.#promptId();
     const claimData: CustomEntryData<"pi-daemon/prompt-claim"> = {
@@ -649,6 +746,8 @@ export class PromptController {
       payloadHash,
       promptId,
       text: input.text,
+      leaseId: input.leaseId,
+      options: canonical.options,
       acceptedAtMs,
       disposition,
       host,
@@ -657,6 +756,7 @@ export class PromptController {
       claimEntryId,
       deliveryOrder: this.#nextDeliveryOrder++,
       promptPromise: Promise.resolve(),
+      promptLaunched: false,
       preflightAccepted: undefined,
       queuedBySdk: false,
       agentStarted: false,
@@ -669,14 +769,25 @@ export class PromptController {
     };
     this.#statesByKey.set(stateKey, state);
 
+    if (disposition === "queued") {
+      // Keep the prompt out of the SDK continuation queue so a pending model can be
+      // applied after this run settles and before the queued prompt starts its turn.
+      state.responseSettled = true;
+      state.response.resolve({
+        outcome: "accepted",
+        disposition,
+        promptId,
+        generation: host.generation,
+      });
+      return { response: state.response.promise };
+    }
+
     const promptOptions: PromptOptions = {
       expandPromptTemplates: canonical.options.expandPromptTemplates,
       source: canonical.options.source,
-      ...(disposition === "queued" ? { streamingBehavior: "followUp" as const } : {}),
       preflightResult: (result) => {
         const success = true;
-        const queuedBySdk =
-          result === "queued" && disposition === "queued" && host.session.pendingMessageCount > 0;
+        const queuedBySdk = result === "queued" && host.session.pendingMessageCount > 0;
         this.track(
           this.queueFor(input.sessionId).enqueue(() =>
             this.handlePreflight(state, success, queuedBySdk),
@@ -685,6 +796,7 @@ export class PromptController {
         );
       },
     };
+    state.promptLaunched = true;
     state.promptPromise = host.session.prompt(input.text, promptOptions);
     this.observePromptCompletion(state);
     return { response: state.response.promise };
@@ -752,6 +864,7 @@ export class PromptController {
         .filter(
           (state) =>
             state.sessionId === publication.sessionId &&
+            state.promptLaunched &&
             !state.terminal &&
             state.preflightAccepted === true &&
             state.userEntryId === undefined,
@@ -786,7 +899,7 @@ export class PromptController {
     if (current !== undefined) current.finalEntryId = entry.id;
   }
 
-  private handleSdkEvent(publication: HostSdkEvent): void {
+  private async handleSdkEvent(publication: HostSdkEvent): Promise<void> {
     if (this.#disposed) return;
     const candidates = [...this.#statesByKey.values()].filter(
       (state) =>
@@ -796,18 +909,25 @@ export class PromptController {
     );
     if (publication.event.type === "agent_start") {
       for (const state of candidates) {
-        if (state.disposition === "started") state.agentStarted = true;
+        if (state.promptLaunched) state.agentStarted = true;
       }
       return;
     }
     if (publication.event.type !== "agent_settled") return;
+    let scheduledTerminal = false;
     for (const state of candidates) {
       if (
+        state.promptLaunched &&
         state.preflightAccepted === true &&
         (state.agentStarted || state.queuedBySdk)
       ) {
         this.scheduleTerminal(state);
+        scheduledTerminal = true;
       }
+    }
+    if (!scheduledTerminal) {
+      const host = this.#getAwakeHost(publication.sessionId);
+      if (host !== undefined) await this.startNextQueuedPrompt(publication.sessionId, host);
     }
   }
 
@@ -959,6 +1079,40 @@ export class PromptController {
         state.response.reject(responseError);
       }
     }
+    await this.startNextQueuedPrompt(state.sessionId, state.host);
+  }
+
+  private async startNextQueuedPrompt(sessionId: string, host: AwakeSessionHost): Promise<void> {
+    if (host.session.isStreaming) return;
+    const next = [...this.#statesByKey.values()]
+      .filter(
+        (state) =>
+          state.sessionId === sessionId &&
+          state.disposition === "queued" &&
+          !state.promptLaunched &&
+          !state.settlementScheduled &&
+          !state.terminal,
+      )
+      .sort((left, right) => left.deliveryOrder - right.deliveryOrder)[0];
+    if (next === undefined) return;
+
+    await this.applyPendingModel(sessionId, host, next.leaseId);
+    const promptOptions: PromptOptions = {
+      expandPromptTemplates: next.options.expandPromptTemplates,
+      source: next.options.source,
+      preflightResult: (result) => {
+        const queuedBySdk = result === "queued" && host.session.pendingMessageCount > 0;
+        this.track(
+          this.queueFor(sessionId).enqueue(() =>
+            this.handlePreflight(next, true, queuedBySdk),
+          ),
+          sessionId,
+        );
+      },
+    };
+    next.promptLaunched = true;
+    next.promptPromise = host.session.prompt(next.text, promptOptions);
+    this.observePromptCompletion(next);
   }
 
   private rejectPendingForExternalWriter(state: PromptDispatchState): void {

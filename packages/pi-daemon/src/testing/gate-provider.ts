@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,13 +48,19 @@ interface PiAiGateModule {
   readonly InMemoryModelsStore: new () => ModelsStore;
 }
 
+// The daemon may load this file as raw TypeScript through PI_DAEMON_MODEL_RUNTIME_MODULE,
+// so it must not import sibling modules. Keep in step with src/testing/pi-ai-module.ts.
+// Older SDKs nest pi-ai under the SDK package; current ones hoist it beside the SDK.
 const sdkRoot = dirname(
   dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))),
 );
-const piAiModulePath = join(
-  sdkRoot,
-  "node_modules/@earendil-works/pi-ai/dist/index.js",
-);
+const piAiModulePath = [
+  join(sdkRoot, "node_modules/@earendil-works/pi-ai/dist/index.js"),
+  join(dirname(sdkRoot), "pi-ai/dist/index.js"),
+].find((candidate) => existsSync(candidate));
+if (piAiModulePath === undefined) {
+  throw new Error(`cannot locate @earendil-works/pi-ai for the Pi SDK at ${sdkRoot}`);
+}
 const {
   createAssistantMessageEventStream,
   InMemoryCredentialStore,

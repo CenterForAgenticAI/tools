@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { realpathSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { accessSync, realpathSync, statSync, constants as fsConstants } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
@@ -16,10 +17,35 @@ import { SessionOperationError } from "./errors.js";
 import { SessionLockRegistry } from "./lock-registry.js";
 import { projectSessionSummary } from "./projection.js";
 
+function canonicalizeEnvironmentPath(value: unknown, field: string, directory: boolean): string {
+  if (typeof value !== "string" || !isAbsolute(value)) {
+    throw new SessionOperationError("invalid_request", `${field} must be an absolute path`);
+  }
+  try {
+    const canonical = realpathSync(value);
+    const stat = statSync(canonical);
+    if ((directory && !stat.isDirectory()) || (!directory && !stat.isFile())) throw new Error("wrong type");
+    accessSync(canonical, fsConstants.R_OK);
+    return canonical;
+  } catch {
+    throw new SessionOperationError("invalid_request", `${field} must be an existing readable ${directory ? "directory" : "file"}`);
+  }
+}
+
+function canonicalizeEnvironment(params: OperationParams<"create">) {
+  return {
+    agentDir: params.agentDir === undefined ? undefined : canonicalizeEnvironmentPath(params.agentDir, "agentDir", true),
+    additionalExtensionPaths: params.additionalExtensionPaths?.map((path, index) =>
+      canonicalizeEnvironmentPath(path, `additionalExtensionPaths[${index}]`, false),
+    ) ?? [],
+  };
+}
+
 export interface ColdSessionOperationsOptions {
   readonly registry: Registry;
   readonly lockRegistry?: SessionLockRegistry;
   readonly sessionDir?: string;
+  readonly agentDir?: string;
   readonly now?: () => number;
 }
 
@@ -77,7 +103,14 @@ function assertSameCreateRequest(
     session.cwd !== cwd ||
     (params.name !== undefined && session.name !== params.name) ||
     (params.sleepAfterMs !== undefined &&
-      session.sleepAfterMs !== params.sleepAfterMs)
+      session.sleepAfterMs !== params.sleepAfterMs) ||
+    (params.agentDir !== undefined &&
+      session.agentDir !== canonicalizeEnvironmentPath(params.agentDir, "agentDir", true)) ||
+    (params.additionalExtensionPaths !== undefined &&
+      JSON.stringify(session.additionalExtensionPaths) !== JSON.stringify(params.additionalExtensionPaths.map((path, index) =>
+        canonicalizeEnvironmentPath(path, `additionalExtensionPaths[${index}]`, false),
+      ))) ||
+    (params.environment !== undefined && !isDeepStrictEqual(session.environment, params.environment))
   ) {
     throw new SessionOperationError(
       "duplicate_session",
@@ -114,6 +147,7 @@ export class ColdSessionOperations {
   readonly #registry: Registry;
   readonly #lockRegistry: SessionLockRegistry;
   readonly #sessionDir: string | undefined;
+  readonly #agentDir: string;
   readonly #now: () => number;
 
   constructor(options: ColdSessionOperationsOptions) {
@@ -123,11 +157,13 @@ export class ColdSessionOperations {
       options.sessionDir === undefined
         ? undefined
         : canonicalizeDirectory(options.sessionDir);
+    this.#agentDir = options.agentDir ?? "";
     this.#now = options.now ?? Date.now;
   }
 
   create(params: OperationParams<"create">): OperationResult<"create"> {
     const cwd = canonicalizeDirectory(params.cwd);
+    const environment = canonicalizeEnvironment(params);
     const sessionId = params.sessionId ?? randomUUID();
     const existing = this.#registry.getSession(sessionId);
 
@@ -142,6 +178,12 @@ export class ColdSessionOperations {
     }
 
     const manager = SessionManager.create(cwd, this.#sessionDir, { id: sessionId });
+    manager.appendCustomEntry("pi-daemon/environment", {
+      v: 1,
+      agentDir: environment.agentDir ?? this.#agentDir,
+      additionalExtensionPaths: [...environment.additionalExtensionPaths],
+      ...(params.environment === undefined ? {} : { environment: params.environment }),
+    });
     const plannedPath = manager.getSessionFile();
     if (manager.getSessionId() !== sessionId || plannedPath === undefined) {
       throw new SessionOperationError(
@@ -161,6 +203,9 @@ export class ColdSessionOperations {
         ...(params.sleepAfterMs === undefined
           ? {}
           : { sleepAfterMs: params.sleepAfterMs }),
+        agentDir: environment.agentDir ?? this.#agentDir,
+        additionalExtensionPaths: environment.additionalExtensionPaths,
+        ...(params.environment === undefined ? {} : { environment: params.environment }),
         nowMs: this.#now(),
       });
       if (

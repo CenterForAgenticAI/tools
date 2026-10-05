@@ -16,6 +16,7 @@ import type {
   PromptOutcomeErrorCode,
   PromptOutcomeName,
   RuntimeState,
+  JsonValue,
 } from "../protocol/index.js";
 import { migrateRegistry, REGISTRY_SCHEMA_VERSION } from "./migrations.js";
 import { canonicalizeSessionFilePath } from "./paths.js";
@@ -84,6 +85,9 @@ export interface SessionRecord {
   readonly fileMaterialized: boolean;
   readonly cwd: string;
   readonly name: string | null;
+  readonly agentDir: string;
+  readonly additionalExtensionPaths: readonly string[];
+  readonly environment?: JsonValue;
   readonly runtimeState: RuntimeState;
   readonly lastPhase: Phase;
   readonly attention: Attention;
@@ -107,6 +111,9 @@ export interface SessionReservation {
   readonly fileMaterialized?: boolean;
   readonly cwd: string;
   readonly name?: string;
+  readonly agentDir?: string;
+  readonly additionalExtensionPaths?: readonly string[];
+  readonly environment?: JsonValue;
   readonly sleepAfterMs?: number;
   readonly nowMs: number;
 }
@@ -246,6 +253,9 @@ interface SessionDatabaseRow {
   readonly file_materialized: number;
   readonly cwd: string;
   readonly name: string | null;
+  readonly agent_dir: string;
+  readonly additional_extension_paths_json: string;
+  readonly environment_json: string | null;
   readonly runtime_state: RuntimeState;
   readonly last_phase: Phase;
   readonly attention: Attention;
@@ -361,12 +371,26 @@ function requireNonNegativeInteger(value: number, name: string): void {
 
 function sessionFromDatabaseRow(row: unknown): SessionRecord {
   const value = row as SessionDatabaseRow;
+  let additionalExtensionPaths: unknown;
+  let environment: unknown;
+  try {
+    additionalExtensionPaths = JSON.parse(value.additional_extension_paths_json);
+    environment = value.environment_json === null ? undefined : JSON.parse(value.environment_json);
+  } catch {
+    throw new Error(`invalid persisted session environment: ${value.session_id}`);
+  }
+  if (!Array.isArray(additionalExtensionPaths) || !additionalExtensionPaths.every((path) => typeof path === "string")) {
+    throw new Error(`invalid persisted extension paths: ${value.session_id}`);
+  }
   return {
     sessionId: value.session_id,
     sessionFile: value.session_file,
     fileMaterialized: value.file_materialized === 1,
     cwd: value.cwd,
     name: value.name,
+    agentDir: value.agent_dir,
+    additionalExtensionPaths,
+    ...(environment === undefined ? {} : { environment: environment as JsonValue }),
     runtimeState: value.runtime_state,
     lastPhase: value.last_phase,
     attention: value.attention,
@@ -535,12 +559,14 @@ export class Registry {
         .prepare(
           `INSERT INTO sessions (
              session_id, session_file, file_materialized, cwd, name,
+             agent_dir, additional_extension_paths_json, environment_json,
              runtime_state, last_phase, attention, generation, epoch,
              active_leaf_id, clean_shutdown, sleep_after_ms, sleep_deadline_ms,
              activity_token, last_activity_ms, failure_code, failure_message,
              created_at_ms, updated_at_ms
            ) VALUES (
              ?, ?, ?, ?, ?,
+             ?, ?, ?,
              'asleep', 'idle', 'none', 0, 0,
              NULL, 0, ?, NULL,
              0, ?, NULL, NULL,
@@ -554,6 +580,9 @@ export class Registry {
           fileMaterialized ? 1 : 0,
           input.cwd,
           input.name ?? null,
+          input.agentDir ?? "",
+          JSON.stringify(input.additionalExtensionPaths ?? []),
+          input.environment === undefined ? null : JSON.stringify(input.environment),
           input.sleepAfterMs ?? null,
           input.nowMs,
           input.nowMs,
@@ -1567,12 +1596,13 @@ export class Registry {
       .prepare(
         `INSERT INTO sessions (
            session_id, session_file, file_materialized, cwd, name,
+           agent_dir, additional_extension_paths_json, environment_json,
            runtime_state, last_phase, attention, generation, epoch,
            active_leaf_id, clean_shutdown, sleep_after_ms, sleep_deadline_ms,
            activity_token, last_activity_ms, failure_code, failure_message,
            created_at_ms, updated_at_ms
          ) VALUES (
-           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
          )`,
       )
       .run(
@@ -1581,6 +1611,9 @@ export class Registry {
         session.fileMaterialized ? 1 : 0,
         session.cwd,
         session.name,
+        session.agentDir,
+        JSON.stringify(session.additionalExtensionPaths),
+        session.environment === undefined ? null : JSON.stringify(session.environment),
         session.runtimeState,
         session.lastPhase,
         session.attention,

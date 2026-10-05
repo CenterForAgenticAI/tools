@@ -85,6 +85,18 @@
         "name": {
           "type": "string"
         },
+        "agentDir": {
+          "type": "string"
+        },
+        "additionalExtensionPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "environment": {
+          "$ref": "#/$defs/JsonValue"
+        },
         "runtime": {
           "type": "string",
           "enum": [
@@ -235,6 +247,7 @@
         "prompt_status",
         "steer",
         "follow_up",
+        "set_model",
         "abort",
         "lease",
         "ui_answer",
@@ -862,6 +875,37 @@
           "type": "object",
           "properties": {
             "op": {
+              "const": "set_model"
+            },
+            "errorCode": {
+              "type": "string",
+              "enum": [
+                "invalid_request",
+                "unsupported_op",
+                "unavailable",
+                "internal",
+                "unknown_session",
+                "not_attached",
+                "stale_generation",
+                "asleep",
+                "external_writer",
+                "no_lease",
+                "lease_expired",
+                "rejected",
+                "invalid_state"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "errorCode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
               "const": "abort"
             },
             "errorCode": {
@@ -1283,6 +1327,18 @@
                   "type": "integer",
                   "minimum": 0,
                   "maximum": 9007199254740991
+                },
+                "agentDir": {
+                  "type": "string"
+                },
+                "additionalExtensionPaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "environment": {
+                  "$ref": "#/$defs/JsonValue"
                 }
               },
               "required": [
@@ -1703,6 +1759,80 @@
                 "attachmentId",
                 "generation",
                 "text"
+              ],
+              "additionalProperties": false
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "t",
+            "id",
+            "op",
+            "params",
+            "session"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "const": "req"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "set_model"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "attachmentId": {
+                  "type": "string"
+                },
+                "leaseId": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "model": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "provider",
+                    "id"
+                  ],
+                  "additionalProperties": false
+                },
+                "thinkingLevel": {
+                  "type": "string",
+                  "enum": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                }
+              },
+              "required": [
+                "attachmentId",
+                "leaseId",
+                "generation",
+                "model"
               ],
               "additionalProperties": false
             },
@@ -4235,6 +4365,101 @@
                       "const": "daemon"
                     },
                     "name": {
+                      "const": "model"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "v": {
+                          "const": 1
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "applied",
+                            "dropped"
+                          ]
+                        },
+                        "model": {
+                          "type": "object",
+                          "properties": {
+                            "provider": {
+                              "type": "string"
+                            },
+                            "id": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "provider",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "thinkingLevel": {
+                          "type": "string"
+                        },
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "v",
+                        "state",
+                        "model"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "sourceEntryId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "session",
+                    "attachmentId",
+                    "generation",
+                    "epoch",
+                    "seq",
+                    "kind",
+                    "name",
+                    "data",
+                    "sourceEntryId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "const": "ev"
+                    },
+                    "session": {
+                      "type": "string"
+                    },
+                    "attachmentId": {
+                      "type": "string"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "epoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "const": "daemon"
+                    },
+                    "name": {
                       "const": "attention"
                     },
                     "data": {
@@ -5374,11 +5599,13 @@
         "pi-daemon/restored",
         "pi-daemon/lifecycle",
         "pi-daemon/phase",
+        "pi-daemon/model",
         "pi-daemon/lease",
         "pi-daemon/prompt-claim",
         "pi-daemon/prompt-outcome",
         "pi-daemon/input",
         "pi-daemon/ui",
+        "pi-daemon/environment",
         "pi-daemon/epoch"
       ]
     },
@@ -5606,6 +5833,67 @@
                 "generation",
                 "epoch",
                 "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "customType",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "custom"
+            },
+            "customType": {
+              "const": "pi-daemon/model"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "const": 1
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "applied",
+                    "dropped"
+                  ]
+                },
+                "model": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "provider",
+                    "id"
+                  ],
+                  "additionalProperties": false
+                },
+                "thinkingLevel": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v",
+                "state",
+                "model"
               ],
               "additionalProperties": false
             }
@@ -6030,6 +6318,49 @@
                 "generation",
                 "epoch",
                 "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "customType",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "custom"
+            },
+            "customType": {
+              "const": "pi-daemon/environment"
+            },
+            "data": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "const": 1
+                },
+                "agentDir": {
+                  "type": "string"
+                },
+                "additionalExtensionPaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "environment": {
+                  "$ref": "#/$defs/JsonValue"
+                }
+              },
+              "required": [
+                "v",
+                "agentDir",
+                "additionalExtensionPaths"
               ],
               "additionalProperties": false
             }

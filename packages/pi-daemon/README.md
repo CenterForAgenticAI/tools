@@ -84,3 +84,7 @@ node scripts/public-release-smoke.mjs
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+### Live model changes
+
+A driver lease may call `lease.setModel({ model: { provider, id }, thinkingLevel? })`. Idle sessions apply immediately; changes requested while a turn is active are queued for the next turn.

@@ -181,4 +181,4 @@ Use the exported validators instead of accepting untrusted frames by shape alone
 - Several sessions may be awake in one process. Extensions share ES-module state, `cwd`, environment variables, listeners, timers, and other process-global resources. Run only extensions you trust to share that process.
 - Live token and tool updates can be lost; committed entries and explicit daemon custom entries are the durable contract.
 - For a brand-new session file, pi 0.99.2 may dispatch the first prompt before its claim reaches the JSONL file. A normal crash can retain a pending SQLite row, but file-only crash recovery is guaranteed only after the session file has materialized. Never infer that `unknown` means the first prompt did not run.
-- The daemon exact-pins its pi SDK version because it observes internal persistence seams. Do not bypass the compatibility stamp when updating the SDK.
+- The daemon observes internal Pi persistence seams, so startup refuses a Pi SDK below `MINIMUM_HOST_SDK_VERSION` or one missing a required seam. Newer releases are accepted when the probe passes; see [SDK compatibility](maintainers/sdk-upgrade.md).

@@ -16,6 +16,7 @@ export interface LeaseArbiterOptions {
   readonly getAwakeHost?: (
     sessionId: string,
   ) => Pick<AwakeSessionHost, "appendDaemonEntry"> | undefined;
+  readonly onLeaseChanged?: (sessionId: string, reason: "lease_changed" | "lease_released" | "lease_expired") => void | Promise<void>;
 }
 
 export interface LeaseAcquireInput {
@@ -88,6 +89,7 @@ export class LeaseArbiter {
   readonly #now: () => number;
   readonly #leaseId: () => string;
   readonly #getAwakeHost: NonNullable<LeaseArbiterOptions["getAwakeHost"]>;
+  readonly #onLeaseChanged: NonNullable<LeaseArbiterOptions["onLeaseChanged"]>;
 
   constructor(options: LeaseArbiterOptions) {
     this.#registry = options.registry;
@@ -95,6 +97,7 @@ export class LeaseArbiter {
     this.#now = options.now ?? Date.now;
     this.#leaseId = options.leaseId ?? randomUUID;
     this.#getAwakeHost = options.getAwakeHost ?? (() => undefined);
+    this.#onLeaseChanged = options.onLeaseChanged ?? (() => undefined);
   }
 
   async acquire(input: LeaseAcquireInput): Promise<LeaseGrant> {
@@ -127,6 +130,7 @@ export class LeaseArbiter {
         nowMs,
       );
     }
+    await this.#onLeaseChanged(input.sessionId, previous.status === "active" ? "lease_changed" : "lease_expired");
     await this.appendTransition(input.sessionId, {
       v: 1,
       action: "acquired",
@@ -190,6 +194,7 @@ export class LeaseArbiter {
     if (session === undefined) {
       throw new Error("session disappeared after lease takeover");
     }
+    await this.#onLeaseChanged(input.sessionId, "lease_changed");
     await this.appendTransition(input.sessionId, {
       v: 1,
       action: "taken_over",
@@ -279,6 +284,7 @@ export class LeaseArbiter {
     if (session === undefined) {
       throw new Error("session disappeared after lease release");
     }
+    await this.#onLeaseChanged(input.sessionId, "lease_released");
     await this.appendTransition(input.sessionId, {
       v: 1,
       action: "released",
@@ -306,6 +312,7 @@ export class LeaseArbiter {
     if (session === undefined) {
       throw new Error("session disappeared after disconnect lease release");
     }
+    await this.#onLeaseChanged(sessionId, "lease_released");
     await this.appendTransition(sessionId, {
       v: 1,
       action: "disconnected",
@@ -357,6 +364,7 @@ export class LeaseArbiter {
     if (session === undefined) {
       throw new Error("session disappeared after lease expiry");
     }
+    await this.#onLeaseChanged(sessionId, "lease_expired");
     await this.appendTransition(sessionId, {
       v: 1,
       action: "expired",

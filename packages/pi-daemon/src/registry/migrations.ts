@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-export const REGISTRY_SCHEMA_VERSION = 1;
+export const REGISTRY_SCHEMA_VERSION = 2;
 
 const INITIAL_SCHEMA = `
   CREATE TABLE meta (
@@ -14,6 +14,9 @@ const INITIAL_SCHEMA = `
     file_materialized INTEGER NOT NULL CHECK (file_materialized IN (0,1)),
     cwd TEXT NOT NULL,
     name TEXT,
+    agent_dir TEXT NOT NULL,
+    additional_extension_paths_json TEXT NOT NULL,
+    environment_json TEXT,
     runtime_state TEXT NOT NULL CHECK (runtime_state IN ('awake','asleep')),
     last_phase TEXT NOT NULL CHECK (last_phase IN ('idle','working','blocked','failed','gone')),
     attention TEXT NOT NULL CHECK (attention IN ('none','question','failed','interrupted')),
@@ -80,6 +83,13 @@ export function migrateRegistry(database: DatabaseSync): void {
   try {
     if (currentVersion === 0) {
       database.exec(INITIAL_SCHEMA);
+      database.exec(`PRAGMA user_version = ${REGISTRY_SCHEMA_VERSION}`);
+    } else if (currentVersion === 1) {
+      database.exec(`
+        ALTER TABLE sessions ADD COLUMN agent_dir TEXT NOT NULL DEFAULT '';
+        ALTER TABLE sessions ADD COLUMN additional_extension_paths_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE sessions ADD COLUMN environment_json TEXT;
+      `);
       database.exec(`PRAGMA user_version = ${REGISTRY_SCHEMA_VERSION}`);
     }
     database.exec("COMMIT");

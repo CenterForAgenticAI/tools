@@ -65,6 +65,9 @@ const sessionSummarySchema = object({
   sessionFile: stringSchema,
   cwd: stringSchema,
   name: optional(stringSchema),
+  agentDir: optional(stringSchema),
+  additionalExtensionPaths: optional(array(stringSchema)),
+  environment: optional(jsonValue),
   runtime: runtimeStateSchema,
   phase: phaseSchema,
   observedPhase: observedPhaseSchema,
@@ -119,6 +122,14 @@ export const PROMPT_OUTCOME_ERROR_CODES = [
 
 const promptOutcomeSchema = unionFromRecord(promptOutcomeSource);
 const promptOutcomeErrorCodeSchema = enumFromValues(PROMPT_OUTCOME_ERROR_CODES);
+
+const modelEntryDataSchema = object({
+  v: literal(1),
+  state: enumeration("pending", "applied", "dropped"),
+  model: object({ provider: stringSchema, id: stringSchema }),
+  thinkingLevel: optional(stringSchema),
+  reason: optional(stringSchema),
+});
 
 export type PromptOutcome = Infer<typeof promptOutcomeSchema>;
 export type PromptOutcomeName = (typeof PROMPT_OUTCOMES)[number];
@@ -321,10 +332,13 @@ const operationSource = {
       name: optional(stringSchema),
       sessionId: optional(stringSchema),
       sleepAfterMs: optional(nonNegativeInteger),
+      agentDir: optional(stringSchema),
+      additionalExtensionPaths: optional(array(stringSchema)),
+      environment: optional(jsonValue),
     }),
     result: object({ session: sessionSummarySchema, created: literal(true) }),
     errorGroups: ["request", "registrationLock"],
-    extraErrors: ["duplicate_session", "sdk_incompatible"],
+    extraErrors: ["duplicate_session", "invalid_request", "sdk_incompatible"],
   }),
   attach: operation({
     session: "required",
@@ -438,6 +452,16 @@ const operationSource = {
       "awakeHostMutation",
     ],
     extraErrors: ["invalid_state", "rejected"],
+  }),
+  set_model: operation({
+    session: "required",
+    params: object({ attachmentId: stringSchema, leaseId: stringSchema, generation: nonNegativeInteger, model: object({ provider: stringSchema, id: stringSchema }), thinkingLevel: optional(enumeration("minimal", "low", "medium", "high", "xhigh")) }),
+    result: union(
+      object({ state: literal("applied"), model: object({ provider: stringSchema, id: stringSchema }), thinkingLevel: optional(stringSchema) }),
+      object({ state: literal("queued"), model: object({ provider: stringSchema, id: stringSchema }), thinkingLevel: optional(stringSchema) }),
+    ),
+    errorGroups: ["request", "session", "attachment", "generation", "awakeHostMutation", "driver"],
+    extraErrors: ["rejected", "invalid_state"],
   }),
   abort: operation({
     session: "required",
@@ -922,6 +946,7 @@ const readerControlDaemonFrame = <const Name extends string>(name: Name) =>
 
 const daemonFrameSource = {
   phase: sourceBackedDaemonFrame("phase", jsonObject),
+  model: sourceBackedDaemonFrame("model", modelEntryDataSchema),
   attention: sourceBackedDaemonFrame("attention", jsonObject),
   lease: sourceBackedDaemonFrame("lease", jsonObject),
   prompt: sourceBackedDaemonFrame("prompt", promptOutcomeSchema),
@@ -1050,6 +1075,7 @@ const customEntryDataSource = {
     epoch: nonNegativeInteger,
     at: timestamp,
   }),
+  "pi-daemon/model": modelEntryDataSchema,
   "pi-daemon/lease": object({
     v: literal(1),
     action: enumeration(
@@ -1123,6 +1149,12 @@ const customEntryDataSource = {
     generation: nonNegativeInteger,
     epoch: nonNegativeInteger,
     at: timestamp,
+  }),
+  "pi-daemon/environment": object({
+    v: literal(1),
+    agentDir: stringSchema,
+    additionalExtensionPaths: array(stringSchema),
+    environment: optional(jsonValue),
   }),
   "pi-daemon/epoch": object({
     v: literal(1),

@@ -49,8 +49,10 @@ export {
   type PersistenceObserverErrorListener,
 } from "./persistence-observer.js";
 export {
-  STAMPED_HOST_SDK_VERSION,
+  HOST_SDK_VERSION,
+  MINIMUM_HOST_SDK_VERSION,
   SdkCompatibilityError,
   assertSdkCompatible,
   defaultHostSdkCompatibility,
+  isSupportedSdkVersion,
 } from "./sdk-stamp.js";

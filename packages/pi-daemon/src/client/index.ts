@@ -445,6 +445,10 @@ export class DaemonLease {
     );
   }
 
+  async setModel(params: { readonly model: OperationParams<"set_model">["model"]; readonly thinkingLevel?: OperationParams<"set_model">["thinkingLevel"] }): Promise<OperationResult<"set_model">> {
+    return await this.attachment.client.request("set_model", { model: params.model, ...(params.thinkingLevel === undefined ? {} : { thinkingLevel: params.thinkingLevel }), attachmentId: this.attachment.attachmentId, leaseId: this.leaseId, generation: this.generation }, this.attachment.sessionId);
+  }
+
   async abort(params: LeaseAbortOptions = {}): Promise<OperationResult<"abort">> {
     return await this.attachment.client.request(
       "abort",

@@ -135,11 +135,28 @@ export interface HostUiBridge {
   subscribe(listener: (frame: HostUiFrame) => void): () => void;
 }
 
+export interface HostModelFrame {
+  readonly session: string;
+  readonly kind: "daemon";
+  readonly generation: number;
+  readonly epoch: number;
+  readonly name: "model";
+  readonly data: {
+    readonly state: "pending" | "applied" | "dropped";
+    readonly model: { readonly provider: string; readonly id: string };
+    readonly thinkingLevel?: string;
+    readonly reason?: string;
+  };
+  readonly sourceEntryId: string;
+}
+
 export interface AwakeSessionHost {
   readonly generation: number;
   readonly sessionId: string;
   readonly session: AgentSession;
   readonly sessionManager: SessionManager;
+  readonly validateModel?: (model: { readonly provider: string; readonly id: string }) => void;
+  readonly setModel?: (model: { readonly provider: string; readonly id: string }, thinkingLevel?: string) => Promise<void>;
   readonly resourceLoader: DefaultResourceLoader;
   readonly ui: HostUiBridge;
   readonly committedSequence: number;
@@ -540,6 +557,24 @@ class BoundSessionHost implements StatefulAwakeSessionHost {
     const answered = this.ui.answer(questionId, answer);
     if (answered) this.#onActivity(false);
     return Promise.resolve(answered);
+  }
+
+  validateModel(model: { readonly provider: string; readonly id: string }): void {
+    const resolved = this.session.modelRuntime.getModel(model.provider, model.id);
+    if (resolved === undefined) throw new SessionHostError("invalid_state", `unknown model: ${model.provider}/${model.id}`);
+    if (!this.session.modelRuntime.hasConfiguredAuth(model.provider)) {
+      throw new SessionHostError("invalid_state", `model provider is not authenticated: ${model.provider}`);
+    }
+  }
+
+  async setModel(model: { readonly provider: string; readonly id: string }, thinkingLevel?: string): Promise<void> {
+    const resolved = this.session.modelRuntime.getModel(model.provider, model.id);
+    if (resolved === undefined) throw new SessionHostError("invalid_state", `unknown model: ${model.provider}/${model.id}`);
+    if (!this.session.modelRuntime.hasConfiguredAuth(model.provider)) {
+      throw new SessionHostError("invalid_state", `model provider is not authenticated: ${model.provider}`);
+    }
+    await this.session.setModel(resolved);
+    if (thinkingLevel !== undefined) this.session.setThinkingLevel(thinkingLevel as Parameters<AgentSession["setThinkingLevel"]>[0], { persist: false });
   }
 
   async drain(): Promise<void> {
@@ -1981,20 +2016,32 @@ export class SessionHostController {
     });
     this.#uiBindings.set(record.sessionId, { ui, stopForwarding });
     try {
+      const hasEnvironmentEntry = manager.getEntries().some(
+        (entry) => entry.type === "custom" && entry.customType === "pi-daemon/environment",
+      );
+      if (!hasEnvironmentEntry) {
+        await appendDaemonCustomEntry(manager, "pi-daemon/environment", {
+          v: 1,
+          agentDir: record.agentDir || this.#agentDir,
+          additionalExtensionPaths: [...record.additionalExtensionPaths],
+          ...(record.environment === undefined ? {} : { environment: record.environment }),
+        });
+      }
       const settingsManager =
         this.#sessionOptions?.settingsManager ??
-        SettingsManager.create(record.cwd, this.#agentDir);
+        SettingsManager.create(record.cwd, record.agentDir || this.#agentDir);
       const resourceLoader = new DefaultResourceLoader({
         ...this.#resourceLoaderOptions,
         cwd: record.cwd,
-        agentDir: this.#agentDir,
+        agentDir: record.agentDir || this.#agentDir,
+        additionalExtensionPaths: [...record.additionalExtensionPaths],
         settingsManager,
       });
       await resourceLoader.reload();
       const created = await createAgentSession({
         ...this.#sessionOptions,
         cwd: record.cwd,
-        agentDir: this.#agentDir,
+        agentDir: record.agentDir || this.#agentDir,
         settingsManager,
         resourceLoader,
         sessionManager: manager,

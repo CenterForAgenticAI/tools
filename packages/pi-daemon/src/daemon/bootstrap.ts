@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import {
-  STAMPED_HOST_SDK_VERSION,
+  HOST_SDK_VERSION,
   defaultHostSdkCompatibility,
   type HostSdkCompatibility,
   type SessionHostControllerOptions,
@@ -148,7 +148,7 @@ export async function runDaemon(options: RunDaemonOptions = {}): Promise<Running
   const instanceId = randomUUID();
   const startedAt = new Date().toISOString();
   const daemonVersion = options.daemonVersion ?? DAEMON_VERSION;
-  const sdkVersion = options.sdkVersion ?? STAMPED_HOST_SDK_VERSION;
+  const sdkVersion = options.sdkVersion ?? HOST_SDK_VERSION;
   const sdkCompatibility = options.sdkCompatibility ?? defaultHostSdkCompatibility;
   const protocolVersion = options.protocolVersion ?? DEFAULT_PROTOCOL_VERSION;
   const lockRecord: SingletonLockRecord = {

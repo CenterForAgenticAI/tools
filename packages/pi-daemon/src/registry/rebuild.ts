@@ -342,6 +342,9 @@ function projectSessionFileBranch(
   let epoch = 0;
   let sleepAfterMs: number | null = null;
   let failureCode: string | null = null;
+  let agentDir = "";
+  let additionalExtensionPaths: string[] = [];
+  let environment: import("../protocol/index.js").JsonValue | undefined;
   const promptsById = new Map<string, PromptIndexRecord>();
   const promptIdsByKeyHash = new Map<string, string>();
 
@@ -363,6 +366,12 @@ function projectSessionFileBranch(
     }
 
     switch (custom.customType) {
+      case "pi-daemon/environment": {
+        agentDir = custom.data.agentDir;
+        additionalExtensionPaths = [...custom.data.additionalExtensionPaths];
+        environment = custom.data.environment;
+        break;
+      }
       case "pi-daemon/restored": {
         attention = "interrupted";
         break;
@@ -466,6 +475,9 @@ function projectSessionFileBranch(
       fileMaterialized: true,
       cwd: header.cwd,
       name,
+      agentDir,
+      additionalExtensionPaths,
+      ...(environment === undefined ? {} : { environment }),
       runtimeState: "asleep",
       lastPhase,
       attention,
