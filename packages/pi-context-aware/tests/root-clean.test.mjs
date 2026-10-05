@@ -24,6 +24,7 @@ export const ALLOWED_ROOT_ENTRIES = new Set([
 	"eslint.config.js",
 	"package-lock.json",
 	"package.json",
+	"renovate.json", // Renovate dependency-update configuration, maintained by the repository owners.
 	"scripts",
 	"src",
 	"tests",

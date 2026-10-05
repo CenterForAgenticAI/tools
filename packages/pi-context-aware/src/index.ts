@@ -217,6 +217,7 @@ import {
 	type WorkstreamCompactionProjection,
 } from "./workstream/workstream-context.js";
 import { replayWorkstreamEntries } from "./workstream/workstream-replay.js";
+import { prepareSessionFocusArguments } from "./tool-arguments.js";
 import { redactPinnedVerbatimBlock, redactText } from "./workstream/workstream-safety.js";
 import { appendWorkstreamSnapshot } from "./workstream/workstream-state.js";
 import {
@@ -8659,6 +8660,7 @@ export default function (pi: ExtensionAPI) {
 		description: "Optionally start, inspect, or update durable focus when the purpose must survive an expected compaction, handoff, or restart, or the user explicitly requests focus; never use it for routine progress tracking. Agent-created objectives are unpinned; agent mutations cannot replace a pinned user objective.",
 		promptSnippet: "Default to no focus. After any required thinking-effort preflight, start only when the purpose must survive an expected compaction, handoff, or restart, or the user explicitly requests focus. Complexity or length alone is not enough; self-contained answers and routine one-file edits stay unfocused. Do not log ordinary steps, branches, commits, tests, or phase completion.",
 		parameters: focusSchema,
+		prepareArguments: prepareSessionFocusArguments,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (params.action === "activity") {
 				return {

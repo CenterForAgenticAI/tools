@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { prepareSessionTasksArguments } from "../tool-arguments.js";
 
 import {
 	MAX_TASK_NOTE_CHARS,
@@ -462,6 +463,7 @@ export function registerSessionTasks(pi: ExtensionAPI, deps: TasksRuntimeDeps): 
 		description: TOOL_DESCRIPTION,
 		promptSnippet: TOOL_PROMPT_SNIPPET,
 		parameters: tasksSchema,
+		prepareArguments: prepareSessionTasksArguments,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!deps.enabled(ctx)) return toolFailure("The session task list is disabled for this session.");
 			const previous = currentTasks(deps, ctx);
