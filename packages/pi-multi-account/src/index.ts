@@ -75,7 +75,7 @@ import {
 import { parsePiCatalogSnapshot, type PiCatalogSnapshot } from "./api-pricing.js";
 import type { CostReport } from "./cost-report.js";
 import { createDefaultCostReportReader } from "./cost-report-reader.js";
-import type { PeriodType } from "./period-boundaries.js";
+import { getPeriodBounds, type PeriodType } from "./period-boundaries.js";
 import {
 	mergeRefreshedCredentials,
 	type CredentialUsability,
@@ -223,7 +223,12 @@ import { restoreManagedAliasModel } from "./session-restore.js";
 import {
 	accountFingerprint,
 	resolveAccountLabelWithinLimit,
+	resolveConfiguredAccountLabelWithinLimit,
 } from "./account-labels.js";
+import {
+	registerPublicAccountStatusService,
+	type PublicAccountStatusEventBus,
+} from "./public-status.js";
 import {
 	createAnthropicAliasProviderConfig,
 	reassertAnthropicBaseRegistration,
@@ -2277,6 +2282,14 @@ export const createMultiAccountExtension =
 		const registerLogicalApi = createLogicalApiRegistrarForFactoryGeneration();
 
 		let context: ExtensionContext | undefined;
+		// The public status service answers owner-unavailable until session_start
+		// has loaded config and discovered accounts, and again after shutdown, so
+		// a consumer never sees a default-config snapshot as authoritative.
+		let publicStatusStarted = false;
+		let publicStatusDisposed = false;
+		// The UTC day (the cost period closer's day) for which a public read last
+		// scheduled the period closer.
+		let publicStatusCostCloseDayStartMs: number | undefined;
 		let attributionStore: AttributionStore | undefined;
 		let latestLogicalPhysicalProviderId: string | undefined;
 		const logicalTerminalAssociations = createLogicalTerminalAssociationStore();
@@ -3304,6 +3317,20 @@ export const createMultiAccountExtension =
 				const label = resolveLabelFor(providerId);
 				return label === providerId ? undefined : label;
 			},
+			// The public status service publishes configured labels only. It must
+			// not use resolveLabelFor, which derives a label from the stored token
+			// (a Codex JWT email claim is a human account identifier).
+			publicAccountLabel: (providerId) => {
+				try {
+					return resolveConfiguredAccountLabelWithinLimit({
+						providerId,
+						accountLimit: config.accountLimit,
+						configured: config.accountLabels,
+					});
+				} catch {
+					return undefined;
+				}
+			},
 			// Re-read live rather than using the discovery snapshot: a long-lived
 			// session's snapshot ages out and would report healthy accounts as
 			// expired, prompting an unnecessary sign-in.
@@ -3317,6 +3344,12 @@ export const createMultiAccountExtension =
 					: usageFetcher.status(providerId, family, config);
 			},
 			costReport,
+			// The month API-equivalent report, read without the period closer:
+			// a polled public read must not drive retained-state writes.
+			publicCostReport: async () =>
+				options.costReport === undefined
+					? defaultCostReportReader("month")
+					: options.costReport("month"),
 			meteredFallbackStatus: () => {
 				const policy = openRouterPolicy();
 				const configuredPolicy = resolveOpenRouterEnvironmentPolicy({
@@ -3398,6 +3431,32 @@ export const createMultiAccountExtension =
 					}),
 			},
 		});
+		// Read-only public status service on Pi's shared event bus. Consumers
+		// discover it through the dependency-free `./public-status` subpath.
+		// Hosts without an event bus (minimal embedders and test doubles) simply
+		// do not offer the service; consumers then discover "unsupported".
+		const publicStatusEvents = (pi as { readonly events?: PublicAccountStatusEventBus })
+			.events;
+		const unregisterPublicStatusService =
+			publicStatusEvents === undefined
+				? () => {}
+				: registerPublicAccountStatusService(publicStatusEvents, async () => {
+						if (!publicStatusStarted || publicStatusDisposed) {
+							return { status: "unavailable", reason: "owner-unavailable" };
+						}
+						schedulePublicStatusCostClose(Date.now());
+						return {
+							status: "available",
+							snapshot: await commands.publicStatus(),
+						};
+					});
+		const disposePublicStatusService = (): void => {
+			// A handler a bus failed to unsubscribe must not keep publishing a
+			// frozen snapshot after shutdown; it reads owner-unavailable instead.
+			publicStatusDisposed = true;
+			publicStatusStarted = false;
+			unregisterPublicStatusService();
+		};
 		/**
 		 * The latest failure classified during the current agent run.
 		 *
@@ -4362,6 +4421,22 @@ export const createMultiAccountExtension =
 				warnCostCloseFailed();
 			}
 		};
+		// The public read itself stays write-free, but the month estimate reads
+		// closed day digests plus today's raw rows only. On the first public read
+		// of a new day, schedule the same deduplicated, leased closer a provider
+		// response uses (without awaiting it), so yesterday's spend reaches the
+		// month digest even when no provider response has arrived yet today.
+		const schedulePublicStatusCostClose = (nowMs: number): void => {
+			let dayStartMs: number;
+			try {
+				dayStartMs = getPeriodBounds(nowMs, "day").startMs;
+			} catch {
+				return;
+			}
+			if (publicStatusCostCloseDayStartMs === dayStartMs) return;
+			publicStatusCostCloseDayStartMs = dayStartMs;
+			closeCostPeriodsAfterObservation(nowMs);
+		};
 		const recordManagedAssistant = async (
 			message: AssistantMessage,
 			providerId: string,
@@ -4949,6 +5024,9 @@ export const createMultiAccountExtension =
 				} catch {
 					// The footer cannot fail session restore.
 				}
+				// Last: config is loaded and accounts are discovered, so the public
+				// status service may now publish an authoritative snapshot.
+				publicStatusStarted = !publicStatusDisposed;
 			}),
 		);
 		pi.on(
@@ -5893,6 +5971,11 @@ export const createMultiAccountExtension =
 					logicalRouteIndicator?.shutdown();
 				} catch {
 					// Footer cleanup cannot block session teardown.
+				}
+				try {
+					disposePublicStatusService();
+				} catch {
+					// Unsubscribing is best-effort and cannot block teardown.
 				}
 				resolverOwner.dispose();
 			});

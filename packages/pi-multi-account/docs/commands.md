@@ -67,6 +67,61 @@ After startup, explicit operator `group use` and `group reset` retain the semant
 in the table: they resolve this session's own policy. A later delegate resume
 inherits the parent's effective result again.
 
+## Public live account status (`./public-status`)
+
+The package exports a dependency-free subpath for other extensions in the same
+Pi process. The example uses the public name; import from the name the package
+is installed under, which is its published name:
+
+```ts
+import { discoverPublicAccountStatusReader } from "@centerforagenticai/pi-multi-account/public-status";
+
+const discovered = discoverPublicAccountStatusReader(pi.events);
+if (discovered.status === "available") {
+	const result = await discovered.reader.read();
+}
+```
+
+`src/public-status.js` is plain JavaScript with no imports at all, typed by the
+hand-written `src/public-status.d.ts`. Plain Node loads it from
+`node_modules` without a TypeScript loader, and importing it never loads this
+extension or Pi. When this extension is loaded it registers the
+service on `pi.events` once per extension load and removes it at
+`session_shutdown`.
+
+The contract is version 1 and is frozen:
+
+- Query channel `pi-multi-account:public-status-service-query:v1`, service
+  version `1`.
+- Discovery returns `{ status: "unsupported" }` when no owner answers.
+- `read()` returns `{ status: "available", snapshot }`, or
+  `{ status: "unavailable", reason }` where the reason is `owner-unavailable`
+  until `session_start` has loaded config and discovered accounts, and after
+  `session_shutdown`, and `source-error` when the owner throws. Error text
+  never reaches the consumer.
+- The snapshot has `sourceVersion: "public-status-v1"`, `observedAtMs`,
+  `accounts`, and `costEstimates`. Each account carries its provider id,
+  label, family, active flag, coarse health, usage headroom, remaining
+  request and token counts, recovery and credential-expiry times, fetch
+  freshness, and `costEstimateIds`. Credential values, fingerprints,
+  diagnostics, and model-routing details have no field.
+- The one cost estimate is this month's API-equivalent figure, labelled
+  `estimate-not-billing`. A failed cost read, an unpriced month, or an invalid
+  figure publishes no estimate and keeps the accounts. The read itself writes
+  nothing. The month figure counts closed day digests plus today's rows, so the
+  first public read of a new day also starts the background period closer
+  that a provider response would start, without waiting for it. Until it
+  finishes, that read can omit the previous day's spend.
+
+Version 1 accepts only the `anthropic` and `openai-codex` families. Google
+Antigravity accounts are omitted from the snapshot rather than published, so a
+v1 consumer still validates it. They wait for a later contract version.
+
+The public `label` is the operator-configured label from `accountLabels`, or
+the provider id when none is configured. It is never derived from a token: the
+Codex JWT `email`, `preferred_username`, or `name` claim that `/multi-account
+status` may show is a human account identifier and does not reach this surface.
+
 ## Command autocomplete
 
 Both commands offer argument suggestions as you type. Pi calls each command's

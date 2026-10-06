@@ -43,8 +43,13 @@ The package bundles reviewed Anthropic OAuth and Google Antigravity source under
 | Provider | `unified` | Optional exact-model logical provider generated from managed catalogs. |
 | CLI | `multi-account` | Offline cost reports, pricing refresh, period closure, and account plan history. |
 | Export | exact-model route resolver v1 | Read-only, credential-free route policy for code consumers. |
+| Export | `./public-status` v1 | Read-only live account status for other extensions over `pi.events`. |
 
 Every subcommand and argument is in [Commands, tools, and autocomplete](docs/commands.md). The resolver contract is in [Routing and recovery](docs/routing.md).
+
+### Public account status subpath
+
+Import `@centerforagenticai/pi-multi-account/public-status` and call `discoverPublicAccountStatusReader(pi.events)`. Use the package name your installation resolves: the package is installed under its published name. The subpath is a plain JavaScript module with no imports, so plain Node can load it and it never loads the extension or Pi. The v1 contract uses the query channel `pi-multi-account:public-status-service-query:v1` and returns a `public-status-v1` snapshot, or `owner-unavailable` until `session_start` finishes and after `session_shutdown`, and `source-error` when the owner fails. Version 1 covers only Anthropic and OpenAI Codex accounts; Google Antigravity accounts are omitted. Each account's `label` is the label you configured in `accountLabels`, or else the provider id. It is never read from a token. See [Commands, tools, and autocomplete](docs/commands.md#public-live-account-status-public-status).
 
 ## Configuration
 

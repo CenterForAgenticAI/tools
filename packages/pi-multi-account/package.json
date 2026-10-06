@@ -1,11 +1,17 @@
 {
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Global Anthropic and OpenAI Codex multi-account OAuth routing for Pi.",
   "type": "module",
   "bin": {
     "multi-account": "scripts/multi-account.mjs"
   },
-  "exports": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./public-status": {
+      "types": "./src/public-status.d.ts",
+      "default": "./src/public-status.js"
+    }
+  },
   "files": [
     "src",
     "scripts/multi-account.mjs",

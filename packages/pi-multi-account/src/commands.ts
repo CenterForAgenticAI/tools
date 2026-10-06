@@ -65,8 +65,11 @@ import { type DiagnosticLog, sanitizedJson } from "./diagnostics.js";
 import {
 	accountHealth,
 	renderStatus,
+	type AccountStatusView,
 	type StatusViewInput,
 } from "./status-view.js";
+import type { PublicAccountStatusSnapshot } from "./public-status.js";
+import { projectPublicAccountStatus } from "./public-status-projection.js";
 import type { CredentialType } from "./discovery.js";
 import { providerTypeFor, type ProviderType } from "./vendor.js";
 import type { UnsupportedModelPair } from "./model-support.js";
@@ -331,6 +334,11 @@ export interface CommandDependencies {
 	readonly activeModelId?: () => string | undefined;
 	/** Operator-facing label for a managed account, when one resolves. */
 	readonly accountLabel?: (providerId: string) => string | undefined;
+	/**
+	 * Operator-configured label only, for the public status service. Must never
+	 * derive a label from a credential.
+	 */
+	readonly publicAccountLabel?: (providerId: string) => string | undefined;
 	/** Bounded credential expiry for a managed account, when known. */
 	readonly credentialExpiry?: (providerId: string) => number | undefined;
 	/** Session-local provider/model divergence observations for operator status. */
@@ -341,6 +349,8 @@ export interface CommandDependencies {
 	) => UsageFetchStatus | undefined;
 	/** Read-only project/account/model cost intelligence for one calendar series. */
 	readonly costReport?: (periodType: PeriodType) => Promise<CostReport>;
+	/** Month API-equivalent cost report for the public status service. */
+	readonly publicCostReport?: () => Promise<CostReport>;
 	/** Explicit metered last-resort policy; never includes credential material. */
 	readonly meteredFallbackStatus?: () => MeteredFallbackStatus;
 	readonly setModel: (model: Model<Api>) => Promise<boolean>;
@@ -811,71 +821,15 @@ export class MultiAccountCommandController {
 			});
 		}
 		const currentProviderId = this.#dependencies.currentProviderId();
-		const activeAccountProviderId =
-			this.#dependencies.activeAccountProviderId?.() ?? currentProviderId;
 		// Label and expiry are resolved HERE, not per-branch, so the JSON and
 		// human-readable views cannot drift: a scripted consumer sees the same
 		// credential freshness the operator does.
-		const projected = accounts.map((account) => {
-			const disabled = this.#disabledProviders.has(account.providerId);
-			const coolingUntilMs = this.#dependencies.state.getCooldown(
-				account.providerId,
-				now,
-			)?.untilMs;
-			const unavailable =
-				this.#dependencies.state.getInvalidation(account.providerId) !==
-				undefined;
-			const usageUntrusted =
-				this.#dependencies.state.isUsageSnapshotUntrusted(
-					account.providerId,
-					now,
-				);
-			const usage = this.#dependencies.usage.get(account.providerId);
-			const view = {
-				providerId: account.providerId,
-				family: account.family,
-				// Derived live from the discovered credential type; additive field,
-				// no existing field changes. An absent credentialType defaults to
-				// the subscription type.
-				providerType: providerTypeFor(
-					account.family,
-					account.credentialType ?? "unknown",
-				),
-				active: account.providerId === activeAccountProviderId,
-				disabled,
-				unavailable,
-				...(coolingUntilMs === undefined ? {} : { coolingUntilMs }),
-				...(usageUntrusted ? { usageUntrusted: true } : {}),
-				...(usage === undefined ? {} : { usage }),
-			};
-			const health = accountHealth(view, now);
-			return {
-				...view,
-				api: account.model.api,
-				healthy: health === "ready" || health === "low-headroom",
-				...(account.accountFingerprint === undefined
-					? {}
-					: { accountFingerprint: account.accountFingerprint }),
-				usageFetch: this.#dependencies.usageFetchStatus?.(account.providerId),
-				allModelsUnsupported:
-					account.modelIds.length > 0 &&
-					account.modelIds.every((modelId) =>
-						unsupportedModels.some(
-							(pair) =>
-								pair.providerId === account.providerId &&
-								pair.modelId === modelId,
-						),
-					),
-				...this.#optionalField(
-					"label",
-					this.#dependencies.accountLabel?.(account.providerId),
-				),
-				...this.#optionalField(
-					"expiresAtMs",
-					this.#dependencies.credentialExpiry?.(account.providerId),
-				),
-			};
-		});
+		const projected = this.#projectAccountViews(
+			accounts,
+			now,
+			unsupportedModels,
+			(providerId) => this.#dependencies.accountLabel?.(providerId),
+		);
 		const meteredFallback = this.#dependencies.meteredFallbackStatus?.();
 		if (asJson) {
 			return sanitizedJson({
@@ -1457,6 +1411,130 @@ export class MultiAccountCommandController {
 		if (!isActive) return {};
 		const modelId = this.#dependencies.activeModelId?.();
 		return modelId === undefined ? {} : { activeModelId: modelId };
+	}
+
+	/**
+	 * The one live per-account projection shared by `status`, `status --json`,
+	 * and the public status service. `labelFor` is a parameter because the
+	 * public service must publish only operator-configured labels, never the
+	 * token-derived label the operator status shows.
+	 */
+	#projectAccountViews(
+		accounts: readonly OperatorAccount[],
+		now: number,
+		unsupportedModels: readonly UnsupportedModelPair[],
+		labelFor: (providerId: string) => string | undefined,
+	) {
+		const activeAccountProviderId =
+			this.#dependencies.activeAccountProviderId?.() ??
+			this.#dependencies.currentProviderId();
+		return accounts.map((account) => {
+			const disabled = this.#disabledProviders.has(account.providerId);
+			const coolingUntilMs = this.#dependencies.state.getCooldown(
+				account.providerId,
+				now,
+			)?.untilMs;
+			const unavailable =
+				this.#dependencies.state.getInvalidation(account.providerId) !==
+				undefined;
+			const usageUntrusted =
+				this.#dependencies.state.isUsageSnapshotUntrusted(
+					account.providerId,
+					now,
+				);
+			const usage = this.#dependencies.usage.get(account.providerId);
+			const view = {
+				providerId: account.providerId,
+				family: account.family,
+				// Derived live from the discovered credential type; additive field,
+				// no existing field changes. An absent credentialType defaults to
+				// the subscription type.
+				providerType: providerTypeFor(
+					account.family,
+					account.credentialType ?? "unknown",
+				),
+				active: account.providerId === activeAccountProviderId,
+				disabled,
+				unavailable,
+				...(coolingUntilMs === undefined ? {} : { coolingUntilMs }),
+				...(usageUntrusted ? { usageUntrusted: true } : {}),
+				...(usage === undefined ? {} : { usage }),
+			};
+			const health = accountHealth(view, now);
+			return {
+				...view,
+				api: account.model.api,
+				healthy: health === "ready" || health === "low-headroom",
+				...(account.accountFingerprint === undefined
+					? {}
+					: { accountFingerprint: account.accountFingerprint }),
+				usageFetch: this.#dependencies.usageFetchStatus?.(account.providerId),
+				allModelsUnsupported:
+					account.modelIds.length > 0 &&
+					account.modelIds.every((modelId) =>
+						unsupportedModels.some(
+							(pair) =>
+								pair.providerId === account.providerId &&
+								pair.modelId === modelId,
+						),
+					),
+				...this.#optionalField("label", labelFor(account.providerId)),
+				...this.#optionalField(
+					"expiresAtMs",
+					this.#dependencies.credentialExpiry?.(account.providerId),
+				),
+			};
+		});
+	}
+
+	/**
+	 * Read-only snapshot for the `./public-status` event-bus service.
+	 *
+	 * Reuses the status projection, but labels come only from
+	 * `publicAccountLabel` (operator configuration). A token-derived label, such
+	 * as a Codex JWT email claim, is a human account identifier and must never
+	 * reach this surface, so the status `accountLabel` resolver is not used.
+	 */
+	async publicStatus(): Promise<PublicAccountStatusSnapshot> {
+		const nowMs = this.#now();
+		const projected = this.#projectAccountViews(
+			this.#accounts(),
+			nowMs,
+			this.#dependencies.unsupportedModels?.() ?? [],
+			(providerId) => this.#dependencies.publicAccountLabel?.(providerId),
+		);
+		const accounts = projected.map(
+			(account): AccountStatusView => ({
+				providerId: account.providerId,
+				family: account.family,
+				active: account.active,
+				disabled: account.disabled,
+				unavailable: account.unavailable,
+				...(account.coolingUntilMs === undefined
+					? {}
+					: { coolingUntilMs: account.coolingUntilMs }),
+				...(account.usageUntrusted ? { usageUntrusted: true } : {}),
+				...(account.usage === undefined ? {} : { usage: account.usage }),
+				...(account.usageFetch === undefined
+					? {}
+					: { usageFetch: account.usageFetch }),
+				...("label" in account ? { label: account.label } : {}),
+				...("expiresAtMs" in account
+					? { expiresAtMs: account.expiresAtMs }
+					: {}),
+			}),
+		);
+		let costReport: CostReport | undefined;
+		try {
+			costReport = await this.#dependencies.publicCostReport?.();
+		} catch {
+			costReport = undefined;
+		}
+		return projectPublicAccountStatus({
+			nowMs,
+			accounts,
+			...(costReport === undefined ? {} : { costReport }),
+		});
 	}
 
 	/**

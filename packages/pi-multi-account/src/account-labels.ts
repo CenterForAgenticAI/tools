@@ -208,6 +208,33 @@ export function resolveAccountLabelWithinLimit(input: Readonly<{
 }
 
 /**
+ * Resolves ONLY an operator-configured label for a managed account, with the
+ * same current-limit guard as {@link resolveAccountLabelWithinLimit}.
+ *
+ * This is the public status surface's label source. It takes no token reader
+ * at all, so a token-derived identity (for example a Codex JWT `email`,
+ * `preferred_username`, or `name` claim) cannot reach it. Returns undefined when
+ * the id is malformed or above the limit, or when no valid label is configured;
+ * the caller then falls back to the provider id.
+ */
+export function resolveConfiguredAccountLabelWithinLimit(input: Readonly<{
+	providerId: string;
+	accountLimit: number;
+	configured: AccountLabelConfig;
+}>): string | undefined {
+	const slot = classifyProviderId({
+		providerId: input.providerId,
+		credentialType: "unknown",
+	});
+	if (
+		slot === null ||
+		!isProviderSlotWithinAccountLimit(slot, input.accountLimit)
+	) return undefined;
+	if (!Object.hasOwn(input.configured, input.providerId)) return undefined;
+	return normalizeLabel(input.configured[input.providerId]);
+}
+
+/**
  * Composes the string Pi shows in its login list and provider UI, pairing the
  * family's product name with the account's own label. When the label carries no
  * information beyond the provider id, the base name is returned unadorned to
