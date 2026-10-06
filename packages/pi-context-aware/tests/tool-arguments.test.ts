@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
-import { prepareSessionFocusArguments, prepareSessionTasksArguments } from "../src/tool-arguments.js";
+import { MAX_REPAIRABLE_ARGUMENT_CHARS, MAX_REPAIRABLE_ARRAY_ITEMS, prepareSessionFocusArguments, prepareSessionTasksArguments } from "../src/tool-arguments.js";
 
 // Some Claude models send list arguments as JSON strings. Pi validates tool
 // arguments after the tool's prepareArguments hook, exactly as below; without
@@ -95,6 +95,45 @@ test("session_focus names the valid actions and the objective field for invented
 	}
 	assert.throws(() => piValidate(tool, { action: "start", purpose: "ship it" }), /session_focus start requires the field objective.*The field purpose is not recognised/u);
 	assert.throws(() => prepareSessionFocusArguments({}), /no action is not valid/u);
+});
+
+test("session_focus names the missing field for status, boundary and ref", async () => {
+	const tool = (await registeredTools()).get("session_focus");
+	assert.ok(tool);
+	assert.throws(() => piValidate(tool, { action: "status" }), /session_focus status requires the field status \(active, paused, completed or detached\)/u);
+	assert.throws(() => piValidate(tool, { action: "boundary" }), /session_focus boundary requires the field boundary/u);
+	assert.throws(() => piValidate(tool, { action: "ref" }), /session_focus ref requires the field ref with kind and value/u);
+	assert.throws(() => piValidate(tool, { action: "ref", refKind: "branch" }), /session_focus ref requires the field ref/u);
+	assert.throws(() => piValidate(tool, { action: "boundary", remove: true }), /session_focus boundary requires the field boundary/u);
+	assert.throws(() => piValidate(tool, { action: "status", status: null }), /session_focus status requires the field status/u);
+	assert.throws(() => piValidate(tool, { action: "boundary", boundary: null }), /session_focus boundary requires the field boundary/u);
+	assert.throws(() => piValidate(tool, { action: "ref", ref: null, refKind: null, refValue: null }), /session_focus ref requires the field ref/u);
+});
+
+test("present focus fields are left to schema validation, and complete calls pass", async () => {
+	const tool = (await registeredTools()).get("session_focus");
+	assert.ok(tool);
+	assert.throws(() => piValidate(tool, { action: "status", status: "bogus" }), (error: Error) => !/requires the field/u.test(error.message));
+	assert.deepEqual(piValidate(tool, { action: "status", status: "paused" }), { action: "status", status: "paused" });
+	assert.deepEqual(piValidate(tool, { action: "boundary", boundary: "no force-push" }), { action: "boundary", boundary: "no force-push" });
+	assert.deepEqual(piValidate(tool, { action: "ref", refKind: "branch", refValue: "fix/x" }), { action: "ref", refKind: "branch", refValue: "fix/x" });
+});
+
+test("a list string over the size cap is not parsed", () => {
+	const oversized = JSON.stringify(Array.from({ length: 40_000 }, (_, index) => ({ title: `task ${index} ${"x".repeat(20)}` })));
+	assert.ok(oversized.length > MAX_REPAIRABLE_ARGUMENT_CHARS);
+	const prepared = prepareSessionTasksArguments<{ tasks: unknown }>({ action: "plan", tasks: oversized });
+	assert.equal(typeof prepared.tasks, "string");
+	const small = prepareSessionTasksArguments<{ tasks: unknown }>({ action: "plan", tasks: '[{"title":"a"}]' });
+	assert.ok(Array.isArray(small.tasks));
+});
+
+test("a list string with too many items is not parsed, but a slightly-too-long one is", () => {
+	const items = (count: number) => JSON.stringify(Array.from({ length: count }, () => ({ title: "t" })));
+	const huge = prepareSessionTasksArguments<{ tasks: unknown }>({ action: "plan", tasks: items(MAX_REPAIRABLE_ARRAY_ITEMS + 1) });
+	assert.equal(typeof huge.tasks, "string");
+	const over = prepareSessionTasksArguments<{ tasks: unknown }>({ action: "plan", tasks: items(101) });
+	assert.ok(Array.isArray(over.tasks));
 });
 
 test("valid session_focus calls pass through unchanged", async () => {
