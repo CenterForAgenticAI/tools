@@ -20,8 +20,7 @@ import { resolveTierModel } from "./tier-model-resolver.js";
 import { providerTypeFor, sameVendor } from "./vendor.js";
 import {
 	type RuntimeState,
-	isCanonicalManagedProviderId,
-	type CredentialRevision,
+	isCanonicalManagedProviderId,	normalizeCredentialRevision,	type CredentialRevision,
 } from "./runtime-state.js";
 
 export interface SharedUsageHint {
@@ -424,12 +423,9 @@ function normalizedAccounts(
 ): readonly ManagedAccount[] {
 	const projected = projectCanonicalAccounts(accounts);
 	for (const account of projected) {
-		if (account.credentialRevision !== undefined) {
-			state.observeCredentialRevision(
-				account.providerId,
-				account.family,
-				account.credentialRevision,
-			);
+		const revision = normalizeCredentialRevision(account.credentialRevision ?? NaN);
+		if (revision !== undefined) {
+			state.observeCredentialRevision(account.providerId, account.family, revision);
 		}
 		// Observed unconditionally: an absent fingerprint is meaningful (identity
 		// is not derivable) and must not be mistaken for an account change.

@@ -12,7 +12,11 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
 	sanitizeDiagnosticText,
+	projectResponseHeaders,
+	isHeaderDiagnostic,
+	HEADER_DIAGNOSTIC_MESSAGE,
 	sanitizeForJson,
+	retainDiagnosticEvents,
 	type DiagnosticEvent,
 	type DiagnosticLevel,
 	type DiagnosticPersistence,
@@ -84,13 +88,16 @@ function projectEvent(value: unknown): DiagnosticEvent | undefined {
 	if (typeof candidate.level !== "string" || !LEVELS.has(candidate.level as DiagnosticLevel)) {
 		return undefined;
 	}
-	const fields = projectFields(candidate.fields);
+	const fields = isHeaderDiagnostic(candidate.category, candidate.message)
+		? projectResponseHeaders(candidate.fields)
+		: projectFields(candidate.fields);
 	if (fields === undefined) return undefined;
 	return {
 		timestampMs: candidate.timestampMs,
 		level: candidate.level as DiagnosticLevel,
 		category: sanitizeDiagnosticText(candidate.category),
-		message: sanitizeDiagnosticText(candidate.message),
+		message: isHeaderDiagnostic(candidate.category, candidate.message)
+			? HEADER_DIAGNOSTIC_MESSAGE : sanitizeDiagnosticText(candidate.message),
 		fields,
 	};
 }
@@ -110,20 +117,15 @@ function parseCompleteEvents(raw: string): readonly DiagnosticEvent[] {
 	return events;
 }
 
-function newestLinesWithin(
+function priorityLinesWithin(
 	events: readonly DiagnosticEvent[],
 	budgetBytes: number,
 ): string {
-	const retained: string[] = [];
-	let used = 0;
-	for (let index = events.length - 1; index >= 0; index -= 1) {
-		const line = `${JSON.stringify(events[index])}\n`;
-		const bytes = Buffer.byteLength(line, "utf8");
-		if (bytes > budgetBytes - used) break;
-		retained.push(line);
-		used += bytes;
-	}
-	return retained.reverse().join("");
+	return retainDiagnosticEvents(
+		events,
+		budgetBytes,
+		(event) => Buffer.byteLength(`${JSON.stringify(event)}\n`, "utf8"),
+	).map((event) => `${JSON.stringify(event)}\n`).join("");
 }
 
 /** Machine-global, credential-free, bounded diagnostic event history. */
@@ -164,7 +166,7 @@ export class DiagnosticStore implements DiagnosticPersistence {
 			: 100;
 		if (safeLimit === 0) return [];
 		try {
-			return parseCompleteEvents(readFileSync(this.#path, "utf8")).slice(-safeLimit);
+			return retainDiagnosticEvents(parseCompleteEvents(readFileSync(this.#path, "utf8")), safeLimit);
 		} catch {
 			return [];
 		}
@@ -251,7 +253,7 @@ export class DiagnosticStore implements DiagnosticPersistence {
 				Math.floor(this.#maxBytes / 2),
 				this.#maxBytes - tailBytes,
 			);
-			const compacted = newestLinesWithin(events, targetBytes);
+			const compacted = priorityLinesWithin(events, targetBytes);
 			const encoded = compacted + tail;
 			if (Buffer.byteLength(encoded, "utf8") > this.#maxBytes) return false;
 			temporaryPath = `${this.#path}.${process.pid}.${randomUUID()}.tmp`;

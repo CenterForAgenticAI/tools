@@ -26,7 +26,7 @@ For operators and agents: slash commands, the read-only agent tool, account grou
 | `configure` | Configure cross-family routing directions and destination models. Interactive TUI only. |
 | `group use <id>` | Bind this session id to one configured account group. |
 | `group reset` | Clear this session override and return to the exact-cwd default, global default, or unrestricted routing. |
-| `group status` | Show the effective group and source plus each member's current eligible or blocked reason. |
+| `group status` | Report the cached effective group and original source, listed members' availability, and recognized excluded providers, without changing policy. |
 | `enable` | Re-enable managed accounts and reset process-local state. |
 | `disable <family>` | Disable one managed family in the current process. |
 
@@ -38,12 +38,34 @@ Automatic failover is a reaction to a classified provider failure;
 discretionary account changes remain operator actions.
 
 Account groups are named allow-lists in machine-global config. `accountGroups` maps
-a group id to canonical account ids from any managed subscription family in
-`ALLOWED_FAMILIES`; `accountGroupCwdDefaults` maps an exact absolute directory to
-a configured group; `defaultAccountGroup` is
-the optional machine-wide fallback. Resolution order is session override, exact-cwd
-default, global default, then unrestricted. A selected unknown, empty, exhausted, or
-otherwise ineligible group fails closed rather than widening to another account.
+a group id to exact Pi provider IDs, including configured built-in and custom
+providers. Managed numbered aliases must be canonical and within `accountLimit`.
+See [member identity and availability](configuration.md#account-group-members).
+`accountGroupCwdDefaults` maps an exact absolute directory to a configured group;
+`defaultAccountGroup` is the optional machine-wide fallback. Resolution order is
+session override, exact-cwd default, global default, then unrestricted. Unknown,
+removed, or unauthenticated members are individually inactive. Other listed usable
+members can serve; an unknown, empty, or wholly unusable group blocks requests
+rather than widening access. Discovery and login remain available.
+
+`group status` distinguishes recognized and available, excluded, unknown or removed,
+authentication unavailable, model unavailable, virtual model unsupported by active
+group, and authorization snapshot unavailable. A virtual-only provider is blocked
+under a restricted group; a mixed provider can still have usable physical models.
+It reads Pi's public catalog and authorization metadata without resolving API keys
+or displaying credential labels. Managed health or disablement can add a routing
+block. Status does not select a model or change group policy. Group membership does
+not give this extension ownership of a custom provider's refresh, usage, cost,
+unified routing, parking, or recovery. Listing `openrouter` leaves the current
+named-group metered block intact.
+
+At startup and resume, in-process and durable delegate children inherit the parent's
+complete cached effective result. The child's cwd does not replace it. Status keeps
+the original source, such as `cwd default`; it does not add an `inherited` source or
+recompute policy. Missing or invalid parent identity or cache blocks requests.
+After startup, explicit operator `group use` and `group reset` retain the semantics
+in the table: they resolve this session's own policy. A later delegate resume
+inherits the parent's effective result again.
 
 ## Command autocomplete
 

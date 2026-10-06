@@ -23,15 +23,16 @@
  * - `baseUrl` is applied to the **model**, not to the options.
  * - `env` merges auth env under caller env.
  */
-import type {
-	AnthropicMessagesCompat,
-	Api,
-	Context,
-	Model,
-	ModelCost,
-	ProviderHeaders,
-	SimpleStreamOptions,
-	ThinkingLevelMap,
+import {
+	type AnthropicMessagesCompat,
+	type Api,
+	type Context,
+	type Model,
+	type ModelCost,
+	type ProviderHeaders,
+	type SimpleStreamOptions,
+	type ThinkingLevelMap,
+	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { LogicalDispatchCall } from "./logical-provider.js";
@@ -149,9 +150,6 @@ function copyAnthropicCompat(
 	}
 	if (value.supportsStrictTools !== undefined) {
 		copy.supportsStrictTools = value.supportsStrictTools;
-	}
-	if (value.supportsToolReferences !== undefined) {
-		copy.supportsToolReferences = value.supportsToolReferences;
 	}
 	return copy;
 }
@@ -272,7 +270,8 @@ export function createLogicalDispatch(
 
 		return provider.streamSimple(
 			physicalModel,
-			call.context as Context,
+			// Forwarded by reference: the host already supplies a transcript context.
+			call.context as TranscriptContext,
 			physicalOptions as SimpleStreamOptions,
 		);
 	};

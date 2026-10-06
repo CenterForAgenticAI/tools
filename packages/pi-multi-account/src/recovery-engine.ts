@@ -12,6 +12,7 @@ import {
 } from "./recovery-output.js";
 import type { RecoveryActionKind, RecoveryCandidate } from "./recovery-plan.js";
 import { classifyCodexRecoverySendEvidence } from "./recovery-send-evidence.js";
+import { isCanonicalManagedProviderId } from "./runtime-state.js";
 
 /** A request-owned timer. Cancelling it must prevent its callback from running. */
 export interface RecoveryTimer {
@@ -39,7 +40,13 @@ export type RecoveryRetrySafety =
 			readonly reason:
 				| "account-local-quota"
 				| "account-local-auth"
-				| "account-local-rate-limit";
+				| "account-local-rate-limit"
+				/**
+				 * A network or transport failure, or a stall, before the attempt
+				 * produced any output. Only valid while nothing has been observed;
+				 * the engine converts it to `uncertain-external-effects` otherwise.
+				 */
+				| "pre-start-transient";
 	  }
 	| {
 			readonly status: "model-policy";
@@ -126,6 +133,12 @@ export interface RecoveryDispatchRequest {
 	readonly context: unknown;
 	readonly options: RecoveryBoundStreamOptions;
 	readonly signal: AbortSignal;
+	/**
+	 * Report bytes arriving on this attempt's connection, keep-alive pings
+	 * included. It resets only the request's idle limit: transport activity is
+	 * not output and never makes an attempt ineligible for recovery.
+	 */
+	readonly onTransportActivity: () => void;
 }
 
 export type RecoveryUsageCoverage =
@@ -146,7 +159,13 @@ export type RecoveryCostCoverage =
 export interface RecoveryAttemptAccounting {
 	readonly ordinal: number;
 	readonly candidate: RecoveryCandidate;
-	readonly disposition: "failed" | "accepted";
+	/**
+	 * `committed` means the attempt started streaming under
+	 * `stream-after-first-content` publication and now belongs to the caller; its
+	 * usage and cost are unknown here and the caller retains them at the
+	 * physical terminal.
+	 */
+	readonly disposition: "failed" | "accepted" | "committed";
 	readonly failureCode?: AcceptedOutputErrorCode | "dispatch-failure";
 	readonly reservation: RecoverySendReservation;
 	readonly chargedSendExposure: RecoveryChargedSendExposure;
@@ -210,8 +229,26 @@ export type RecoveryTimingConfig = Pick<
 	"recoveryIdleTimeoutMs" | "recoveryAbsoluteTimeoutMs"
 >;
 
+/**
+ * How an attempt's output is published.
+ *
+ * `buffered` (the default) holds every event until a successful terminal, so a
+ * failure at any point may still recover. `stream-after-first-content` holds
+ * the attempt's leading `start` events, which a provider pushes as soon as the
+ * response headers arrive and before any content: they are neither published
+ * nor counted as progress. The first content event (text, thinking or a tool
+ * call) commits the attempt and streams one held `start`, that event and the
+ * rest of the attempt live to the caller with no further recovery. A terminal,
+ * malformed or missing event, or a thrown failure, before any content falls
+ * back to the buffered path, so it may still recover and a failed attempt's
+ * held `start` is never published. A committed attempt is never retried, so
+ * output already shown to a consumer is never followed by a second send.
+ */
+export type RecoveryPublication = "buffered" | "stream-after-first-content";
+
 export interface RecoveryRequest {
 	readonly candidates: readonly RecoveryCandidate[];
+	readonly publication?: RecoveryPublication;
 	readonly context: unknown;
 	readonly options?: SimpleStreamOptions;
 	readonly timing: RecoveryTimingConfig;
@@ -246,6 +283,19 @@ export type RecoveryResult =
 			readonly attempts: number;
 			readonly terminal: AssistantMessage;
 			readonly output: AssistantMessageEventStream;
+	  }
+	| {
+			/**
+			 * The attempt produced content under `stream-after-first-content`
+			 * publication. `output` yields its one held `start` (when it sent
+			 * one), the first content event and then the rest of the physical
+			 * stream unbuffered; the caller owns its terminal, timers and abort
+			 * from here on.
+			 */
+			readonly status: "committed";
+			readonly candidate: RecoveryCandidate;
+			readonly attempts: number;
+			readonly output: AsyncIterable<unknown>;
 	  }
 	| {
 			readonly status: "exhausted";
@@ -478,8 +528,12 @@ function assistantTerminal(value: unknown): AssistantMessage | undefined {
 		: undefined;
 }
 
+/**
+ * Assistant content a consumer would see. A provider's `start` event is not
+ * here: it only reports that the response headers arrived, so it is held, never
+ * counted as progress or output, and a failure after it is still pre-output.
+ */
 const PROGRESS_EVENT_TYPES = new Set([
-	"start",
 	"text_start",
 	"text_delta",
 	"text_end",
@@ -496,6 +550,23 @@ function isProgressEvent(event: unknown): boolean {
 		typeof event === "object" &&
 		event !== null &&
 		PROGRESS_EVENT_TYPES.has((event as { type?: unknown }).type as string)
+	);
+}
+
+/**
+ * Whether an event is assistant content (text, thinking or a tool call). Only
+ * content counts as output for in-call recovery; a `start` never does.
+ */
+export function isRecoveryContentEvent(event: unknown): boolean {
+	return isProgressEvent(event);
+}
+
+/** Whether an event is the provider's `start`, held until the first content. */
+export function isRecoveryStartEvent(event: unknown): boolean {
+	return (
+		typeof event === "object" &&
+		event !== null &&
+		(event as { type?: unknown }).type === "start"
 	);
 }
 
@@ -581,6 +652,9 @@ function validCandidate(candidate: RecoveryCandidate): boolean {
 		// future family addition cannot silently fall out of recovery consideration
 		// the way the prior hand-listed three-family check did for Google Antigravity.
 		isManagedFamily(candidate.family) &&
+		// A caller-built candidate must name a canonical account of its own family,
+		// so a mislabelled id can never borrow another family's send reservation.
+		isCanonicalManagedProviderId(candidate.providerId, candidate.family) &&
 		typeof candidate.modelId === "string" &&
 		candidate.modelId.length > 0 &&
 		(candidate.recoveryAction === "account" || candidate.recoveryAction === "model")
@@ -618,6 +692,124 @@ function observeLatePhysicalAttempt(
 		},
 		() => {},
 	);
+}
+
+/**
+ * An attempt read up to its first event that is not a `start`. At most one
+ * `start` is kept: a provider sends one, and a repeat carries nothing a
+ * consumer needs.
+ */
+interface HeldPrefix {
+	readonly iterator: AsyncIterator<unknown>;
+	readonly held: readonly unknown[];
+	/** The step after the held events; absent when reading it failed. */
+	readonly next?: IteratorResult<unknown>;
+	readonly failure?: { readonly error: unknown };
+}
+
+type PeekResult =
+	| { readonly status: "aborted" }
+	| { readonly status: "content"; readonly prefix: HeldPrefix }
+	| { readonly status: "replay"; readonly prefix: Promise<HeldPrefix> };
+
+/**
+ * Read an attempt past its leading `start` events. A held `start` is not
+ * progress, so it never resets the request's idle limit. A rejection while
+ * opening the stream or before any `start` rejects; a rejection after a held
+ * `start` is kept so the replay can rethrow it at the same point.
+ */
+function readHeldPrefix(
+	output: AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>,
+): Promise<HeldPrefix> {
+	const pending = (async (): Promise<HeldPrefix> => {
+		const source = await output;
+		const iterator = source[Symbol.asyncIterator]();
+		const held: unknown[] = [];
+		let sawStart = false;
+		for (;;) {
+			let step: IteratorResult<unknown>;
+			try {
+				step = await iterator.next();
+			} catch (error) {
+				if (!sawStart) throw error;
+				return { iterator, held, failure: { error } };
+			}
+			if (step.done !== true && isRecoveryStartEvent(step.value)) {
+				if (!sawStart) held.push(step.value);
+				sawStart = true;
+				continue;
+			}
+			return { iterator, held, next: step };
+		}
+	})();
+	void pending.catch(() => {});
+	return pending;
+}
+
+function closeIterator(iterator: AsyncIterator<unknown>): void {
+	try {
+		void Promise.resolve(iterator.return?.()).catch(() => {});
+	} catch {
+		// A throwing `return` is contained like any other callback failure.
+	}
+}
+
+/**
+ * The attempt's output, resumed after the engine read its held prefix. The
+ * held `start` replays first, then the step that ended the prefix; a failure
+ * the read observed rethrows at the same point, so the buffered path sees
+ * exactly what an unread stream would have produced.
+ */
+function resumedOutput(prefix: Promise<HeldPrefix>): AsyncIterable<unknown> {
+	return {
+		async *[Symbol.asyncIterator]() {
+			const { iterator, held, next, failure } = await prefix;
+			let finished = false;
+			try {
+				for (const event of held) yield event;
+				if (failure !== undefined) {
+					finished = true;
+					throw failure.error;
+				}
+				if (next === undefined || next.done === true) {
+					finished = true;
+					return;
+				}
+				yield next.value;
+				for (;;) {
+					const step = await iterator.next();
+					if (step.done === true) {
+						finished = true;
+						return;
+					}
+					yield step.value;
+				}
+			} finally {
+				if (!finished) closeIterator(iterator);
+			}
+		},
+	};
+}
+
+async function peekFirstContent(
+	output: AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>,
+	request: ActiveRequest,
+): Promise<PeekResult> {
+	const prefix = readHeldPrefix(output);
+	const settled = await awaitRequest(prefix, request);
+	if (settled.status === "aborted") {
+		void prefix.then(({ iterator }) => closeIterator(iterator), () => {});
+		return { status: "aborted" };
+	}
+	if (
+		settled.status === "value" &&
+		settled.value.next !== undefined &&
+		settled.value.next.done !== true &&
+		isRecoveryContentEvent(settled.value.next.value)
+	) {
+		return { status: "content", prefix: settled.value };
+	}
+	return { status: "replay", prefix };
 }
 
 /**
@@ -678,7 +870,8 @@ function validRetrySafety(value: unknown): value is RecoveryRetrySafety {
 			safety.action === "account" &&
 			(safety.reason === "account-local-quota" ||
 				safety.reason === "account-local-auth" ||
-				safety.reason === "account-local-rate-limit")
+				safety.reason === "account-local-rate-limit" ||
+				safety.reason === "pre-start-transient")
 		);
 	}
 	if (safety.status === "model-policy") {
@@ -854,6 +1047,8 @@ async function runRecovery(
 		let safety: RecoveryRetrySafety | undefined;
 		let terminal: AssistantMessage | undefined;
 		let callbackFailed = false;
+		let sawProgress = false;
+		let committed: { readonly output: AsyncIterable<unknown> } | undefined;
 		const attemptController = new AbortController();
 		const abortAttempt = (): void => attemptController.abort();
 		request.controller.signal.addEventListener("abort", abortAttempt, { once: true });
@@ -870,6 +1065,10 @@ async function runRecovery(
 					context: input.context,
 					options: streamOptions,
 					signal: attemptController.signal,
+					onTransportActivity: () => {
+						// Liveness, not output: only the idle limit is reset.
+						if (!attemptController.signal.aborted) onProgress();
+					},
 				});
 			} catch {
 				callbackFailed = true;
@@ -890,62 +1089,82 @@ async function runRecovery(
 						}
 						const safetyPromise = Promise.resolve(physical.retrySafety);
 						void safetyPromise.catch(() => {});
-						const output = createAcceptedOutputStream(
-							observedOutput(
-								physical.output,
-								onProgress,
-								(observed) => {
-									terminal = observed;
-								},
-								(observed) => {
-									facts = observed;
-								},
-							),
-							{ signal: request.controller.signal },
-						);
-						const outputResult = await awaitRequest(output.result(), request);
-						if (outputResult.status === "value") {
-							accepted = { terminal: outputResult.value, output };
-							facts = projectAttemptFacts(outputResult.value) ?? facts;
-						} else if (outputResult.status === "rejected") {
-							try {
-								await output.result();
-							} catch (error) {
-								failureCode =
-									error instanceof AcceptedOutputError
-										? error.code
-										: "dispatch-failure";
+						let upstream: AsyncIterable<unknown> | Promise<AsyncIterable<unknown>> =
+							physical.output;
+						let peekAborted = false;
+						if (input.publication === "stream-after-first-content") {
+							const peek = await peekFirstContent(physical.output, request);
+							if (peek.status === "aborted") {
+								peekAborted = true;
+							} else if (peek.status === "content") {
+								onProgress();
+								sawProgress = true;
+								committed = { output: resumedOutput(Promise.resolve(peek.prefix)) };
+							} else {
+								upstream = resumedOutput(peek.prefix);
 							}
 						}
-						if (accepted === undefined) {
-							if (
-								reservation.basis === "antigravity-inner-unknown" ||
-								(reservation.basis === "codex-non-sse-unknown" &&
-									(terminal === undefined ||
-										classifyCodexRecoverySendEvidence(terminal) !==
-											"pre-execution-rejected"))
-							) {
-								// A non-SSE Codex invocation may have reconnected or fallen back
-								// to SSE after socket.send; only structured proof of a single
-								// pre-execution rejection may consult the caller's classifier.
-								// An Antigravity invocation may already have sent to several
-								// endpoints or runtime models; no supported evidence bounds it.
-								safety = {
-									status: "unsafe",
-									reason: "uncertain-external-effects",
-								};
-							} else {
-								const safetyResult = await awaitRequest(safetyPromise, request);
+						if (committed === undefined && !peekAborted) {
+							const output = createAcceptedOutputStream(
+								observedOutput(
+									upstream,
+									() => {
+										sawProgress = true;
+										onProgress();
+									},
+									(observed) => {
+										terminal = observed;
+									},
+									(observed) => {
+										facts = observed;
+									},
+								),
+								{ signal: request.controller.signal },
+							);
+							const outputResult = await awaitRequest(output.result(), request);
+							if (outputResult.status === "value") {
+								accepted = { terminal: outputResult.value, output };
+								facts = projectAttemptFacts(outputResult.value) ?? facts;
+							} else if (outputResult.status === "rejected") {
+								try {
+									await output.result();
+								} catch (error) {
+									failureCode =
+										error instanceof AcceptedOutputError
+											? error.code
+											: "dispatch-failure";
+								}
+							}
+							if (accepted === undefined) {
 								if (
-									safetyResult.status === "value" &&
-									validRetrySafety(safetyResult.value)
+									reservation.basis === "antigravity-inner-unknown" ||
+									(reservation.basis === "codex-non-sse-unknown" &&
+										(terminal === undefined ||
+											classifyCodexRecoverySendEvidence(terminal) !==
+												"pre-execution-rejected"))
 								) {
-									safety = safetyResult.value;
-								} else if (
-									safetyResult.status === "rejected" ||
-									safetyResult.status === "value"
-								) {
-									callbackFailed = true;
+									// A non-SSE Codex invocation may have reconnected or fallen back
+									// to SSE after socket.send; only structured proof of a single
+									// pre-execution rejection may consult the caller's classifier.
+									// An Antigravity invocation may already have sent to several
+									// endpoints or runtime models; no supported evidence bounds it.
+									safety = {
+										status: "unsafe",
+										reason: "uncertain-external-effects",
+									};
+								} else {
+									const safetyResult = await awaitRequest(safetyPromise, request);
+									if (
+										safetyResult.status === "value" &&
+										validRetrySafety(safetyResult.value)
+									) {
+										safety = safetyResult.value;
+									} else if (
+										safetyResult.status === "rejected" ||
+										safetyResult.status === "value"
+									) {
+										callbackFailed = true;
+									}
 								}
 							}
 						}
@@ -958,18 +1177,42 @@ async function runRecovery(
 		const accounting = await accountAttempt(deps, request, {
 			ordinal,
 			candidate,
-			disposition: accepted === undefined ? "failed" : "accepted",
-			...(accepted === undefined ? { failureCode } : {}),
+			disposition:
+				committed !== undefined ? "committed" : accepted === undefined ? "failed" : "accepted",
+			...(accepted === undefined && committed === undefined ? { failureCode } : {}),
 			reservation,
 			chargedSendExposure: chargedSendExposureFor(reservation),
 			usage: facts.usage,
 			cost: facts.cost,
 		});
 		request.controller.signal.removeEventListener("abort", abortAttempt);
+		if (
+			committed !== undefined &&
+			accounting === "recorded" &&
+			!request.controller.signal.aborted
+		) {
+			// The live attempt now belongs to the caller: its signal stays open and
+			// no later send exists for this call.
+			return { status: "committed", candidate, attempts, output: committed.output };
+		}
 		if (!attemptController.signal.aborted) abortAttempt();
+		if (committed !== undefined) {
+			// Close the started stream; a committed attempt is never retried.
+			void (async () => {
+				try {
+					for await (const _event of committed.output) break;
+				} catch {
+					// The attempt was already aborted.
+				}
+			})();
+		}
 		if (request.controller.signal.aborted) return terminated();
 		if (accounting === "rejected") {
 			abortRequest(request, "accounting-rejected");
+			return terminated();
+		}
+		if (committed !== undefined) {
+			abortRequest(request, "callback-failure");
 			return terminated();
 		}
 		if (accepted !== undefined) {
@@ -983,6 +1226,11 @@ async function runRecovery(
 		}
 		if (callbackFailed || safety === undefined) {
 			abortRequest(request, "callback-failure");
+			return terminated();
+		}
+		if (safety.status === "recoverable" && safety.reason === "pre-start-transient" && sawProgress) {
+			// A transient failure is retried only while nothing was produced.
+			abortRequest(request, "uncertain-external-effects");
 			return terminated();
 		}
 		if (safety.status === "recoverable") {
@@ -1069,8 +1317,11 @@ export function createRecoveryEngine(
 			let absoluteTimer: RecoveryTimer | undefined;
 			let callerAbort: (() => void) | undefined;
 			let idleGeneration = 0;
+			let settled = false;
 			const resetIdle = (): void => {
-				if (activeRequest.controller.signal.aborted) return;
+				// A committed attempt's connection outlives the invocation; its late
+				// transport activity must not arm a timer for a settled request.
+				if (settled || activeRequest.controller.signal.aborted) return;
 				const generation = ++idleGeneration;
 				cancelTimer(idleTimer);
 				try {
@@ -1123,6 +1374,7 @@ export function createRecoveryEngine(
 				}
 				return await runRecovery(deps, input, activeRequest, resetIdle);
 			} finally {
+				settled = true;
 				idleGeneration += 1;
 				cancelTimer(deadlineTimer);
 				cancelTimer(idleTimer);

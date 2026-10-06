@@ -28,8 +28,10 @@ import {
 import { cloneProviderModelCatalog } from "./catalog-rebinding.js";
 import {
   sanitizeDiagnosticText,
-  sanitizeHeaderValue,
+  projectResponseHeaders,
 } from "./diagnostics.js";
+
+import { projectAliasAssistantEvent } from "./public-assistant-projection.js";
 
 const CODEX_BASE_API = "openai-codex-responses" as const;
 /**
@@ -141,56 +143,8 @@ type CodexUpstreamStream = (
   options?: SimpleStreamOptions,
 ) => AssistantMessageEventStream;
 
-function withAliasAttribution(
-  message: AssistantMessage,
-  aliasModel: Model<Api>,
-): AssistantMessage {
-  return {
-    ...message,
-    api: aliasModel.api,
-    provider: aliasModel.provider,
-    model: aliasModel.id,
-  };
-}
-
-function sanitizeUpstreamError(message: AssistantMessage): AssistantMessage {
-  if (message.errorMessage === undefined) return message;
-  return {
-    ...message,
-    errorMessage: sanitizeDiagnosticText(message.errorMessage),
-  };
-}
-
 function sanitizeProviderResponse(response: ProviderResponse): ProviderResponse {
-  return {
-    status: response.status,
-    headers: Object.fromEntries(
-      Object.entries(response.headers).map(([name, value]) => [
-        sanitizeDiagnosticText(name),
-        sanitizeHeaderValue(name, value),
-      ]),
-    ),
-  };
-}
-
-function withAliasEvent(
-  event: AssistantMessageEvent,
-  aliasModel: Model<Api>,
-): AssistantMessageEvent {
-  switch (event.type) {
-    case "done":
-      return { ...event, message: withAliasAttribution(event.message, aliasModel) };
-    case "error":
-      return {
-        ...event,
-        error: withAliasAttribution(
-          sanitizeUpstreamError(event.error),
-          aliasModel,
-        ),
-      };
-    default:
-      return { ...event, partial: withAliasAttribution(event.partial, aliasModel) };
-  }
+  return { status: response.status, headers: projectResponseHeaders(response.headers) };
 }
 
 /**
@@ -254,7 +208,7 @@ function reattributeStream(
       for await (const event of await upstream) {
         if (sawTerminal) continue;
         if (isTerminalEvent(event)) sawTerminal = true;
-        attributed.push(withAliasEvent(event, aliasModel));
+        attributed.push(projectAliasAssistantEvent(event, aliasModel));
       }
     } catch (error) {
       if (!sawTerminal) {

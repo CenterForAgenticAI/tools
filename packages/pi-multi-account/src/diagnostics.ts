@@ -2,17 +2,38 @@ const MAX_DIAGNOSTIC_LENGTH = 512;
 const REDACTED = "[REDACTED]";
 const SENSITIVE_NAME_FRAGMENT = /(?:authorization|authentication|auth|token|credential|secret|cookie|apikey)/;
 const PRIVATE_REASONING_KEY = /^(?:thinking|reasoning)/;
-const TOKEN_QUOTA_REMAINING_HEADERS = new Set([
-  "x-ratelimit-remaining-tokens",
-  "x-ratelimit-tokens-remaining",
-  "anthropic-ratelimit-tokens-remaining",
+// Closed response observations: unknown names (including identifiers) never cross
+// the callback or retained-diagnostic boundary, even when their value looks safe.
+const COUNT_HEADERS = new Set([
+  "x-ratelimit-remaining", "x-ratelimit-remaining-requests", "x-ratelimit-requests-remaining",
+  "x-ratelimit-remaining-tokens", "x-ratelimit-tokens-remaining",
+  "anthropic-ratelimit-requests-remaining", "anthropic-ratelimit-tokens-remaining",
+  "x-ratelimit-limit-requests", "x-ratelimit-limit-tokens",
+  "anthropic-ratelimit-requests-limit", "anthropic-ratelimit-tokens-limit",
+  "retry-after-ms",
 ]);
-const TOKEN_QUOTA_DURATION_RESET_HEADERS = new Set([
-  "x-ratelimit-reset-tokens",
+const DURATION_RESET_HEADERS = new Set(["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"]);
+const ABSOLUTE_RESET_HEADERS = new Set([
+  "x-ratelimit-reset", "anthropic-ratelimit-requests-reset", "anthropic-ratelimit-tokens-reset",
+  "x-codex-primary-reset-at", "x-codex-secondary-reset-at",
 ]);
-const TOKEN_QUOTA_ABSOLUTE_RESET_HEADERS = new Set([
-  "anthropic-ratelimit-tokens-reset",
+const SECONDS_HEADERS = new Set([
+  "x-codex-primary-reset-after-seconds", "x-codex-secondary-reset-after-seconds",
 ]);
+const PERCENT_HEADERS = new Set(["x-codex-primary-used-percent", "x-codex-secondary-used-percent"]);
+const UTILIZATION_HEADERS = new Set([
+  "anthropic-ratelimit-unified-5h-utilization", "anthropic-ratelimit-unified-7d-utilization",
+  "anthropic-ratelimit-unified-7d-sonnet-utilization", "anthropic-ratelimit-unified-7d-opus-utilization",
+]);
+const STATUS_HEADERS = new Set(["anthropic-ratelimit-unified-status"]);
+const RESPONSE_HEADER_NAMES = new Set([
+  ...COUNT_HEADERS, ...DURATION_RESET_HEADERS, ...ABSOLUTE_RESET_HEADERS,
+  ...SECONDS_HEADERS, ...PERCENT_HEADERS, ...UTILIZATION_HEADERS, ...STATUS_HEADERS, "retry-after",
+]);
+export const HEADER_DIAGNOSTIC_MESSAGE = "Provider response headers observed.";
+export function isHeaderDiagnostic(category: unknown, message: unknown): boolean {
+  return category === "provider.response" || message === HEADER_DIAGNOSTIC_MESSAGE;
+}
 
 export type DiagnosticLevel = "info" | "warning" | "error";
 
@@ -128,22 +149,22 @@ function validAbsoluteReset(value: string): boolean {
   return Number.isFinite(epochMs) && epochMs >= 0 && new Date(epochMs).toUTCString() === value;
 }
 
-function validatedTokenQuotaValue(name: string, value: unknown): string | undefined {
+function validatedResponseHeaderValue(name: string, value: unknown): string | undefined {
   const normalized = name.toLowerCase();
-  const isTokenQuotaHeader = TOKEN_QUOTA_REMAINING_HEADERS.has(normalized)
-    || TOKEN_QUOTA_DURATION_RESET_HEADERS.has(normalized)
-    || TOKEN_QUOTA_ABSOLUTE_RESET_HEADERS.has(normalized);
-  if (!isTokenQuotaHeader || typeof value !== "string") return undefined;
-
-  const trimmed = value.trim();
-  if (value !== trimmed) return undefined;
-  if (TOKEN_QUOTA_REMAINING_HEADERS.has(normalized)) {
-    return validTokenCount(trimmed) ? trimmed : undefined;
+  if (!RESPONSE_HEADER_NAMES.has(normalized) || typeof value !== "string" || value !== value.trim()) return undefined;
+  if (COUNT_HEADERS.has(normalized)) return validTokenCount(value) ? value : undefined;
+  if (DURATION_RESET_HEADERS.has(normalized)) {
+    return validDuration(value) || validAbsoluteReset(value) ? value : undefined;
   }
-  if (TOKEN_QUOTA_DURATION_RESET_HEADERS.has(normalized)) {
-    return validDuration(trimmed) || validAbsoluteReset(trimmed) ? trimmed : undefined;
+  if (ABSOLUTE_RESET_HEADERS.has(normalized)) return validAbsoluteReset(value) ? value : undefined;
+  if (STATUS_HEADERS.has(normalized)) {
+    return ["allowed", "allowed_warning", "rejected"].includes(value) ? value : undefined;
   }
-  return validAbsoluteReset(trimmed) ? trimmed : undefined;
+  if (normalized === "retry-after" && validAbsoluteReset(value)) return value;
+  if (value.length > 32 || !/^\d+(?:\.\d+)?$/.test(value)) return undefined;
+  const number = Number(value);
+  const maximum = PERCENT_HEADERS.has(normalized) ? 100 : UTILIZATION_HEADERS.has(normalized) ? 1 : Number.MAX_SAFE_INTEGER / 1000;
+  return Number.isFinite(number) && number >= 0 && number <= maximum ? value : undefined;
 }
 
 /** Sanitizes and bounds one upstream-derived diagnostic value before storage. */
@@ -151,11 +172,20 @@ export function sanitizeDiagnosticText(value: unknown): string {
   return bound(redactDiagnosticText(value));
 }
 
-/** Sensitive headers are replaced wholesale except for strictly validated token-quota observations. */
+/** Compatibility scalar API; unsupported names and malformed observations are redacted. */
 export function sanitizeHeaderValue(name: string, value: unknown): string {
-  const tokenQuotaValue = validatedTokenQuotaValue(name, value);
-  if (tokenQuotaValue !== undefined) return tokenQuotaValue;
-  return isSensitiveName(name) ? REDACTED : sanitizeDiagnosticText(value);
+  return validatedResponseHeaderValue(name, value) ?? REDACTED;
+}
+
+/** Copy only named, validated quota/retry facts. Never retain caller keys or prose. */
+export function projectResponseHeaders(headers: unknown): Record<string, string> {
+  const projected: Record<string, string> = {};
+  if (typeof headers !== "object" || headers === null || Array.isArray(headers)) return projected;
+  for (const [name, value] of Object.entries(headers)) {
+    const validated = validatedResponseHeaderValue(name, value);
+    if (validated !== undefined) projected[name.toLowerCase()] = validated;
+  }
+  return projected;
 }
 
 function sanitizeFields(value: unknown, depth = 0): unknown {
@@ -202,6 +232,35 @@ export function sanitizedJson(value: unknown): string {
   return JSON.stringify(sanitizeForJson(value));
 }
 
+/**
+ * Reserve the budget for newest failures/routing facts before routine observations.
+ * Both classes share one hard bound; a priority flood evicts older priority facts.
+ * Return append order, not priority order or wall-clock order. Oversized records
+ * are skipped so one record cannot prevent smaller, useful facts from fitting.
+ */
+export function retainDiagnosticEvents(
+  events: readonly DiagnosticEvent[],
+  budget: number,
+  sizeOf: (event: DiagnosticEvent) => number = () => 1,
+): readonly DiagnosticEvent[] {
+  const retained = new Set<number>();
+  const sizes = events.map(sizeOf);
+  let used = 0;
+  for (const priority of [true, false]) {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]!;
+      const isPriority = event.level !== "info" || event.category === "routing" ||
+        event.category.startsWith("routing.") || event.category === "logical.provider";
+      if (isPriority !== priority) continue;
+      const size = sizes[index]!;
+      if (size > budget - used) continue;
+      retained.add(index);
+      used += size;
+    }
+  }
+  return events.filter((_event, index) => retained.has(index));
+}
+
 export class DiagnosticLog {
   readonly #events: DiagnosticEvent[] = [];
   readonly #maxEvents: number;
@@ -224,7 +283,9 @@ export class DiagnosticLog {
       for (const event of persisted.slice(-this.#maxEvents)) {
         this.#events.push(Object.freeze({
           ...event,
-          fields: Object.freeze({ ...event.fields }),
+          message: isHeaderDiagnostic(event.category, event.message) ? HEADER_DIAGNOSTIC_MESSAGE : event.message,
+          fields: Object.freeze(isHeaderDiagnostic(event.category, event.message)
+            ? projectResponseHeaders(event.fields) : { ...event.fields }),
         }));
       }
     } catch {
@@ -239,18 +300,22 @@ export class DiagnosticLog {
     fields: Readonly<Record<string, unknown>> = {},
   ): DiagnosticEvent {
     const safeFields: Record<string, string> = {};
-    for (const [key, value] of Object.entries(fields)) {
+    const projectedFields = isHeaderDiagnostic(category, message) ? projectResponseHeaders(fields) : fields;
+    for (const [key, value] of Object.entries(projectedFields)) {
       safeFields[sanitizeDiagnosticText(key)] = sanitizeDiagnosticText(value);
     }
     const event = Object.freeze({
       timestampMs: this.#now(),
       level,
       category: sanitizeDiagnosticText(category),
-      message: sanitizeDiagnosticText(message),
+      message: isHeaderDiagnostic(category, message) ? HEADER_DIAGNOSTIC_MESSAGE : sanitizeDiagnosticText(message),
       fields: Object.freeze(safeFields),
     });
     this.#events.push(event);
-    if (this.#events.length > this.#maxEvents) this.#events.splice(0, this.#events.length - this.#maxEvents);
+    if (this.#events.length > this.#maxEvents) {
+      const retained = retainDiagnosticEvents(this.#events, this.#maxEvents);
+      this.#events.splice(0, this.#events.length, ...retained);
+    }
     try {
       this.#persistence?.append(event);
     } catch {
@@ -273,16 +338,13 @@ export class DiagnosticLog {
   }
 
   recordHeaders(category: string, headers: Readonly<Record<string, unknown>>): DiagnosticEvent {
-    const safeHeaders: Record<string, string> = {};
-    for (const [name, value] of Object.entries(headers)) {
-      safeHeaders[sanitizeDiagnosticText(name)] = sanitizeHeaderValue(name, value);
-    }
-    return this.record("info", category, "Provider response headers observed.", safeHeaders);
+    return this.record("info", category, HEADER_DIAGNOSTIC_MESSAGE, projectResponseHeaders(headers));
   }
 
   recent(limit = 20): readonly DiagnosticEvent[] {
     const safeLimit = Number.isSafeInteger(limit) ? Math.max(0, Math.min(limit, 100)) : 20;
-    return this.#events.slice(-safeLimit).map((event) => ({ ...event, fields: { ...event.fields } }));
+    return retainDiagnosticEvents(this.#events, safeLimit)
+      .map((event) => ({ ...event, fields: { ...event.fields } }));
   }
 
   formatRecent(limit = 20): string {

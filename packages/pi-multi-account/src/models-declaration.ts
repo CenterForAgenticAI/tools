@@ -88,6 +88,16 @@ export type ManagedLogicalModelSource =
 			readonly model: Model<typeof GOOGLE_ANTIGRAVITY_API>;
 	  };
 
+/**
+ * Closed copy-by-name tables over Pi's model types. A field Pi removes or
+ * renames is a compile error (excess property), so a lost capability is never
+ * silent. A field Pi adds is NOT required here: it is excluded by default
+ * because projection copies only listed fields, and
+ * `test/package-contract.test.ts` reports it as a warning for review. See
+ * docs/pi-upgrades.md.
+ */
+type PiFieldDisposition<T, D extends string> = Partial<Record<keyof T, D>>;
+
 const MODEL_FIELD_DISPOSITION = {
 	id: "copy",
 	name: "copy",
@@ -103,8 +113,8 @@ const MODEL_FIELD_DISPOSITION = {
 	samplingParams: "copy",
 	headers: "exclude",
 	compat: "copy",
-} as const satisfies Record<
-	keyof Model<Api>,
+} as const satisfies PiFieldDisposition<
+	Model<Api>,
 	"copy" | "exclude" | "override"
 >;
 
@@ -118,9 +128,8 @@ const ANTHROPIC_COMPAT_DISPOSITION = {
 	allowEmptySignature: "copy",
 	supportsStrictTools: "copy",
 	allowedFallbackModels: "exclude",
-	supportsToolReferences: "copy",
-} as const satisfies Record<
-	keyof AnthropicMessagesCompat,
+} as const satisfies PiFieldDisposition<
+	AnthropicMessagesCompat,
 	"copy" | "exclude"
 >;
 
@@ -133,7 +142,7 @@ const CODEX_COMPAT_DISPOSITION = {
 	supportsAdditionalTools: "copy",
 	supportsToolSearch: "copy",
 	supportsExplicitPromptCacheMode: "copy",
-} as const satisfies Record<keyof OpenAIResponsesCompat, "copy">;
+} as const satisfies PiFieldDisposition<OpenAIResponsesCompat, "copy">;
 
 const THINKING_LEVEL_DISPOSITION = {
 	off: "copy",
@@ -549,8 +558,6 @@ function projectAnthropicCompat(
 	if (emptySignature !== undefined) projected.allowEmptySignature = emptySignature;
 	const strictTools = optionalCompatBoolean(properties, "supportsStrictTools", "anthropic");
 	if (strictTools !== undefined) projected.supportsStrictTools = strictTools;
-	const toolReferences = optionalCompatBoolean(properties, "supportsToolReferences", "anthropic");
-	if (toolReferences !== undefined) projected.supportsToolReferences = toolReferences;
 	return projected;
 }
 

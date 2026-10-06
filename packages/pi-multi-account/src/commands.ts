@@ -14,6 +14,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import type { AccountGroupMemberAvailability } from "./account-group-members.js";
 import { acquireMachineLease } from "./machine-lease.js";
 import {
 	DECLARATION_BASE_URL,
@@ -290,9 +291,8 @@ export function declarationNoticeMessage(notice: DeclarationNotice): string {
 		: `LOGICAL ROUTING OFF: The managed model declaration is unreadable. Run ${notice.remedy}.`;
 }
 
-export interface AccountGroupCommandMemberStatus {
-	readonly providerId: string;
-	readonly eligible: boolean;
+export interface AccountGroupCommandMemberStatus extends Pick<AccountGroupMemberAvailability, "providerId" | "eligible"> {
+	/** Membership availability or an additional managed-routing/metered block. */
 	readonly reason: string;
 }
 

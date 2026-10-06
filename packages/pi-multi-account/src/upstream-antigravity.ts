@@ -5,14 +5,13 @@ import type {
 import {
   createAssistantMessageEventStream,
   type Api,
-  type AssistantMessage,
-  type AssistantMessageEvent,
   type AssistantMessageEventStream,
   type Context,
   type Model,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { registerApiProvider } from "@earendil-works/pi-ai/compat";
+import { projectAliasAssistantEvent } from "./public-assistant-projection.js";
 
 const AUTH_ENTRYPOINT = "../packages/pi-antigravity/src/auth/index.js";
 const CLIENT_ENTRYPOINT = "../packages/pi-antigravity/src/client/index.js";
@@ -185,41 +184,6 @@ export function assertAntigravityDebugDumpDisabled(
   }
 }
 
-function withAliasAttribution(
-  message: AssistantMessage,
-  aliasModel: Model<Api>,
-): AssistantMessage {
-  return {
-    ...message,
-    api: aliasModel.api,
-    provider: aliasModel.provider,
-    model: aliasModel.id,
-  };
-}
-
-function withAliasEvent(
-  event: AssistantMessageEvent,
-  aliasModel: Model<Api>,
-): AssistantMessageEvent {
-  switch (event.type) {
-    case "done":
-      return {
-        ...event,
-        message: withAliasAttribution(event.message, aliasModel),
-      };
-    case "error":
-      return {
-        ...event,
-        error: withAliasAttribution(event.error, aliasModel),
-      };
-    default:
-      return {
-        ...event,
-        partial: withAliasAttribution(event.partial, aliasModel),
-      };
-  }
-}
-
 function reattributeAntigravityStream(
   upstream: AssistantMessageEventStream,
   aliasModel: Model<Api>,
@@ -227,7 +191,7 @@ function reattributeAntigravityStream(
   const attributed = createAssistantMessageEventStream();
   void (async () => {
     for await (const event of upstream) {
-      attributed.push(withAliasEvent(event, aliasModel));
+      attributed.push(projectAliasAssistantEvent(event, aliasModel));
     }
   })();
   return attributed;

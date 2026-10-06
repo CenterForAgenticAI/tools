@@ -20,6 +20,11 @@ import {
 } from "./commands.js";
 import { CompactionRouter } from "./compaction.js";
 import {
+	accountGroupMemberAvailability,
+	isAccountGroupVirtualModel,
+	readAccountGroupRegistrySnapshot,
+} from "./account-group-members.js";
+import {
 	createCodexAliasProviderConfig,
 	getCodexModelsFromRegistry,
 	type CapturedCodexProvider,
@@ -35,6 +40,8 @@ import {
 import {
 	ALLOWED_FAMILIES,
 	DEFAULT_CONFIG,
+	ConfigValidationError,
+	isAccountLimit,
 	accountSlotIndexes,
 	canonicalProviderIdForAccountSlot,
 	isAccountSlotIndex,
@@ -137,6 +144,7 @@ import {
 	type InstalledDeclarationStatus,
 } from "./models-declaration.js";
 import { createLogicalDispatch } from "./logical-dispatch.js";
+import type { AccountGroupFailureBlockReason } from "./account-group-failure.js";
 import type { ModelsCatalogs } from "./commands.js";
 import {
 	NOOP_LOGICAL_ATTRIBUTION_ATTEMPT,
@@ -156,6 +164,7 @@ import {
 import { isCredentialUsable } from "./credential-lifecycle.js";
 import {
 	routeAfterFailure,
+	logicalAccountEligible,
 	selectAvailableManagedAccount,
 	selectAvailableRecoveryAccount,
 	selectAvailableRouteCandidates,
@@ -201,7 +210,7 @@ import {
 	type SessionIdSource,
 } from "./session-account-groups.js";
 import { projectKeyForCwd } from "./project-identity.js";
-import { RuntimeState, isCanonicalManagedProviderId } from "./runtime-state.js";
+import { RuntimeState, isCanonicalManagedProviderId, normalizeCredentialRevision } from "./runtime-state.js";
 import { providerTypeFor } from "./vendor.js";
 import { resolveTierModel } from "./tier-model-resolver.js";
 import {
@@ -407,6 +416,17 @@ function readInstalledDeclaration(targetPath: string): unknown {
 	} catch {
 		return undefined;
 	}
+}
+
+/** Only schema field names, never validator prose or operator-supplied values. */
+function configRepairMessage(error: unknown): string {
+	const field = error instanceof ConfigValidationError
+		? [...Object.keys(DEFAULT_CONFIG), "defaultAccountGroup"].find((key) =>
+			error.message.startsWith(`[multi-account config] ${key} `) ||
+			error.message.startsWith(`[multi-account config] ${key}.`),
+		)
+		: undefined;
+	return `Multi-account configuration is invalid${field === undefined ? "" : ` (${field})`}. Correct the global config and run /multi-account reload or /reload.`;
 }
 
 /** The session's id, or undefined when the host context cannot supply one. */
@@ -1604,11 +1624,12 @@ function readLiveCredentialFacts(
 ): {
 	credential: CredentialUsability | undefined;
 	fingerprint: string | undefined;
+	credentialRevision: number | undefined;
 } {
 	try {
 		const stored = readStoredCredential(providerId, authPath);
 		if (stored === null || typeof stored !== "object") {
-			return { credential: undefined, fingerprint: undefined };
+			return { credential: undefined, fingerprint: undefined, credentialRevision: undefined };
 		}
 		const record = stored as Record<string, unknown>;
 		const expiresAtMs =
@@ -1622,10 +1643,11 @@ function readLiveCredentialFacts(
 				...(expiresAtMs === undefined ? {} : { expiresAtMs }),
 			},
 			fingerprint: accountFingerprint(record.access),
+			credentialRevision: expiresAtMs,
 		};
 	} catch {
 		// Missing or unreadable metadata must preserve existing reactive routing.
-		return { credential: undefined, fingerprint: undefined };
+		return { credential: undefined, fingerprint: undefined, credentialRevision: undefined };
 	}
 }
 
@@ -1638,7 +1660,7 @@ function readLiveCredentialFacts(
  * routing keep the managed superset.
  */
 type OperatorManagedAccount = Omit<OperatorAccount, "family"> &
-	Omit<ManagedAccount, "family"> & { readonly family: ManagedFamily };
+	Omit<ManagedAccount, "family"> & { readonly family: ManagedFamily; readonly credentialRevision?: number };
 
 export type AccountGroupEnforcementReason =
 	| "unknown-group"
@@ -1730,7 +1752,7 @@ function operatorAccounts(
 		// Project the stored credential at this boundary into bounded metadata only.
 		// The raw access value is used transiently by accountFingerprint and never
 		// enters OperatorAccount, ManagedAccount, routing state, or diagnostics.
-		const { credential, fingerprint } = readLiveCredentialFacts(
+		const { credential, fingerprint, credentialRevision } = readLiveCredentialFacts(
 			slot.providerId,
 			authPath,
 		);
@@ -1747,6 +1769,7 @@ function operatorAccounts(
 				modelIds: models.map((candidate) => candidate.id),
 				displayName: slot.providerId,
 				...(credential === undefined ? {} : { credential }),
+				...(credentialRevision === undefined ? {} : { credentialRevision }),
 				...(fingerprint === undefined
 					? {}
 					: { accountFingerprint: fingerprint }),
@@ -1963,9 +1986,10 @@ function delegateOwnedApiSet(): WeakSet<object> {
  * True when this extension API belongs to a delegate-owned in-process session
  * rather than the real foreground originator.
  *
- * This read must happen while the factory runs inside bindExtensions(). An active
- * current bind has a defined AsyncLocalStorage frame; a legacy bind has positive
- * depth. Either signal marks the API persistently, matching pi-delegate's own
+ * Read at session_start, which bindExtensions() emits inside the trusted frame,
+ * not while the loader executes the factory. An active current bind has a defined
+ * AsyncLocalStorage frame; a legacy bind has positive depth. Either signal marks
+ * the API persistently, matching pi-delegate's own
  * shouldSkipForegroundLifecycleForDelegateOwnedApi contract.
  */
 function isDelegateOwnedApi(api: Parameters<ExtensionFactory>[0]): boolean {
@@ -2032,7 +2056,7 @@ function delegateWorkerOriginOwnerSessionId(
 
 /**
  * Persist an inherited effective result under the child's own session id without
- * consulting the child's real cwd/default policy. This makes a durable child a
+ * consulting the child's real cwd/default policy. This makes a delegate child a
  * valid parent for the next durable or in-process hop while preserving the
  * inherited source exactly.
  */
@@ -2118,13 +2142,9 @@ function buildLivePiCatalogSnapshot(
 export const createMultiAccountExtension =
 	(options: MultiAccountExtensionOptions = {}): ExtensionFactory =>
 	async (pi) => {
-		// Read pi-delegate's bind scope while the factory body runs synchronously
-		// inside bindExtensions(). A delegate-owned in-process worker/clone session
-		// shares the foreground's TUI, so its route indicator would publish to the
-		// same qualified widget key and overwrite the real foreground footer. The
-		// footer is foreground-only; every other surface (provider registration,
-		// routing, cost attribution) stays active for the worker.
-		const delegateOwnedSession = isDelegateOwnedApi(pi);
+		// Ownership becomes available at session_start, not factory loading. Keep
+		// the bind-time result for later routing and foreground-only UI callbacks.
+		let delegateOwnedSession = false;
 		// Copy only pi-delegate's two named child-identity fields. Public request
 		// objects and caller-provided env maps never cross this trust boundary.
 		const delegateDriverChildMarker = process.env[DELEGATE_DRIVER_CHILD_ENV];
@@ -2261,6 +2281,17 @@ export const createMultiAccountExtension =
 		let latestLogicalPhysicalProviderId: string | undefined;
 		const logicalTerminalAssociations = createLogicalTerminalAssociationStore();
 		let config: MultiAccountConfig = DEFAULT_CONFIG;
+		// Discovery defaults are not request authorization. Cleared only by a
+		// complete validated load; a failed reload keeps the last valid policy.
+		let policyConfigError: string | undefined =
+			"Multi-account configuration is not loaded. Run /multi-account reload or /reload.";
+		const loadGlobalConfig = (): MultiAccountConfig => {
+			try {
+				return readConfig(configPath);
+			} catch (error) {
+				throw new Error(configRepairMessage(error));
+			}
+		};
 		const defaultCostReportReader = createDefaultCostReportReader({
 			config: () => config,
 			// `context` is undefined until `session_start` assigns it below; this
@@ -2399,11 +2430,23 @@ export const createMultiAccountExtension =
 			return executeLogicalModelSwitch(args, dependencies);
 		};
 
-		const openRouterPolicy = () =>
-			resolveOpenRouterEnvironmentPolicy({
+		const openRouterPolicy = () => {
+			const policy = resolveOpenRouterEnvironmentPolicy({
 				environment: openRouterEnvironment,
 				sessionDisabled: openRouterSessionDisabled,
 			});
+			// In-process workers share the parent's environment, so lineage env
+			// alone cannot exclude them. Only retained trusted bind ownership
+			// supplies this additional veto; caller-shaped origins never do.
+			return delegateOwnedSession
+				? {
+						enabled: false as const,
+						reason: "delegate-session" as const,
+						conversationEgressConsented: policy.conversationEgressConsented,
+						delegatesAllowed: false as const,
+					}
+				: policy;
+		};
 		const openRouterModel = (
 			modelId: string,
 			modelContext: ExtensionContext | undefined = context,
@@ -2469,7 +2512,9 @@ export const createMultiAccountExtension =
 			| undefined;
 		let accountGroupResolutionInitialized = false;
 		let accountGroupScopeBlocked = false;
-		const blockAccountGroupScope = (key: string, message: string): void => {
+		let accountGroupBlockReason: AccountGroupFailureBlockReason | undefined;
+		const blockAccountGroupScope = (key: AccountGroupFailureBlockReason, message: string): void => {
+			accountGroupBlockReason = key;
 			accountGroupResolutionInitialized = true;
 			accountGroupScopeBlocked = true;
 			effectiveAccountGroupResolution = undefined;
@@ -2480,10 +2525,12 @@ export const createMultiAccountExtension =
 		): EffectiveAccountGroupResolution => {
 			accountGroupResolutionInitialized = true;
 			accountGroupScopeBlocked = false;
+			accountGroupBlockReason = undefined;
 			effectiveAccountGroupResolution = resolution;
 			return resolution;
 		};
 		const accountGroupScopeRestrictsRouting = (): boolean =>
+			policyConfigError !== undefined ||
 			accountGroupScopeBlocked ||
 			effectiveAccountGroupResolution === undefined ||
 			effectiveAccountGroupResolution.source !== "unrestricted";
@@ -2501,6 +2548,10 @@ export const createMultiAccountExtension =
 		const initializeSessionAccountGroupScope = (
 			accountContext: ExtensionContext | undefined,
 		): void => {
+			if (policyConfigError !== undefined) {
+				blockAccountGroupScope("config-invalid", policyConfigError);
+				return;
+			}
 			const sessionManager = accountContext?.sessionManager as
 				| AccountGroupSessionManager
 				| undefined;
@@ -2547,14 +2598,23 @@ export const createMultiAccountExtension =
 						);
 						return;
 					}
-					const parentOverride =
-						sessionAccountGroups.readOverride(parentSessionId);
-					if (parentOverride === undefined) {
-						resolveOwnSessionAccountGroup(sessionManager, cwd);
+					const inherited =
+						sessionAccountGroups.readCachedResolution(parentSessionId);
+					if (inherited === undefined) {
+						blockAccountGroupScope(
+							"delegate-resolution-unavailable",
+							"The delegate parent's effective account group is unavailable; managed routing is blocked for this worker.",
+						);
 						return;
 					}
-					sessionAccountGroups.setOverride(sessionManager, parentOverride);
-					resolveOwnSessionAccountGroup(sessionManager, cwd);
+					rememberAccountGroupResolution(
+						cacheInheritedAccountGroupResolution(
+							sessionAccountGroups,
+							sessionManager,
+							cwd,
+							inherited,
+						),
+					);
 					return;
 				}
 				if (delegateDriverIdentityPresent) {
@@ -2601,6 +2661,7 @@ export const createMultiAccountExtension =
 			accounts: readonly OperatorManagedAccount[],
 			accountContext: ExtensionContext | undefined,
 		): OperatorManagedAccount[] => {
+			if (policyConfigError !== undefined) return [];
 			if (!accountGroupResolutionInitialized) {
 				initializeSessionAccountGroupScope(accountContext);
 			}
@@ -2649,13 +2710,17 @@ export const createMultiAccountExtension =
 				(account): account is OperatorAccount & SubscriptionManagedAccount =>
 					isRoutingEligibleAccountFamily(account),
 			);
-		const physicalAccountsForRouting = (nowMs: number): ManagedAccount[] =>
-			physicalOperatorAccounts().map((account) => {
+		const physicalAccountsForRouting = (
+			nowMs: number,
+			accounts: readonly OperatorManagedAccount[] = physicalOperatorAccounts(),
+		): ManagedAccount[] =>
+			accounts.map((account) => {
 				const {
 					providerId,
 					family,
 					credentialType,
 					credential,
+					credentialRevision,
 					accountFingerprint,
 					modelIds,
 				} = account;
@@ -2682,6 +2747,7 @@ export const createMultiAccountExtension =
 						: { accountFingerprint }),
 					...(modelIds === undefined ? {} : { modelIds }),
 					...(fleetUsage === undefined ? {} : { fleetUsage }),
+					...(account.credentialRevision === undefined ? {} : { credentialRevision: account.credentialRevision }),
 				};
 			});
 		const subscriptionAccountsForRouting = (
@@ -2899,6 +2965,10 @@ export const createMultiAccountExtension =
 				authJsonPath: authPath,
 				config,
 			});
+			for (const slot of discovered.slots) {
+				const revision = normalizeCredentialRevision(slot.expiresAtMs ?? NaN);
+				if (revision !== undefined) state.observeCredentialRevision(slot.providerId, slot.family, revision);
+			}
 			// When codex is disabled (host OAuth surface unavailable), strip codex
 			// slots so the disabled sentinel's throwing callbacks are never reached.
 			discovery = codexEnabled
@@ -3117,7 +3187,47 @@ export const createMultiAccountExtension =
 			};
 		};
 
+		const readCommandAccountGroupStatus = (): AccountGroupCommandStatus => {
+			if (policyConfigError !== undefined) throw new Error(policyConfigError);
+			const resolution = effectiveAccountGroupResolution;
+			if (accountGroupScopeBlocked || resolution === undefined) {
+				throw new Error("The effective session account group is unavailable; managed routing is blocked.");
+			}
+			if (resolution.source === "unrestricted") return { resolution };
+			const members = config.accountGroups?.[resolution.groupId] ?? [];
+			const nowMs = Date.now();
+			const snapshot = readAccountGroupRegistrySnapshot(context?.modelRegistry);
+			const providerIds = new Set([...members, ...snapshot.providerIds]);
+			providerIds.delete(LOGICAL_PROVIDER_ID);
+			return {
+				resolution,
+				members: [...providerIds].map((providerId) => {
+					const availability = accountGroupMemberAvailability(providerId, members, snapshot);
+					if (!availability.eligible) return availability;
+					if (providerId === OPENROUTER_PROVIDER_ID) {
+						return { providerId, eligible: false, reason: "metered OpenRouter disabled by active group" };
+					}
+					const slot = classifyProviderId({ providerId, credentialType: "unknown" });
+					if (slot === null) return availability;
+					const fleetUsage = isAllowedFamily(slot.family)
+						? sharedUsageHint(
+							usage.routingUsage(providerId, slot.family, nowMs),
+							usage.activeExhaustionHoldUntilMs(providerId, slot.family, nowMs),
+						)
+						: undefined;
+					const eligible = !disabledProviders.has(providerId) && logicalAccountEligible(
+						{ providerId, exhausted: snapshotIndicatesExhaustion(fleetUsage, nowMs, "all-observed") },
+						state, nowMs,
+					);
+					return { providerId, eligible, reason: eligible ? availability.reason : "not currently routing-eligible" };
+				}),
+			};
+		};
+
+		// Explicit operator actions resolve this session's own policy. Observational
+		// status must instead preserve the effective result inherited at startup.
 		const resolveCommandAccountGroup = (): AccountGroupCommandStatus => {
+			if (policyConfigError !== undefined) throw new Error(policyConfigError);
 			const liveContext = context;
 			if (
 				liveContext === undefined ||
@@ -3125,34 +3235,8 @@ export const createMultiAccountExtension =
 			) {
 				throw new Error("The live session identity is unavailable.");
 			}
-			const resolution = resolveOwnSessionAccountGroup(
-				liveContext.sessionManager,
-				liveContext.cwd,
-			);
-			if (resolution.source === "unrestricted") return { resolution };
-			const members = config.accountGroups?.[resolution.groupId] ?? [];
-			const nowMs = Date.now();
-			const routingAccounts = physicalAccountsForRouting(nowMs);
-			return {
-				resolution,
-				members: members.map((providerId) => {
-					const eligible =
-						selectAvailableManagedAccount({
-							accounts: routingAccounts.filter(
-								(account) => account.providerId === providerId,
-							),
-							state,
-							nowMs,
-						}) !== undefined;
-					return {
-						providerId,
-						eligible,
-						reason: eligible
-							? "routing-eligible"
-							: "not currently routing-eligible",
-					};
-				}),
-			};
+			resolveOwnSessionAccountGroup(liveContext.sessionManager, liveContext.cwd);
+			return readCommandAccountGroupStatus();
 		};
 
 		const commands = new MultiAccountCommandController({
@@ -3198,7 +3282,7 @@ export const createMultiAccountExtension =
 					sessionAccountGroups.clearOverride(sessionManager);
 					return resolveCommandAccountGroup();
 				},
-				status: resolveCommandAccountGroup,
+				status: readCommandAccountGroupStatus,
 			},
 			logicalRoutingState: () => logicalRoutingState,
 			disabledProviders,
@@ -3283,9 +3367,12 @@ export const createMultiAccountExtension =
 			setModel,
 			rediscover,
 			addSlot,
-			reloadGlobalConfig: async () => readConfig(configPath),
+			reloadGlobalConfig: async () => loadGlobalConfig(),
 			onConfigReload: async (nextConfig) => {
 				config = nextConfig;
+				policyConfigError = undefined;
+				accountGroupResolutionInitialized = false;
+				initializeSessionAccountGroupScope(context);
 				await rediscover();
 			},
 			routingConfig: {
@@ -3333,8 +3420,8 @@ export const createMultiAccountExtension =
 			// Group scope is stricter than the optional metered rung. For unrestricted
 			// sessions, consent, delegate exclusion, session disablement, model syntax,
 			// and the positive budget cap remain the authority for OpenRouter.
-			// A named account group is a closed dispatch set. Metered OpenRouter is
-			// intentionally outside every group and therefore cannot widen exhaustion.
+			// A named group remains closed to metered OpenRouter even when listed.
+			// Membership alone cannot enable or widen the existing metered gate.
 			if (accountGroupScopeRestrictsRouting()) return false;
 			const policy = openRouterPolicy();
 			if (!policy.enabled) return false;
@@ -3476,12 +3563,31 @@ export const createMultiAccountExtension =
 			providerId: string,
 			inputContext: ExtensionContext,
 		): boolean => {
+			if (policyConfigError !== undefined) return false;
 			if (!accountGroupScopeRestrictsRouting()) return true;
+			// Pi virtual routers may choose arbitrary physical targets. No public
+			// cross-host hook here can authorize those targets before they send.
+			// Check the selected model before the extension-owned unified exception.
+			if (isAccountGroupVirtualModel(inputContext.model ?? currentModel)) return false;
 			if (providerId === LOGICAL_PROVIDER_ID) return true;
+			// Listing OpenRouter does not enable a metered route. Issue 138 owns
+			// changing that gate; all existing consent/budget/delegate controls stay.
+			if (providerId === OPENROUTER_PROVIDER_ID) return false;
+			const resolution = effectiveAccountGroupResolution;
+			if (accountGroupScopeBlocked || resolution === undefined || resolution.source === "unrestricted") {
+				return false;
+			}
+			const members = config.accountGroups?.[resolution.groupId] ?? [];
+			const modelId = inputContext.model?.id ?? currentModel?.id;
+			const availability = accountGroupMemberAvailability(
+				providerId, members,
+				readAccountGroupRegistrySnapshot(inputContext.modelRegistry), modelId,
+			);
+			if (!availability.eligible) return false;
+			// Membership never enrolls custom providers in extension-owned routing.
+			if (classifyProviderId({ providerId, credentialType: "unknown" }) === null) return true;
 			try {
-				return subscriptionOperatorAccounts(context ?? inputContext).some(
-					(account) => account.providerId === providerId,
-				);
+				return physicalOperatorAccounts(context ?? inputContext).some((account) => account.providerId === providerId);
 			} catch {
 				return false;
 			}
@@ -3526,11 +3632,28 @@ export const createMultiAccountExtension =
 		): Promise<{ readonly action: "continue" | "handled" }> => {
 			const activeProviderId =
 				inputContext.model?.provider ?? currentModel?.provider;
+			if (policyConfigError !== undefined && activeProviderId === undefined) {
+				inputContext.ui.notify(policyConfigError, "warning");
+				return { action: "handled" };
+			}
 			if (
 				activeProviderId === undefined ||
 				providerAllowedByActiveGroup(activeProviderId, inputContext)
 			) {
 				return { action: "continue" };
+			}
+			if (policyConfigError !== undefined) {
+				inputContext.ui.notify(policyConfigError, "warning");
+				return { action: "handled" };
+			}
+			if (isAccountGroupVirtualModel(inputContext.model ?? currentModel)) {
+				// Never reinterpret a virtual selection as a managed physical origin
+				// or replace it silently, even under a managed provider's name.
+				inputContext.ui.notify(
+					"Multi-account blocked a virtual model under the active account group. Select a physical model allowed by the group.",
+					"warning",
+				);
+				return { action: "handled" };
 			}
 			const origin = accountGroupOrigin(
 				activeProviderId,
@@ -3574,7 +3697,7 @@ export const createMultiAccountExtension =
 					replacement = undefined;
 				}
 			}
-			if (replacement !== undefined) {
+			if (replacement !== undefined && !isAccountGroupVirtualModel(replacement)) {
 				try {
 					if (await setModel(replacement)) {
 						if (origin !== undefined) {
@@ -3781,6 +3904,11 @@ export const createMultiAccountExtension =
 		 */
 		const settleTurn = async (): Promise<void> => {
 			openRouterInputApproved = false;
+			if (policyConfigError !== undefined) {
+				pendingFailure = undefined;
+				pendingOpenRouterFailure = false;
+				return;
+			}
 			if (pendingOpenRouterFailure) {
 				pendingOpenRouterFailure = false;
 				const restored = await restoreOpenRouterOrigin();
@@ -3800,6 +3928,24 @@ export const createMultiAccountExtension =
 			const origin = turnRouteOrigin;
 			if (!classified || origin === undefined) return;
 			const { providerId, family, failure } = classified;
+			if (origin.logical) {
+				// Unified recovers inside the model call, so its final failure already
+				// spent the call's bounded sends, and message_end recorded its quota
+				// effects. Settlement adds only a detached usage refresh for a quota
+				// failure and a terminal-auth invalidation: never a switch, park,
+				// OpenRouter rung, route pin, or fixed continuation.
+				// Direct physical selections keep the legacy path below.
+				clearTurnRouteOrigin();
+				if (classified.failedAtMs !== undefined) {
+					refreshUsageAfterLogicalQuotaFailure(
+						providerId,
+						family,
+						classified.failedAtMs,
+					);
+				}
+				await invalidateOnTerminalAuth(providerId, family, failure);
+				return;
+			}
 			const accounts = physicalOperatorAccounts();
 			const nowMs = Date.now();
 			const routingAccounts = physicalAccountsForRouting(nowMs);
@@ -4162,7 +4308,13 @@ export const createMultiAccountExtension =
 		const observedMessages = new WeakSet<object>();
 		// Operator advice for a structured refusal. A delegate-owned in-process
 		// session shares the foreground UI, so only the foreground advises.
-		const refusalAdvisor = createRefusalAdvisor({ foreground: !delegateOwnedSession });
+		const refusalAdvisor = createRefusalAdvisor({
+			// The advisor is constructed before binding; read retained ownership
+			// when advising rather than freezing the factory-time foreground value.
+			get foreground() {
+				return !delegateOwnedSession;
+			},
+		});
 		const recordUsage = (
 			observation: () => UsageObservation | undefined,
 		): void => {
@@ -4312,8 +4464,9 @@ export const createMultiAccountExtension =
 			const activeProviderId =
 				runContext.model?.provider ?? currentModel?.provider;
 			if (
-				activeProviderId !== undefined &&
-				!providerAllowedByActiveGroup(activeProviderId, runContext)
+				(activeProviderId === undefined && policyConfigError !== undefined) ||
+				(activeProviderId !== undefined &&
+					!providerAllowedByActiveGroup(activeProviderId, runContext))
 			) {
 				openRouterInputApproved = false;
 				diagnostics.record(
@@ -4322,11 +4475,11 @@ export const createMultiAccountExtension =
 					"A custom-message run selected a provider outside the active account group and was aborted before provider dispatch.",
 					{ providerId: activeProviderId },
 				);
+				runContext.abort();
 				runContext.ui.notify(
-					"Multi-account aborted a provider run outside the active account group.",
+					policyConfigError ?? "Multi-account aborted a provider run outside the active account group.",
 					"warning",
 				);
-				runContext.abort();
 				return;
 			}
 			const ownsActiveOpenRouter =
@@ -4355,6 +4508,10 @@ export const createMultiAccountExtension =
 		pi.on(
 			"session_start",
 			guarded("lifecycle.session-start", async (_event, startupContext) => {
+				// Pi executes factories during resource loading, before pi-delegate
+				// opens its trusted bind frame. Capture ownership here before any
+				// UI or routing initialization, and retain it after the frame ends.
+				delegateOwnedSession ||= isDelegateOwnedApi(pi);
 				context = startupContext;
 				try {
 					logicalRouteIndicator?.shutdown();
@@ -4414,7 +4571,27 @@ export const createMultiAccountExtension =
 					now: Date.now,
 				});
 				currentModel = startupContext.model;
-				config = readConfig(configPath);
+				try {
+					config = loadGlobalConfig();
+					policyConfigError = undefined;
+				} catch (error) {
+					// loadGlobalConfig produces only bounded, field-only guidance.
+					const message = (error as Error).message;
+					if (policyConfigError !== undefined) {
+						policyConfigError = message;
+						const raw = readInstalledDeclaration(configPath) as
+							| { accountLimit?: unknown }
+							| undefined;
+						config = {
+							...DEFAULT_CONFIG,
+							accountLimit: isAccountLimit(raw?.accountLimit)
+								? raw.accountLimit
+								: DEFAULT_CONFIG.accountLimit,
+						};
+					}
+					diagnostics.record("warning", "config.invalid", message);
+					startupContext.ui.notify(message, "warning");
+				}
 				// Resolve and durably cache the session policy before rediscovery can
 				// publish any request-capable provider surface.
 				accountGroupResolutionInitialized = false;
@@ -4579,10 +4756,32 @@ export const createMultiAccountExtension =
 								: decorateLogicalAttributionLifecycle(store, indicator);
 						},
 						deps: {
+							captureSelectionSnapshot(modelId) {
+								if (policyConfigError !== undefined) throw new Error(policyConfigError);
+								if (!accountGroupResolutionInitialized) initializeSessionAccountGroupScope(context);
+								const resolution = effectiveAccountGroupResolution;
+								const members = resolution === undefined || resolution.source === "unrestricted" ? [] : [...(config.accountGroups?.[resolution.groupId] ?? [])];
+								const policy = resolution === undefined || accountGroupScopeBlocked || policyConfigError !== undefined
+									? { kind: "blocked" as const, reason: policyConfigError !== undefined ? "config-invalid" as const : accountGroupBlockReason ?? "context-unavailable" }
+									: { kind: "resolved" as const, resolution: resolution.source === "unrestricted" ? { source: "unrestricted" as const } : { source: resolution.source, groupId: resolution.groupId }, members };
+								const accountLimit = config.accountLimit;
+								const nowMs = Date.now();
+								const rows = operatorAccounts(context, discovery, authPath, accountLimit).filter((account) => !disabledProviders.has(account.providerId));
+								const allAccounts = logicalAccountsFromManaged(physicalAccountsForRouting(nowMs, rows), nowMs);
+								const authorized = new Set(enforceSessionAccountGroup(rows, context).map((row) => row.providerId));
+								const registry = readAccountGroupRegistrySnapshot(context?.modelRegistry);
+								const physicalModels = context?.modelRegistry.getAll().filter((row) => !isAccountGroupVirtualModel(row)) ?? [];
+								const otherCandidates = [...registry.providerIds].filter((providerId) => providerId !== LOGICAL_PROVIDER_ID && providerId !== OPENROUTER_PROVIDER_ID && classifyProviderId({ providerId, credentialType: "unknown" }) === null).map((providerId) => {
+									const availability = accountGroupMemberAvailability(providerId, [providerId], registry, modelId);
+									return { providerId, eligible: availability.eligible, reason: availability.reason, servesModel: physicalModels.some((row) => row.provider === providerId && row.id === modelId) };
+								});
+								return { accounts: allAccounts.filter((row) => authorized.has(row.providerId)), group: { policy, accountLimit, allAccounts, otherCandidates } };
+							},
 							// A getter, not an array. `clear`, `disable`, expiry and
 							// provider-reported exhaustion must take effect on the next
 							// request, not at the next restart.
 							get accounts() {
+								if (policyConfigError !== undefined) throw new Error(policyConfigError);
 								const nowMs = Date.now();
 								return logicalAccountsFromManaged(
 									physicalAccountsForRouting(nowMs),
@@ -4592,15 +4791,26 @@ export const createMultiAccountExtension =
 							dispatch: createLogicalDispatch(context.modelRegistry),
 							onPublicTerminal: logicalTerminalAssociations.bindPublicTerminal,
 							state,
-							routePin: {
-								get: () => state.getLogicalRoutePin(),
-								consume: (generation, requestedModelId) =>
-									state.consumeLogicalRoutePin(generation, requestedModelId),
-								clear: () => state.clearLogicalRoutePin(),
+							// A recovered-past attempt never reaches message_end; commit its
+							// account effects through its own exact association.
+							onSupersededTerminal: (physical: AssistantMessage) => {
+								commitSupersededLogicalFailure(physical);
+							},
+							get recoveryTiming() {
+								return {
+									recoveryIdleTimeoutMs: config.recoveryIdleTimeoutMs,
+									recoveryAbsoluteTimeoutMs: config.recoveryAbsoluteTimeoutMs,
+									recoveryStallTimeoutMs: config.recoveryStallTimeoutMs,
+								};
 							},
 							modelVendor,
 							get tierModelMap() {
 								return config.tierModelMap;
+							},
+							// A getter, so a reload that turns same-family failover off
+							// stops the next call's in-call account switch.
+							get sameFamilyFailover() {
+								return config.sameFamilyFailover;
 							},
 							...(config.crossFamilyChainEnabled
 								? { crossFamilyChains: config.crossFamilyChains }
@@ -4664,20 +4874,22 @@ export const createMultiAccountExtension =
 					// a fault in the logical gate must not take them down with it.
 					diagnostics.recordError("logical.registration", error);
 				}
-				void Promise.resolve()
-					.then(() =>
-						warmer.start(
-							() =>
-								projectAutomaticAccountCandidates(
-									discovery,
-									config.accountLimit,
-								),
-							config,
-						),
-					)
-					.catch((error) => {
-						diagnostics.recordError("credential.warmer.start", error);
-					});
+				if (policyConfigError === undefined) {
+					void Promise.resolve()
+						.then(() =>
+							warmer.start(
+								() =>
+									projectAutomaticAccountCandidates(
+										discovery,
+										config.accountLimit,
+									),
+								config,
+							),
+						)
+						.catch((error) => {
+							diagnostics.recordError("credential.warmer.start", error);
+						});
+				}
 				// Pi restores the session model inside createAgentSession, strictly
 				// BEFORE extensions load, so a managed alias does not exist yet and the
 				// host falls back to a base provider. Now that the aliases are
@@ -4744,6 +4956,7 @@ export const createMultiAccountExtension =
 			guarded(
 				"lifecycle.before-agent-start",
 				async (_event, upcomingContext) => {
+					if (policyConfigError !== undefined) return;
 					// The warmer and usage fetcher each project independently, so
 					// removing one call-site guard cannot expose the sibling sink.
 					void Promise.resolve()
@@ -4779,6 +4992,10 @@ export const createMultiAccountExtension =
 						const accounts = subscriptionOperatorAccounts(
 							context ?? upcomingContext,
 						);
+						for (const account of accounts) {
+							const revision = normalizeCredentialRevision(account.credentialRevision ?? NaN);
+							if (revision !== undefined) state.observeCredentialRevision(account.providerId, account.family, revision);
+						}
 						const nowMs = Date.now();
 						const managedAccounts: SubscriptionManagedAccount[] = accounts.map(
 							({
@@ -4995,6 +5212,137 @@ export const createMultiAccountExtension =
 				});
 			}),
 		);
+		/**
+		 * A unified terminal-auth failure: invalidate the account, unless an
+		 * explicit 401 on a subscription account is repaired by the one forced
+		 * refresh the session allows it. The refresh only restores the account for
+		 * later calls; it never sends this call again.
+		 */
+		const invalidateOnTerminalAuth = async (
+			providerId: string,
+			family: ManagedFamily,
+			failure: ProviderFailureSignal,
+		): Promise<void> => {
+			// An explicit 401 gets the one forced refresh whatever else the body
+			// says, as direct settlement does: a server-revoked token can still
+			// look locally valid.
+			if (
+				failure.httpStatus === 401 &&
+				forcedCredentialRefresher !== undefined &&
+				isAllowedFamily(family)
+			) {
+				const outcome = await forcedCredentialRefresher
+					.attempt(providerId, family)
+					.catch(() => "failed" as const);
+				if (outcome === "refreshed") return;
+			}
+			if (classifyFailure(failure).category !== "terminal-auth") return;
+			state.invalidateAccount({
+				providerId,
+				family,
+				reason: "terminal-auth-failure",
+				invalidatedAtMs: Date.now(),
+			});
+		};
+		/**
+		 * One opportunistic usage refresh for the physical account a unified
+		 * quota failure refused on, as direct settlement does for its own.
+		 *
+		 * Detached and fail-soft: it improves routing state and never delays or
+		 * changes the call. Only named fields reach the fetcher, and only for a
+		 * live subscription account; an owning-vendor API account has no pooled
+		 * usage to refresh.
+		 */
+		const refreshUsageAfterLogicalQuotaFailure = (
+			providerId: string,
+			family: ManagedFamily,
+			failedAtMs: number,
+		): void => {
+			try {
+				const account = physicalOperatorAccounts().find(
+					(candidate) =>
+						candidate.providerId === providerId && candidate.family === family,
+				);
+				if (account === undefined || !isRoutingEligibleAccountFamily(account)) {
+					return;
+				}
+				void usageFetcher
+					.refreshAfterFailure(
+						{
+							providerId: account.providerId,
+							family: account.family,
+							...(account.credentialType === undefined
+								? {}
+								: { credentialType: account.credentialType }),
+						},
+						config,
+						failedAtMs,
+					)
+					.catch(() => undefined);
+			} catch {
+				// A refresh is an improvement, never a step the call depends on.
+			}
+		};
+		/**
+		 * Account effects of one unified physical attempt the call recovered past.
+		 *
+		 * It never reaches message_end, so this applies what message_end and
+		 * settlement would: the quota limit streak and, when the provider gave no
+		 * recovery time, a bounded exhaustion hold, and one detached usage
+		 * refresh; or a terminal-auth invalidation. Its cooldown was already
+		 * written before the engine chose the next send. Nothing here switches the
+		 * model, continues, parks, or pins.
+		 */
+		const applyLogicalFailureEffects = (
+			association: {
+				readonly route: LogicalRouteFact;
+				readonly response?: ProviderFailureSignal;
+				readonly failure?: ProviderFailureSignal;
+			},
+			dispatchedModelId: string,
+		): void => {
+			const route = association.route;
+			const providerId = route.providerId;
+			const failure: ProviderFailureSignal = {
+				...(association.failure ?? {}),
+				...(association.response ?? {}),
+				modelId: dispatchedModelId,
+			};
+			if (classifyFailure(failure).category === "quota-rate-limit") {
+				const failedAtMs = Date.now();
+				state.recordLimitError(providerId, failedAtMs);
+				// Only the subscription families have shared usage state; an
+				// owning-vendor API account is billed per request, not pooled.
+				if (isAllowedFamily(route.family) && refusalWithoutRecoveryTime(failure)) {
+					usage.recordExhaustionHold(providerId, route.family, failedAtMs);
+				}
+				refreshUsageAfterLogicalQuotaFailure(providerId, route.family, failedAtMs);
+			}
+			void invalidateOnTerminalAuth(providerId, route.family, failure).catch(() => undefined);
+		};
+		const commitSupersededLogicalFailure = (physical: AssistantMessage): void => {
+			const association = logicalTerminalAssociations.consume(physical);
+			let accepted = false;
+			try {
+				if (
+					association !== undefined &&
+					association.outcome === "fail" &&
+					association.dispatchedModelId !== undefined &&
+					boundedPhysicalIdentity(association.dispatchedModelId)
+				) {
+					applyLogicalFailureEffects(association, association.dispatchedModelId);
+					accepted = true;
+				}
+			} catch {
+				diagnostics.record(
+					"warning",
+					"logical.attribution",
+					"A recovered unified attempt's account effects could not be applied.",
+				);
+			} finally {
+				logicalTerminalAssociations.complete(association, accepted);
+			}
+		};
 		// Observation and classification only. Every switch, park, or resume waits
 		// for `agent_settled`; see `settleTurn` above.
 		pi.on("message_end", async (event, messageContext) => {

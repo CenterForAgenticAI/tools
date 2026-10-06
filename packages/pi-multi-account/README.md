@@ -6,7 +6,7 @@ Concurrent Anthropic, OpenAI Codex, and Google Antigravity OAuth accounts for Pi
 
 ## What it does
 
-When a managed account reaches a limit or loses authorization, `pi-multi-account` waits for Pi's own retries to settle, selects an eligible route, and sends one fixed continuation. It never replays the failed provider request.
+When a managed account reaches a limit or loses authorization, `pi-multi-account` waits for Pi's own retries to settle, selects an eligible route, and sends one fixed continuation. It never replays the failed provider request, with one bounded exception: a `unified` logical call that fails before showing any output may move once to another account serving the same model.
 
 - Registers numbered OAuth account aliases without copying credentials out of Pi's `AuthStorage`.
 - Routes within a provider family first, then through explicit owning-vendor or cross-family policy.
@@ -54,7 +54,7 @@ The extension reads one machine-global file and no project-local config:
 $PI_CODING_AGENT_DIR/pi-multi-account/config.json
 ```
 
-When `PI_CODING_AGENT_DIR` is unset, the root is `~/.pi/agent`. Missing configuration uses conservative defaults. Same-family failover and usage fetches ship on; cross-family routing and OpenRouter ship off. Malformed or unknown fields fail extension initialization closed while Pi keeps running.
+When `PI_CODING_AGENT_DIR` is unset, the root is `~/.pi/agent`. Missing configuration uses conservative defaults. Same-family failover and usage fetches ship on; cross-family routing and OpenRouter ship off. Malformed or unknown fields keep discovery, `/login`, and repair commands available, but block requests and automatic routing until valid config is loaded. Correct the global config and run `/multi-account reload` or `/reload`. A failed reload retains the last valid policy.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
@@ -65,13 +65,27 @@ When `PI_CODING_AGENT_DIR` is unset, the root is `~/.pi/agent`. Missing configur
 | `accountGroups` and defaults | `{}` | Restrict a session, exact cwd, or global fallback to named account allow-lists. |
 | `usageFetchEnabled` | all managed families `true` | Enable fail-soft provider usage fetches. |
 
+Account groups may list exact configured Pi provider IDs, including built-in API
+and custom providers. Unknown, removed, or unavailable members stay inactive;
+other listed usable members can serve, with no fallback outside the group.
+Membership does not transfer credential or routing ownership to this extension.
+Under an active group, select physical models: host virtual models can choose
+other providers and are unsupported. Physical models on mixed providers still work.
+Unrestricted virtual selection keeps the host's behavior.
+When a group prevents `unified` selection, the turn error names the group, its
+original source, and a bounded cause. It reports outside-group availability
+without naming excluded accounts. This guidance does not authorize a send or
+prove that request credentials have resolved.
+Listing `openrouter` does not enable it: the current named-group metered block
+remains in force.
+
 The full schema, defaults, examples, timing controls, labels, and rate-history fields are in [Configuration reference](docs/configuration.md).
 
 ## When it runs
 
 The extension discovers accounts and registers aliases at `session_start`. It checks account-group and OpenRouter safety before a run, tracks model selection and provider responses, repairs failed assistant history at `message_end`, and releases resources at `session_shutdown`.
 
-Reactive routing starts only at `agent_settled`, after Pi's provider retry and compaction loop. A classified provider failure can schedule one fixed `deliverAs: "followUp"` continuation. It does not replay the prompt, provider request, or uncertain tool work. More detail is in [Routing and recovery](docs/routing.md).
+Reactive routing starts only at `agent_settled`, after Pi's provider retry and compaction loop. A classified provider failure can schedule one fixed `deliverAs: "followUp"` continuation. It does not replay the prompt, provider request, or uncertain tool work. A `unified` call is different: it recovers inside the call, before any output, with at most two physical sends, and never continues after settlement. `recoveryStallTimeoutMs` bounds the wait for a physical attempt's response to start. More detail is in [Routing and recovery](docs/routing.md#in-call-recovery).
 
 ## Develop
 

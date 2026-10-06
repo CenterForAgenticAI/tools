@@ -1,136 +1,26 @@
-import {
-	isContextOverflow,
-	isRetryableAssistantError,
-	type AssistantMessage,
-} from "@earendil-works/pi-ai";
-import { sanitizeDiagnosticText } from "./diagnostics.js";
+import { isContextOverflow, isRetryableAssistantError, type AssistantMessage } from "@earendil-works/pi-ai";
 
-/** Fixed fallbacks for a structured provider stop; none matches a host re-dispatch pattern. */
+/** Fixed public reasons: provider prose and unknown reason payloads are never retained. */
 export const REFUSAL_FALLBACK_MESSAGE = "The model refused to complete the request";
-export const UNKNOWN_STOP_FALLBACK_MESSAGE =
-	"Provider stopped with an unrecognized stop reason";
-
-/**
- * Appended when a reworded unknown stop reason omits words a host predicate acts
- * on, so the published reason does not read as complete. Neither pinned
- * predicate matches it, and the marked message is probed again before use.
- */
+export const UNKNOWN_STOP_FALLBACK_MESSAGE = "Provider stopped with an unrecognized stop reason";
+// Kept for source compatibility; reasons are now entirely withheld, not reworded.
 export const PARTLY_WITHHELD_MARKER = " (partly withheld)";
 
-/** Upper bound on the normalized stop reason named in a reworded message. */
-const MAX_NAMED_REASON_LENGTH = 64;
-
-/**
- * Whether the pinned host would re-dispatch an error terminal carrying `text`.
- *
- * The host re-dispatches when either retry predicate matches the prose:
- * `AgentSession._isRetryableError` runs pi-ai `isRetryableAssistantError`, and
- * `_checkCompaction` runs `isContextOverflow` before compacting and retrying once
- * (pi-coding-agent dist/core/agent-session.js, both from `@earendil-works/pi-ai`).
- * An unreadable predicate result counts as a match, so the caller keeps looking
- * for a safer form.
- */
+/** Probe pinned host predicates without publishing the provider DTO. */
 export function hostWouldRedispatch(message: AssistantMessage, text: string): boolean {
-	try {
-		const probe = { ...message, errorMessage: text };
-		return isRetryableAssistantError(probe) || isContextOverflow(probe, 0);
-	} catch {
-		return true;
-	}
+  try {
+    // Private predicate probe only; this object is never published or retained.
+    const probe = { ...message, errorMessage: text };
+    return isRetryableAssistantError(probe) || isContextOverflow(probe, 0);
+  } catch { return true; }
 }
 
-function namedReasonMessage(reason: string): string {
-	return `Provider stopped (reason: ${reason})`;
-}
-
-/**
- * Normalizes a bounded, sanitized raw stop reason into plain words: every run of
- * non-alphanumeric characters (underscores included) becomes one space, and the
- * result is capped at a word boundary where possible.
- */
-function normalizedReasonWords(rawStopReason: unknown): string[] {
-	if (typeof rawStopReason !== "string") return [];
-	const words = sanitizeDiagnosticText(rawStopReason)
-		.replace(/[^A-Za-z0-9]+/g, " ")
-		.trim()
-		.split(" ")
-		.filter((word) => word.length > 0);
-	const kept: string[] = [];
-	let length = 0;
-	for (const word of words) {
-		const next = length === 0 ? word.length : length + 1 + word.length;
-		if (next > MAX_NAMED_REASON_LENGTH) {
-			if (kept.length === 0) kept.push(word.slice(0, MAX_NAMED_REASON_LENGTH));
-			break;
-		}
-		kept.push(word);
-		length = next;
-	}
-	return kept;
-}
-
-/**
- * Names an unknown stop reason in a message neither host predicate acts on.
- *
- * The first form keeps every normalized word. When that still matches a host
- * predicate (a reason containing "overloaded" or "timeout", say), the second
- * form admits words in order and drops each one whose addition would make the
- * message match. When any word was dropped the result ends with
- * `PARTLY_WITHHELD_MARKER`; that marked text is probed too, and an unsafe or
- * empty result yields `undefined`.
- */
-function unknownStopNamingReason(
-	message: AssistantMessage,
-	rawStopReason: unknown,
-): string | undefined {
-	const words = normalizedReasonWords(rawStopReason);
-	if (words.length === 0) return undefined;
-	const reworded = namedReasonMessage(words.join(" "));
-	if (!hostWouldRedispatch(message, reworded)) return reworded;
-	const kept: string[] = [];
-	for (const word of words) {
-		const tentative = namedReasonMessage([...kept, word].join(" "));
-		if (!hostWouldRedispatch(message, tentative)) kept.push(word);
-	}
-	if (kept.length === 0) return undefined;
-	const named = namedReasonMessage(kept.join(" "));
-	if (kept.length === words.length) return named;
-	const marked = `${named}${PARTLY_WITHHELD_MARKER}`;
-	return hostWouldRedispatch(message, marked) ? undefined : marked;
-}
-
-/**
- * The public error text for a structured refusal or unknown provider stop.
- *
- * The pinned host re-dispatches an error terminal from its prose alone (see
- * `hostWouldRedispatch`). A refusal explanation or stop reason is
- * provider-authored, so text such as "overloaded", "prompt is too long", or
- * "model_context_window_exceeded" would make the host send the stopped request
- * again. The structured code alone selects this path; the provider text is kept
- * only when neither host predicate would act on it. An unknown stop is then
- * reworded so it still names its reason, and only when no reworded form is safe
- * is a fixed fallback published. A refusal whose explanation is unsafe publishes
- * its fixed fallback directly. A message without the structured code, or that is
- * not an error terminal, yields `undefined` and must be published unchanged.
- */
-export function hostFinalStopMessage(
-	message: AssistantMessage,
-): { readonly errorMessage: string } | undefined {
-	const code = (message as { code?: unknown }).code;
-	if (message.stopReason !== "error") return undefined;
-	if (code !== "refusal" && code !== "unknown_stop") return undefined;
-	const candidate = message.errorMessage;
-	if (
-		typeof candidate === "string" &&
-		candidate.length > 0 &&
-		!hostWouldRedispatch(message, candidate)
-	) {
-		return { errorMessage: candidate };
-	}
-	if (code === "refusal") return { errorMessage: REFUSAL_FALLBACK_MESSAGE };
-	return {
-		errorMessage:
-			unknownStopNamingReason(message, message.rawStopReason) ??
-			UNKNOWN_STOP_FALLBACK_MESSAGE,
-	};
+/** A structured stop is an answer, never retry/overflow evidence or a prose retention permission. */
+export function hostFinalStopMessage(message: AssistantMessage): {
+  readonly errorMessage: string;
+  readonly rawStopReason: "refusal" | "unknown_stop";
+} | undefined {
+  const code = Object.getOwnPropertyDescriptor(message, "code")?.value;
+  if (message.stopReason !== "error" || (code !== "refusal" && code !== "unknown_stop")) return undefined;
+  return { errorMessage: code === "refusal" ? REFUSAL_FALLBACK_MESSAGE : UNKNOWN_STOP_FALLBACK_MESSAGE, rawStopReason: code };
 }

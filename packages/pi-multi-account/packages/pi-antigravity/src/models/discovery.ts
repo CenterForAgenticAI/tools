@@ -19,6 +19,7 @@ import {
   registerDiscoveredModelEnums,
   restoreDynamicModelEnums,
   snapshotDynamicModelEnums,
+  type AntigravityModelConfig,
 } from "./models.js";
 
 export const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
@@ -144,7 +145,7 @@ function apiKeyFromCredential(credential: Credential | undefined): string | unde
   return undefined;
 }
 
-function toStoredModels(models: ProviderModelConfig[]): Model<Api>[] {
+function toStoredModels(models: AntigravityModelConfig[]): Model<Api>[] {
   return models.map((model) => ({
     ...model,
     api: ANTIGRAVITY_API,

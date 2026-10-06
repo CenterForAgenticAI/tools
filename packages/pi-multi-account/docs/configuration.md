@@ -13,9 +13,18 @@ $PI_CODING_AGENT_DIR/pi-multi-account/config.json
 When `PI_CODING_AGENT_DIR` is unset, the root is `~/.pi/agent`. The extension
 does not load project-local config files. Missing config uses conservative
 defaults. A malformed file, including one with an unknown top-level field,
-makes extension session initialization fail closed: Pi records a sanitized
-diagnostic and does not rediscover managed aliases. Pi itself stays running
-because extension event handlers are crash-isolated.
+keeps numbered OAuth discovery, `/login`, model catalogs, and operator repair
+available. Discovery retains an independently valid `accountLimit` from `1`
+through `32`, or uses the default limit when that field is invalid. These
+discovery defaults do not authorize requests: direct input, custom-message runs,
+`unified` dispatch, automatic recovery, parking, and OpenRouter stay blocked
+until a complete valid config is loaded. An installed or stale `unified`
+declaration still gets a registered handler with safe correction guidance.
+
+Pi stays running and reports bounded guidance that names a known invalid field
+without copying config values or raw errors. Correct the global config, then
+run `/multi-account reload` or `/reload`; existing credentials need no changes.
+`/multi-account rediscover` alone does not clear the policy block.
 
 ```json
 {
@@ -143,10 +152,77 @@ the pre-standard README table:
 
 | Setting | Default | Purpose |
 | --- | ---: | --- |
-| `recoveryIdleTimeoutMs` | `300000` | Maximum time without qualifying recovery progress. |
+| `recoveryIdleTimeoutMs` | `300000` | Maximum time without qualifying recovery progress, at least `1000` ms and more than `recoveryStallTimeoutMs`. |
 | `recoveryAbsoluteTimeoutMs` | `1800000` | Maximum elapsed time for one complete recovery invocation. |
-| `accountGroups` | `{}` | Named allow-lists of canonical managed subscription account IDs. |
+| `recoveryStallTimeoutMs` | `180000`, or one less than `recoveryIdleTimeoutMs` when that is shorter | Longest one `unified` physical attempt may wait for the provider's `start` event (opening included), from `1000` through `1800000` ms and less than `recoveryIdleTimeoutMs`; otherwise the idle limit would end the call before a stalled attempt could move. A stall before `start` is a pre-start transient that may move once to another account. After `start` the provider has answered and keeps the connection alive, and a model may think silently for minutes, so later waits are bounded only by `recoveryIdleTimeoutMs` before the first content and by `recoveryAbsoluteTimeoutMs` after it. |
+| `accountGroups` | `{}` | Named allow-lists of exact Pi provider IDs, including configured built-in and custom providers. Managed numbered aliases must remain canonical and within `accountLimit`. |
 | `accountGroupCwdDefaults` | `{}` | Exact absolute cwd-to-group defaults. |
 | `defaultAccountGroup` | absent | Optional machine-wide group when no session or exact-cwd choice applies. |
 | `subscriptionPlanCatalogOverrides` | `{}` | Replace or add machine-global subscription-plan presets. |
 | `accountRateHistory` | `{}` | Effective-dated copied plan and rate records per account. |
+
+### Account-group members
+
+Use the exact provider ID from Pi, not a model ID, API name, display name, endpoint,
+or credential label. For example:
+
+```json
+{
+  "accountLimit": 4,
+  "accountGroups": {
+    "client": ["anthropic-account-2", "openai", "google", "google-vertex", "abliteration.ai"]
+  },
+  "defaultAccountGroup": "client"
+}
+```
+
+Each reference is 1–128 ASCII letters, digits, dots, underscores, or hyphens and
+starts with a letter or digit. This is the extension's safe reference syntax;
+Pi's provider registry uses string IDs. A syntactically valid reference is not
+authorization: Pi must recognize that exact provider, the group must list it, and
+Pi's cached catalog/auth-check snapshot must include the selected model. A misspelling
+or removed provider stays inactive. This eligibility check does not verify request
+credentials: a configured credential command can pass without running, even if later
+resolution fails. Pi resolves request credentials separately before a physical send.
+An unavailable snapshot blocks dispatch. Status reads metadata only; it does not
+resolve credentials or execute credential commands.
+
+A virtual model is a selectable model that chooses a physical model for each
+request. Newer Pi hosts mark these models with API `pi-virtual`. A virtual-only
+provider can be keyless and available, and a physical provider can also list virtual
+models. Neither provider membership nor authentication confines a virtual router's
+physical targets. Under a restricted account group, virtual selected models are
+unsupported, including virtual entries named `unified` or listed under a managed
+provider. Ordinary input is blocked and custom-message runs are aborted before
+dispatch. Select a listed physical model or use `group reset` to resolve your own
+default policy. Reset removes the restriction only when that policy is unrestricted.
+Physical models on a mixed physical/virtual provider remain usable. Unrestricted
+virtual selection keeps the host's behavior. This is a session lifecycle guard,
+not a firewall for arbitrary nested calls made by trusted extensions.
+
+Managed family IDs and numbered aliases remain canonical within `accountLimit`
+(`1` through `32`). The reserved `<managed-family>-account-` prefixes cannot be
+used to evade that limit: `openai-account-33`, `anthropic-account-01`, and
+`anthropic-account-custom` are invalid. A truly custom name such as
+`custom-account-99` is not a managed alias. Subscription plan and monthly-cost
+keys remain subscription-only; adding `openai` to a group does not make it a
+subscription account.
+
+Unknown, removed, or auth-unavailable members are individually inactive. Other
+explicitly listed usable members can serve. An empty or wholly unusable group
+blocks requests without falling back outside the group. Discovery, `/login`,
+`rediscover`, and operator repair remain available. A successful `reload` applies
+the new membership; failed reload keeps the last valid policy.
+
+Membership restricts direct ordinary and custom-message requests, including
+restored model selections and inherited delegate policy. It does not enroll a
+custom provider in extension-owned refresh, usage, cost, unified routing, parking,
+or recovery. Those candidate sets remain managed-only. `group status` shows
+availability and exclusion through credential-free public metadata.
+
+`openrouter` is a valid reference, but this release still blocks metered OpenRouter
+under a named group, even when listed. The separate group-enabled OpenRouter,
+tree-directory rules, and opt-out precedence changes are not part of this feature.
+Unrestricted OpenRouter retains all existing consent, concrete-model, positive-cap,
+credential, pricing, budget, and delegate-exclusion checks. Older builds reject
+these new member kinds; remove them before downgrading and reload valid config.

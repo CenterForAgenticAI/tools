@@ -35,6 +35,7 @@ import {
   type Api,
   type AssistantMessage,
   type AssistantMessageEventStream,
+  type JsonObject,
   calculateCost,
   type Context,
   createAssistantMessageEventStream,
@@ -53,7 +54,7 @@ type IndexedBlock =
       type: "toolCall";
       id: string;
       name: string;
-      arguments: Record<string, unknown>;
+      arguments: JsonObject;
       partialJson: string;
     } & { index: number });
 type UpstreamHelpers = {
@@ -67,15 +68,20 @@ type UpstreamHelpers = {
   convertPiToolsToAnthropic: (tools: NonNullable<Context["tools"]>, isOAuth: boolean) => unknown;
   fromClaudeCodeToolName: (name: string, tools?: NonNullable<Context["tools"]>) => string;
   buildAnthropicSystemPrompt: (systemPrompt: string | undefined, isOAuth: boolean) => unknown;
+  transportActivityListener: (options: unknown) => (() => void) | undefined;
+  createTransportActivityFetch: (onActivity: () => void) => typeof fetch;
 };
 
 const upstreamAuthPath = "../packages/pi-anthropic-oauth/src/auth.ts";
 const upstreamConvertPath = "../packages/pi-anthropic-oauth/src/convert.ts";
 const upstreamPromptPath = "../packages/pi-anthropic-oauth/src/prompt.ts";
+const upstreamTransportActivityPath =
+  "../packages/pi-anthropic-oauth/src/transport-activity.ts";
 const upstreamHelpers = {
   ...(await import(upstreamAuthPath)),
   ...(await import(upstreamConvertPath)),
   ...(await import(upstreamPromptPath)),
+  ...(await import(upstreamTransportActivityPath)),
 } as unknown as UpstreamHelpers;
 const {
   isClaudeOAuthAccessToken,
@@ -84,6 +90,8 @@ const {
   convertPiToolsToAnthropic,
   fromClaudeCodeToolName,
   buildAnthropicSystemPrompt,
+  transportActivityListener,
+  createTransportActivityFetch,
 } = upstreamHelpers;
 
 const REQUIRED_BETAS = [
@@ -230,12 +238,19 @@ export function streamAnthropicAdaptive(
 
       if (isOAuth) defaultHeaders.authorization = `Bearer ${apiKey}`;
 
+      // A caller that supplies onTransportActivity hears about every response
+      // body chunk, including the pings the SDK drops; otherwise the SDK keeps
+      // its default fetch.
+      const onTransportActivity = transportActivityListener(options);
       const client = new Anthropic({
         baseURL: model.baseUrl,
         apiKey: isOAuth ? null : apiKey,
         authToken: isOAuth ? apiKey : null,
         defaultHeaders,
         dangerouslyAllowBrowser: true,
+        ...(onTransportActivity === undefined
+          ? {}
+          : { fetch: createTransportActivityFetch(onTransportActivity) }),
       });
 
       const maxTokens =
@@ -468,10 +483,7 @@ export function streamAnthropicAdaptive(
           ) {
             block.partialJson += event.delta.partial_json;
             try {
-              block.arguments = JSON.parse(block.partialJson) as Record<
-                string,
-                unknown
-              >;
+              block.arguments = JSON.parse(block.partialJson) as JsonObject;
             } catch {}
             stream.push({
               type: "toolcall_delta",
@@ -507,10 +519,7 @@ export function streamAnthropicAdaptive(
             });
           } else if (block.type === "toolCall") {
             try {
-              block.arguments = JSON.parse(block.partialJson) as Record<
-                string,
-                unknown
-              >;
+              block.arguments = JSON.parse(block.partialJson) as JsonObject;
             } catch {}
             delete (block as { partialJson?: string }).partialJson;
             stream.push({

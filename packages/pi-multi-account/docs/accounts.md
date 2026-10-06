@@ -77,7 +77,7 @@ The current catalog has eight models: `gemini-3.8-flash`, `gemini-3.7-flash`,
 `claude-sonnet-4-6`, and `gpt-oss-120b`. `/multi-account add google-antigravity`
 registers the next free numbered slot the same way as the other families, and
 `/multi-account rediscover` picks up a credential added outside the running
-session.
+session. A changed stored credential (new expiry) clears a terminal login-required mark at the next rediscover or turn without restarting Pi.
 
 Usage fetching honors an `AbortSignal` end to end: `UsageFetcher` forwards it
 through to the pinned fork's `fetchAccountUsage(apiKey?, { signal })`, and a

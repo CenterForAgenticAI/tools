@@ -7,6 +7,13 @@ import {
 /** Numeric revision exposed by maintained, non-secret public credential metadata. */
 export type CredentialRevision = number;
 
+/** Convert public expiry metadata to the integer revision accepted by runtime state. */
+export function normalizeCredentialRevision(value: number): CredentialRevision | undefined {
+	if (!Number.isFinite(value) || value < 0) return undefined;
+	const revision = Math.trunc(value);
+	return Number.isSafeInteger(revision) ? revision : undefined;
+}
+
 export type CooldownReason =
 	| "quota"
 	| "rate-limit"

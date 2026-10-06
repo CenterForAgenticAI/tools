@@ -1,23 +1,26 @@
 import {
   createAssistantMessageEventStream,
   type Api,
-  type AssistantMessage,
-  type AssistantMessageEvent,
   type AssistantMessageEventStream,
-  type Context,
   type Model,
+  type Context,
+  type TranscriptContext,
   type ProviderResponse,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import {
-  sanitizeDiagnosticText,
-  sanitizeHeaderValue,
-} from "./diagnostics.js";
-import { hostFinalStopMessage } from "./host-final-stop-message.js";
+import { projectResponseHeaders } from "./diagnostics.js";
+import { projectAliasAssistantEvent } from "./public-assistant-projection.js";
 
 export const ANTHROPIC_ALIAS_API = "hypha-anthropic-oauth" as const;
 
 export type AnthropicUpstreamStream = (
+  model: Model<Api>,
+  context: Context | TranscriptContext,
+  options?: SimpleStreamOptions,
+) => AssistantMessageEventStream;
+
+/** Legacy Pi 0.84 context-shaped stream consumed by the exact-provenance adaptive adapter. */
+export type AnthropicLegacyStream = (
   model: Model<Api>,
   context: Context,
   options?: SimpleStreamOptions,
@@ -33,66 +36,8 @@ export function sanitizeAnthropicProviderResponse(
 ): ProviderResponse {
   return {
     status: response.status,
-    headers: Object.fromEntries(
-      Object.entries(response.headers).map(([name, value]) => [
-        sanitizeDiagnosticText(name),
-        sanitizeHeaderValue(name, value),
-      ]),
-    ),
+    headers: projectResponseHeaders(response.headers),
   };
-}
-
-function withAliasAttribution(
-  message: AssistantMessage,
-  aliasModel: Model<Api>,
-): AssistantMessage {
-  return {
-    ...message,
-    api: aliasModel.api,
-    provider: aliasModel.provider,
-    model: aliasModel.id,
-  };
-}
-
-/**
- * Bounds an upstream error and, for a structured refusal or unknown stop,
- * publishes the shared host-final message. A direct alias turn reaches the
- * host's retry and compaction predicates without the unified provider, so
- * provider-authored stop wording must not make the host resend the request.
- */
-function sanitizeUpstreamError(message: AssistantMessage): AssistantMessage {
-  if (message.errorMessage === undefined) return message;
-  const sanitized: AssistantMessage = {
-    ...message,
-    errorMessage: sanitizeDiagnosticText(message.errorMessage),
-  };
-  return { ...sanitized, ...hostFinalStopMessage(sanitized) };
-}
-
-function withAliasEvent(
-  event: AssistantMessageEvent,
-  aliasModel: Model<Api>,
-): AssistantMessageEvent {
-  switch (event.type) {
-    case "done":
-      return {
-        ...event,
-        message: withAliasAttribution(event.message, aliasModel),
-      };
-    case "error":
-      return {
-        ...event,
-        error: withAliasAttribution(
-          sanitizeUpstreamError(event.error),
-          aliasModel,
-        ),
-      };
-    default:
-      return {
-        ...event,
-        partial: withAliasAttribution(event.partial, aliasModel),
-      };
-  }
 }
 
 function reattributeStream(
@@ -103,7 +48,7 @@ function reattributeStream(
 
   void (async () => {
     for await (const event of upstream) {
-      attributed.push(withAliasEvent(event, aliasModel));
+      attributed.push(projectAliasAssistantEvent(event, aliasModel));
     }
   })();
 

@@ -30,6 +30,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { sanitizeDiagnosticText } from "./diagnostics.js";
+import { isAccountGroupMemberReference } from "./account-group-members.js";
 import { PROJECT_KEY_PATTERN } from "./project-identity.js";
 import {
 	AccountRateHistoryError,
@@ -177,6 +178,9 @@ export interface ModelFallbackEgressAuthorization {
 /** Exact source unified model id -> ordered exact fallback model ids. */
 export type ModelFallbackMap = Readonly<Record<string, readonly string[]>>;
 
+/** Upper bound for `recoveryStallTimeoutMs`: one stalled attempt never waits longer. */
+export const MAX_RECOVERY_STALL_TIMEOUT_MS = 30 * 60_000;
+
 export interface MultiAccountConfig {
 	readonly accountLimit: number;
 	readonly sameFamilyFailover: boolean;
@@ -188,6 +192,14 @@ export interface MultiAccountConfig {
 	readonly recoveryIdleTimeoutMs: number;
 	/** Total elapsed time allowed for one complete recovery invocation. */
 	readonly recoveryAbsoluteTimeoutMs: number;
+	/**
+	 * Longest wait for the next event of one unified physical attempt, opening
+	 * included. A stall before any content ends that attempt as a pre-start
+	 * transient failure that may recover once on another account; a stall after
+	 * content ends the call with no retry. Must be less than
+	 * `recoveryIdleTimeoutMs`, so the stall fires before the invocation idles out.
+	 */
+	readonly recoveryStallTimeoutMs: number;
 	/**
 	 * Operator-chosen display labels keyed by canonical provider id, so managed
 	 * accounts are distinguishable in Pi's login list and the status view.
@@ -289,6 +301,7 @@ export const DEFAULT_CONFIG: MultiAccountConfig = {
 	cooldownMaxMs: 300_000,
 	recoveryIdleTimeoutMs: 5 * 60_000,
 	recoveryAbsoluteTimeoutMs: 30 * 60_000,
+	recoveryStallTimeoutMs: 3 * 60_000,
 	accountLabels: {},
 	projectLabels: {},
 	accountGroups: {},
@@ -315,6 +328,7 @@ const CONFIG_KEYS = new Set<keyof MultiAccountConfig>([
 	"cooldownMaxMs",
 	"recoveryIdleTimeoutMs",
 	"recoveryAbsoluteTimeoutMs",
+	"recoveryStallTimeoutMs",
 	"accountLabels",
 	"projectLabels",
 	"accountGroups",
@@ -961,10 +975,10 @@ function parseAccountGroups(
 		const providerIds = members.map((member, index) => {
 			if (
 				typeof member !== "string" ||
-				!isCanonicalSubscriptionAccountId(member, accountLimit)
+				!isAccountGroupMemberReference(member, accountLimit, MANAGED_FAMILIES)
 			) {
 				throw new ConfigValidationError(
-					`accountGroups.${groupId}[${index}] must be a canonical managed subscription provider id within accountLimit.`,
+					`accountGroups.${groupId}[${index}] must be a safe provider reference with canonical managed slots within accountLimit.`,
 				);
 			}
 			return member;
@@ -1327,6 +1341,35 @@ export function parseConfig(value: unknown): MultiAccountConfig {
 			);
 		}
 	}
+	// An omitted stall limit defaults below the effective idle limit, so a
+	// config that sets only a short `recoveryIdleTimeoutMs` stays valid and its
+	// stall can still fire first.
+	const recoveryStallTimeoutMs =
+		value["recoveryStallTimeoutMs"] ??
+		Math.min(
+			DEFAULT_CONFIG.recoveryStallTimeoutMs,
+			(recoveryIdleTimeoutMs as number) - 1,
+		);
+	if (
+		typeof recoveryStallTimeoutMs !== "number" ||
+		!Number.isFinite(recoveryStallTimeoutMs) ||
+		recoveryStallTimeoutMs < 1_000 ||
+		recoveryStallTimeoutMs > MAX_RECOVERY_STALL_TIMEOUT_MS
+	) {
+		throw new ConfigValidationError(
+			value["recoveryStallTimeoutMs"] === undefined
+				? "recoveryIdleTimeoutMs must be more than 1000 ms, so the 1000 ms minimum recoveryStallTimeoutMs can end first."
+				: `recoveryStallTimeoutMs must be a finite number from 1000 through ${MAX_RECOVERY_STALL_TIMEOUT_MS} ms.`,
+		);
+	}
+	// The engine's idle timer covers the whole invocation. A stall limit that is
+	// not shorter would let it abort the call before a stalled attempt could
+	// move to another account.
+	if (recoveryStallTimeoutMs >= (recoveryIdleTimeoutMs as number)) {
+		throw new ConfigValidationError(
+			"recoveryStallTimeoutMs must be less than recoveryIdleTimeoutMs.",
+		);
+	}
 	if (
 		typeof preemptiveExpiryWindowMs !== "number" ||
 		!Number.isFinite(preemptiveExpiryWindowMs) ||
@@ -1346,6 +1389,7 @@ export function parseConfig(value: unknown): MultiAccountConfig {
 		cooldownMaxMs,
 		recoveryIdleTimeoutMs: recoveryIdleTimeoutMs as number,
 		recoveryAbsoluteTimeoutMs: recoveryAbsoluteTimeoutMs as number,
+		recoveryStallTimeoutMs,
 		accountLabels,
 		projectLabels,
 		accountGroups,

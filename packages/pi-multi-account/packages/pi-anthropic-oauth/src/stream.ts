@@ -10,6 +10,7 @@ import {
   type Model,
   type SimpleStreamOptions,
   type StopReason,
+  type ToolCall,
 } from "@earendil-works/pi-ai";
 import { isClaudeOAuthAccessToken, USER_AGENT } from "./auth.js";
 import {
@@ -20,6 +21,10 @@ import {
 } from "./convert.js";
 import { projectContext } from "./context.js";
 import { buildAnthropicSystemPrompt } from "./prompt.js";
+import {
+  createTransportActivityFetch,
+  transportActivityListener,
+} from "./transport-activity.js";
 
 const REQUIRED_BETAS = [
   "claude-code-20250219",
@@ -132,12 +137,19 @@ export function streamAnthropicOAuth(
 
       if (isOAuth) defaultHeaders.authorization = `Bearer ${apiKey}`;
 
+      // A caller that supplies onTransportActivity hears about every response
+      // body chunk, including the pings the SDK drops; otherwise the SDK keeps
+      // its default fetch.
+      const onTransportActivity = transportActivityListener(options);
       const client = new Anthropic({
         baseURL: model.baseUrl,
         apiKey: isOAuth ? null : apiKey,
         authToken: isOAuth ? apiKey : null,
         defaultHeaders,
         dangerouslyAllowBrowser: true,
+        ...(onTransportActivity === undefined
+          ? {}
+          : { fetch: createTransportActivityFetch(onTransportActivity) }),
       });
 
       const maxTokens =
@@ -371,10 +383,9 @@ export function streamAnthropicOAuth(
           ) {
             block.partialJson += event.delta.partial_json;
             try {
-              block.arguments = JSON.parse(block.partialJson) as Record<
-                string,
-                unknown
-              >;
+              block.arguments = JSON.parse(
+                block.partialJson,
+              ) as ToolCall["arguments"];
             } catch {}
             stream.push({
               type: "toolcall_delta",
@@ -410,10 +421,9 @@ export function streamAnthropicOAuth(
             });
           } else if (block.type === "toolCall") {
             try {
-              block.arguments = JSON.parse(block.partialJson) as Record<
-                string,
-                unknown
-              >;
+              block.arguments = JSON.parse(
+                block.partialJson,
+              ) as ToolCall["arguments"];
             } catch {}
             delete (block as { partialJson?: string }).partialJson;
             stream.push({

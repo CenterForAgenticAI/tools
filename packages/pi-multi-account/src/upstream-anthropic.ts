@@ -3,10 +3,12 @@ import type {
   ProviderConfig,
   ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
+import { normalizeContext, type Context } from "@earendil-works/pi-ai";
 import { registerApiProvider } from "@earendil-works/pi-ai/compat";
 import {
   ANTHROPIC_ALIAS_API,
   createAnthropicAliasStream,
+  type AnthropicLegacyStream,
   type AnthropicUpstreamStream,
 } from "./anthropic-alias-stream.js";
 import { streamAnthropicAdaptive } from "./anthropic-adaptive-stream.js";
@@ -167,7 +169,7 @@ export function captureUpstreamAnthropicProvider(
  * through the other implementation.
  */
 export function createAnthropicStreamSelector(
-  adaptiveStream: AnthropicUpstreamStream,
+  adaptiveStream: AnthropicLegacyStream,
   pinnedStream: AnthropicUpstreamStream,
 ): AnthropicUpstreamStream {
   return (model, context, options) => {
@@ -175,7 +177,7 @@ export function createAnthropicStreamSelector(
       (model.compat as { forceAdaptiveThinking?: boolean } | undefined)
         ?.forceAdaptiveThinking === true && options?.reasoning !== undefined;
     const selected = useAdaptiveStream ? adaptiveStream : pinnedStream;
-    return selected(model, toPinnedAnthropicContext(context), options);
+    return selected(model, toPinnedAnthropicContext(context as Context), options);
   };
 }
 
@@ -229,14 +231,20 @@ const registerAliasApiWithCompat: AliasApiRegistrar = (aliasStream) => {
 export async function registerUpstreamAnthropicProvider(
   pi: ExtensionAPI,
   upstream?: UpstreamAnthropicExtension,
-  adaptiveStream: AnthropicUpstreamStream = streamAnthropicAdaptive,
+  adaptiveStream: AnthropicLegacyStream = streamAnthropicAdaptive,
   registerAliasApi: AliasApiRegistrar = registerAliasApiWithCompat,
 ): Promise<CapturedAnthropicProvider> {
   const extension = upstream ?? (await loadUpstreamAnthropicExtension());
   const captured = captureUpstreamAnthropicProvider(pi, extension);
+  const pinnedStream: AnthropicUpstreamStream = (model, context, options) =>
+    captured.config.streamSimple(
+      model,
+      normalizeContext(toPinnedAnthropicContext(context as Context)),
+      options,
+    );
   const streamSimple = createAnthropicStreamSelector(
     adaptiveStream,
-    captured.config.streamSimple,
+    pinnedStream,
   );
   const adapted: CompleteAnthropicProviderConfig = {
     ...captured.config,

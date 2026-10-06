@@ -48,6 +48,22 @@ runs at `agent_settled`, after Pi's retry and compaction loop has finished. A
 visible pause before failover is normally Pi's backoff, not an extra retry made
 by this extension.
 
+## Delegate account-group confinement
+
+In-process and durable delegate children inherit the parent's complete cached
+effective account group at startup and resume. This covers session overrides,
+exact-cwd defaults, global defaults, and unrestricted results. The original source
+is retained. No child-cwd rule can replace that inherited result, including when
+the child's cwd has no exact default. Each child caches the same result under its
+own session id, so nested in-process and durable descendants inherit it too.
+
+Missing, malformed, or duplicate parent origin, or an absent or unreadable parent
+cache, blocks physical requests. It never permits fallback to child-cwd policy.
+`/multi-account group status` reports the held effective policy without resolving
+or rewriting it. Explicit operator `group use` and `group reset` remain available
+and resolve this session's own policy after startup; they are not agent-tool
+actions. Delegate resume applies parent inheritance again.
+
 ## Unified logical model provider
 
 The extension can register one extra provider, `unified`, whose models come from
@@ -74,8 +90,8 @@ While a `unified` model is selected, Pi renders `(unified)` in its model line an
 shows one compact, right-aligned below-editor route widget under model/thinking status.
 It starts at `unified(waiting)`, then shows the exact physical account serving an
 attempt and its live usage, such as `unified(anthropic-account-2 · 75% left)`.
-A configured account label appears last inside the parentheses. A retry replaces
-the account with the new exact route. Selecting any physical or unrelated provider
+A configured account label appears last inside the parentheses. An in-call
+recovery send replaces the account with the new exact route. Selecting any physical or unrelated provider
 removes the widget.
 
 The indicator uses the same machine-shared quota observations as the status view.
@@ -86,6 +102,64 @@ optional account label is read from live config on every render and appears last
 Updates are event-driven by model selection, route attempts, usage observations, and
 terminal settlement. The indicator creates no timer, polling loop, retained record,
 or diagnostic state.
+
+### In-call recovery
+
+A `unified` call recovers an account failure inside the same logical call,
+through the recovery engine, instead of through host retry or a settled
+continuation. The rules are fixed:
+
+- At most two physical provider sends per logical call. The first send uses the
+  exact selected account and model. The one recovery action changes the account
+  only, to another eligible account of the same vendor that serves the same
+  model. It never changes the model. With `sameFamilyFailover: false` there is
+  no recovery action: every `unified` call is one attempt. The setting is read
+  per call, so `/multi-account reload` applies to the next call.
+- Every physical send carries `maxRetries: 0`, so a provider SDK adds no sends of
+  its own.
+- Output means assistant content: a text, thinking, or tool-call event. The
+  provider's `start` event is not output. pi-ai sends it as soon as the response
+  headers arrive, before any content, so each attempt's leading `start` is held:
+  it is not published and does not count as progress. A failure after a held
+  `start` but before content is a failure before any output, and the failed
+  attempt's `start` is never published; after a recovery send the consumer sees
+  only the second attempt's `start` and events. A successful terminal with no
+  content is published as its held `start` and then the terminal.
+- Output streams live. The first content event hands the attempt to the
+  consumer, preceded by that attempt's one held `start`, and nothing after it is
+  ever sent again: a later failure ends the call with the bounded text `Unified
+  recovery stopped after its bounded provider attempt.`, which the host does not
+  retry.
+- Recoverable before any output: an account-local rate limit or quota, an
+  account-local authentication failure, and a pre-start transient (a network or
+  transport failure, a 5xx, a retryable setup failure, or a stall before the
+  provider's `start`). The failed account is cooled
+  exactly as before. A caller abort while a `start` is held aborts the live send
+  and ends the call with no recovery send.
+- A structured refusal or unknown stop is an outcome, not a failure. It is sent
+  once, cools nothing, and the consumer receives the provider's own text and its
+  `code`.
+- A context overflow is sent once. A setup-shaped overflow is published as
+  `context_length_exceeded (provider_error)`, so the host still compacts.
+- A route served through `tierModelMap` under a different API model ID is one
+  attempt with no in-call recovery.
+- Routed Codex calls are pinned to SSE and may recover. A Google Antigravity
+  attempt has an unknown inner send count, so it is never followed by a recovery
+  send.
+- `recoveryStallTimeoutMs` (default three minutes) bounds the wait for a
+  physical attempt's `start`, opening included. After `start` the provider has
+  answered and a model may think silently for minutes, so later waits are not
+  stalls: `recoveryIdleTimeoutMs` bounds the wait for the first content and
+  `recoveryAbsoluteTimeoutMs` bounds the whole call.
+- Anthropic attempts also report connection activity, keep-alive pings
+  included. Each report restarts the idle wait, so a model thinking silently
+  is never cut off while its connection is alive. Once an attempt has reported
+  activity, 90 seconds without a single byte ends it as a dead connection.
+  Before any output that is a pre-start transient and recovers on another
+  account; activity is not output and never blocks recovery.
+- The host's own retry and the settled continuation are not used for `unified`
+  turns. A failed unified call ends with a final message the host does not
+  retry; the operator can resend.
 
 Selection is exact. A request for a model ID no account serves is refused, not
 redirected. A cross-tier ID may differ only when the operator records that model
@@ -328,8 +402,10 @@ identified by `PI_DELEGATE_LINEAGE_*` cannot use this rung.
 - Pi defaults to three retries for a retryable provider error before
   `agent_settled`; Pi settings can change that count. This extension cannot
   suppress the host retry layer.
-- Same-turn replay is intentionally excluded. Recovery uses a fixed continuation
-  message after settlement.
+- Same-turn replay is intentionally excluded for aliases and base providers.
+  Recovery uses a fixed continuation message after settlement. The only
+  exception is `unified` in-call recovery before any output; see
+  [In-call recovery](#in-call-recovery).
 - Provider usage endpoints are not guaranteed to be available. Fetches time out,
   fail soft, and report their bounded state.
 - Only sessions that load this extension can use its failover lifecycle. At this
