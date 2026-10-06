@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { check } from '../../kit/intent-check.mjs';
 import { conform } from '../../kit/intent-conform.mjs';
-import { gate } from '../../kit/intent-gate.mjs';
+import { crossCheckLaws, gate } from '../../kit/intent-gate.mjs';
 import { liveEvaluator, produce } from '../../kit/intent-receipt.mjs';
 import { coverageQuestions, fidelityQuestions, moduleState, modules, splitLaws, FORBIDDEN_BEND, INTENT_DIR, canonical, codeOnly, hasProof, IntentError, lawIds, POLICY, record, rootArg, run, seal, sha256, verifyHeaders, verifyReceipt } from '../../kit/intent-core.mjs';
 import { init, vendor } from '../../bin/pi-intent.mjs';
@@ -210,6 +210,82 @@ test('vendor headers detect drift in check itself and shared scripts; init never
   assert.equal(text(recordPath), draft, 'init must preserve existing adopter state');
   renameSync(join(dir, INTENT_DIR), join(dir, 'intent'));
   assert.throws(() => check(dir), /\.intent\/records unavailable/, 'legacy visible state must not be silently accepted');
+});
+
+test('gate cross-check: the scanner and Bend must agree on the law set, and the probe leaves nothing behind', async t => {
+  const dir = fixture(t);
+  const model = join(dir, '.intent/model');
+  const ids = lawIds(text(join(model, 'LAWS.bend')));
+  await crossCheckLaws(model, bend, ids);
+  // A law Bend sees but the scanner dropped (here: the scanner list is short by one).
+  await assert.rejects(crossCheckLaws(model, bend, ids.slice(1)), /Bend sees 2 laws but the offline scanner found 1/);
+  // A law the scanner lists but Bend does not see (same count, wrong name).
+  await assert.rejects(crossCheckLaws(model, bend, [ids[0], 'invented_law']), /scanner lists law invented_law but Bend sees no law of that name/);
+  // An extra scanner law.
+  await assert.rejects(crossCheckLaws(model, bend, [...ids, 'extra']), /Bend sees 2 laws but the offline scanner found 3/);
+  // Output the cross-check cannot read is refused, never passed.
+  await assert.rejects(crossCheckLaws(model, bend, ids, async () => ({ status: 0, stdout: 'something new', stderr: '' })), /does not recognise/);
+  await assert.rejects(crossCheckLaws(model, bend, ids, async argv => ({ status: 1, stdout: /\.crosscheck/.test(argv[1]) && argv.length ? 'Error: 2 TODOs found.' : '', stderr: '' })), /does not recognise for law/);
+  assert.deepEqual(readdirSync(model).filter(name => name.startsWith('.crosscheck')), []);
+});
+
+test('gate cross-check: intent-gate itself fails when Bend disagrees with the scanner (planted disagreement)', async t => {
+  const dir = fixture(t);
+  const wrapper = join(dir, 'bend-wrapper.mjs');
+  // Delegates to the real Bend, except that the no-proof probe reports a different number of open laws.
+  writeFileSync(wrapper, `#!/usr/bin/env node\nimport { spawnSync } from 'node:child_process';\nimport { readFileSync } from 'node:fs';\nconst file = process.argv[2];\nif (/\\.crosscheck/.test(file) && !/def M\\./.test(readFileSync(file, 'utf8'))) { console.log('SOME PROOFS FAIL\\nError: 3 TODOs found.'); process.exit(1); }\nconst r = spawnSync(${JSON.stringify(bend)}, process.argv.slice(2), { stdio: 'inherit' });\nprocess.exit(r.status ?? 1);\n`);
+  chmodSync(wrapper, 0o755);
+  await gate(dir, bend);
+  await assert.rejects(gate(dir, wrapper), /Bend sees 3 laws but the offline scanner found 2/);
+  assert.ok(text(join(root, 'kit/intent-gate.mjs')).includes('await crossCheckLaws(dir, bend, laws);'), 'the gate runs the cross-check');
+});
+
+test('gate cross-check: open laws in files LAWS.bend imports are not counted against the scanner (real Bend)', async t => {
+  const dir = fixture(t);
+  const model = join(dir, '.intent/model');
+  writeFileSync(join(model, 'H.bend'), 'law helper_refl: for b: Bool {b == b : Bool}\n');
+  writeFileSync(join(model, 'H2.bend'), 'import ./H.bend as H\nlaw helper2: for b: Bool {b == b : Bool}\n');
+  const laws = text(join(model, 'LAWS.bend'));
+  writeFileSync(join(model, 'LAWS.bend'), laws.replace('import Base\n', 'import Base\nimport ./H.bend as H\nimport ./H2.bend as H2\n'));
+  const ids = lawIds(text(join(model, 'LAWS.bend')));
+  await crossCheckLaws(model, bend, ids);
+  await assert.rejects(crossCheckLaws(model, bend, ids.slice(1)), /Bend sees 2 laws but the offline scanner found 1/);
+  assert.deepEqual(readdirSync(model).filter(name => name.startsWith('.crosscheck')), []);
+});
+
+test('gate cross-check: a Location line for another law is refused, and an unwritable model directory is reported', async t => {
+  const dir = fixture(t);
+  const model = join(dir, '.intent/model');
+  const ids = lawIds(text(join(model, 'LAWS.bend')));
+  const other = async argv => ({ status: 1, stdout: /def M\./.test(readFileSync(argv[1], 'utf8')) ? 'Location: M.other' : 'Error: 2 TODOs found.', stderr: '' });
+  await assert.rejects(crossCheckLaws(model, bend, ids, other), /does not recognise for law/);
+  chmodSync(model, 0o555);
+  try { if (process.getuid?.() !== 0) await assert.rejects(crossCheckLaws(model, bend, ids), /must be writable/); }
+  finally { chmodSync(model, 0o755); }
+});
+
+test('gate cross-check: import spellings and a helper law closed inside LAWS.bend (real Bend)', async t => {
+  const dir = fixture(t);
+  const model = join(dir, '.intent/model');
+  const original = text(join(model, 'LAWS.bend'));
+  const helper = 'law hlaw: for b: Bool {b == b : Bool}\n';
+  mkdirSync(join(dir, '.intent/ext'));
+  writeFileSync(join(dir, '.intent/ext/H.bend'), helper);
+  // A trailing comment and a ../ path are valid imports and must not be falsely rejected.
+  writeFileSync(join(model, 'LAWS.bend'), original.replace('import Base\n', 'import Base\nimport ../ext/H.bend as H  # shared helper\n'));
+  const ids = lawIds(text(join(model, 'LAWS.bend')));
+  await crossCheckLaws(model, bend, ids);
+  await assert.rejects(crossCheckLaws(model, bend, ids.slice(1)), /Bend sees 2 laws but the offline scanner found 1/);
+  // Closing the helper law inside LAWS.bend would offset a hidden law in the count: refused.
+  writeFileSync(join(model, 'LAWS.bend'), text(join(model, 'LAWS.bend')) + '\ndef H.hlaw(b):\n  {==}\n');
+  await assert.rejects(crossCheckLaws(model, bend, ids.slice(1)), /do not define names under an import alias/);
+  // Non-relative imports cannot be cross-checked.
+  writeFileSync(join(model, 'LAWS.bend'), original.replace('import Base\n', 'import Base\nimport Other as O\n'));
+  await assert.rejects(crossCheckLaws(model, bend, ids), /imports must be relative/);
+  writeFileSync(join(model, 'LAWS.bend'), original);
+  const [a, b] = await Promise.all([crossCheckLaws(model, bend, ids).then(() => 'ok'), crossCheckLaws(model, bend, ids).then(() => 'ok')]);
+  assert.deepEqual([a, b], ['ok', 'ok']);
+  assert.deepEqual(readdirSync(model).filter(name => name.startsWith('.crosscheck')), []);
 });
 
 test('Bend gate proves laws and rejects both negatives and bypass constructs', async t => {
