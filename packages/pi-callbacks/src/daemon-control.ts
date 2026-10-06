@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { DEFAULT_HOST, DEFAULT_PORT, serverFile } from "./paths.ts";
 import type { DaemonHealth, ServerInfo } from "./types.ts";
 
@@ -19,6 +20,15 @@ export function readServerInfo(file = serverFile()): ServerInfo {
     // Ignore missing or malformed daemon state and fall back to defaults.
   }
   return { version: 1, pid: 0, host: DEFAULT_HOST, port: DEFAULT_PORT, startedAt: 0 };
+}
+
+/**
+ * Filesystem path of the running CLI module. `URL.pathname` keeps percent
+ * escapes (a space becomes `%20`), so the daemon would be spawned from a path
+ * that does not exist; `fileURLToPath` decodes it.
+ */
+export function cliSelfPath(moduleUrl: string): string {
+  return fileURLToPath(moduleUrl);
 }
 
 /**

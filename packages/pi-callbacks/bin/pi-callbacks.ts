@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { runDaemon } from "../src/daemon.ts";
-import { defaultEndpoint, ensureDaemon, getDaemonHealth, readServerInfo } from "../src/daemon-control.ts";
+import { cliSelfPath, defaultEndpoint, ensureDaemon, getDaemonHealth, readServerInfo } from "../src/daemon-control.ts";
 import type { ExternalCallbackPayload } from "../src/types.ts";
 
 const argv = process.argv.slice(2);
@@ -42,7 +42,7 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "start") {
-    const status = await ensureDaemon(new URL(import.meta.url).pathname);
+    const status = await ensureDaemon(cliSelfPath(import.meta.url));
     if (status === "down") throw new Error("pi-callbacks daemon did not become reachable");
     console.log(defaultEndpoint());
     return;
@@ -78,7 +78,7 @@ async function main(): Promise<void> {
   };
 
   if (!value("--endpoint") && !process.env.PI_CALLBACK_ENDPOINT) {
-    const status = await ensureDaemon(new URL(import.meta.url).pathname);
+    const status = await ensureDaemon(cliSelfPath(import.meta.url));
     if (status === "down") throw new Error("pi-callbacks daemon did not become reachable");
   }
 

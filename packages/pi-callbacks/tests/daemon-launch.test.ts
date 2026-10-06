@@ -4,7 +4,8 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { daemonCliPath, daemonDownMessage, ensureDaemon } from "../src/daemon-control.ts";
+import { pathToFileURL } from "node:url";
+import { cliSelfPath, daemonCliPath, daemonDownMessage, ensureDaemon } from "../src/daemon-control.ts";
 import type { ServerInfo } from "../src/types.ts";
 
 function tempDir(t: test.TestContext): string {
@@ -127,4 +128,17 @@ test("the down warning stays generic when the compiled CLI exists or in a source
   const generic = "pi-callbacks daemon did not become reachable; callbacks may not fire";
   assert.equal(daemonDownMessage(path.join(path.sep, "x", "node_modules", "pi-callbacks"), () => true), generic);
   assert.equal(daemonDownMessage(path.join(path.sep, "work", "pi-callbacks"), () => false), generic);
+});
+
+test("the CLI resolves its own path with percent escapes decoded", () => {
+  const dir = path.join(os.tmpdir(), "pi callbacks dir");
+  const file = path.join(dir, "bin", "pi-callbacks.js");
+  const url = pathToFileURL(file).href;
+  assert.ok(url.includes("%20"));
+  assert.equal(cliSelfPath(url), file);
+});
+
+test("the CLI never derives its own path from URL.pathname", () => {
+  const source = fs.readFileSync(new URL("../bin/pi-callbacks.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /import\.meta\.url\)\.pathname/);
 });

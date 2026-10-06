@@ -1,6 +1,6 @@
 # @centerforagenticai/pi-callbacks
 
-**Kind:** extension · **Status:** stable · **Pi:** ^0.85.1 · **Node:** >=22.19
+**Kind:** extension · **Status:** stable · **Pi:** ^1.0.0 · **Node:** >=22.19
 
 Persistent reminders, polling checks, background script callbacks, and
 token-based external callback hooks for Pi.
@@ -40,7 +40,7 @@ pi install npm:@centerforagenticai/pi-callbacks
 ```
 
 Restart Pi or run `/reload`. The extension starts the daemon on session start and
-again before it creates a job. It needs Pi `^0.85.1` and Node `>=22.19`. Named
+again before it creates a job. It needs Pi `^1.0.0` and Node `>=22.19`. Named
 GitLab pipeline polls also need `glab` installed and logged in.
 
 ## Surface
