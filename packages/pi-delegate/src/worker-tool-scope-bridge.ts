@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { writeSync } from "node:fs";
 
+import { requestFabricHostPolicy } from "./fabric-protocol.js";
 import {
 	DETACHED_WORKER_TOOL_SCOPE_ENV,
 	assertWorkerToolSurfaceHasUsableToolNames,
@@ -29,6 +30,14 @@ export default function workerToolScopeBridge(pi: ExtensionAPI): void {
 		transportError = error instanceof Error ? error : new Error(String(error));
 	}
 	if (!envelope && !transportError) return;
+	if (envelope?.fabricHostPolicy && envelope.workerFabricResolvedPath &&
+		requestFabricHostPolicy(
+			pi.events,
+			envelope.fabricHostPolicy,
+			envelope.workerFabricResolvedPath,
+		)) {
+		envelope.allowFabricExec = true;
+	}
 	if (transportError) {
 		const reason = `Hosted worker tool scope is invalid: ${transportError.message}`;
 		const denyAll = (): void => pi.setActiveTools([]);

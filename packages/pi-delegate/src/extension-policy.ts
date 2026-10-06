@@ -636,6 +636,24 @@ export function selectWorkerExtensionCandidates(
 	return selection.selected.filter((candidate) => !isPiIntercomExtensionIdentity(candidate.identity));
 }
 
+/**
+ * Append the loader's recorded failure for each missing candidate, so the real
+ * cause (for example ENOENT from a package upgraded under a running process)
+ * is not lost behind "did not register".
+ */
+function describeExtensionLoadErrors(
+	missing: readonly ExtensionPolicyCandidate[],
+	loadErrors: readonly { path: string; error: string }[],
+): string {
+	const missingKeys = new Set(missing.map((candidate) => canonicalPathKey(candidate.path)));
+	const matching = loadErrors.filter((entry) => missingKeys.has(canonicalPathKey(entry.path)));
+	if (matching.length === 0) return "";
+	const detail = matching.map((entry) => `${entry.path}: ${entry.error}`).join("; ");
+	const insidePackage = matching.some((entry) => /ENOENT|MODULE_NOT_FOUND|Cannot find module/.test(entry.error));
+	return ` Load error: ${detail}.` +
+		(insidePackage ? " If the package was upgraded or removed while this process was running, restart pi." : "");
+}
+
 /** Keep a configured extension factory failure fail-closed for a requested ext: tool. */
 function assertRequestedExtensionCandidatesLoaded(
 	requestedSelectors: readonly string[] | undefined,
@@ -643,6 +661,7 @@ function assertRequestedExtensionCandidatesLoaded(
 	loadedExtensions: readonly Extension[],
 	policySelected: readonly ExtensionPolicyCandidate[] = candidates,
 	selectedForLoad: readonly ExtensionPolicyCandidate[] = policySelected,
+	loadErrors: readonly { path: string; error: string }[] = [],
 ): void {
 	if (!requestedSelectors || requestedSelectors.length === 0) return;
 	const loadedPaths = new Set(loadedExtensions.map((extension) => canonicalPathKey(extension.resolvedPath)));
@@ -667,7 +686,8 @@ function assertRequestedExtensionCandidatesLoaded(
 		if (missing.length === 0) continue;
 		throw new Error(
 			`Could not load extension provider ${JSON.stringify(selector)} for an ext: tool selector; ` +
-			`configured extension candidate(s) did not register: ${missing.map((candidate) => candidate.path).join(", ")}.`,
+			`configured extension candidate(s) did not register: ${missing.map((candidate) => candidate.path).join(", ")}.` +
+			describeExtensionLoadErrors(missing, loadErrors),
 		);
 	}
 }
@@ -809,6 +829,9 @@ export async function loadWorkerResourceLoader(
 				context?.requestedExtensionSelectors,
 				selection.candidates,
 				loader.getExtensions().extensions,
+				undefined,
+				undefined,
+				loader.getExtensions().errors,
 			);
 			applyExtensionPolicy(loader.getExtensions(), agent);
 			return loader;
@@ -874,6 +897,7 @@ export async function loadWorkerResourceLoader(
 			loader.getExtensions().extensions,
 			selection.selected,
 			selected,
+			loader.getExtensions().errors,
 		);
 		const selectedByPath = new Map(
 			selected.map((candidate) => [canonicalPathKey(candidate.path), candidate.identity]),

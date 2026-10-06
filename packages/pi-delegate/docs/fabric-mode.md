@@ -143,7 +143,10 @@ outside them.
 
 The worker gets `fabric_exec` only after Fabric acknowledges the policy. A
 Fabric build without the handshake never replies, and such a worker keeps the
-native tools without `fabric_exec`, as before.
+native tools without `fabric_exec`, as before. For a detached worker,
+pi-delegate performs this handshake inside the child process after that child's
+Fabric has loaded; the parent's detached-scope envelope carries only the policy
+to request and cannot grant `fabric_exec` by itself.
 
 pi-delegate delivers this request directly to the single listener registered
 from the loaded `pi-fabric` package instead of broadcasting it on the worker's

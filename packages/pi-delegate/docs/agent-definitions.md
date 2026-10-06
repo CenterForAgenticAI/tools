@@ -112,6 +112,16 @@ the colon form. The old source-qualified example
 `ext:git:github.com/acme/tools#extensions/guard.ts/guard_check` therefore remains
 readable but is not the preferred authoring form.
 
+An exact tool selector must name a tool the extension has registered by the
+worker's first turn. A direct, in-process worker checks this at every
+`turn_start`, so the tool must exist by the first one; a tool that exists in no registered form fails the worker there,
+naming the selector, instead of starting with a smaller tool set. A built-in of
+the same name does not satisfy the selector. Tools registered during
+`session_start`, `before_agent_start` or the first `turn_start` count; a tool an
+extension registers later, on demand, does not. Optional global selectors stay
+soft and are skipped when their provider does not register the tool. Detached and
+hosted workers do not yet run this check.
+
 Tool-owner disambiguation does not apply to `extensionInclude` or
 `extensionExclude`; those policy selectors keep their portable-identity grammar.
 

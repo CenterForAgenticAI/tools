@@ -1,3 +1,5 @@
+import * as path from "node:path";
+import * as fs from "node:fs";
 import type {
 	AgentSession,
 	Extension,
@@ -78,9 +80,13 @@ export interface DetachedWorkerToolScopeEnvelope {
 	workerAskRuntimePath?: string;
 	/** Trusted delegate-self entrypoint loaded ahead of other consumer extensions. */
 	workerDelegateRuntimePath?: string;
-	/** Parent-resolved pi-fabric entrypoint loaded by this child, if any. */
+	/** Generated pi-fabric entrypoint loaded by this child, if any. */
 	workerFabricRuntimePath?: string;
-	/** Parent-authorized unrestricted Fabric admission; never inferred from empty arrays. */
+	/** Parent-validated original pi-fabric entrypoint behind the generated runtime path. */
+	workerFabricResolvedPath?: string;
+	/** Policy that only this child may ask its loaded Fabric to acknowledge. */
+	fabricHostPolicy?: FabricHostPolicyV1;
+	/** Child-authorized Fabric admission; never inferred from the transported policy alone. */
 	allowFabricExec?: boolean;
 	/** Whether the worker opted into delegate-family capabilities. */
 	allowNestedDelegate?: boolean;
@@ -102,6 +108,8 @@ export interface PreparedWorkerToolScope {
 	readonly workerFabricRuntimePath?: string;
 	/** Requested names that an extension-owned replacement must not satisfy. */
 	readonly deniedToolNames: readonly string[];
+	/** Host policy required before this restricted full-code Fabric shape is admitted. */
+	readonly fabricHostPolicy?: FabricHostPolicyV1;
 	readonly controlActionGrants?: Record<string, string[] | undefined>;
 	/** Diagnostics retained for worker binding (missing selectors fail construction). */
 	readonly diagnostics: string[];
@@ -231,6 +239,44 @@ function hasSystemText(message: TranscriptSystemMessage): boolean {
  * names narrows what the model is told to match what the worker can run.
  * Returns the context unchanged when nothing outside `allowed` is declared.
  */
+/**
+ * True when pi-fabric full-code mode has collapsed the transcript's tool
+ * declarations to `fabric_exec` (plus any foreground tools) while the final
+ * worker set excludes it.
+ * Fabric's `context_with_system` projection runs on every request regardless
+ * of the worker's tool scope, so an explicit-allowlist worker (which never
+ * receives `fabric_exec`) would otherwise be told about no tools at all.
+ */
+function fabricCollapsedDeclarations(context: unknown, finalNames: readonly string[]): boolean {
+	if (finalNames.includes(FABRIC_EXEC_TOOL_NAME)) return false;
+	return transcriptDeclaredToolNames(context)?.includes(FABRIC_EXEC_TOOL_NAME) === true;
+}
+
+/**
+ * Replace every transcript tool declaration with the final worker set,
+ * declared once on the leading system message. Copies only the declaration
+ * fields a provider reads, never the executable tool object.
+ */
+export function redeclareTranscriptTools<T>(context: T, definitions: readonly FinalAgentToolDefinition[]): T {
+	const messages = (context as { messages?: unknown } | null | undefined)?.messages;
+	if (!Array.isArray(messages)) return context;
+	const declared = definitions.map((tool) => ({
+		name: tool.name,
+		description: tool.description,
+		parameters: tool.parameters,
+	}));
+	let first = true;
+	const next = (messages as unknown[]).map((message) => {
+		const system = message as TranscriptSystemMessage | null;
+		if (system?.role !== "system") return message;
+		const { toolsAdded: _added, toolsRemoved: _removed, ...rest } = system;
+		const declare = first;
+		first = false;
+		return { ...rest, ...(declare && declared.length > 0 ? { toolsAdded: declared } : {}) };
+	});
+	return { ...(context as object), messages: next } as T;
+}
+
 export function narrowTranscriptToolDeclarations<T>(context: T, allowed: readonly string[]): T {
 	const messages = (context as { messages?: unknown } | null | undefined)?.messages;
 	if (!Array.isArray(messages)) return context;
@@ -288,6 +334,62 @@ function createFinalFloorErrorStream(errorMessage: string): ReturnType<AgentStre
 	return stream;
 }
 
+function canonicalToolOwnerPath(value: string): string {
+	const resolved = path.resolve(value);
+	try { return fs.realpathSync(resolved); } catch { return resolved; }
+}
+
+/**
+ * Fail loudly when an exact `ext:<owner>:<tool>` selector names a tool that
+ * the live registry never gained. Registration is deferred past construction
+ * for lazy providers, so this runs at the first turn, when every eager and lazy
+ * registration has had its chance. Without it the selector is dropped and the
+ * worker runs with a smaller surface than the agent file asked for.
+ */
+export function assertSelectedExtensionToolsRegistered(
+	scope: Pick<PreparedWorkerToolScope, "extensionToolSelectors" | "selectorExtensionPaths">,
+	tools: readonly Pick<ToolInfo, "name" | "sourceInfo">[],
+): void {
+	const missing = scope.extensionToolSelectors.filter((selector, index) => {
+		if (selector.tool === undefined) return false;
+		// The worker pins or vetoes these names itself, so the extension's own
+		// registration need not appear in the live registry.
+		if (selector.tool === ASK_TOOL_NAME || EXCLUDED_TOOL_NAMES.includes(selector.tool)) return false;
+		const ownerPath = scope.selectorExtensionPaths[index];
+		// Owner-bound: a built-in of the same name (for example `grep`) must not
+		// satisfy a selector aimed at an extension that never registered it.
+		return !tools.some((tool) =>
+			tool.name === selector.tool &&
+			(ownerPath === undefined || canonicalToolOwnerPath(tool.sourceInfo.path) === canonicalToolOwnerPath(ownerPath)));
+	});
+	if (missing.length === 0) return;
+	const rendered = missing
+		.map((selector) => `ext:${selector.extension}${selector.module ? `#${selector.module}` : ""}:${selector.tool}`)
+		.join(", ");
+	throw new Error(toolSelectorDiagnostic(
+		ToolSelectorDiagnosticCode.TOOL_UNDECLARED,
+		`Requested extension tool selector(s) matched no tool registered by that extension: ${rendered}. ` +
+			"The extension loaded but does not register that tool name; check the spelling against the extension's tool list.",
+	));
+}
+
+/**
+ * Selectors the first-turn registration check enforces. Optional global
+ * selectors stay soft: a loaded provider may register the tool only
+ * conditionally, and the worker is documented to run without it.
+ */
+function firstTurnSelectorScope(
+	surface: ResolvedToolSurface,
+	selectors: readonly ExtSelector[],
+	extensions: readonly { resolvedPath: string }[],
+): Pick<PreparedWorkerToolScope, "extensionToolSelectors" | "selectorExtensionPaths"> {
+	const hard = selectors.map((selector, index) => ({ selector, index })).filter(({ selector }) => !isOptionalGlobalExtensionSelector(surface, selector));
+	return {
+		extensionToolSelectors: hard.map(({ selector }) => selector),
+		selectorExtensionPaths: hard.map(({ index }) => extensions[index]!.resolvedPath),
+	};
+}
+
 /** Guard exactly one provider request after each real AgentSession turn_start. */
 function installFinalWorkerToolFloor(
 	session: AgentSession,
@@ -296,6 +398,7 @@ function installFinalWorkerToolFloor(
 	artifactWriterRequirement?: ArtifactWriterRequirement,
 	requestedToolNames?: readonly string[],
 	workerFabricRuntimePath?: string,
+	selectorScope?: Pick<PreparedWorkerToolScope, "extensionToolSelectors" | "selectorExtensionPaths">,
 ): () => void {
 	if (!enabled) return () => {};
 	// `streamFn` is re-declared by AgentCompatibilitySurface: its SDK type changed
@@ -318,6 +421,7 @@ function installFinalWorkerToolFloor(
 		try {
 			apply();
 			const definitions = session.agent.state.tools.slice() as FinalAgentToolDefinition[];
+			if (selectorScope) assertSelectedExtensionToolsRegistered(selectorScope, session.getAllTools());
 			if (artifactWriterRequirement !== undefined) {
 				assertWorkerArtifactWriterRetained(
 					artifactWriterRequirement,
@@ -353,7 +457,9 @@ function installFinalWorkerToolFloor(
 		// set, then verify the result and fail closed if anything still widens it.
 		if (transcriptDeclaredToolNames(context)) {
 			const finalNames = snapshot.definitions.map((tool) => tool.name);
-			const narrowedContext = narrowTranscriptToolDeclarations(context, finalNames);
+			const narrowedContext = fabricCollapsedDeclarations(context, finalNames)
+				? redeclareTranscriptTools(context, snapshot.definitions)
+				: narrowTranscriptToolDeclarations(context, finalNames);
 			const mismatch = describeToolDeclarationMismatch(
 				transcriptDeclaredToolNames(narrowedContext) ?? [],
 				finalNames,
@@ -628,14 +734,20 @@ export function prepareWorkerToolScope(
 	// that refuses the denied names and every unhooked non-read action.
 	const fabricUnrestrictedShape = !hasExplicitAllowlist && requestedToolNames === undefined && !dynamic;
 	const fabricRestricted = deniedToolNames.size > 0 || options.writeConfined === true;
+	const fabricHostPolicy: FabricHostPolicyV1 | undefined = fabricUnrestrictedShape && fabricRestricted
+		? {
+				owner: "pi-delegate",
+				reason: options.writeConfined === true ? "write-confined delegate worker" : "restricted delegate worker",
+				deniedTools: [...deniedToolNames],
+				allowedUnhookedRisks: ["read"],
+			}
+		: undefined;
 	const fabricAllowed = fabricUnrestrictedShape && (
-		!fabricRestricted ||
-		(workerFabricRuntimePath !== undefined && options.requestFabricHostPolicy?.({
-			owner: "pi-delegate",
-			reason: options.writeConfined === true ? "write-confined delegate worker" : "restricted delegate worker",
-			deniedTools: [...deniedToolNames],
-			allowedUnhookedRisks: ["read"],
-		}, workerFabricRuntimePath) === true)
+		!fabricHostPolicy ||
+		(workerFabricRuntimePath !== undefined && options.requestFabricHostPolicy?.(
+			fabricHostPolicy,
+			workerFabricRuntimePath,
+		) === true)
 	);
 	const selectedExtensions = resolution.selectedExtensions;
 	const selectorExtensions = resolution.bindings.map(({ extension }) => extension);
@@ -692,6 +804,7 @@ export function prepareWorkerToolScope(
 			requestedToolNames,
 			workerFabricRuntimePath,
 			deniedToolNames: [...deniedToolNames],
+			...(fabricHostPolicy ? { fabricHostPolicy } : {}),
 			controlActionGrants: surface.actionGrants,
 			diagnostics,
 			extensionToolSelectors: selectors,
@@ -747,6 +860,7 @@ export function prepareWorkerToolScope(
 					artifactWriterRequirement,
 					requestedToolNames,
 					workerFabricRuntimePath,
+					firstTurnSelectorScope(surface as ResolvedToolSurface, selectors, selectorExtensions),
 				);
 				// A static allowlist still needs its ACTION grants bound: the
 				// allowlist can only grant or withhold the whole delegate_control
@@ -870,6 +984,7 @@ export function prepareWorkerToolScope(
 		requestedToolNames,
 		workerFabricRuntimePath,
 		deniedToolNames: [...deniedToolNames],
+		...(fabricHostPolicy ? { fabricHostPolicy } : {}),
 		controlActionGrants: surface.actionGrants,
 		diagnostics,
 		extensionToolSelectors: selectors,
@@ -901,6 +1016,7 @@ export function prepareWorkerToolScope(
 				artifactWriterRequirement,
 				requestedToolNames,
 				workerFabricRuntimePath,
+				firstTurnSelectorScope(surface as ResolvedToolSurface, selectors, selectorExtensions),
 			);
 			const previousBeforeToolCall = (session.agent as {
 				beforeToolCall?: (input: unknown, signal?: AbortSignal) => Promise<unknown> | unknown;
@@ -1046,21 +1162,30 @@ export function assertWorkerToolSurfaceHasUsableToolNames(names: readonly string
  * from an untrusted child-side package discovery result.
  */
 export function createDetachedWorkerToolScopeEnvelope(
-	scope: Pick<PreparedWorkerToolScope, "requestedToolNames" | "deniedToolNames" | "extensionToolSelectors" | "selectorExtensionPaths" | "dynamic" | "controlActionGrants" | "hasExplicitAllowlist"> &
-		Partial<Pick<PreparedWorkerToolScope, "delegateOptIn" | "delegateToolSelectorIndexes">>,
+	scope: Pick<PreparedWorkerToolScope, "requestedToolNames" | "workerFabricRuntimePath" | "deniedToolNames" | "extensionToolSelectors" | "selectorExtensionPaths" | "dynamic" | "controlActionGrants" | "hasExplicitAllowlist"> &
+		Partial<Pick<PreparedWorkerToolScope, "fabricHostPolicy" | "delegateOptIn" | "delegateToolSelectorIndexes">>,
 	selectedExtensionPaths: readonly string[],
 	extensionRuntimePaths?: Readonly<Record<string, string>>,
 	workerAskRuntimePath?: string,
 	workerDelegateRuntimePath?: string,
-	options: { force?: boolean; workerFabricRuntimePath?: string } = {},
+	options: {
+		force?: boolean;
+		workerFabricRuntimePath?: string;
+		workerFabricResolvedPath?: string;
+	} = {},
 ): DetachedWorkerToolScopeEnvelope | undefined {
 	// A STATIC allowlist still needs an envelope when it carries action grants:
 	// the detached child has no other way to learn them, and without it every
 	// action would be permitted. A caller may also force one so lifecycle-time
 	// registrations can be re-applied to a static allowlist. Dynamic scopes need
 	// one regardless, for their selector narrowing.
-	if (!scope.dynamic && !scope.controlActionGrants && scope.deniedToolNames.length === 0 && options.force !== true) return undefined;
-	const validatedOwnerPaths = dedupe(selectedExtensionPaths);
+	if (!scope.dynamic && !scope.controlActionGrants && !scope.fabricHostPolicy && scope.deniedToolNames.length === 0 && options.force !== true) return undefined;
+	const validatedOwnerPaths = dedupe([
+		...selectedExtensionPaths,
+		...(options.workerFabricResolvedPath !== undefined && options.workerFabricResolvedPath === scope.workerFabricRuntimePath
+			? [options.workerFabricResolvedPath]
+			: []),
+	]);
 	const runtimePathFor = (ownerPath: string): string | undefined => {
 		if (!extensionRuntimePaths) return ownerPath;
 		return Object.prototype.hasOwnProperty.call(extensionRuntimePaths, ownerPath)
@@ -1087,10 +1212,17 @@ export function createDetachedWorkerToolScopeEnvelope(
 		(options.workerFabricRuntimePath !== undefined &&
 			(options.workerFabricRuntimePath.trim().length === 0 ||
 				!selectedRuntimeExtensionPaths.includes(options.workerFabricRuntimePath))) ||
+		(options.workerFabricResolvedPath !== undefined &&
+			(options.workerFabricResolvedPath.trim().length === 0 ||
+				!validatedOwnerPaths.includes(options.workerFabricResolvedPath))) ||
 		new Set(selectedRuntimeExtensionPaths).size !== validatedOwnerPaths.length
 	) {
 		throw new Error("Detached worker tool scope selector owners do not match the parent-validated extension paths");
 	}
+	const fabricUnrestrictedShape = !scope.hasExplicitAllowlist && scope.requestedToolNames === undefined && !scope.dynamic;
+	const fabricHostPolicy = fabricUnrestrictedShape && options.workerFabricRuntimePath
+		? scope.fabricHostPolicy
+		: undefined;
 	const envelope: DetachedWorkerToolScopeEnvelope = {
 		protocolVersion: WORKER_TOOL_SCOPE_PROTOCOL_VERSION,
 		requestedToolNames: [...(scope.requestedToolNames ?? [])],
@@ -1113,8 +1245,11 @@ export function createDetachedWorkerToolScopeEnvelope(
 		...(workerAskRuntimePath ? { workerAskRuntimePath } : {}),
 		...(workerDelegateRuntimePath ? { workerDelegateRuntimePath } : {}),
 		...(options.workerFabricRuntimePath ? { workerFabricRuntimePath: options.workerFabricRuntimePath } : {}),
-		...(!scope.hasExplicitAllowlist && scope.requestedToolNames === undefined && !scope.dynamic &&
-			scope.deniedToolNames.length === 0 && options.workerFabricRuntimePath
+		...(fabricHostPolicy ? {
+			workerFabricResolvedPath: options.workerFabricResolvedPath ?? scope.workerFabricRuntimePath,
+			fabricHostPolicy,
+		} : {}),
+		...(fabricUnrestrictedShape && !fabricHostPolicy && options.workerFabricRuntimePath
 			? { allowFabricExec: true } : {}),
 		...(scope.delegateOptIn !== undefined ? { allowNestedDelegate: scope.delegateOptIn } : {}),
 		...(scope.delegateToolSelectorIndexes && scope.delegateToolSelectorIndexes.length > 0
@@ -1129,6 +1264,23 @@ export function createDetachedWorkerToolScopeEnvelope(
 	}
 	return envelope;
 }
+function detachedFabricHostPolicyIsValid(parsed: Partial<DetachedWorkerToolScopeEnvelope>): boolean {
+	const policy = parsed.fabricHostPolicy;
+	if (!policy || typeof policy !== "object" || Array.isArray(policy)) return false;
+	if (!parsed.workerFabricRuntimePath || !parsed.workerFabricResolvedPath) return false;
+	if (parsed.requestedToolNames?.length !== 0 || parsed.extensionToolSelectors?.length !== 0) return false;
+	if (policy.owner !== "pi-delegate" ||
+		(policy.reason !== "restricted delegate worker" && policy.reason !== "write-confined delegate worker") ||
+		!Array.isArray(policy.deniedTools) ||
+		!policy.deniedTools.every((name) => typeof name === "string" && name.trim().length > 0) ||
+		!Array.isArray(policy.allowedUnhookedRisks) ||
+		policy.allowedUnhookedRisks.length !== 1 || policy.allowedUnhookedRisks[0] !== "read") return false;
+	const transportedDenied = dedupe(parsed.deniedExtensionToolNames ?? []);
+	const policyDenied = dedupe(policy.deniedTools);
+	return transportedDenied.length === policyDenied.length &&
+		transportedDenied.every((name, index) => name === policyDenied[index]);
+}
+
 
 export function parseDetachedWorkerToolScopeEnvelope(raw: string | undefined): DetachedWorkerToolScopeEnvelope | undefined {
 	if (!raw) return undefined;
@@ -1186,9 +1338,18 @@ export function parseDetachedWorkerToolScopeEnvelope(raw: string | undefined): D
 		(parsed.workerFabricRuntimePath !== undefined &&
 			(typeof parsed.workerFabricRuntimePath !== "string" ||
 				!parsed.selectedRuntimeExtensionPaths.includes(parsed.workerFabricRuntimePath))) ||
+		(parsed.workerFabricResolvedPath !== undefined &&
+			(typeof parsed.workerFabricResolvedPath !== "string" ||
+				!parsed.selectedExtensionPaths.includes(parsed.workerFabricResolvedPath))) ||
+		(parsed.workerFabricResolvedPath !== undefined && parsed.workerFabricRuntimePath === undefined) ||
+		(parsed.workerFabricRuntimePath !== undefined && parsed.workerFabricResolvedPath !== undefined &&
+			parsed.selectedRuntimeExtensionPaths.indexOf(parsed.workerFabricRuntimePath) !==
+				parsed.selectedExtensionPaths.indexOf(parsed.workerFabricResolvedPath)) ||
+		(parsed.fabricHostPolicy !== undefined && !detachedFabricHostPolicyIsValid(parsed)) ||
 		(parsed.allowFabricExec !== undefined &&
-			(parsed.allowFabricExec !== true || !parsed.workerFabricRuntimePath || parsed.requestedToolNames.length !== 0 ||
-				parsed.extensionToolSelectors.length !== 0 || (parsed.deniedExtensionToolNames?.length ?? 0) !== 0)) ||
+			(parsed.allowFabricExec !== true || !parsed.workerFabricRuntimePath || parsed.fabricHostPolicy !== undefined ||
+				parsed.requestedToolNames.length !== 0 || parsed.extensionToolSelectors.length !== 0 ||
+				(parsed.deniedExtensionToolNames?.length ?? 0) !== 0)) ||
 		(parsed.allowNestedDelegate !== undefined && typeof parsed.allowNestedDelegate !== "boolean") ||
 		(parsed.delegateToolSelectorIndexes !== undefined &&
 			(!Array.isArray(parsed.delegateToolSelectorIndexes) ||
@@ -1235,6 +1396,15 @@ export function parseDetachedWorkerToolScopeEnvelope(raw: string | undefined): D
 			? { workerDelegateRuntimePath: parsed.workerDelegateRuntimePath }
 			: {}),
 		...(parsed.workerFabricRuntimePath ? { workerFabricRuntimePath: parsed.workerFabricRuntimePath } : {}),
+		...(parsed.workerFabricResolvedPath ? { workerFabricResolvedPath: parsed.workerFabricResolvedPath } : {}),
+		...(parsed.fabricHostPolicy ? {
+			fabricHostPolicy: {
+				owner: "pi-delegate",
+				reason: parsed.fabricHostPolicy.reason,
+				deniedTools: [...(parsed.fabricHostPolicy.deniedTools ?? [])],
+				allowedUnhookedRisks: ["read"],
+			},
+		} : {}),
 		...(parsed.allowFabricExec === true ? { allowFabricExec: true } : {}),
 		...(parsed.allowNestedDelegate !== undefined ? { allowNestedDelegate: parsed.allowNestedDelegate } : {}),
 		...(parsed.delegateToolSelectorIndexes
@@ -1440,7 +1610,7 @@ export function resolveDetachedWorkerActiveToolNames(
 		}
 	}
 	if (envelope.allowFabricExec === true && envelope.requestedToolNames.length === 0 &&
-		envelope.extensionToolSelectors.length === 0 && deniedExtensionToolNames.size === 0 &&
+		envelope.extensionToolSelectors.length === 0 &&
 		fabricExecAdmitted(undefined, tools, envelope.workerFabricRuntimePath)) {
 		names.push(FABRIC_EXEC_TOOL_NAME);
 	}
@@ -1456,7 +1626,7 @@ export function isDetachedWorkerToolAllowed(
 	const deniedExtensionToolNames = new Set(envelope.deniedExtensionToolNames ?? []);
 	if (toolName === FABRIC_EXEC_TOOL_NAME) {
 		return envelope.allowFabricExec === true && envelope.requestedToolNames.length === 0 &&
-			envelope.extensionToolSelectors.length === 0 && deniedExtensionToolNames.size === 0 &&
+			envelope.extensionToolSelectors.length === 0 &&
 			fabricExecAdmitted(undefined, tools, envelope.workerFabricRuntimePath);
 	}
 	if (envelope.requestedToolNames.includes(toolName)) {

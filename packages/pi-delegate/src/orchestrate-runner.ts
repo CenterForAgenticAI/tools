@@ -152,6 +152,7 @@ import {
 	DETACHED_WORKER_TOOL_SCOPE_ENV,
 	type DetachedWorkerToolScopeEnvelope,
 } from "./worker-tool-scope.js";
+import { FABRIC_HOST_POLICY_EVENT, FABRIC_HOST_POLICY_HANDLER_REGISTRY_KEY } from "./fabric-protocol.js";
 import {
 	DETACHED_THINKING_POLICY_ENV,
 	THINKING_LEVELS,
@@ -570,6 +571,8 @@ const factory = typeof importedFactory === "function"
     ? importedFactory.default
     : undefined;
 const registryKey = Symbol.for(${JSON.stringify(DETACHED_WORKER_TOOL_OWNER_REGISTRY_KEY)});
+const fabricPolicyEvent = ${JSON.stringify(FABRIC_HOST_POLICY_EVENT)};
+const fabricPolicyRegistryKey = Symbol.for(${JSON.stringify(FABRIC_HOST_POLICY_HANDLER_REGISTRY_KEY)});
 const ownerPath = ${JSON.stringify(ownerPath)};
 const runtimePath = ${JSON.stringify(runtimePath)};
 export default async function workerToolOwnerProxy(pi) {
@@ -593,6 +596,37 @@ export default async function workerToolOwnerProxy(pi) {
           owners.set(runtimePath, ownerPath);
           return target.registerTool(tool);
         };
+      }
+      if (property === "events") {
+        const events = Reflect.get(target, property, receiver);
+        return new Proxy(events, {
+          get(eventTarget, eventProperty, eventReceiver) {
+            if (eventProperty !== "on") return Reflect.get(eventTarget, eventProperty, eventReceiver);
+            return (channel, handler) => {
+              if (channel !== fabricPolicyEvent) return eventTarget.on(channel, handler);
+              let registry = globalThis[fabricPolicyRegistryKey];
+              if (!(registry instanceof Map)) {
+                registry = new Map();
+                globalThis[fabricPolicyRegistryKey] = registry;
+              }
+              let handlers = registry.get(ownerPath);
+              if (!Array.isArray(handlers)) {
+                handlers = [];
+                registry.set(ownerPath, handlers);
+              }
+              handlers.push(handler);
+              const unsubscribe = eventTarget.on(channel, handler);
+              let active = true;
+              return () => {
+                if (!active) return;
+                active = false;
+                const index = handlers.indexOf(handler);
+                if (index >= 0) handlers.splice(index, 1);
+                unsubscribe();
+              };
+            };
+          },
+        });
       }
       return Reflect.get(target, property, receiver);
     },
@@ -649,6 +683,8 @@ export function buildOrchestratePiArgs(
 		resolveThinkingPolicyBridge?: () => string | undefined;
 		/** Test seam for the compiled live worker-tool scope bridge. */
 		resolveWorkerToolScopeBridge?: () => string | undefined;
+		/** Install the live-scope bridge and owner proxies for a restricted implicit Fabric surface. */
+		forceWorkerToolScopeBridge?: boolean;
 		/** Test seam for the compiled task-seed bootstrap. */
 		resolveTasksSeedBridge?: () => string | undefined;
 	} = {},
@@ -686,13 +722,14 @@ export function buildOrchestratePiArgs(
 		? (opts.resolveWorkerAskShim ?? resolveWorkerAskShimPath)()
 		: undefined;
 	const hasExplicitAllowlist = resolveCfgHasExplicitAllowlist(cfg);
-	const needsWorkerScopeBridge = liveSelectorScope || hasExplicitAllowlist || cfg.tasks !== undefined;
+	const needsWorkerScopeBridge = liveSelectorScope || hasExplicitAllowlist || cfg.tasks !== undefined ||
+		opts.forceWorkerToolScopeBridge === true;
 	const scopeBridgePath = needsWorkerScopeBridge
 		? (opts.resolveWorkerToolScopeBridge ?? resolveWorkerToolScopeBridgePath)()
 		: undefined;
 	if (needsWorkerScopeBridge && !scopeBridgePath) {
 		throw new Error(
-			"Detached driver requires the compiled worker tool scope bridge for an explicit tool allowlist; " +
+			"Detached driver requires the compiled worker tool scope bridge for an explicit or policy-restricted tool surface; " +
 				"run the pi-delegate build or upgrade the installed package.",
 		);
 	}
@@ -800,7 +837,7 @@ export function buildOrchestratePiArgs(
 	}
 	try {
 		for (const [index, [ownerPath, aliases]] of [...extensionEntries].entries()) {
-			const runtimePath = liveSelectorScope
+			const runtimePath = liveSelectorScope || opts.forceWorkerToolScopeBridge === true
 				? materializeWorkerToolOwnerProxy(ensureTempDir(), ownerPath, index)
 				: ownerPath;
 			extensionRuntimePaths[ownerPath] = runtimePath;
@@ -875,7 +912,7 @@ export function buildOrchestratePiArgs(
 	return {
 		args,
 		...(tempDir ? { tempDir } : {}),
-		...(liveSelectorScope ? { extensionRuntimePaths } : {}),
+		...(liveSelectorScope || opts.forceWorkerToolScopeBridge === true ? { extensionRuntimePaths } : {}),
 		...(askShimPath ? { workerAskRuntimePath: askShimPath } : {}),
 		...(workerDelegateRuntimePath ? { workerDelegateRuntimePath } : {}),
 		...(tasksSeedBridgePath ? { tasksSeedBridgePath } : {}),
@@ -2060,7 +2097,8 @@ export async function runOrchestrateChild(
 		);
 
 		const hasThinkingBounds = Boolean(cfg.thinkingMin || cfg.thinkingMax);
-		const needsResourcePreflight = hostedSurface.extSelectors.length > 0 || hasThinkingBounds || cfg.tasks !== undefined;
+		const needsResourcePreflight = hostedSurface.extSelectors.length > 0 || hostedSurface.deniedToolNames.length > 0 ||
+			hasThinkingBounds || cfg.tasks !== undefined;
 		const prepareResources = () => prepareWorkerSessionResources(
 			hostedAgent,
 			{ cwd: cfg.cwd, agentDir: cfg.agentDir },
@@ -2123,6 +2161,8 @@ export async function runOrchestrateChild(
 		const selectedThinkingTool = selectedToolNames?.includes("set_thinking_effort") === true ||
 			effectiveHostedSurface.extSelectors.some((selector) => selector.tool === "set_thinking_effort") ||
 			liveToolScope?.currentActiveToolNames().includes("set_thinking_effort") === true;
+		const detachedFabricPolicyRequired = preparedResources?.toolScope.workerFabricRuntimePath !== undefined &&
+			preparedResources.toolScope.fabricHostPolicy !== undefined;
 		const hostedCfg: OrchestrateCfg = {
 			...cfg,
 			...(selectedExtensionPaths ? { extensions: selectedExtensionPaths } : {}),
@@ -2134,7 +2174,10 @@ export async function runOrchestrateChild(
 		};
 
 		const sessionDir = buildWorkerSessionDir(cfg.agentDir);
-		const built = buildOrchestratePiArgs(hostedCfg, { sessionDir });
+		const built = buildOrchestratePiArgs(hostedCfg, {
+			sessionDir,
+			forceWorkerToolScopeBridge: detachedFabricPolicyRequired,
+		});
 		let workerToolScopeEnvelope: DetachedWorkerToolScopeEnvelope | undefined;
 		let thinkingPolicyRequirements: DetachedThinkingPolicyRequirements | undefined;
 		try {
@@ -2147,9 +2190,13 @@ export async function runOrchestrateChild(
 				effectiveHostedSurface.hasExplicitAllowlist
 				? prepareWorkerToolScope({ ...effectiveHostedSurface, tools: selectedToolNames }, [])
 				: undefined;
-			const childToolScopeBase = liveToolScope ?? staticTaskToolScope ?? staticExplicitToolScope;
+			const childToolScopeBase = liveToolScope ?? staticTaskToolScope ?? staticExplicitToolScope ??
+				(detachedFabricPolicyRequired ? preparedResources?.toolScope : undefined);
 			const childToolScope = childToolScopeBase
-				? { ...childToolScopeBase, requestedToolNames: selectedToolNames }
+				? {
+						...childToolScopeBase,
+						requestedToolNames: detachedFabricPolicyRequired ? undefined : selectedToolNames,
+					}
 				: undefined;
 			const transportRequestedToolNames = childToolScope?.requestedToolNames?.filter(
 				(name) =>
@@ -2163,15 +2210,25 @@ export async function runOrchestrateChild(
 			workerToolScopeEnvelope = transportedToolScope
 				? createDetachedWorkerToolScopeEnvelope(
 						transportedToolScope,
-						transportedToolScope.selectedExtensionPaths,
+						[
+							...new Set([
+								...transportedToolScope.selectedExtensionPaths,
+								...(detachedFabricPolicyRequired && preparedResources?.toolScope.workerFabricRuntimePath
+									? [preparedResources.toolScope.workerFabricRuntimePath]
+									: []),
+							]),
+						],
 						built.extensionRuntimePaths,
 						built.workerAskRuntimePath,
 						built.workerDelegateRuntimePath,
 						{
 							force: staticTaskToolScope !== undefined || staticExplicitToolScope !== undefined,
 							...(preparedResources?.toolScope.workerFabricRuntimePath
-								? { workerFabricRuntimePath: built.extensionRuntimePaths?.[preparedResources.toolScope.workerFabricRuntimePath] ??
-									preparedResources.toolScope.workerFabricRuntimePath }
+								? {
+										workerFabricRuntimePath: built.extensionRuntimePaths?.[preparedResources.toolScope.workerFabricRuntimePath] ??
+											preparedResources.toolScope.workerFabricRuntimePath,
+										workerFabricResolvedPath: preparedResources.toolScope.workerFabricRuntimePath,
+									}
 								: {}),
 						},
 					)

@@ -13,7 +13,7 @@
  * member omitted here is optional on the Fabric side, which the contract test
  * also checks.
  */
-import type { ExtensionContext, EventBusController } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, EventBus, EventBusController } from "@earendil-works/pi-coding-agent";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 import { readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
@@ -117,6 +117,8 @@ export function readFabricProviderDiscovery(value: unknown): FabricProviderDisco
  * without the handshake never reply, so callers must treat silence as refusal.
  */
 export const FABRIC_HOST_POLICY_EVENT = "pi-fabric:host-policy:v1";
+/** Process-local key populated only by parent-generated detached owner proxies. */
+export const FABRIC_HOST_POLICY_HANDLER_REGISTRY_KEY = "pi-delegate.fabric-host-policy-handlers.v1";
 
 export interface FabricHostPolicyV1 {
 	owner: string;
@@ -138,7 +140,10 @@ interface AttributedHostPolicyHandler {
 	registrationStack: string;
 }
 
-const hostPolicyHandlers = new WeakMap<EventBusController, Set<AttributedHostPolicyHandler>>();
+type BoundHostPolicyHandlerRegistry = Map<string, EventHandler[]>;
+
+const hostPolicyHandlers = new WeakMap<EventBus, Set<AttributedHostPolicyHandler>>();
+const instrumentedHostPolicyBuses = new WeakSet<EventBus>();
 
 function captureRegistrationStack(): string {
 	const previousLimit = Error.stackTraceLimit;
@@ -150,33 +155,41 @@ function captureRegistrationStack(): string {
 	}
 }
 
+/** Retain host-policy subscription provenance on a worker's shared event bus. */
+export function trackFabricHostPolicyEventBus<T extends EventBus>(events: T): T {
+	if (instrumentedHostPolicyBuses.has(events)) return events;
+	const attributed = new Set<AttributedHostPolicyHandler>();
+	const rawOn = events.on.bind(events);
+	const controller = events as Partial<EventBusController>;
+	const rawClear = typeof controller.clear === "function" ? controller.clear.bind(events) : undefined;
+	events.on = (channel, handler) => {
+		const record = channel === FABRIC_HOST_POLICY_EVENT
+			? { handler, registrationStack: captureRegistrationStack() }
+			: undefined;
+		if (record) attributed.add(record);
+		const unsubscribeRaw = rawOn(channel, handler);
+		let active = true;
+		return () => {
+			if (!active) return;
+			active = false;
+			if (record) attributed.delete(record);
+			unsubscribeRaw();
+		};
+	};
+	if (rawClear) {
+		controller.clear = () => {
+			attributed.clear();
+			rawClear();
+		};
+	}
+	hostPolicyHandlers.set(events, attributed);
+	instrumentedHostPolicyBuses.add(events);
+	return events;
+}
+
 /** Create the worker event bus while retaining host-policy subscription provenance. */
 export function createFabricHostPolicyEventBus(): EventBusController {
-	const raw = createEventBus();
-	const attributed = new Set<AttributedHostPolicyHandler>();
-	const events: EventBusController = {
-		emit: (channel, data) => raw.emit(channel, data),
-		on: (channel, handler) => {
-			const record = channel === FABRIC_HOST_POLICY_EVENT
-				? { handler, registrationStack: captureRegistrationStack() }
-				: undefined;
-			if (record) attributed.add(record);
-			const unsubscribeRaw = raw.on(channel, handler);
-			let active = true;
-			return () => {
-				if (!active) return;
-				active = false;
-				if (record) attributed.delete(record);
-				unsubscribeRaw();
-			};
-		},
-		clear: () => {
-			attributed.clear();
-			raw.clear();
-		},
-	};
-	hostPolicyHandlers.set(events, attributed);
-	return events;
+	return trackFabricHostPolicyEventBus(createEventBus());
 }
 
 function canonicalPath(path: string): string {
@@ -222,28 +235,43 @@ function registrationIsInsidePackage(registrationStack: string, packageDirectory
 	});
 }
 
+function boundHostPolicyHandlers(fabricResolvedPath: string): EventHandler[] {
+	const key = Symbol.for(FABRIC_HOST_POLICY_HANDLER_REGISTRY_KEY);
+	const registry = (globalThis as Record<symbol, unknown>)[key];
+	if (!(registry instanceof Map)) return [];
+	const expectedPath = canonicalPath(fabricResolvedPath);
+	const matching = [...(registry as BoundHostPolicyHandlerRegistry)].filter(([ownerPath, handlers]) =>
+		typeof ownerPath === "string" && Array.isArray(handlers) && canonicalPath(ownerPath) === expectedPath);
+	if (matching.length !== 1) return [];
+	return [...matching[0]![1]].filter((handler): handler is EventHandler => typeof handler === "function");
+}
+
 /**
  * Ask the worker's loaded Fabric to enforce `policy`. Returns true only after
  * exactly one handler registered from that Fabric package replies synchronously
  * with a version 1 acknowledgement.
  */
 export function requestFabricHostPolicy(
-	events: EventBusController,
+	events: EventBus,
 	policy: FabricHostPolicyV1,
 	fabricResolvedPath: string,
 ): boolean {
 	const packageDirectory = fabricPackageDirectory(fabricResolvedPath);
+	if (!packageDirectory) return false;
 	const attributed = hostPolicyHandlers.get(events);
-	if (!packageDirectory || !attributed) return false;
-	const handlers = [...attributed].filter(({ registrationStack }) =>
-		registrationIsInsidePackage(registrationStack, packageDirectory));
+	const attributedHandlers = attributed
+		? [...attributed].filter(({ registrationStack }) =>
+			registrationIsInsidePackage(registrationStack, packageDirectory)).map(({ handler }) => handler)
+		: [];
+	const boundHandlers = boundHostPolicyHandlers(fabricResolvedPath);
+	const handlers = boundHandlers.length > 0 ? boundHandlers : attributedHandlers;
 	if (handlers.length !== 1) return false;
 
 	let acceptingReply = true;
 	let replied = false;
 	let accepted = false;
 	try {
-		handlers[0]!.handler({
+		handlers[0]!({
 			policy: structuredClone(policy),
 			reply: (ack: unknown) => {
 				if (!acceptingReply || replied) return;
