@@ -457,6 +457,14 @@ export const HOST_STALE_INSTALL_MESSAGE =
 	"pi's installed files changed while this session was running; restart the pi session to load the current install.";
 
 /**
+ * Public text when the missing module is a bare package rather than one of
+ * pi's own bundle files: the dependency is absent from the install, so a
+ * restart loads the same broken tree and only a reinstall helps.
+ */
+export const HOST_MISSING_DEPENDENCY_MESSAGE =
+	"pi could not load a package it depends on; reinstall pi (or the extension that needs the package), then restart the pi session.";
+
+/**
  * Node's own phrasing, anchored at the start: pi-ai `lazyStream` keeps
  * `error.message` unprefixed. An unanchored match would misread a provider or
  * gateway error body that quotes a module error as a local fault.
@@ -491,7 +499,7 @@ function hasStructuredFailureEvidence(failure: ProviderFailureSignal | undefined
  * Bounded diagnostic cause for a stale install: the Node error code and the
  * missing file's base name. Directories are dropped so no local path is kept.
  */
-function hostStaleInstallCause(error: unknown): string {
+export function hostLoadFault(error: unknown): { cause: string; missingDependency: boolean } {
 	let text = "";
 	let code: unknown;
 	try {
@@ -504,9 +512,25 @@ function hostStaleInstallCause(error: unknown): string {
 	} catch {
 		// Fall through with whatever was read.
 	}
-	const file = /['"]?([^'"\s]*\.(?:m?js|cjs|json|node))['"]?/.exec(text)?.[1]?.split(/[\\/]/).at(-1);
 	const kind = code === "ERR_MODULE_NOT_FOUND" || /ERR_MODULE_NOT_FOUND|Cannot find/.test(text) ? "ERR_MODULE_NOT_FOUND" : "dynamic-import-failed";
-	return file === undefined || file.length === 0 ? kind : `${kind} ${file.slice(0, 120)}`;
+	// Node names the missing specifier first ("Cannot find package 'x' imported
+	// from /dir/importer.js"); the importer is not what is missing.
+	// Node does not escape quotes, so a path may contain one: read up to the
+	// quote that ends the specifier (before " imported from", a CJS
+	// ". Please verify…"/"Require stack" line, or the end of the text).
+	const specifier = /Cannot find (?:module|package) '(.+?)'(?=$| imported from |\.\s|\r?\n)/.exec(text)?.[1];
+	if (specifier !== undefined && specifier.length > 0) {
+		if (!/^(?:\.{1,2}[\\/]|[\\/]|file:|[A-Za-z]:[\\/])/.test(specifier)) {
+			// A bare specifier names a package (keep "@scope/name" or "name").
+			const parts = specifier.split("/");
+			const name = (specifier.startsWith("@") ? parts.slice(0, 2) : parts.slice(0, 1)).join("/");
+			return { cause: `${kind} package ${name.slice(0, 120)}`, missingDependency: true };
+		}
+		const base = specifier.split(/[\\/]/).at(-1) ?? "";
+		return { cause: base.length === 0 ? kind : `${kind} ${base.slice(0, 120)}`, missingDependency: false };
+	}
+	const file = /['"]?([^'"\s]*\.(?:m?js|cjs|json|node))['"]?/.exec(text)?.[1]?.split(/[\\/]/).at(-1);
+	return { cause: file === undefined || file.length === 0 ? kind : `${kind} ${file.slice(0, 120)}`, missingDependency: false };
 }
 
 type SetupFailureDisposition = "context-overflow" | "retryable" | "host-final";
@@ -1167,13 +1191,15 @@ export function createLogicalProvider(
 		account: LogicalPhysicalAccount,
 		cause: unknown,
 	): void => {
+		const fault = hostLoadFault(cause);
 		box.hostStaleInstall = true;
+		box.hostMissingDependency = fault.missingDependency;
 		box.overflow = false;
 		box.preStartRetryable = false;
 		try {
 			deps.onDiagnostic?.(
 				`logical dispatch for ${account.providerId} failed loading host code (host_stale_install: ` +
-					`${hostStaleInstallCause(cause)}); restart the pi session`,
+					`${fault.cause}); ${fault.missingDependency ? "reinstall the missing package" : "restart the pi session"}`,
 			);
 		} catch {
 			// A diagnostic sink failure cannot replace a provider result.
@@ -1247,6 +1273,8 @@ export function createLogicalProvider(
 		preStartRetryable: boolean;
 		/** Setup failed because this pi process could not load its own code. */
 		hostStaleInstall?: boolean;
+		/** The missing module is a bare package, so a reinstall, not a restart, helps. */
+		hostMissingDependency?: boolean;
 		/** Whether the caller or provider shutdown aborted this physical request. */
 		cancelled?: () => boolean;
 		/**
@@ -1283,7 +1311,10 @@ export function createLogicalProvider(
 			let sawTerminal = false;
 			// Whether any event other than a leading `start` arrived. A `start`
 			// only reports that response headers arrived, so a failure after it is
-			// still the stream's first real event.
+			// still the stream's first real event. Every other non-terminal event
+			// is output (it also sets `box.sawOutput`), and a terminal ends the
+			// loop, so on the thrown path `!sawEvent` means "no content yet": this
+			// is the signal the setup-only classifications key on.
 			let sawEvent = false;
 			const recordFailureOnce = (error: unknown): HostRetryCooldownReceipt => {
 				if (box.hostStaleInstall === true) box.receipt ??= hostFaultReceipt();
@@ -1779,7 +1810,7 @@ export function createLogicalProvider(
 		return {
 			...syntheticErrorMessage(
 				modelId,
-				`${stale ? HOST_STALE_INSTALL_MESSAGE : errorMessage} ${evidence}`,
+				`${stale ? (box?.hostMissingDependency === true ? HOST_MISSING_DEPENDENCY_MESSAGE : HOST_STALE_INSTALL_MESSAGE) : errorMessage} ${evidence}`,
 				physical === undefined ? undefined : projectTerminalUsage(physical),
 				physical === undefined ? undefined : finiteNonNegative(physical.timestamp),
 			),
