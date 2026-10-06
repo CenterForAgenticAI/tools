@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { join, relative } from 'node:path';
 import { check } from './intent-check.mjs';
-import { INTENT_DIR, bendFiles, cli, codeOnly, hasProof, lawIds, read, reject, rootArg, run } from './intent-core.mjs';
+import { FORBIDDEN_BEND, INTENT_DIR, bendFiles, cli, codeOnly, hasProof, lawIds, read, reject, rootArg, run } from './intent-core.mjs';
 
 export async function gate(root, bend = process.env.BEND_BIN || 'bend') {
   console.log(check(root));
@@ -13,8 +13,8 @@ export async function gate(root, bend = process.env.BEND_BIN || 'bend') {
   const proof = read(proofFile);
   const entries = new Set([proofFile]);
   for (const file of files) {
-    const text = codeOnly(read(file));
-    if (/@unsafe\b|^\s*def\s+[\w.]+\?\s*\(|\?TODO\b/m.test(text)) reject(`${relative(dir, file)}: forbidden @unsafe, def f? or ?TODO; write a total proof`);
+    const text = codeOnly(read(file), file);
+    if (FORBIDDEN_BEND.test(text)) reject(`${relative(dir, file)}: forbidden @unsafe, def f? or ?TODO; write a total proof`);
     if (negatives.includes(file)) continue;
     for (const match of text.matchAll(/^law\s+([\w.]+)\s*:/gm)) {
       const inEntry = hasProof(file, match[1], proofFile, proof);
