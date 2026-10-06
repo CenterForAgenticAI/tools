@@ -141,7 +141,7 @@ Do not give CI Jev credentials. Commit the authoring receipt before CI runs.
 | Python | same Bend model | import app module | Node, Bend, Python |
 | Other | same Bend model | any executable emitting rows | Node, Bend, its app toolchain |
 
-The fast check alone needs only Node. The gate needs Bend regardless of app language. Conformance does not use Jev.
+The fast check alone needs only Node. The gate needs Bend regardless of app language. It runs `--check-only`; Bend 2.0.34's `--verdict` kernel recheck still rejects `kit/Lib.bend` (template-parameter function hypotheses), so it is not part of the gate. Conformance does not use Jev.
 
 [examples/transitions](examples/transitions) models one decision over `idle`, `working`, `blocked` and `not-running`: stopped sources reject; active sources allow every target. All 16 source/target pairs are exercised. Its approval and receipt are labeled synthetic fixtures, not real human/Jev approval. The example stores its tree as `intent/` because npm and the public release omit dot-directories; adopters use `.intent/`.
 

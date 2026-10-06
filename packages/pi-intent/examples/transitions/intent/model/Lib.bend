@@ -231,8 +231,8 @@ def mem_product(A, B, xs, ys, a, b, ma, mb):
     case +h <> +t:
       match ma:
         case Inl{e}:
-          %Equal.sym(A, a, h, e) : Mem(Prd<A, B>, P{_, b}, List.append(&2, Prd<A, B>, pairWith(A, B, h, ys), product(A, B, t, ys)))
-          mem_append_l(Prd<A, B>, P{h, b}, pairWith(A, B, h, ys), product(A, B, t, ys), mem_pairWith(A, B, h, ys, b, mb))
+          %e : Mem(Prd<A, B>, P{a, b}, List.append(&2, Prd<A, B>, pairWith(A, B, _, ys), product(A, B, t, ys)))
+          mem_append_l(Prd<A, B>, P{a, b}, pairWith(A, B, a, ys), product(A, B, t, ys), mem_pairWith(A, B, a, ys, b, mb))
         case Inr{r}:
           mem_append_r(Prd<A, B>, P{a, b}, pairWith(A, B, h, ys), product(A, B, t, ys), mem_product(A, B, t, ys, a, b, r, mb))
 

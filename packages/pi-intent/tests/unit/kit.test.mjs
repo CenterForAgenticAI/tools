@@ -1008,3 +1008,19 @@ test('Bend-backed oracle: a file the scanner accepts has exactly the laws Bend s
   assert.ok(accepted >= 3, 'some files are accepted: ' + accepted);
   assert.ok(refusedWithHidden >= 3, 'files with a Bend-visible hidden law were refused: ' + refusedWithHidden);
 });
+test('Bend: Lib.bend through mem_product checks under both --check-only and the --verdict kernel', t => {
+  // notIn_map, nodup_map and join_injective pass --check-only but fail --verdict on Bend 2.0.34 (template ~ function
+  // hypotheses applied in a proof); mem_product failed only through a rewrite on a call term, now fixed.
+  const lines = text(join(root, 'kit/Lib.bend')).split('\n');
+  const stop = lines.findIndex(l => l.startsWith('law notIn_map:'));
+  assert.ok(lines.findIndex(l => l.startsWith('def mem_product(')) < stop);
+  mkdirSync(join(root, '.scratch'), { recursive: true });
+  const dir = mkdtempSync(join(root, '.scratch/lib-verdict-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'Prefix.bend');
+  writeFileSync(file, lines.slice(0, stop).join('\n') + '\n');
+  for (const flag of ['--check-only', '--verdict']) {
+    const out = spawnSync(bend, [file, flag], { encoding: 'utf8', env, timeout: 180000 });
+    assert.match(out.stdout + out.stderr, /^ALL PROOFS CHECK\r?$/m, flag + ': ' + out.stdout + out.stderr);
+  }
+});
