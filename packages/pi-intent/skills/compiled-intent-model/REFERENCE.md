@@ -5,7 +5,7 @@ habits used in our models to explicit Bend proof terms, and names the shared
 helpers in `Lib.bend`, the generator `gen-enums.mjs`, and the gate `.intent/tools/intent-gate.mjs`.
 
 Ported from the architect module's Bend 2.0.28 patterns; pi-intent's gate and
-transition fixture are checked with Bend 2.0.34 (`bend --help` prints the version). `bend guide`
+transition fixture are checked with Bend 2.0.35 (`bend --help` prints the version). `bend guide`
 prints the language guide; `bend base <Name>` prints a Base definition.
 
 ## What changes from Lean

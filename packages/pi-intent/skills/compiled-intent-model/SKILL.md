@@ -7,7 +7,7 @@ Adopter records, models, receipts, conformance manifests, oracles and vendored s
 
 # Compiled intent in Bend
 
-The adopter needs a provable statement of its finite decision. The person owns claims; the agent owns proof work. Read REFERENCE.md beside this skill before writing Bend proof terms. Read the installed package's SPEC.md for the approval and receipt formats. Bend 2.0.34 is the tested compiler; inspect `bend --help` and `bend guide` when the installed version differs.
+The adopter needs a provable statement of its finite decision. The person owns claims; the agent owns proof work. Read REFERENCE.md beside this skill before writing Bend proof terms. Read the installed package's SPEC.md for the approval and receipt formats. Bend 2.0.35 is the tested compiler; inspect `bend --help` and `bend guide` when the installed version differs.
 
 1. Load `intent-records` if the record is not approved. Extract its finite domain and R1, R2… obligations. List any clause that cannot fit a finite decision and propose an ordinary test that names that rule. Done: each modeled clause has a declared law and a concrete example.
 2. Work in `.intent/model/`. Keep claims in LAWS.bend; keep one explicit total proof def per law in PROOF.bend. Use relative imports with aliases, `Lib.bend` helpers and `.intent/tools/gen-enums.mjs` when useful. Inventory with `node .intent/tools/inventory.mjs .intent/model`; its `defined` status is only a source index, not proof. Implement proofs with total constructors, matches and equalities; the gate rejects `@unsafe`, partial `def f?` and `?TODO`.

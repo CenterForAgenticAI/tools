@@ -16,7 +16,7 @@ const expectedAgents = {
 	"intent-prover": { model: "gpt-6.1-sol", tools: ["read", "bash", "edit", "write"], skills: ["compiled-intent-model", "intent-conformance"] },
 	"intent-judge": { model: "gpt-6-astra", tools: ["read", "write"], skills: ["intent-records", "compiled-intent-model", "intent-conformance"] },
 };
-const expectedKit = ["gen-enums", "intent-check", "intent-conform", "intent-core", "intent-gate", "intent-receipt", "inventory"];
+const expectedKit = ["gen-enums", "intent-check", "intent-conform", "intent-core", "intent-gate", "intent-impact", "intent-receipt", "inventory"];
 const expectedTemplates = ["conform.json", "records/0001-change.md", "model/LAWS.bend", "model/PROOF.bend", "model/laws.sha256", "model/neg/identity.bend", "receipts/example.json"];
 
 if (!existsSync(distEntry) || !existsSync(distTypes)) {

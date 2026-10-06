@@ -13,6 +13,7 @@ import { coverageQuestions, fidelityQuestions, moduleState, modules, splitLaws, 
 import { init, vendor } from '../../bin/pi-intent.mjs';
 import { generate, validate } from '../../kit/gen-enums.mjs';
 import { inventory } from '../../kit/inventory.mjs';
+import { clauseLaws } from '../../kit/intent-impact.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const example = join(root, 'examples/transitions');
@@ -286,6 +287,364 @@ test('gate cross-check: import spellings and a helper law closed inside LAWS.ben
   const [a, b] = await Promise.all([crossCheckLaws(model, bend, ids).then(() => 'ok'), crossCheckLaws(model, bend, ids).then(() => 'ok')]);
   assert.deepEqual([a, b], ['ok', 'ok']);
   assert.deepEqual(readdirSync(model).filter(name => name.startsWith('.crosscheck')), []);
+});
+
+function gitFixture(t) {
+  const dir = fixture(t);
+  const git = (...args) => spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...args], { cwd: dir, encoding: 'utf8' });
+  git('init', '-q', '.');
+  git('add', '-A', '.');
+  assert.equal(git('commit', '-qm', 'base').status, 0);
+  return { dir, git };
+}
+const impactOut = (dir, args = []) => { const r = command('kit/intent-impact.mjs', dir, args); return { status: r.status, out: r.stdout + r.stderr }; };
+const editClause = dir => { const p = join(dir, '.intent/records/0001-transitions.md'); writeFileSync(p, text(p).replace('rejects every target state.', 'rejects any target state.')); };
+const editLaw = (dir, from, to) => { const p = join(dir, '.intent/model/LAWS.bend'); writeFileSync(p, text(p).replace(from, to)); };
+
+test('intent-impact: an unchanged tree has nothing stale', t => {
+  const { dir } = gitFixture(t);
+  const r = impactOut(dir);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /nothing is stale since the last receipt/);
+  assert.equal(impactOut(dir, ['--since', 'HEAD']).status, 0);
+});
+
+test('intent-impact: editing one clause names the law its receipt maps, that law\'s rows and their oracles, and nothing else', t => {
+  const { dir } = gitFixture(t);
+  editClause(dir);
+  const r = impactOut(dir);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /^law stopped_rejects is stale \(clause R1 edited\)$/m);
+  assert.match(r.out, /^conform row "typescript" is stale: law stopped_rejects is stale \(clause R1 edited\)$/m);
+  assert.match(r.out, /^oracle \.intent\/oracle\/typescript\.mjs is stale: conform row "typescript" is stale$/m);
+  assert.doesNotMatch(r.out, /active_allows/, 'R2 and its law are unchanged');
+  // A receipt maps R1 to stopped_rejects only; the same edit with the receipt's mapping changed names the other law.
+  const { dir: other } = gitFixture(t);
+  const receiptPath = join(other, '.intent/receipts/0001-transitions.json');
+  const receipt = JSON.parse(text(receiptPath));
+  receipt.answers.coverage.R1.choice = 'active_allows';
+  writeFileSync(receiptPath, JSON.stringify(receipt));
+  assert.equal(spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-qam', 'remap'], { cwd: other }).status, 0);
+  editClause(other);
+  assert.match(impactOut(other).out, /^law active_allows is stale \(clause R1 edited\)$/m);
+  assert.doesNotMatch(impactOut(other).out, /stopped_rejects/);
+});
+
+test('intent-impact: the receipt at --since, not the working tree, maps clauses to laws', t => {
+  const { dir } = gitFixture(t);
+  const receiptPath = join(dir, '.intent/receipts/0001-transitions.json');
+  const receipt = JSON.parse(text(receiptPath));
+  receipt.answers.coverage.R1.choice = 'active_allows'; // the stale working-tree receipt must be ignored
+  writeFileSync(receiptPath, JSON.stringify(receipt));
+  editClause(dir);
+  const r = impactOut(dir, ['--since', 'HEAD']);
+  assert.match(r.out, /^law stopped_rejects is stale \(clause R1 edited\)$/m, r.out);
+  assert.doesNotMatch(r.out, /active_allows/);
+});
+
+test('intent-impact: editing one law body names only that law and its rows', t => {
+  const { dir } = gitFixture(t);
+  editLaw(dir, 'law active_allows', '# reworded\nlaw active_allows');
+  const r = impactOut(dir);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /^law active_allows changed$/m);
+  assert.match(r.out, /^conform row "go" is stale: law active_allows changed$/m);
+  assert.doesNotMatch(r.out, /stopped_rejects/);
+});
+
+test('intent-impact: a removed law that a row still names is reported, not skipped', t => {
+  const { dir } = gitFixture(t);
+  const p = join(dir, '.intent/model/LAWS.bend');
+  const laws = text(p);
+  const start = laws.indexOf('law active_allows');
+  assert.ok(start > 0);
+  writeFileSync(p, laws.slice(0, start).trimEnd() + '\n');
+  const r = impactOut(dir);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /^law active_allows was removed$/m);
+  assert.match(r.out, /^conform row "typescript" is stale: law active_allows was removed but the row still names it$/m);
+});
+
+test('intent-impact: a missing receipt or manifest is not yet checked and never exits 0', t => {
+  const { dir } = gitFixture(t);
+  rmSync(join(dir, '.intent/conform.json'));
+  // Conformance is opt-in: with nothing stale a missing manifest is only a note, but a stale law needs its rows checked.
+  const optIn = impactOut(dir);
+  assert.equal(optIn.status, 0, optIn.out);
+  assert.match(optIn.out, /note: .*conform\.json is missing: conformance is not set up/);
+  editClause(dir);
+  const noManifest = impactOut(dir);
+  assert.equal(noManifest.status, 1, noManifest.out);
+  assert.match(noManifest.out, /not yet checked: .*conform\.json is missing/);
+  const { dir: bare } = gitFixture(t);
+  spawnSync('git', ['rm', '-q', '.intent/receipts/0001-transitions.json'], { cwd: bare });
+  assert.equal(spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-qm', 'drop receipt'], { cwd: bare }).status, 0);
+  const noReceipt = impactOut(bare);
+  assert.equal(noReceipt.status, 1, noReceipt.out);
+  assert.match(noReceipt.out, /not yet checked: no receipt for approved record 0001-transitions/);
+});
+
+test('intent-impact: an unreadable or malformed link exits 2', t => {
+  const { dir } = gitFixture(t);
+  assert.equal(impactOut(dir, ['--since', 'no-such-ref']).status, 2);
+  assert.equal(impactOut(dir, ['--since']).status, 2);
+  writeFileSync(join(dir, '.intent/conform.json'), '{not json');
+  assert.equal(impactOut(dir).status, 2);
+  const { dir: badReceipt } = gitFixture(t);
+  writeFileSync(join(badReceipt, '.intent/receipts/0001-transitions.json'), '{"schema":1,"answers":{}}');
+  spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-qam', 'bad receipt'], { cwd: badReceipt });
+  editClause(badReceipt);
+  assert.equal(impactOut(badReceipt).status, 2);
+});
+
+test('intent-impact: reads the clause-to-law map from schema 1 and schema 2 receipts through one function', () => {
+  assert.deepEqual([...clauseLaws({ schema: 1, answers: { coverage: { R1: { choice: 'a' }, R2: { choice: 'none' } } } }, 'x')], [['R1', 'a'], ['R2', null]]);
+  assert.deepEqual([...clauseLaws({ schema: 2, modules: { m: { answers: { coverage: { R1: { choice: 'a' } } } }, n: { answers: { coverage: { R2: { choice: 'b' } } } } } }, 'x')], [['R1', 'a'], ['R2', 'b']]);
+  assert.throws(() => clauseLaws({ schema: 1, answers: {} }, 'x'), /no coverage answers/);
+});
+
+test('intent-impact: intent-check prints the same list when it rejects', t => {
+  const { dir } = gitFixture(t);
+  editClause(dir);
+  const r = command('kit/intent-check.mjs', dir);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /stale dependents since the last receipt:/);
+  assert.match(r.stderr, /^law stopped_rejects is stale \(clause R1 edited\)$/m);
+  const gated = command('kit/intent-gate.mjs', dir);
+  assert.equal(gated.status, 1, gated.stdout + gated.stderr);
+  assert.match(gated.stderr, /^law stopped_rejects is stale \(clause R1 edited\)$/m);
+  assert.equal(command('kit/intent-check.mjs', gitFixture(t).dir).status, 0);
+});
+
+test('intent-impact: a planted failure (impact walk disabled) turns the assertions red', t => {
+  const { dir } = gitFixture(t);
+  editClause(dir);
+  assert.equal(impactOut(dir).status, 1);
+  const copy = mkdtempSync(join(root, '.scratch/impact-walk-'));
+  t.after(() => rmSync(copy, { recursive: true, force: true }));
+  cpSync(join(root, 'kit'), copy, { recursive: true });
+  const script = join(copy, 'intent-impact.mjs');
+  const source = text(script);
+  const disabled = source.replace('const touch = (id, what, why) => {', 'const touch = (id, what, why) => {\n    return;');
+  assert.notEqual(disabled, source, 'the walk hook must exist');
+  writeFileSync(script, disabled);
+  const r = spawnSync(process.execPath, [script, dir], { encoding: 'utf8', env });
+  assert.doesNotMatch(r.stdout, /stopped_rejects|conform row|oracle /, 'with the walk disabled no law, row or oracle is named, so the assertions above would fail');
+});
+
+const commitAll = (dir, message) => spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-qam', message], { cwd: dir, encoding: 'utf8' });
+
+test('intent-impact: an edit that is already committed is found against the last receipt (the CI case)', t => {
+  const { dir } = gitFixture(t);
+  editClause(dir);
+  assert.equal(commitAll(dir, 'edit R1').status, 0);
+  const r = impactOut(dir);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /^law stopped_rejects is stale \(clause R1 edited\)$/m);
+  const check = command('kit/intent-check.mjs', dir);
+  assert.match(check.stderr, /stale dependents since the last receipt:/);
+  assert.match(check.stderr, /law stopped_rejects is stale/);
+});
+
+test('intent-impact: any change to the record or LAWS.bend makes the receipt stale, and a clause the receipt maps to no law is not just a note', t => {
+  const edits = {
+    'a worked example': dir => { const p = join(dir, '.intent/records/0001-transitions.md'); writeFileSync(p, text(p).replace('blocked -> idle: true', 'blocked -> idle: false')); },
+    'a CRLF conversion': dir => { const p = join(dir, '.intent/records/0001-transitions.md'); writeFileSync(p, text(p).replace(/\n/g, '\r\n')); },
+    'a law moved': dir => { const p = join(dir, '.intent/model/LAWS.bend'); writeFileSync(p, text(p) + '\n'); },
+  };
+  for (const [name, edit] of Object.entries(edits)) {
+    const { dir } = gitFixture(t);
+    edit(dir);
+    const r = impactOut(dir);
+    assert.equal(r.status, 1, name + ': ' + r.out);
+    assert.match(r.out, /^receipt 0001-transitions is stale: /m, name);
+  }
+  const { dir } = gitFixture(t);
+  const receiptPath = join(dir, '.intent/receipts/0001-transitions.json');
+  const receipt = JSON.parse(text(receiptPath));
+  receipt.answers.coverage.R2.choice = 'none';
+  writeFileSync(receiptPath, JSON.stringify(receipt));
+  assert.equal(commitAll(dir, 'map R2 to none').status, 0);
+  const p = join(dir, '.intent/records/0001-transitions.md');
+  writeFileSync(p, text(p).replace('independent of the target state.', 'regardless of the target state.'));
+  const r = impactOut(dir);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /^clause R2 edited: the receipt maps it to no law; a law may now be needed$/m);
+});
+
+test('intent-impact: shared LAWS.bend code touches every law, a comment-only edit does not, and records in subdirectories are ignored', t => {
+  const { dir } = gitFixture(t);
+  const p = join(dir, '.intent/model/LAWS.bend');
+  writeFileSync(p, text(p).replace('# Finite decision:', '# A different comment:'));
+  assert.doesNotMatch(impactOut(dir).out, /^law /m, 'a comment on shared code changes no law');
+  writeFileSync(p, text(p).replace('case NotRunning{}:\n      False{}', 'case NotRunning{}:\n      True{}'));
+  const r = impactOut(dir);
+  assert.match(r.out, /^law stopped_rejects depends on changed shared definitions$/m, r.out);
+  assert.match(r.out, /^law active_allows depends on changed shared definitions$/m, r.out);
+  const { dir: nested } = gitFixture(t);
+  mkdirSync(join(nested, '.intent/records/archive'));
+  writeFileSync(join(nested, '.intent/records/archive/notes.md'), '# not a record\n');
+  spawnSync('git', ['add', '-A', '.'], { cwd: nested });
+  assert.equal(commitAll(nested, 'archive').status, 0);
+  assert.equal(impactOut(nested).status, 0, impactOut(nested).out);
+});
+
+test('intent-impact: a new clause and a newly approved record are not clean', t => {
+  const { dir } = gitFixture(t);
+  const p = join(dir, '.intent/records/0001-transitions.md');
+  writeFileSync(p, text(p).replace('\n## Worked examples', 'R3: Nothing else changes.\n\n## Worked examples'));
+  const r = impactOut(dir);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /^clause R3 of 0001-transitions is new: /m);
+  const { dir: fresh } = gitFixture(t);
+  writeFileSync(join(fresh, '.intent/records/0002-other.md'), text(join(fresh, '.intent/records/0001-transitions.md')).replace('0001-transitions', '0002-other'));
+  const added = impactOut(fresh);
+  assert.equal(added.status, 1, added.out);
+  assert.match(added.out, /not yet checked: no receipt for approved record 0002-other/);
+});
+
+test('intent-impact: reads a schema 2 receipt in Git end to end', t => {
+  const { dir } = gitFixture(t);
+  const receiptPath = join(dir, '.intent/receipts/0001-transitions.json');
+  const hashes = JSON.parse(text(receiptPath));
+  writeFileSync(receiptPath, JSON.stringify({ schema: 2, recordSha256: hashes.recordSha256, lawsSha256: hashes.lawsSha256, modules: { m: { answers: { coverage: { R1: { choice: 'stopped_rejects' }, R2: { choice: 'active_allows' } } } } } }));
+  assert.equal(commitAll(dir, 'modular receipt').status, 0);
+  const p = join(dir, '.intent/records/0001-transitions.md');
+  writeFileSync(p, text(p).replace('independent of the target state.', 'regardless of the target state.'));
+  const r = impactOut(dir);
+  assert.match(r.out, /^law active_allows is stale \(clause R2 edited\)$/m, r.out);
+  assert.doesNotMatch(r.out, /law stopped_rejects/);
+});
+
+const regen = async (dir, name = '0001-transitions') => {
+  const receipt = await produce(text(join(dir, `.intent/records/${name}.md`)), text(join(dir, '.intent/model/LAWS.bend')), `${name}.md`, 'fixture/fake', fake);
+  writeJson(join(dir, `.intent/receipts/${name}.json`), receipt);
+};
+const commitAdd = (dir, message) => { spawnSync('git', ['add', '-A', '.'], { cwd: dir }); return commitAll(dir, message); };
+const secondRecord = (dir, status = 'approved') => writeFileSync(join(dir, '.intent/records/0002-other.md'), text(join(dir, '.intent/records/0001-transitions.md')).replace('0001-transitions', '0002-other').replace('status: approved', `status: ${status}`));
+const LAW_EDIT = ['law active_allows', '# reworded\nlaw active_allows'];
+
+test('intent-impact: a shallow clone still finds a committed edit that intent-check rejects', t => {
+  const { dir } = gitFixture(t);
+  editClause(dir);
+  assert.equal(commitAll(dir, 'edit R1').status, 0);
+  for (let i = 0; i < 3; i++) assert.equal(spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '--allow-empty', '-qm', 'later ' + i], { cwd: dir }).status, 0);
+  const clone = mkdtempSync(join(root, '.scratch/shallow-'));
+  t.after(() => rmSync(clone, { recursive: true, force: true }));
+  assert.equal(spawnSync('git', ['clone', '-q', '--depth', '1', pathToFileURL(dir).href, join(clone, 'c')]).status, 0);
+  assert.equal(command('kit/intent-check.mjs', join(clone, 'c')).status, 1);
+  const r = impactOut(join(clone, 'c'));
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /^receipt 0001-transitions is stale: record 0001-transitions\.md changed since its receipt$/m, r.out);
+  assert.match(r.out, /history\b.*unavailable/, 'the missing history is said, not hidden');
+  const { dir: clean } = gitFixture(t);
+  const cleanClone = join(clone, 'clean');
+  assert.equal(spawnSync('git', ['clone', '-q', '--depth', '1', pathToFileURL(clean).href, cleanClone]).status, 0);
+  assert.equal(impactOut(cleanClone).status, 0);
+});
+
+test('intent-impact: touching or moving the receipt does not hide a committed edit', t => {
+  const { dir } = gitFixture(t);
+  editClause(dir);
+  assert.equal(commitAll(dir, 'edit R1').status, 0);
+  const p = join(dir, '.intent/receipts/0001-transitions.json');
+  writeFileSync(p, JSON.stringify(JSON.parse(text(p)), null, 4));
+  assert.equal(commitAll(dir, 'reformat receipt').status, 0);
+  const r = impactOut(dir);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /^law stopped_rejects is stale \(clause R1 edited\)$/m, r.out);
+  renameSync(join(dir, '.intent/receipts'), join(dir, '.intent/r2'));
+  assert.equal(commitAdd(dir, 'move away').status, 0);
+  renameSync(join(dir, '.intent/r2'), join(dir, '.intent/receipts'));
+  assert.equal(commitAdd(dir, 'move back').status, 0);
+  assert.equal(impactOut(dir).status, 1);
+});
+
+test('intent-impact: an edit regenerated but not yet committed, or committed apart from its receipt, is clean when intent-check accepts it', async t => {
+  const { dir } = gitFixture(t);
+  editClause(dir);
+  await regen(dir);
+  assert.equal(command('kit/intent-check.mjs', dir).status, 0);
+  const r = impactOut(dir);
+  assert.equal(r.status, 0, r.out);
+  const gitIn = (...args) => spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...args], { cwd: dir, encoding: 'utf8' });
+  assert.equal(gitIn('add', '.intent/receipts').status, 0);
+  assert.equal(gitIn('commit', '-qm', 'receipt only').status, 0);
+  assert.equal(impactOut(dir).status, 0, 'receipt committed, record still uncommitted');
+  assert.equal(gitIn('add', '.intent/records').status, 0);
+  assert.equal(gitIn('commit', '-qm', 'record').status, 0);
+  assert.equal(impactOut(dir).status, 0);
+});
+
+test('intent-impact: an unreadable historical blob cannot suppress the stale verdict', t => {
+  const { dir } = gitFixture(t);
+  const p = join(dir, '.intent/records/0001-transitions.md');
+  const original = text(p);
+  writeFileSync(p, original + 'x'.repeat(1_100_000));
+  assert.equal(commitAll(dir, 'huge').status, 0);
+  writeFileSync(p, original);
+  editClause(dir);
+  assert.equal(commitAll(dir, 'edit R1').status, 0);
+  assert.equal(command('kit/intent-check.mjs', dir).status, 1);
+  const r = impactOut(dir);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /^receipt 0001-transitions is stale: record 0001-transitions\.md changed since its receipt$/m, r.out);
+});
+
+test('intent-impact: a demoted draft with its receipt deleted does not make a legitimate law change look stale', async t => {
+  const { dir } = gitFixture(t);
+  secondRecord(dir);
+  await regen(dir, '0002-other');
+  assert.equal(commitAdd(dir, 'add B').status, 0);
+  secondRecord(dir, 'draft');
+  rmSync(join(dir, '.intent/receipts/0002-other.json'));
+  assert.equal(commitAdd(dir, 'demote B').status, 0);
+  editLaw(dir, ...LAW_EDIT);
+  await regen(dir);
+  const r = impactOut(dir);
+  assert.equal(r.status, 0, r.out);
+  assert.doesNotMatch(r.out, /0002-other|active_allows/);
+});
+
+test('intent-impact: with two approved records and only one regenerated, the law, its rows and oracles are named whatever the commit dates', async t => {
+  const { dir } = gitFixture(t);
+  secondRecord(dir);
+  await regen(dir, '0002-other');
+  assert.equal(commitAdd(dir, 'add B').status, 0);
+  editLaw(dir, ...LAW_EDIT);
+  await regen(dir);
+  for (const date of ['2030-01-01T00:00:00Z', '2020-01-01T00:00:00Z']) {
+    const sub = spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-qam', 'laws'], { cwd: dir, env: { ...process.env, GIT_COMMITTER_DATE: date, GIT_AUTHOR_DATE: date } });
+    assert.equal(sub.status, 0);
+    const r = impactOut(dir);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /^receipt 0002-other is stale: LAWS\.bend changed since its receipt$/m, r.out);
+    assert.match(r.out, /^law active_allows changed$/m, r.out);
+    assert.match(r.out, /^conform row /m, r.out);
+    assert.match(r.out, /^oracle /m, r.out);
+    spawnSync('git', ['reset', '-q', '--hard', 'HEAD~1'], { cwd: dir });
+    editLaw(dir, ...LAW_EDIT);
+    await regen(dir);
+  }
+});
+
+test('intent-impact: records and receipts in subdirectories are ignored, and an orphan receipt is a note, not a wall of stale lines', t => {
+  const { dir } = gitFixture(t);
+  mkdirSync(join(dir, '.intent/records/archive'));
+  mkdirSync(join(dir, '.intent/receipts/archive'));
+  writeFileSync(join(dir, '.intent/records/archive/0009-old.md'), '# notes\n');
+  writeFileSync(join(dir, '.intent/receipts/archive/0009-old.json'), '{}');
+  writeFileSync(join(dir, '.intent/receipts/0007-gone.json'), '{}');
+  assert.equal(commitAdd(dir, 'extras').status, 0);
+  const r = impactOut(dir);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /note: receipt 0007-gone\.json has no record/);
+});
+
+test('intent-impact: a receipt without recorded hashes exits 2', t => {
+  const { dir } = gitFixture(t);
+  writeFileSync(join(dir, '.intent/receipts/0001-transitions.json'), '{"schema":1}');
+  assert.equal(impactOut(dir).status, 2);
 });
 
 test('Bend gate proves laws and rejects both negatives and bypass constructs', async t => {
@@ -1085,7 +1444,7 @@ test('Bend-backed oracle: a file the scanner accepts has exactly the laws Bend s
   assert.ok(refusedWithHidden >= 3, 'files with a Bend-visible hidden law were refused: ' + refusedWithHidden);
 });
 test('Bend: Lib.bend through mem_product checks under both --check-only and the --verdict kernel', t => {
-  // notIn_map, nodup_map and join_injective pass --check-only but fail --verdict on Bend 2.0.34 (template ~ function
+  // notIn_map, nodup_map and join_injective pass --check-only but fail --verdict on Bend 2.0.34 and 2.0.35 (template ~ function
   // hypotheses applied in a proof); mem_product failed only through a rewrite on a call term, now fixed.
   const lines = text(join(root, 'kit/Lib.bend')).split('\n');
   const stop = lines.findIndex(l => l.startsWith('law notIn_map:'));

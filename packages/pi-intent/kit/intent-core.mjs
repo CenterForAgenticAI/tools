@@ -346,7 +346,7 @@ export function verifyHeaders(scriptUrl) {
   const dir = resolve(fileURLToPath(new URL('.', scriptUrl)));
   if (basename(dir) !== 'tools' || basename(dirname(dir)) !== INTENT_DIR) return; // Only .intent/tools carries vendored body hashes.
   // Only files owned by the kit: adopting apps may keep unrelated tools here.
-  const scripts = ['gen-enums', 'intent-check', 'intent-conform', 'intent-core', 'intent-gate', 'intent-receipt', 'inventory'];
+  const scripts = ['gen-enums', 'intent-check', 'intent-conform', 'intent-core', 'intent-gate', 'intent-impact', 'intent-receipt', 'inventory'];
   let version;
   for (const name of scripts.map(name => `${name}.mjs`)) {
     const text = read(join(dir, name));

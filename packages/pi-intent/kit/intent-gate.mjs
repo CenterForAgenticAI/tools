@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { check } from './intent-check.mjs';
+import { explain } from './intent-impact.mjs';
 import { FORBIDDEN_BEND, INTENT_DIR, bendFiles, cli, codeOnly, hasProof, lawIds, read, reject, rootArg, run, unavailable } from './intent-core.mjs';
 
 // Bend is the ground truth for which laws exist; the offline scanner (lawIds) must agree with it. Bend 2.0.35 reports every law that has no
@@ -96,4 +97,7 @@ export async function gate(root, bend = process.env.BEND_BIN || 'bend') {
   if (missing.length) reject(`laws lack negative controls: ${missing.join(', ')}; add neg/*.bend for each law`);
   console.log(`intent-gate: ok (${negatives.length} negative controls)`);
 }
-await cli(argv => gate(rootArg(argv)), import.meta.url);
+await cli(async argv => {
+  const root = rootArg(argv);
+  try { await gate(root); } catch (error) { throw await explain(root, error); }
+}, import.meta.url);

@@ -1,5 +1,5 @@
 {
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Intent records, compiled-intent Bend models and Jev evaluation receipts for pi.",
   "keywords": [
     "pi-package"

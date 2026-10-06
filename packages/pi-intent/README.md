@@ -27,7 +27,7 @@ pi-intent does not bundle other pi packages. Install these before installing pi-
 
 Jev also needs a credential. Configure one through pi-fabric (`/login jev`, `/login openrouter` or `/login vercel-ai-gateway`). When a session starts, pi-intent warns if a prerequisite is missing. Run `/intent-prereqs` to check again.
 
-The offline scripts need none of those pi packages or credentials. They need Node; the proof gate and Bend model oracles also need Bend on PATH (tested at 2.0.34). Node 22.19 or later is required by this package's engines; the TypeScript example uses Node's built-in type stripping. Use a newer Node or your normal compiler/runner for TypeScript that needs transformation.
+The offline scripts need none of those pi packages or credentials. They need Node; the proof gate and Bend model oracles also need Bend on PATH (tested at 2.0.35). Node 22.19 or later is required by this package's engines; the TypeScript example uses Node's built-in type stripping. Use a newer Node or your normal compiler/runner for TypeScript that needs transformation.
 
 ## Start an adopting repo
 
@@ -73,6 +73,7 @@ Read [SPEC.md](SPEC.md) for the first format version. The three shipped skills g
 | `node .intent/tools/intent-check.mjs` | every build | record structure, approved law hash, current receipt hashes, integrity and recomputed passing policy; no Bend or network |
 | `node .intent/tools/intent-gate.mjs` | CI | freshness plus Bend proofs, failing negative controls and absence of forbidden bypass constructs |
 | `node .intent/tools/intent-conform.mjs` | opt-in build/CI | model rows match actual app rows; broken model differs; lists uncovered laws |
+| `node .intent/tools/intent-impact.mjs [--since <ref>]` | before approving a change | names the receipt, laws, conformance rows and oracles a record or law edit makes stale, with the reason; compares each receipt's recorded hashes with the files; needs Git, no Bend |
 
 Add `--require-coverage` to conformance to reject uncovered laws. Exit 0 means pass, 1 rejection, 2 missing/malformed input or unavailable tool, timeout or output cap. Failures say what to repair. `BEND_BIN` can select the proof-gate executable; manifest commands select their own executable.
 
@@ -141,7 +142,7 @@ Do not give CI Jev credentials. Commit the authoring receipt before CI runs.
 | Python | same Bend model | import app module | Node, Bend, Python |
 | Other | same Bend model | any executable emitting rows | Node, Bend, its app toolchain |
 
-The fast check alone needs only Node. The gate needs Bend regardless of app language. It runs `--check-only`; Bend 2.0.34's `--verdict` kernel recheck still rejects `kit/Lib.bend` (template-parameter function hypotheses), so it is not part of the gate. Conformance does not use Jev.
+The fast check alone needs only Node. The gate needs Bend regardless of app language. It runs `--check-only`; Bend 2.0.35's `--verdict` kernel recheck still rejects `kit/Lib.bend` (template-parameter function hypotheses), so it is not part of the gate. Conformance does not use Jev.
 
 [examples/transitions](examples/transitions) models one decision over `idle`, `working`, `blocked` and `not-running`: stopped sources reject; active sources allow every target. All 16 source/target pairs are exercised. Its approval and receipt are labeled synthetic fixtures, not real human/Jev approval. The example stores its tree as `intent/` because npm and the public release omit dot-directories; adopters use `.intent/`.
 

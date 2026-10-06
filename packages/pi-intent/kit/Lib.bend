@@ -1,6 +1,6 @@
 # Shared Bend proof library for compiled-intent models.
 # Copy beside a model and import it: `import ./Lib.bend as L`.
-# Checked with Bend 2.0.28. Every law here is proven; no @unsafe, no ?TODO.
+# Checked with Bend 2.0.35 (--check-only; --verdict still fails, see SPEC). Every law here is proven; no @unsafe, no ?TODO.
 import Base
 
 # T(b): the proposition "b is True".

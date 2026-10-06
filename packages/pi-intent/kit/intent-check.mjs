@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { explain } from './intent-impact.mjs';
 import { INTENT_DIR, cli, read, json, sha256, record, lawIds, reject, unavailable, verifyReceipt, verifyHeaders, rootArg, isDirectory } from './intent-core.mjs';
 
 export function check(root, scriptUrl = import.meta.url) {
@@ -25,4 +26,7 @@ export function check(root, scriptUrl = import.meta.url) {
   if (!approved) reject('no approved intent record; request human approval then run intent-receipt');
   return `intent-check: ok (${approved} approved record(s))`;
 }
-await cli(argv => console.log(check(rootArg(argv))), import.meta.url);
+await cli(async argv => {
+  const root = rootArg(argv);
+  try { console.log(check(root)); } catch (error) { throw await explain(root, error); }
+}, import.meta.url);
