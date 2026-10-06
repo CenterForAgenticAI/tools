@@ -1,3 +1,4 @@
+import { loadedIdentitySuffix } from "../load-identity.js";
 import type { FindingPath, SchemaFinding } from "./findings.js";
 
 type JsonSchema = Record<string, unknown>;
@@ -107,6 +108,9 @@ export function unknownPropertyFindings(schema: unknown, value: unknown): Schema
 			keyword: "additionalProperties",
 			properties: [property],
 			params: { additionalProperties: [property] },
+			// A field documented by a newer pi-work than the one loaded is rejected here,
+			// so name the loaded copy: a restart may be the fix, not a spec edit.
+			message: `unknown property ${JSON.stringify(property)}${loadedIdentitySuffix()}`,
 		});
 	}
 

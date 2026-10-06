@@ -146,7 +146,7 @@ async function runLegacyUser(input: UserRunInput, session: SessionReader | undef
 	const entryTimestamp = timestampValue(entry.timestamp);
 	if (!entryTimestamp) return { outcome: "failed", attempt: attempt(finishedAt), failures: [{ code: "user-confirmation-required", message: `explicit confirmation required; reply with exactly: ${expected}`, challenge }] };
 	const proof: UserConfirmationProof = {
-		kind: "user-proof", prompt: input.evidence.prompt, challenge, sessionId, sessionFile,
+		kind: "user-proof", source: "session", prompt: input.evidence.prompt, challenge, sessionId, sessionFile,
 		entryId: entry.id, entryTimestamp, startedAt, finishedAt,
 		durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)), tree: input.tree,
 	};
@@ -192,8 +192,7 @@ async function runHostUser(input: UserRunInput, host: HostUserCapabilities, sign
 			if (!accepted) return { outcome: "failed", attempt: attempt(finishedAt), failures: [failure("user-not-confirmed", "host confirmation was declined")] };
 			if (signal?.aborted) return { outcome: "failed", attempt: attempt(finishedAt), failures: [{ code: "verification-aborted", message: "verification was aborted during user confirmation" }] };
 			const proof: UserConfirmationProof = {
-				kind: "user-proof", prompt: input.evidence.prompt, challenge, sessionId,
-				sessionFile: sessionFile ?? "ui-confirmation", entryId: `ui:${sha(challenge)}`, entryTimestamp: finishedAt,
+				kind: "user-proof", source: "ui", prompt: input.evidence.prompt, challenge, sessionId,
 				startedAt, finishedAt, durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)), tree: input.tree,
 			};
 			return { outcome: "passed", proof };
@@ -214,7 +213,7 @@ async function runHostUser(input: UserRunInput, host: HostUserCapabilities, sign
 		const entryTimestamp = timestampValue(entry.timestamp);
 		if (!entryTimestamp) return { outcome: "failed", attempt: attempt(finishedAt), failures: [{ code: "user-confirmation-required", message: `explicit confirmation required; reply with exactly: ${expected}`, challenge }] };
 		const proof: UserConfirmationProof = {
-			kind: "user-proof", prompt: input.evidence.prompt, challenge, sessionId, sessionFile,
+			kind: "user-proof", source: "session", prompt: input.evidence.prompt, challenge, sessionId, sessionFile,
 			entryId: entry.id, entryTimestamp, startedAt, finishedAt,
 			durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)), tree: input.tree,
 		};

@@ -188,7 +188,9 @@ function validProof(proof: CriterionProof): boolean {
 	if (proof.kind === "agent-proof") {
 		return proof.agent.length > 0 && proof.rubric.length > 0 && proof.rubricDigest === createHash("sha256").update(proof.rubric, "utf8").digest("hex") && proof.verdict === "approve" && proof.dispatchReceipt.trim().length > 0 && proof.inputs.length > 0 && proof.inputs.every((input) => input.path.length > 0 && /^[a-f0-9]{64}$/.test(input.digest) && Number.isInteger(input.bytes) && input.bytes >= 0);
 	}
-	return proof.prompt.length > 0 && proof.challenge.length > 0 && proof.sessionId.length > 0 && proof.sessionFile.length > 0 && proof.entryId.length > 0 && Number.isFinite(Date.parse(proof.entryTimestamp));
+	if (proof.prompt.length === 0 || proof.challenge.length === 0 || proof.sessionId.length === 0) return false;
+	if (proof.source === "ui") return proof.sessionFile === undefined && proof.entryId === undefined && proof.entryTimestamp === undefined;
+	return proof.sessionFile.length > 0 && proof.entryId.length > 0 && Number.isFinite(Date.parse(proof.entryTimestamp));
 }
 
 function validCriterion(criterion: PassedCriterionResult): boolean {

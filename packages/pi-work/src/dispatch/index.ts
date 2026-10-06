@@ -51,10 +51,11 @@ function nonEmptyStrings(value: unknown): value is readonly string[] {
 
 function validLegacyRequest(value: unknown): value is LegacyDelegateDispatchRequest {
 	if (!record(value)) return false;
-	const allowed = ["agent", "task", "cwd", "reads", "skills", "model", "writableRoots", "confineWrites", "escalation"];
+	const allowed = ["agent", "task", "cwd", "reads", "skills", "model", "fallbackModels", "writableRoots", "confineWrites", "escalation"];
 	if (!onlyKeys(value, allowed) || typeof value.agent !== "string" || value.agent.length === 0 || typeof value.task !== "string" || value.task.length === 0 || typeof value.cwd !== "string" || !path.isAbsolute(value.cwd) || path.normalize(value.cwd) !== value.cwd || !Array.isArray(value.reads) || value.reads.length !== 1 || typeof value.reads[0] !== "string" || !path.isAbsolute(value.reads[0]) || value.confineWrites !== true || value.escalation !== "off") return false;
 	if (value.skills !== undefined && !nonEmptyStrings(value.skills)) return false;
 	if (value.model !== undefined && (typeof value.model !== "string" || value.model.length === 0)) return false;
+	if (value.fallbackModels !== undefined && !nonEmptyStrings(value.fallbackModels)) return false;
 	return value.writableRoots === undefined || nonEmptyStrings(value.writableRoots);
 }
 
@@ -76,7 +77,7 @@ function validHandoff(value: unknown): boolean {
 function validCanonicalRequest(value: unknown): value is CanonicalDelegateDispatchRequest {
 	if (!record(value) || !onlyKeys(value, ["runs"]) || !Array.isArray(value.runs) || value.runs.length !== 1) return false;
 	const run = value.runs[0];
-	const allowed = ["name", "agent", "task", "mode", "skills", "model", "cwd", "reads", "writableRoots", "confineWrites", "escalation", "worktree", "handoff"];
+	const allowed = ["name", "agent", "task", "mode", "skills", "model", "fallbackModels", "cwd", "reads", "writableRoots", "confineWrites", "escalation", "worktree", "handoff"];
 	if (!record(run) || !onlyKeys(run, allowed) || typeof run.name !== "string" || run.name.length === 0 || run.mode !== "solo" || run.worktree !== false || (run.handoff !== undefined && !validHandoff(run.handoff))) return false;
 	return validLegacyRequest({
 		agent: run.agent,
@@ -85,6 +86,7 @@ function validCanonicalRequest(value: unknown): value is CanonicalDelegateDispat
 		reads: run.reads,
 		...(run.skills === undefined ? {} : { skills: run.skills }),
 		...(run.model === undefined ? {} : { model: run.model }),
+		...(run.fallbackModels === undefined ? {} : { fallbackModels: run.fallbackModels }),
 		...(run.writableRoots === undefined ? {} : { writableRoots: run.writableRoots }),
 		confineWrites: run.confineWrites,
 		escalation: run.escalation,
@@ -121,6 +123,7 @@ function legacyRequest(plan: PlanReceipt, target: DispatchTarget): LegacyDelegat
 		reads: [plan.briefPath],
 		...(plan.delegate.skills === undefined ? {} : { skills: plan.delegate.skills }),
 		...(plan.delegate.model === undefined ? {} : { model: plan.delegate.model }),
+		...(plan.delegate.fallbackModels === undefined ? {} : { fallbackModels: plan.delegate.fallbackModels }),
 		...(plan.delegate.writableRoots === undefined ? {} : { writableRoots: plan.delegate.writableRoots }),
 		confineWrites: true,
 		escalation: "off",

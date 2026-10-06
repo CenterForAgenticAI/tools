@@ -5,6 +5,7 @@ import { getWorkStatus, type WorkStatusDetails } from "../status/index.js";
 import type { NodeAddress } from "../plan/index.js";
 import { renderBlockers } from "../status/derive.js";
 import { renderFinding } from "../schema/findings.js";
+import { boundedTextWithHint, staleLoadCheck, type StaleLoadCheck } from "../load-identity.js";
 
 export const MAX_RENDERED_TEXT = 4000;
 
@@ -22,7 +23,8 @@ export const WorkStatusParameters = Type.Object({
 	refresh: Type.Optional(RefreshSchema),
 }, { additionalProperties: false });
 
-export type WorkStatusToolDetails = WorkStatusDetails;
+/** Present when the pi-work on disk differs from the one this process loaded. */
+export type WorkStatusToolDetails = WorkStatusDetails & { readonly restartHint?: string };
 export type { WorkStatusDetails } from "../status/index.js";
 
 function render(details: WorkStatusDetails): string {
@@ -44,30 +46,43 @@ function render(details: WorkStatusDetails): string {
 	return lines.join("\n");
 }
 
-function response(details: WorkStatusDetails): { content: [{ type: "text"; text: string }]; details: WorkStatusDetails } {
-	const rendered = render(details);
-	if (rendered.length <= MAX_RENDERED_TEXT) return { content: [{ type: "text", text: rendered }], details };
-	return { content: [{ type: "text", text: `${rendered.slice(0, MAX_RENDERED_TEXT - 24)}\n… output truncated` }], details: { ...details, truncated: true } };
+function response(details: WorkStatusDetails, loadCheck: StaleLoadCheck): { content: [{ type: "text"; text: string }]; details: WorkStatusToolDetails } {
+	const restartHint = loadCheck.hint();
+	const bounded = boundedTextWithHint(render(details), MAX_RENDERED_TEXT, restartHint);
+	return {
+		content: [{ type: "text", text: bounded.text }],
+		details: { ...details, ...(bounded.truncated ? { truncated: true } : {}), ...(restartHint === undefined ? {} : { restartHint }) },
+	};
 }
 
-export const workStatusTool = defineTool({
-	name: "work_status",
-	label: "Work status",
-	description: "Derive qualified workspec node status from the current source and observed verification cache.",
-	parameters: WorkStatusParameters,
-	async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
-		const result = await getWorkStatus({
-			path: params.path,
-			worktreePath: params.worktreePath,
-			expectedCommit: params.expectedCommit,
-			signal,
-			...(params.refresh === undefined ? {} : {
-				refresh: {
-					nodeAddresses: params.refresh.nodeAddresses as NodeAddress[] | undefined,
-					checklists: params.refresh.checklists?.map((entry) => ({ nodeAddress: entry.nodeAddress as NodeAddress, reports: entry.reports })),
-				},
-			}),
-		});
-		return response(result.details);
-	},
-});
+export interface WorkStatusToolOptions {
+	/** Defaults to the check for the pi-work copy this process loaded. */
+	readonly loadCheck?: StaleLoadCheck;
+}
+
+export function createWorkStatusTool(options: WorkStatusToolOptions = {}) {
+	const loadCheck = options.loadCheck ?? staleLoadCheck;
+	return defineTool({
+		name: "work_status",
+		label: "Work status",
+		description: "Derive qualified workspec node status from the current source and observed verification cache.",
+		parameters: WorkStatusParameters,
+		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+			const result = await getWorkStatus({
+				path: params.path,
+				worktreePath: params.worktreePath,
+				expectedCommit: params.expectedCommit,
+				signal,
+				...(params.refresh === undefined ? {} : {
+					refresh: {
+						nodeAddresses: params.refresh.nodeAddresses as NodeAddress[] | undefined,
+						checklists: params.refresh.checklists?.map((entry) => ({ nodeAddress: entry.nodeAddress as NodeAddress, reports: entry.reports })),
+					},
+				}),
+			});
+			return response(result.details, loadCheck);
+		},
+	});
+}
+
+export const workStatusTool = createWorkStatusTool();

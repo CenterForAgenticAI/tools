@@ -27,7 +27,13 @@ Reuse those skills instead of copying their rules here.
 
 There are two axes:
 
-- **Lifecycle** — `done`, `ready`, `blocked`, or `needs-decision`.
+- **Lifecycle** — `done`, `ready`, `blocked`, or `needs-decision`. An applicable
+  unresolved open decision makes a node `needs-decision` unless another prerequisite
+  already makes it `blocked`, such as unfinished children of a composite. A decision
+  applies when its `gates` name the node's top-level node, or when it has no `gates`,
+  in which case it applies to every node. `work_plan` and `work_dispatch` refuse
+  gated nodes with `node-needs-decision`; gating a composite prevents planning
+  and dispatch of its whole subtree even when its lifecycle is `blocked`.
 - **Verification provenance** — whether evidence was run authoritatively in the
   current session and against which tree.
 
@@ -180,6 +186,14 @@ Use `work_dispatch` to dispatch one planned node. It performs exactly one
 pi-delegate dispatch through the live pi-delegate instance and records a
 durable node-to-run receipt. It never loops, waits, or retries. Do not write a
 fake receipt.
+
+When a node's configured worker model keeps failing, re-dispatch it through
+`work_dispatch` with the optional `model` and `fallbackModels` parameters instead
+of bypassing it with a plain `delegate` call. They apply to this dispatch only,
+`model` beats the node's `worker.model`, and the ledger entry records the
+requested and resolved model as the pi-delegate runtime reports them (the
+`fallbackModels` list itself is not recorded). The worker brief still shows the
+node's own `worker.model`; the override applies to the run only.
 
 When the pi-delegate runtime is unavailable in the session, for example when
 pi-delegate is not loaded, `work_dispatch` returns a `degraded` result with

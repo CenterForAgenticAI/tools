@@ -127,6 +127,28 @@ test("cache decoder rejects forged green records and tree disagreement", () => {
 	const user = structuredClone(base) as unknown as { record: { criteria: [{ proof: Record<string, unknown> }] } };
 	user.record.criteria[0].proof = { kind: "user-proof", prompt: "sent", challenge: "challenge", sessionId: "session", sessionFile: "/tmp/session", entryId: "entry", entryTimestamp: "2026-01-01T00:00:00.000Z", startedAt: "2026-01-01T00:00:00.000Z", finishedAt: "2026-01-01T00:00:00.001Z", durationMs: 1, tree };
 	assert.ok(decodeVerificationCacheUpdate(user));
+	const userProof = (overrides: Record<string, unknown>) => {
+		const candidate = structuredClone(user);
+		candidate.record.criteria[0].proof = { ...candidate.record.criteria[0].proof, ...overrides };
+		for (const [key, value] of Object.entries(overrides)) if (value === undefined) delete candidate.record.criteria[0].proof[key];
+		return candidate;
+	};
+	assert.ok(decodeVerificationCacheUpdate(userProof({ source: "session" })));
+	const legacy = decodeVerificationCacheUpdate(user);
+	const legacyProof = legacy?.record.criteria[0]?.outcome === "passed" ? legacy.record.criteria[0].proof : undefined;
+	assert.equal(legacyProof?.kind === "user-proof" ? legacyProof.source : undefined, "session", "a source-less cached proof decodes as a transcript proof");
+	if (legacyProof?.kind === "user-proof" && legacyProof.source === "session") assert.deepEqual([legacyProof.sessionFile, legacyProof.entryId, legacyProof.entryTimestamp], ["/tmp/session", "entry", "2026-01-01T00:00:00.000Z"]);
+	for (const missing of ["sessionFile", "entryId", "entryTimestamp"]) {
+		assert.equal(decodeVerificationCacheUpdate(userProof({ source: "session", [missing]: undefined })), undefined, `session proof without ${missing}`);
+		assert.equal(decodeVerificationCacheUpdate(userProof({ [missing]: undefined })), undefined, `legacy proof without ${missing}`);
+	}
+	assert.equal(decodeVerificationCacheUpdate(userProof({ source: "session", sessionFile: "" })), undefined);
+	assert.equal(decodeVerificationCacheUpdate(userProof({ source: "session", entryTimestamp: "not-a-timestamp" })), undefined);
+	assert.equal(decodeVerificationCacheUpdate(userProof({ source: "transcript" })), undefined);
+	const uiOnly = { source: "ui", sessionFile: undefined, entryId: undefined, entryTimestamp: undefined };
+	assert.ok(decodeVerificationCacheUpdate(userProof(uiOnly)));
+	assert.equal(decodeVerificationCacheUpdate(userProof({ ...uiOnly, sessionId: "" })), undefined);
+	assert.equal(decodeVerificationCacheUpdate(userProof({ ...uiOnly, entryId: "ui:fabricated" })), undefined, "a UI proof must not claim a transcript entry");
 	const badCommand = structuredClone(base) as Record<string, unknown>;
 	const badCommandRecord = badCommand.record as Record<string, unknown>;
 	const badCommandCriterion = (badCommandRecord.criteria as Array<Record<string, unknown>>)[0];

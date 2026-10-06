@@ -56,3 +56,14 @@ test("one deterministic cycle finding covers one strongly connected component", 
 		["work", 2, "depends_on"],
 	]);
 });
+
+test("decision gates must name existing top-level nodes", () => {
+	const decision = (gates: string[]) => ({ id: "D1", question: "Q?", tripwire: "T", decides: "user", gates });
+	const work = [composite("group", [leaf("leaf")]), leaf("B")];
+	assert.deepEqual(validateDependencies({ ...spec(work), open_decisions: [decision(["B", "group"])] }), []);
+	const findings = validateDependencies({ ...spec(work), open_decisions: [decision(["B"]), decision(["missing", "leaf"])] });
+	assert.deepEqual(findings.map((finding) => [finding.code, finding.path.join(".")]), [
+		["decision-gate-unresolved", "open_decisions.1.gates.0"],
+		["decision-gate-unresolved", "open_decisions.1.gates.1"],
+	]);
+});

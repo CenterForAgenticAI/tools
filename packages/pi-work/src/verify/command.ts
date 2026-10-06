@@ -1,6 +1,7 @@
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { promisify } from "node:util";
 
+import { loadedIdentitySuffix } from "../load-identity.js";
 import type { CommandEvidence } from "../schema/workspec.js";
 import { captureAuthoredPath, captureEvidenceEnvironment, isAbsoluteExecutable, pathShadowsExecutable, resolveVerifierExecutable, type VerifierExecutable } from "./executable.js";
 import { inheritedValuesSnapshot, redactCommandEvidence, redactCommandFailure, redactCommandOutput, redactCommandText, type InheritedValuesSnapshot } from "./output.js";
@@ -74,7 +75,10 @@ function failure(code: VerificationFailure["code"], message: string, extra: Fail
 	if (code === "environment-unavailable") return { code, message, names: extra.names ?? [] };
 	if (code === "spawn-error") return { code, message, ...(extra.errorCode === undefined ? {} : { errorCode: extra.errorCode }) };
 	if (code === "executable-unavailable") return { code, message, executable: extra.executable ?? "unknown" };
-	if (code === "cleanup-unavailable" || code === "cleanup-failed") return { code, message };
+	// Containment support differs between pi-work versions; name the loaded copy so a
+	// reader can tell whether a restart onto a newer install could change the outcome.
+	if (code === "cleanup-unavailable") return { code, message: `${message}${loadedIdentitySuffix()}` };
+	if (code === "cleanup-failed") return { code, message };
 	return { code: "spawn-error", message };
 }
 

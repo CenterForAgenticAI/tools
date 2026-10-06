@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { validateDependencies } from "../schema/dependencies.js";
+import { applicableOpenDecisions, validateDependencies } from "../schema/dependencies.js";
 import { findTouchOverlaps, type LocatedWorkNode } from "../lint/touches-overlap.js";
 import { renderWorkerBrief } from "./projectors.js";
 import { addressKey, assembleWorkspec, formatNodeAddress } from "./assembler.js";
@@ -81,6 +81,10 @@ function handoffFor(assembly: NodeContractAssembly): DelegateHandoff | undefined
 	return { tasks: [...tasks], ...(focus === undefined ? {} : { focus }) };
 }
 
+function effectiveModel(nodeModel: string | undefined, options: CompilePlanOptions): string | undefined {
+	return options.workerOverride?.model ?? nodeModel;
+}
+
 export async function compileWorkPlan(spec: Workspec, options: CompilePlanOptions): Promise<PlanResult> {
 	const specFindings = invalidSpecFindings(spec);
 	if (specFindings.length > 0) return { ok: false, plans: [], advisories: [], worktree: false, findings: specFindings };
@@ -106,6 +110,15 @@ export async function compileWorkPlan(spec: Workspec, options: CompilePlanOption
 	}
 	if (selectionFindings.length > 0) return { ok: false, plans: [], advisories: [], worktree: false, findings: selectionFindings };
 
+	// Only a decision that names a node in its gates refuses that node here. A
+	// decision without gates applies to the whole spec and is reported by
+	// work_status, which remains the readiness authority.
+	const decisionFindings = selected.flatMap((assembly): PlanFinding[] => {
+		const decisions = applicableOpenDecisions(spec, assembly.address).filter((decision) => decision.gates !== undefined).map((decision) => decision.id);
+		return decisions.length === 0 ? [] : [{ code: "node-needs-decision", address: assembly.address, decisions, message: `node ${formatNodeAddress(assembly.address)} is gated by unresolved open ${decisions.length === 1 ? "decision" : "decisions"} ${decisions.join(", ")}` }];
+	});
+	if (decisionFindings.length > 0) return { ok: false, plans: [], advisories: [], worktree: false, findings: decisionFindings };
+
 	const profileFindings = selected.flatMap((assembly) => assembly.node.worker?.profile === undefined ? [] : [profileFinding(assembly, assembly.node.worker.profile)]);
 	if (profileFindings.length > 0) return { ok: false, plans: [], advisories: [], worktree: false, findings: profileFindings };
 
@@ -130,10 +143,12 @@ export async function compileWorkPlan(spec: Workspec, options: CompilePlanOption
 		const agent = assembly.node.worker?.agent ?? "worker";
 		const task = `Execute the assembled work contract for node ${assembly.node.id}; read the contract from the attached brief.`;
 		const handoff = handoffFor(assembly);
+		const model = effectiveModel(assembly.node.worker?.model, options);
 		const shared = {
 			agent,
 			...(assembly.node.worker?.skills === undefined ? {} : { skills: assembly.node.worker.skills }),
-			...(assembly.node.worker?.model === undefined ? {} : { model: assembly.node.worker.model }),
+			...(model === undefined ? {} : { model }),
+			...(options.workerOverride?.fallbackModels === undefined ? {} : { fallbackModels: options.workerOverride.fallbackModels }),
 			...(worktree ? {} : { cwd: path.resolve(options.cwd) }),
 			reads: [briefPath] as [string],
 			task,

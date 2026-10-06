@@ -505,6 +505,7 @@ test("request and receipt decoders reject unknown and mistyped values", () => {
 		escalation: "off",
 	};
 	assert.equal(validateDelegateDispatchRequest(request), true);
+	assert.equal(validateDelegateDispatchRequest({ ...request, fallbackModels: ["a/b", "c/d"] }), true);
 	for (const invalid of [
 		null,
 		[],
@@ -526,6 +527,10 @@ test("request and receipt decoders reject unknown and mistyped values", () => {
 		{ ...request, skills: [1] },
 		{ ...request, model: 1 },
 		{ ...request, model: "" },
+		{ ...request, fallbackModels: [] },
+		{ ...request, fallbackModels: [""] },
+		{ ...request, fallbackModels: "a/b" },
+		{ ...request, fallbackModels: [1] },
 		{ ...request, writableRoots: "src/**" },
 		{ ...request, writableRoots: [] },
 		{ ...request, writableRoots: [1] },

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import type { UiUserConfirmationProof } from "../../src/verify/results.ts";
 import { confirmationLine, runUser, userChallenge, type SessionReader } from "../../src/verify/user.ts";
 
 const input = { evidence: { kind: "user" as const, prompt: "The letter was sent." }, specPath: "spec.yaml", nodeId: "letter", criterionId: "sent", tree: { kind: "git" as const, worktreePath: "/work", resolvedCommit: "a".repeat(40) } };
@@ -26,7 +27,8 @@ test("legacy adapter requires exact persisted active-branch confirmation", async
 	const passed = await runUser(input, session(confirmationLine(challenge)));
 	assert.equal(passed.outcome, "passed");
 	if (passed.outcome === "passed") {
-		assert.equal(passed.proof.entryId, "entry-1");
+		assert.equal(passed.proof.source, "session");
+		if (passed.proof.source === "session") assert.equal(passed.proof.entryId, "entry-1");
 		assert.equal(passed.proof.sessionId, "session-1");
 	}
 });
@@ -38,6 +40,7 @@ test("host non-UI confirmation reads the real session file", async () => {
 	await writeFile(file, `${JSON.stringify({ type: "session", id: "session-1" })}\n${JSON.stringify({ id: "entry-1", type: "message", timestamp: "2026-08-08T00:00:00.000Z", message: { role: "user", content: confirmationLine(challenge) } })}\n`);
 	const passed = await runUser(input, { host: { hasUI: false, session: hostSession(file, confirmationLine(challenge)) } });
 	assert.equal(passed.outcome, "passed");
+	if (passed.outcome === "passed") assert.equal(passed.proof.source, "session");
 	const missingFile = await runUser(input, { host: { hasUI: false, session: hostSession(path.join(directory, "missing.jsonl"), confirmationLine(challenge)) } });
 	assert.equal(missingFile.outcome, "failed");
 	if (missingFile.outcome === "failed") assert.equal(missingFile.failures[0]?.code, "session-unavailable");
@@ -49,6 +52,16 @@ test("host UI confirmation is captured by the host and cancellation fails closed
 	const confirmed = await runUser(input, { host: { hasUI: true, session: session("silence"), confirm: async (_title, message) => { calls += 1; assert.match(message, /I confirm [a-f0-9]{32}/); return true; } } });
 	assert.equal(confirmed.outcome, "passed");
 	assert.equal(calls, 1);
+	if (confirmed.outcome === "passed") {
+		// A dialog answer leaves no transcript entry, so the proof must not invent one.
+		assert.equal(confirmed.proof.source, "ui");
+		assert.deepEqual(["sessionFile", "entryId", "entryTimestamp"].filter((key) => key in confirmed.proof), []);
+		if (confirmed.proof.source === "ui") {
+			// @ts-expect-error -- a UI proof cannot be typed with a transcript entry.
+			const mixed: UiUserConfirmationProof = { ...confirmed.proof, entryId: "ui:fabricated" };
+			assert.equal(mixed.source, "ui");
+		}
+	}
 	const declined = await runUser(input, { host: { hasUI: true, session: session("silence"), confirm: async () => false } });
 	assert.equal(declined.outcome, "failed");
 });

@@ -58,6 +58,7 @@ export interface LegacyDelegateDispatchRequest {
 	readonly reads: readonly [string];
 	readonly skills?: readonly string[];
 	readonly model?: string;
+	readonly fallbackModels?: readonly string[];
 	readonly writableRoots?: readonly string[];
 	readonly confineWrites: true;
 	readonly escalation: "off";

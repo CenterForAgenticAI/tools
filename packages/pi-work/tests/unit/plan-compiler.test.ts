@@ -136,3 +136,35 @@ for (const [fixture, nodeAddress] of [["cyclic-dependency.yaml", ["a"]], ["cross
 		await assert.rejects(access(path.join(root, ".work", ".cache", "briefs")));
 	});
 }
+
+test("a node gated by an unresolved decision is refused while ungated nodes compile", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-work-plan-gated-"));
+	const gated = await spec("gated-decisions.yaml");
+	const refused = await compileWorkPlan(gated, { cwd: root, nodeAddresses: [["A"], ["B"]] });
+	assert.equal(refused.ok, false);
+	assert.deepEqual(refused.plans, []);
+	assert.deepEqual(refused.findings.map((finding) => finding.code), ["node-needs-decision"]);
+	assert.match(refused.findings[0]!.message, /^node B is gated by unresolved open decision D1$/);
+	await assert.rejects(access(path.join(root, ".work", ".cache", "briefs")));
+	const allowed = await compileWorkPlan(gated, { cwd: root, nodeAddresses: [["A"], ["D"]] });
+	assert.equal(allowed.ok, true);
+	assert.equal(allowed.plans.length, 2);
+});
+
+test("workerOverride beats the node's worker.model in both request shapes and leaves the brief unchanged (#56)", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-work-plan-override-"));
+	const parsed = await spec("design-section-2-no-profile-with-acceptance.yaml");
+	const plain = await compileWorkPlan(parsed, { cwd: root, nodeAddresses: [["schema"]] });
+	const overridden = await compileWorkPlan(parsed, { cwd: root, nodeAddresses: [["schema"]], workerOverride: { model: "override/model", fallbackModels: ["backup/one"] } });
+	assert.equal(plain.ok && overridden.ok, true);
+	const [a, b] = [plain.plans[0], overridden.plans[0]];
+	assert.equal(a.delegate.model, "openai/gpt-5.6-sol");
+	assert.equal("fallbackModels" in a.delegate, false);
+	assert.equal(b.delegate.model, "override/model");
+	assert.deepEqual(b.delegate.fallbackModels, ["backup/one"]);
+	assert.equal(b.canonicalDelegate.runs[0].model, "override/model");
+	assert.deepEqual(b.canonicalDelegate.runs[0].fallbackModels, ["backup/one"]);
+	assert.equal(b.briefSha256, a.briefSha256);
+	const onlyFallback = await compileWorkPlan(parsed, { cwd: root, nodeAddresses: [["schema"]], workerOverride: { fallbackModels: ["backup/one"] } });
+	assert.equal(onlyFallback.plans[0].delegate.model, "openai/gpt-5.6-sol", "fallbackModels alone keeps the node's model");
+});

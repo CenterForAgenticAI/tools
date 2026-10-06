@@ -24,7 +24,7 @@ interface FindingBase<S extends FindingSeverity, C extends string> {
 
 export type SchemaFinding =
 	| (FindingBase<"error", "schema-required"> & { keyword: "required"; property: string; params: Record<string, unknown> })
-	| (FindingBase<"error", "schema-additional-properties"> & { keyword: "additionalProperties"; properties: string[]; params: Record<string, unknown> })
+	| (FindingBase<"error", "schema-additional-properties"> & { keyword: "additionalProperties"; properties: string[]; params: Record<string, unknown>; message?: string })
 	| (FindingBase<"error", "schema-invalid"> & { keyword: string; params: Record<string, unknown>; message?: string });
 
 export type PathInputFinding = FindingBase<"error", "absolute-path"> & { message: string; suppliedPath: string };
@@ -40,6 +40,7 @@ export type SemanticFinding =
 	| (FindingBase<"error", "duplicate-node-id"> & { id: string; relatedPaths: FindingPath[] })
 	| (FindingBase<"error", "duplicate-criterion-id"> & { id: string; relatedPaths: FindingPath[] })
 	| (FindingBase<"error", "dependency-unresolved"> & { dependency: string })
+	| (FindingBase<"error", "decision-gate-unresolved"> & { gate: string })
 	| (FindingBase<"error", "dependency-self"> & { dependency: string })
 	| (FindingBase<"error", "dependency-cycle"> & { members: string[]; relatedPaths: FindingPath[] });
 

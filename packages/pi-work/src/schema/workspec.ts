@@ -22,6 +22,12 @@ export const OpenDecisionSchema = Type.Object({
 	question: Type.String(),
 	tripwire: Type.String(),
 	decides: Type.String(nonEmpty),
+	/**
+	 * Top-level node ids this decision blocks. Omitted, the decision blocks every
+	 * node in the spec. A gated composite blocks its whole subtree, and nodes that
+	 * depend on a gated node wait through ordinary dependency blocking.
+	 */
+	gates: Type.Optional(Type.Array(Type.String(nonEmpty), { minItems: 1, uniqueItems: true })),
 }, closed);
 
 /**

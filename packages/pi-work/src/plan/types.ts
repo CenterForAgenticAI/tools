@@ -55,6 +55,7 @@ export interface DelegateInvocation {
 	readonly agent: string;
 	readonly skills?: readonly string[];
 	readonly model?: string;
+	readonly fallbackModels?: readonly string[];
 	readonly cwd?: string;
 	readonly reads: readonly [string];
 	readonly task: string;
@@ -92,6 +93,7 @@ export interface CanonicalDelegateRun {
 	readonly mode: "solo";
 	readonly skills?: readonly string[];
 	readonly model?: string;
+	readonly fallbackModels?: readonly string[];
 	readonly cwd?: string;
 	readonly reads: readonly [string];
 	readonly writableRoots?: readonly string[];
@@ -137,6 +139,7 @@ export type PlanFinding =
 	| { readonly code: "node-address-required"; readonly path: FindingPath; readonly message: string }
 	| { readonly code: "node-address-not-found"; readonly address: NodeAddress; readonly message: string }
 	| { readonly code: "duplicate-node-address"; readonly address: NodeAddress; readonly message: string }
+	| { readonly code: "node-needs-decision"; readonly address: NodeAddress; readonly decisions: readonly string[]; readonly message: string }
 	| { readonly code: "worker-profile-unsupported"; readonly path: FindingPath; readonly profile: string; readonly message: string }
 	| { readonly code: "brief-write-error"; readonly path: FindingPath; readonly message: string };
 
@@ -161,6 +164,8 @@ export interface CompilePlanOptions {
 	readonly cwd: string;
 	readonly nodeAddresses: readonly NodeAddress[];
 	readonly briefDirectory?: string;
+	/** Per-dispatch worker model override; beats the node's worker.model (#56). */
+	readonly workerOverride?: { readonly model?: string; readonly fallbackModels?: readonly string[] };
 }
 
 export interface RenderProjectorOverrides {

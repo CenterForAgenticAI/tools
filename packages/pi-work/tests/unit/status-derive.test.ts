@@ -195,3 +195,84 @@ test("every blocker kind renders, and the blocked refresh wrapper reports the sh
 	assert.equal(blocked.message, REFRESH_BLOCKED_MESSAGE);
 	assert.ok(blocked.requires.length > 0);
 });
+
+function withDecisions(source: string, decisions: string): string {
+	return source.replace(/^open_decisions:\n(?: {2,}.*\n)+/m, decisions);
+}
+
+test("a decision with gates blocks only the named nodes and, through dependencies, their dependents", async () => {
+	const result = deriveStatus({ source: await fixture("gated-decisions.yaml"), specPath: STATUS_SPEC_PATH, tree: TREE });
+	assert.equal(result.ok, true);
+	const lifecycle = Object.fromEntries(result.details.nodes.map((node) => [node.address.join("/"), node.lifecycle]));
+	assert.deepEqual(lifecycle, { A: "ready", B: "needs-decision", C: "blocked", D: "ready" });
+	const byId = (id: string) => result.details.nodes.find((node) => node.address.join("/") === id)!;
+	assert.deepEqual(byId("B").blockers, [{ code: "open-decision", ids: ["D1"] }]);
+	assert.match(byId("B").lifecycleText, /unresolved: D1\.$/);
+	assert.deepEqual(byId("C").blockers, [{ code: "dependency", addresses: [["B"]] }]);
+	assert.deepEqual(byId("A").blockers, []);
+	assert.deepEqual(result.details.unresolvedDecisions, ["D1"]);
+});
+
+test("a decision without gates still blocks every node, and each node lists only the decisions that apply to it", async () => {
+	const source = withDecisions(await fixture("gated-decisions.yaml"), [
+		"open_decisions:",
+		"  - id: D1",
+		"    question: Which format does B emit?",
+		"    tripwire: Before B is dispatched.",
+		"    decides: user",
+		"    gates: [B]",
+		"  - id: D2",
+		"    question: Which release does this target?",
+		"    tripwire: Before any node is dispatched.",
+		"    decides: user",
+		"",
+	].join("\n"));
+	const result = deriveStatus({ source, specPath: STATUS_SPEC_PATH, tree: TREE });
+	assert.equal(result.ok, true);
+	const lifecycle = Object.fromEntries(result.details.nodes.map((node) => [node.address.join("/"), node.lifecycle]));
+	assert.deepEqual(lifecycle, { A: "needs-decision", B: "needs-decision", C: "blocked", D: "needs-decision" });
+	const byId = (id: string) => result.details.nodes.find((node) => node.address.join("/") === id)!;
+	assert.deepEqual(byId("A").blockers, [{ code: "open-decision", ids: ["D2"] }]);
+	assert.deepEqual(byId("B").blockers, [{ code: "open-decision", ids: ["D1", "D2"] }]);
+	assert.match(byId("A").lifecycleText, /unresolved: D2\.$/);
+	assert.match(byId("B").lifecycleText, /unresolved: D1, D2\.$/);
+	assert.deepEqual(result.details.unresolvedDecisions, ["D1", "D2"]);
+});
+
+test("a gate on a composite node applies to its whole subtree", () => {
+	const leafNode = (id: string, indent: string) => [
+		`${indent}- id: ${id}`,
+		`${indent}  task: ${id}`,
+		`${indent}  acceptance:`,
+		`${indent}    - id: ${id}-pass`,
+		`${indent}      statement: ${id} is green`,
+		`${indent}      evidence:`,
+		`${indent}        kind: command`,
+		`${indent}        run: printf ${id}`,
+		`${indent}        expect:`,
+		`${indent}          exit: 0`,
+		`${indent}          output_includes: ${id}`,
+	].join("\n");
+	const source = statusSource([
+		"title: gated composite",
+		"description: d",
+		"intent: i",
+		"open_decisions:",
+		"  - id: D1",
+		"    question: Which shape does the group take?",
+		"    tripwire: Before the group is dispatched.",
+		"    decides: user",
+		"    gates: [group]",
+		"work:",
+		"  - id: group",
+		"    task: group",
+		"    work:",
+		leafNode("leaf", "      "),
+		leafNode("other", "  "),
+		"",
+	].join("\n"));
+	const result = deriveStatus({ source, specPath: STATUS_SPEC_PATH, tree: TREE });
+	assert.equal(result.ok, true);
+	const lifecycle = Object.fromEntries(result.details.nodes.map((node) => [node.address.join("/"), node.lifecycle]));
+	assert.deepEqual(lifecycle, { group: "blocked", "group/leaf": "needs-decision", other: "ready" });
+});

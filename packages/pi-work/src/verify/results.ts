@@ -70,16 +70,31 @@ export interface AgentJudgmentProof extends ExecutionWindow {
 	tree: TreeIdentity;
 }
 
-export interface UserConfirmationProof extends ExecutionWindow {
+interface UserConfirmationProofBase extends ExecutionWindow {
 	kind: "user-proof";
 	prompt: string;
 	challenge: string;
 	sessionId: string;
+	tree: TreeIdentity;
+}
+
+/** The user typed the exact challenge line into the persisted session transcript. */
+export interface SessionUserConfirmationProof extends UserConfirmationProofBase {
+	source: "session";
 	sessionFile: string;
 	entryId: string;
 	entryTimestamp: string;
-	tree: TreeIdentity;
 }
+
+/** The host's interactive confirm dialog accepted the challenge. No transcript entry exists. */
+export interface UiUserConfirmationProof extends UserConfirmationProofBase {
+	source: "ui";
+	sessionFile?: never;
+	entryId?: never;
+	entryTimestamp?: never;
+}
+
+export type UserConfirmationProof = SessionUserConfirmationProof | UiUserConfirmationProof;
 
 export type CriterionProof = CommandExecutionProof | AgentJudgmentProof | UserConfirmationProof;
 
@@ -367,7 +382,11 @@ function proofValue(value: unknown, tree: TreeIdentity): value is CriterionProof
 		return value.inputs.every(namedInputValue);
 	}
 	if (value.kind === "user-proof") {
-		return stringValue(value.prompt) && stringValue(value.challenge) && value.challenge.length > 0 && stringValue(value.sessionId) && value.sessionId.length > 0 && stringValue(value.sessionFile) && value.sessionFile.length > 0 && stringValue(value.entryId) && value.entryId.length > 0 && timestamp(value.entryTimestamp);
+		if (!stringValue(value.prompt) || !stringValue(value.challenge) || value.challenge.length === 0 || !stringValue(value.sessionId) || value.sessionId.length === 0) return false;
+		if (value.source === "ui") return value.sessionFile === undefined && value.entryId === undefined && value.entryTimestamp === undefined;
+		// Records written before `source` existed are read as transcript proofs and must carry a transcript entry.
+		if (value.source !== "session" && value.source !== undefined) return false;
+		return stringValue(value.sessionFile) && value.sessionFile.length > 0 && stringValue(value.entryId) && value.entryId.length > 0 && timestamp(value.entryTimestamp);
 	}
 	return false;
 }
@@ -429,7 +448,14 @@ function decodeCriterion(value: unknown, tree: TreeIdentity): ObservedCriterionR
 	if (!isRecord(value) || !criterionSummaryValue(value.criterion)) return undefined;
 	if (value.outcome === "failed") return failedCriterionValue(value, tree) ? value : undefined;
 	if (value.outcome !== "passed" || !windowValue(value) || !proofValue(value.proof, tree) || !sameWindow(value, value.proof)) return undefined;
-	return { outcome: "passed", criterion: value.criterion, startedAt: value.startedAt, finishedAt: value.finishedAt, durationMs: value.durationMs, proof: value.proof };
+	return { outcome: "passed", criterion: value.criterion, startedAt: value.startedAt, finishedAt: value.finishedAt, durationMs: value.durationMs, proof: value.proof.kind === "user-proof" ? decodeUserProof(value.proof) : value.proof };
+}
+
+/** Copy a validated user proof field by field, reading a source-less (pre-`source`) record as a transcript proof. */
+function decodeUserProof(proof: UserConfirmationProof): UserConfirmationProof {
+	const base = { kind: proof.kind, prompt: proof.prompt, challenge: proof.challenge, sessionId: proof.sessionId, startedAt: proof.startedAt, finishedAt: proof.finishedAt, durationMs: proof.durationMs, tree: proof.tree };
+	if (proof.source === "ui") return { ...base, source: "ui" };
+	return { ...base, source: "session", sessionFile: proof.sessionFile, entryId: proof.entryId, entryTimestamp: proof.entryTimestamp };
 }
 
 function decodeResult(value: unknown, tree: TreeIdentity): ObservedVerificationResult | undefined {

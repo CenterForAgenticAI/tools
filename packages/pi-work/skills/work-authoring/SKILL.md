@@ -120,6 +120,10 @@ refuses the whole draft rather than emitting one. Recording the question is
 the point: an unanswered question belongs in this region, never dissolved into
 a confident sentence in the rationale.
 
+A promoted decision has no `gates`, so it blocks every node until it is
+resolved. A draft has no node graph to name yet; scope a decision to the nodes
+it blocks by adding `gates` during decomposition.
+
 Two cautions the parser will not save you from. An indented line that is not
 `tripwire:` or `decides:` is treated as question prose, so an invented field
 such as `owner: finance` is silently appended to the question text — write

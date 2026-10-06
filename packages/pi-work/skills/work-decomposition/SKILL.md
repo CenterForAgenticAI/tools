@@ -167,13 +167,27 @@ open_decisions:
     question: Which authentication mode does the importer use?
     tripwire: before decomposing the authentication subtree
     decides: user
+    gates: [auth]
 ```
 
 An `open_decisions` entry is a frontier, not a status field. Name the question,
 when it blocks safe decomposition, and who decides it. Do not parse the
-`tripwire` prose later to pretend that a decision was resolved. Until the v1
-status contract can scope decisions to nodes, treat an unresolved decision as a
-conservative blocker for execution and say so.
+`tripwire` prose later to pretend that a decision was resolved.
+
+Scope each decision with `gates` when you know which work it blocks. `gates` is
+a non-empty list of unique top-level node ids: decisions live at the spec root,
+so top-level nodes are their sibling scope, the same rule `depends_on` follows.
+To gate a nested node, gate its top-level ancestor; a gated composite prevents
+planning and dispatch of its whole subtree. Validation rejects an id that
+names no top-level node.
+
+An applicable unresolved decision makes a node `needs-decision` unless another
+prerequisite already makes it `blocked`, such as unfinished children of a
+composite. A decision with `gates` applies only to the named top-level nodes
+and their subtrees; nodes that depend on them stay `blocked` through ordinary
+dependency blocking, and unrelated nodes remain schedulable if their own
+prerequisites permit. A decision without `gates` blocks every node in the spec,
+so omit it only when the answer really can change all of the work.
 
 ## 4. Optional compiled-intent hook
 

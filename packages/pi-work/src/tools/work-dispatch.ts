@@ -21,6 +21,10 @@ export const WorkDispatchParameters = Type.Object({
 	nodeAddress: NodeAddressSchema,
 	worktreePath: Type.String({ minLength: 1 }),
 	expectedCommit: Type.String({ minLength: 1 }),
+	// Invocation-scoped worker overrides, passed through to pi-delegate (#56).
+	// Model refs contain no whitespace; pi-delegate silently drops blank values, so reject them here.
+	model: Type.Optional(Type.String({ minLength: 1, pattern: "^\\S+$" })),
+	fallbackModels: Type.Optional(Type.Array(Type.String({ minLength: 1, pattern: "^\\S+$" }), { minItems: 1 })),
 }, { additionalProperties: false });
 
 export type WorkDispatchPreflightFinding =
@@ -125,7 +129,7 @@ export function createWorkDispatchTool(dependencies: DispatchDependencies = {}) 
 			}
 			const validation = validateWorkspec(source, { specPath, cwd: root });
 			if (!validation.structuralValid || !validation.valid || errorCount(validation.findings) > 0) return response(preflightDetails({ ...input, worktreePath: root }, validation.findings));
-			const compiled = await compileWorkPlan(validation.spec, { cwd: root, nodeAddresses: [nodeAddress] });
+			const compiled = await compileWorkPlan(validation.spec, { cwd: root, nodeAddresses: [nodeAddress], ...(params.model === undefined && params.fallbackModels === undefined ? {} : { workerOverride: { ...(params.model === undefined ? {} : { model: params.model }), ...(params.fallbackModels === undefined ? {} : { fallbackModels: params.fallbackModels }) } }) });
 			if (!compiled.ok) return response(preflightDetails({ ...input, worktreePath: root }, compiled.findings));
 			const plan = compiled.plans[0];
 			if (!plan) return response(preflightDetails({ ...input, worktreePath: root }, [{ code: "dispatch-input-invalid", message: "work_plan returned no plan for the selected node" }]));

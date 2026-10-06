@@ -9,7 +9,8 @@ import test from "node:test";
 
 import type { DelegateDispatchRequest, DelegateRuntimeReceipt } from "../../src/dispatch/index.ts";
 import { readStatusCache, statusCachePath } from "../../src/status/cache.ts";
-import { createWorkDispatchTool, type WorkDispatchDetails } from "../../src/tools/work-dispatch.ts";
+import { createWorkDispatchTool, WorkDispatchParameters, type WorkDispatchDetails } from "../../src/tools/work-dispatch.ts";
+import { Value } from "typebox/value";
 import { withDraftLineage } from "../helpers/workspec-source.ts";
 
 const execFileAsync = promisify(execFile);
@@ -209,4 +210,96 @@ test("work_dispatch tool schema is strict and selects exactly one qualified node
 	assert.equal(tool.parameters.additionalProperties, false);
 	assert.equal(tool.parameters.properties.nodeAddress.type, "array");
 	assert.equal("nodeAddresses" in tool.parameters.properties, false);
+});
+
+test("work_dispatch refuses a node gated by an unresolved decision and allows an ungated one", async () => {
+	const gatedSource = SPEC
+		.replace("work:\n", "open_decisions:\n  - id: D1\n    question: Which format does the node emit?\n    tripwire: Before the node is dispatched.\n    decides: user\n    gates: [node]\nwork:\n")
+		.replace(/\n$/, "\n  - id: other\n    task: run other\n    acceptance:\n      - id: B\n        statement: other signal\n        evidence:\n          kind: command\n          run: printf other\n          expect:\n            exit: 0\n            output_includes: other\n");
+	const repo = await fixture(gatedSource);
+	try {
+		let providerCalls = 0;
+		const tool = createWorkDispatchTool({ clientProvider: async () => { providerCalls += 1; return { status: "unavailable", message: "optional package absent" }; } });
+		const gated = await execute(tool, repo.root, repo.commit);
+		assert.equal(gated.details.outcome, "rejected");
+		assert.deepEqual(gated.details.findings.map((finding) => finding.code), ["node-needs-decision"]);
+		assert.equal(providerCalls, 0);
+		const ungated = await tool.execute("test", { path: "spec.yaml", nodeAddress: ["other"], worktreePath: repo.root, expectedCommit: repo.commit }, undefined, undefined, { cwd: repo.root } as never) as { details: WorkDispatchDetails };
+		assert.equal(ungated.details.outcome, "degraded");
+	} finally {
+		await rm(repo.root, { recursive: true, force: true });
+	}
+});
+
+test("the work_dispatch schema accepts model and fallbackModels and still rejects other fields (#56)", () => {
+	const base = { path: "spec.yaml", nodeAddress: ["node"], worktreePath: "/w", expectedCommit: "f".repeat(40) };
+	assert.equal(Value.Check(WorkDispatchParameters, base), true);
+	assert.equal(Value.Check(WorkDispatchParameters, { ...base, model: "a/b", fallbackModels: ["c/d", "e/f"] }), true);
+	assert.equal(Value.Check(WorkDispatchParameters, { ...base, model: "" }), false);
+	assert.equal(Value.Check(WorkDispatchParameters, { ...base, fallbackModels: [""] }), false);
+	assert.equal(Value.Check(WorkDispatchParameters, { ...base, fallbackModels: "c/d" }), false);
+	assert.equal(Value.Check(WorkDispatchParameters, { ...base, fallbackModels: [] }), false, "an empty list would fail later as a compiled-plan defect");
+	assert.equal(Value.Check(WorkDispatchParameters, { ...base, model: "   " }), false, "pi-delegate silently drops a blank model");
+	assert.equal(Value.Check(WorkDispatchParameters, { ...base, fallbackModels: [" "] }), false);
+	assert.equal(Value.Check(WorkDispatchParameters, { ...base, model: " a/b" }), false);
+	assert.equal(Value.Check(WorkDispatchParameters, { ...base, escalation: "local" }), false);
+});
+
+test("work_dispatch passes model and fallbackModels to the delegate run and records the requested model in the ledger (#56)", async () => {
+	const repo = await fixture();
+	try {
+		const requests: DelegateDispatchRequest[] = [];
+		const tool = createWorkDispatchTool({
+			clientProvider: async () => ({
+				status: "available",
+				grammar: "canonical",
+				client: {
+					async dispatch(request) {
+						requests.push(request);
+						const slot = "runs" in request ? request.runs[0] : request;
+						const bytes = await readFile(slot.reads[0]);
+						return receipt(request, createHash("sha256").update(bytes).digest("hex"));
+					},
+				},
+			}),
+		});
+		const result = await tool.execute("test", { path: "spec.yaml", nodeAddress: ["node"], worktreePath: repo.root, expectedCommit: repo.commit, model: "override/model", fallbackModels: ["backup/one", "backup/two"] }, undefined, undefined, { cwd: repo.root } as never) as { details: WorkDispatchDetails };
+		assert.equal(result.details.outcome, "dispatched");
+		const request = requests[0]!;
+		assert.ok("runs" in request);
+		assert.equal(request.runs[0].model, "override/model", "an explicit model beats the node's worker.model (test/model)");
+		assert.deepEqual(request.runs[0].fallbackModels, ["backup/one", "backup/two"]);
+		const cache = await readStatusCache(statusCachePath(repo.root, path.join(repo.root, "spec.yaml")));
+		assert.equal(cache.cache?.dispatch["run-tool"]?.slot.requestedModel, "override/model");
+	} finally {
+		await rm(repo.root, { recursive: true, force: true });
+	}
+});
+
+test("work_dispatch without overrides keeps the node's worker.model and sends no fallbackModels (#56)", async () => {
+	const repo = await fixture();
+	try {
+		const requests: DelegateDispatchRequest[] = [];
+		const tool = createWorkDispatchTool({
+			clientProvider: async () => ({
+				status: "available",
+				grammar: "canonical",
+				client: {
+					async dispatch(request) {
+						requests.push(request);
+						const slot = "runs" in request ? request.runs[0] : request;
+						const bytes = await readFile(slot.reads[0]);
+						return receipt(request, createHash("sha256").update(bytes).digest("hex"));
+					},
+				},
+			}),
+		});
+		await execute(tool, repo.root, repo.commit);
+		const request = requests[0]!;
+		assert.ok("runs" in request);
+		assert.equal(request.runs[0].model, "test/model");
+		assert.equal("fallbackModels" in request.runs[0], false);
+	} finally {
+		await rm(repo.root, { recursive: true, force: true });
+	}
 });

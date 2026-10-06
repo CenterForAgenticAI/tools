@@ -1,0 +1,55 @@
+title: Gated decisions
+description: Decision gate fixture.
+intent: Scope open decisions to the nodes they gate.
+open_decisions:
+  - id: D1
+    question: Which format does B emit?
+    tripwire: Before B is dispatched.
+    decides: user
+    gates: [B]
+work:
+  - id: A
+    task: Build A
+    acceptance:
+      - id: a-pass
+        statement: A is green
+        evidence:
+          kind: command
+          run: printf a
+          expect:
+            exit: 0
+            output_includes: a
+  - id: B
+    task: Build B
+    acceptance:
+      - id: b-pass
+        statement: B is green
+        evidence:
+          kind: command
+          run: printf b
+          expect:
+            exit: 0
+            output_includes: b
+  - id: C
+    task: Use B
+    depends_on: [B]
+    acceptance:
+      - id: c-pass
+        statement: C is green
+        evidence:
+          kind: command
+          run: printf c
+          expect:
+            exit: 0
+            output_includes: c
+  - id: D
+    task: Build D
+    acceptance:
+      - id: d-pass
+        statement: D is green
+        evidence:
+          kind: command
+          run: printf d
+          expect:
+            exit: 0
+            output_includes: d

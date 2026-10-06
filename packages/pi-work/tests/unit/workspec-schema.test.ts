@@ -180,3 +180,21 @@ test("structural validity is distinct from semantic validity", () => {
 	if (!semanticErrors.structuralValid) throw new Error("expected a valid structure");
 	assert.equal(semanticErrors.spec.work[0].id, "a");
 });
+
+test("open decision gates are an optional non-empty unique list of top-level node ids", () => {
+	const source = (gates: string): string => withDraftLineage(`title: T\ndescription: D\nintent: I\nopen_decisions:\n  - id: D1\n    question: Q?\n    tripwire: T\n    decides: user\n${gates}work:\n  - id: A\n    task: A\n    acceptance:\n      - id: A\n        statement: A is green\n        evidence:\n          kind: command\n          run: printf a\n          expect:\n            exit: 0\n            output_includes: a\n  - id: B\n    task: B\n    acceptance:\n      - id: B\n        statement: B is green\n        evidence:\n          kind: command\n          run: printf b\n          expect:\n            exit: 0\n            output_includes: b\n`);
+	assert.deepEqual(validateWorkspec(source("")).findings, []);
+	assert.deepEqual(validateWorkspec(source("    gates: [B]\n")).findings, []);
+	assert.deepEqual(validateWorkspec(source("    gates: [A, B]\n")).findings, []);
+	for (const gates of ["[]", "[B, B]", "['']", "[1]", "B"]) {
+		const result = validateWorkspec(source(`    gates: ${gates}\n`));
+		assert.equal(result.valid, false, gates);
+		assert.ok(result.findings.some((finding) => finding.code === "schema-invalid" && finding.path.slice(0, 3).join(".") === "open_decisions.0.gates"), gates);
+	}
+	const unknown = validateWorkspec(source("    gates: [B, missing]\n"));
+	assert.equal(unknown.structuralValid, true);
+	assert.equal(unknown.valid, false);
+	assert.deepEqual(unknown.findings.map((finding) => [finding.code, finding.path.join(".")]), [["decision-gate-unresolved", "open_decisions.0.gates.1"]]);
+	const misplaced = validateWorkspec(source("    blocks: [B]\n"));
+	assert.ok(misplaced.findings.some((finding) => finding.code === "schema-additional-properties" && finding.path.join(".") === "open_decisions.0.blocks"));
+});

@@ -14,6 +14,7 @@ import { redactCommandFailure } from "../verify/output.js";
 import { captureEvidenceEnvironment } from "../verify/executable.js";
 import type { VerificationCacheUpdate, VerificationFailure, VerificationResult } from "../verify/results.js";
 import { resolveSpecPath } from "../verify/tree.js";
+import { boundedTextWithHint, staleLoadCheck, type StaleLoadCheck } from "../load-identity.js";
 import { confinedPath } from "./confined-path.js";
 
 const MAX_RENDERED_TEXT = 4000;
@@ -39,6 +40,8 @@ export interface WorkVerifyDetails {
 	cacheUpdate?: VerificationCacheUpdate;
 	cacheWrite?: StatusCacheVerificationWriteResult;
 	truncated: boolean;
+	/** Present when the pi-work on disk differs from the one this process loaded. */
+	restartHint?: string;
 }
 
 function render(details: WorkVerifyDetails): string {
@@ -53,11 +56,12 @@ function render(details: WorkVerifyDetails): string {
 	return lines.join("\n");
 }
 
-function resultPayload(details: WorkVerifyDetails): { content: [{ type: "text"; text: string }]; details: WorkVerifyDetails } {
-	const rendered = render(details);
-	if (rendered.length <= MAX_RENDERED_TEXT) return { content: [{ type: "text", text: rendered }], details };
-	details.truncated = true;
-	return { content: [{ type: "text", text: `${rendered.slice(0, MAX_RENDERED_TEXT - 24)}\n… output truncated` }], details };
+function payload(details: WorkVerifyDetails, loadCheck: StaleLoadCheck): { content: [{ type: "text"; text: string }]; details: WorkVerifyDetails } {
+	const restartHint = loadCheck.hint();
+	if (restartHint !== undefined) details.restartHint = restartHint;
+	const bounded = boundedTextWithHint(render(details), MAX_RENDERED_TEXT, restartHint);
+	if (bounded.truncated) details.truncated = true;
+	return { content: [{ type: "text", text: bounded.text }], details };
 }
 
 function locateNode(nodes: readonly import("../schema/workspec.js").WorkNode[], id: string, parent: readonly string[] = []): { node: import("../schema/workspec.js").WorkNode; address: string[] } | undefined {
@@ -81,7 +85,14 @@ function failureDetails(params: { path: string; nodeId: string; worktreePath: st
 	return { path: params.path, nodeId: params.nodeId, worktreePath: params.worktreePath, expectedCommit: params.expectedCommit, outcome: "failed", findings, failures, truncated: false };
 }
 
-export function createWorkVerifyTool() {
+export interface WorkVerifyToolOptions {
+	/** Defaults to the check for the pi-work copy this process loaded. */
+	readonly loadCheck?: StaleLoadCheck;
+}
+
+export function createWorkVerifyTool(options: WorkVerifyToolOptions = {}) {
+	const loadCheck = options.loadCheck ?? staleLoadCheck;
+	const resultPayload = (details: WorkVerifyDetails) => payload(details, loadCheck);
 	return defineTool({
 		name: "work_verify",
 		label: "Verify work node",

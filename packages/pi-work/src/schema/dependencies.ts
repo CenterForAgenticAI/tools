@@ -1,5 +1,5 @@
 import type { FindingPath, SemanticFinding } from "./findings.js";
-import type { AcceptanceCriterion, WorkNode, Workspec } from "./workspec.js";
+import type { AcceptanceCriterion, OpenDecision, WorkNode, Workspec } from "./workspec.js";
 
 function at(path: FindingPath, segment: string | number): FindingPath {
 	return [...path, segment];
@@ -59,7 +59,25 @@ export function validateDependencies(spec: Workspec): SemanticFinding[] {
 		}
 	}
 	visitScope(spec.work, ["work"]);
+	validateDecisionGates(spec, findings);
 	return findings;
+}
+
+/**
+ * Gates name top-level node ids. Open decisions live at the spec root, so the
+ * top-level nodes are their sibling scope, the same scope rule depends_on uses.
+ * Gating a composite covers its whole subtree.
+ */
+function validateDecisionGates(spec: Workspec, findings: SemanticFinding[]): void {
+	const topLevel = new Set(spec.work.map(nodeId));
+	const decisions = spec.open_decisions ?? [];
+	for (let decisionIndex = 0; decisionIndex < decisions.length; decisionIndex++) {
+		const gates = decisions[decisionIndex].gates ?? [];
+		for (let gateIndex = 0; gateIndex < gates.length; gateIndex++) {
+			const gate = gates[gateIndex];
+			if (!topLevel.has(gate)) findings.push({ code: "decision-gate-unresolved", severity: "error", path: ["open_decisions", decisionIndex, "gates", gateIndex], gate });
+		}
+	}
 }
 
 function findCycles(graph: Map<string, string[]>, nodes: WorkNode[], scopePath: FindingPath, findings: SemanticFinding[]): void {
@@ -105,6 +123,16 @@ function findCycles(graph: Map<string, string[]>, nodes: WorkNode[], scopePath: 
 			relatedPaths: members.map((member) => paths.get(member) ?? scopePath),
 		});
 	}
+}
+
+/**
+ * The open decisions that apply to the node at `address`: every decision without
+ * gates, plus each decision whose gates name the node's top-level ancestor (or
+ * the node itself, when it is top-level).
+ */
+export function applicableOpenDecisions(spec: Workspec, address: readonly string[]): OpenDecision[] {
+	const root = address[0];
+	return (spec.open_decisions ?? []).filter((decision) => decision.gates === undefined || (root !== undefined && decision.gates.includes(root)));
 }
 
 export function isCompositeNode(node: WorkNode): node is WorkNode & { work: WorkNode[] } {

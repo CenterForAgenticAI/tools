@@ -8,7 +8,7 @@ import { redactCommandFailure, type InheritedValuesSnapshot } from "../verify/ou
 import { captureEvidenceEnvironment } from "../verify/executable.js";
 import { confinedPath } from "../tools/confined-path.js";
 import { addressKey } from "../plan/index.js";
-import { isCompositeNode } from "../schema/dependencies.js";
+import { applicableOpenDecisions, isCompositeNode } from "../schema/dependencies.js";
 import type { AcceptanceCriterion, WorkNode, Workspec } from "../schema/workspec.js";
 import { buildStatusGraph } from "./graph.js";
 import { classifyStatusCache, decodeStatusCache, readStatusCache, statusCachePath } from "./cache.js";
@@ -292,10 +292,11 @@ function deriveValidatedStatus(spec: Workspec, tree: TreeIdentity, context: Deri
 		const childrenSatisfied = !isComposite || childReports.every(({ report }) => report.lifecycle === "done");
 		const canBeDone = dependencyBlockers.length === 0 && blockers.every((blocker) => blocker.code !== "completion-contract") && directRequirementSatisfied && checklistSatisfied && childrenSatisfied && (!hasDirectRequirement || trusted !== undefined);
 		const hasBlockingPrerequisite = dependencyBlockers.length > 0 || childBlockers.length > 0 || blockers.some((blocker) => blocker.code === "completion-contract");
+		const decisionIds = applicableOpenDecisions(spec, address).map((decision) => decision.id);
 		let lifecycle: LifecycleState;
 		if (hasBlockingPrerequisite) lifecycle = "blocked";
-		else if (spec.open_decisions && spec.open_decisions.length > 0) {
-			blockers.push({ code: "open-decision", ids: spec.open_decisions.map((decision) => decision.id) });
+		else if (decisionIds.length > 0) {
+			blockers.push({ code: "open-decision", ids: decisionIds });
 			lifecycle = "needs-decision";
 		} else if (canBeDone && (!hasDirectRequirement || trusted === "passed")) lifecycle = "done";
 		else if (blockers.length > 0) lifecycle = "blocked";
@@ -316,7 +317,7 @@ function deriveValidatedStatus(spec: Workspec, tree: TreeIdentity, context: Deri
 		const qualification = containmentQualification(containment);
 		const renderedLifecycle = lifecycleText(lifecycle, {
 			blockers: lifecycle === "blocked" ? renderBlockers(blockers) : undefined,
-			decisions: lifecycle === "needs-decision" ? spec.open_decisions?.map((decision) => decision.id).join(", ") : undefined,
+			decisions: lifecycle === "needs-decision" ? decisionIds.join(", ") : undefined,
 		});
 		const result: NodeStatusReport = {
 			address: [...address],

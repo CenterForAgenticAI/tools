@@ -64,7 +64,15 @@ pi list          # pi-work must be listed under "Project packages"
 ```
 
 Extensions are resolved when the pi process starts. A session already running
-keeps its old set until pi restarts.
+keeps its old set until pi restarts. When the installed pi-work changes under a
+running process, `work_validate`, `work_status`, and `work_verify` end their
+output with `pi-work loaded <old>; installed is <new>. Restart pi to use it.`
+
+Identity checks accept only bounded version strings and full Git commit IDs.
+Malformed or unreadable metadata is unknown, so it cannot by itself trigger a
+restart hint. Each metadata read accepts only regular files up to 64 KiB; pipes
+and other special files are ignored without waiting for input. Tool output stays
+within its text limit even if a supplied hint is too long.
 
 ### Load it once without installing
 

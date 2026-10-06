@@ -6,6 +6,7 @@ import { Type } from "typebox";
 
 import { validateWorkspec, type Finding } from "../schema/index.js";
 import { errorCount, renderFinding, warningCount } from "../schema/findings.js";
+import { boundedTextWithHint, staleLoadCheck, type StaleLoadCheck } from "../load-identity.js";
 import { confinedPath } from "./confined-path.js";
 
 const MAX_RENDERED_TEXT = 4000;
@@ -17,64 +18,80 @@ export interface WorkValidateDetails {
 	warningCount: number;
 	findings: Finding[];
 	truncated: boolean;
+	/** Present when the pi-work on disk differs from the one this process loaded. */
+	restartHint?: string;
 }
 
-export const workValidateTool = defineTool({
-	name: "work_validate",
-	label: "Validate workspec",
-	description: "Parse and strictly validate a Workspec v2 YAML file.",
-	parameters: Type.Object({ path: Type.String() }, { additionalProperties: false }),
-	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-		const pathInput = confinedPath(params.path, "path", "working-directory");
-		if (!pathInput.ok) {
-			const details: WorkValidateDetails = {
-				path: params.path,
-				valid: false,
-				errorCount: 1,
-				warningCount: 0,
-				findings: [pathInput.finding],
-				truncated: false,
-			};
-			return { content: [{ type: "text", text: renderFindings(details) }], details };
-		}
-		const filePath = path.resolve(ctx.cwd, pathInput.relativePath);
-		let source: string;
-		try {
-			source = await readFile(filePath, "utf8");
-		} catch (error) {
-			const finding: Finding = {
-				code: "read-error",
-				severity: "error",
-				path: ["path"],
-				message: error instanceof Error ? error.message : String(error),
-			};
+export interface WorkValidateToolOptions {
+	/** Defaults to the check for the pi-work copy this process loaded. */
+	readonly loadCheck?: StaleLoadCheck;
+}
+
+export function createWorkValidateTool(options: WorkValidateToolOptions = {}) {
+	const loadCheck = options.loadCheck ?? staleLoadCheck;
+	const respond = (details: WorkValidateDetails) => response(details, loadCheck);
+	return defineTool({
+		name: "work_validate",
+		label: "Validate workspec",
+		description: "Parse and strictly validate a Workspec v2 YAML file.",
+		parameters: Type.Object({ path: Type.String() }, { additionalProperties: false }),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const pathInput = confinedPath(params.path, "path", "working-directory");
+			if (!pathInput.ok) {
+				const details: WorkValidateDetails = {
+					path: params.path,
+					valid: false,
+					errorCount: 1,
+					warningCount: 0,
+					findings: [pathInput.finding],
+					truncated: false,
+				};
+				return respond(details);
+			}
+			const filePath = path.resolve(ctx.cwd, pathInput.relativePath);
+			let source: string;
+			try {
+				source = await readFile(filePath, "utf8");
+			} catch (error) {
+				const finding: Finding = {
+					code: "read-error",
+					severity: "error",
+					path: ["path"],
+					message: error instanceof Error ? error.message : String(error),
+				};
+				const details: WorkValidateDetails = {
+					path: filePath,
+					valid: false,
+					errorCount: 1,
+					warningCount: 0,
+					findings: [finding],
+					truncated: false,
+				};
+				return respond(details);
+			}
+			const result = validateWorkspec(source, { specPath: filePath, cwd: ctx.cwd });
 			const details: WorkValidateDetails = {
 				path: filePath,
-				valid: false,
-				errorCount: 1,
-				warningCount: 0,
-				findings: [finding],
+				valid: result.valid,
+				errorCount: errorCount(result.findings),
+				warningCount: warningCount(result.findings),
+				findings: result.findings,
 				truncated: false,
 			};
-			return { content: [{ type: "text", text: renderFindings(details) }], details };
-		}
-		const result = validateWorkspec(source, { specPath: filePath, cwd: ctx.cwd });
-		const details: WorkValidateDetails = {
-			path: filePath,
-			valid: result.valid,
-			errorCount: errorCount(result.findings),
-			warningCount: warningCount(result.findings),
-			findings: result.findings,
-			truncated: false,
-		};
-		const rendered = renderFindings(details);
-		if (rendered.length > MAX_RENDERED_TEXT) {
-			details.truncated = true;
-			return { content: [{ type: "text", text: `${rendered.slice(0, MAX_RENDERED_TEXT - 24)}\n… output truncated` }], details };
-		}
-		return { content: [{ type: "text", text: rendered }], details };
-	},
-});
+			return respond(details);
+		},
+	});
+}
+
+export const workValidateTool = createWorkValidateTool();
+
+function response(details: WorkValidateDetails, loadCheck: StaleLoadCheck): { content: [{ type: "text"; text: string }]; details: WorkValidateDetails } {
+	const restartHint = loadCheck.hint();
+	if (restartHint !== undefined) details.restartHint = restartHint;
+	const bounded = boundedTextWithHint(renderFindings(details), MAX_RENDERED_TEXT, restartHint);
+	if (bounded.truncated) details.truncated = true;
+	return { content: [{ type: "text", text: bounded.text }], details };
+}
 
 function renderFindings(details: WorkValidateDetails): string {
 	const status = details.valid

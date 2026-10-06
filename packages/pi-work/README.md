@@ -73,7 +73,7 @@ one-run loading, and limiting which package resources load.
 | Tool | `work_validate` | Parse and validate a workspec; return typed findings and advisory lints. |
 | Tool | `work_promote` | Promote a Markdown draft to a YAML workspec while preserving criteria. |
 | Tool | `work_amend_criterion` | Change one criterion through an append-only recorded amendment. |
-| Tool | `work_status` | Derive each node as done, ready, blocked, or needing a decision. |
+| Tool | `work_status` | Derive each node as done, ready, blocked, or needing a decision. An open decision with `gates` prevents planning and dispatch of the named top-level nodes and their subtrees; one without `gates` blocks every node. An applicable decision makes a node `needs-decision` unless another prerequisite already makes it `blocked`. |
 | Tool | `work_plan` | Compile ready node addresses into plans that point to stored worker briefs, without dispatching. |
 | Tool | `work_dispatch` | Compile and submit exactly one node through pi-delegate, or return the plan without claiming dispatch occurred. |
 | Tool | `work_verify` | Verify a node's declared evidence in a named Git tree. |
