@@ -170,6 +170,32 @@ The staged example manifest uses these real commands (the Rust manifest points i
 
 Adapt `conform.json` to the languages installed in your project. Package tests require TypeScript, Go and Python; Rust is skipped with a reason only when Cargo is absent. Tests also change the real code to prove drift rejects, and substitute a wrongly retyped oracle/model to prove the broken-model control rejects.
 
+## Fabric provider
+
+pi-intent depends on pi-fabric (a peer dependency, `>=0.108.1`, which itself needs Node 24 or later; the kit scripts alone need only Node 22.19). The extension registers the component `pi-intent`, which mounts the provider `intent`. Agents call it inside `fabric_exec` instead of running the scripts and parsing text.
+
+Fabric mounts a component when an instance is configured. Add one to the project's `.pi/fabric.json` (trusted projects only) or to the global `~/.pi/agent/fabric.json`:
+
+```json
+{ "components": [{ "id": "intent", "component": "pi-intent" }] }
+```
+
+| Action | Risk | Runs |
+| --- | --- | --- |
+| `intent.check({ repoDir? })` | execute | the repository's `.intent/tools/intent-check.mjs` |
+| `intent.gate({ repoDir? })` | execute | `intent-gate.mjs` (Bend proofs and negative controls) |
+| `intent.conform({ repoDir?, requireCoverage? })` | execute | `intent-conform.mjs` (runs the oracles) |
+| `intent.receipt({ repoDir?, recordId, model })` | network | `intent-receipt.mjs` (spends on Jev, writes the receipt) |
+
+Each action returns `{ action, verdict, exitCode, message, output, truncated }`. `verdict` is `pass` for exit 0, `reject` for exit 1 and `unavailable` for exit 2, a timeout or any other failure; `message` is the last line of output (capped at 500 characters) and `output` keeps the last 16 KB.
+
+- **The provider offers no approve action.** Nothing in it writes `approved-by` or `laws.sha256`, and an agent or delegate that declares `requires: ["intent.check", "intent.gate"]` cannot call `intent.receipt`. This is not a sandbox: the actions run the repository's own scripts, which are trusted code. Such a script can write any file, run programs outside the session cwd (conformance manifests name arbitrary commands) and read the whole environment the session passes on. Treat a call as running that repository's code; use a repository you trust, or run the session in a real sandbox.
+- **The repository's own kit runs**, so the provider checks what CI checks. The scripts run with `node`, an argv array and no shell, in their own process group: a timeout, a cancel, output over 4 MiB or the script exiting ends every member of that group. A descendant that starts its own group or session is outside this guarantee, and the provider needs POSIX process groups, so it reports `unavailable` on Windows. `check` is classed `execute`, not `read`, because it runs repository code. Caller fields other than the declared ones are ignored.
+- **A linked script is refused.** The kit entry point exits 0 without running when it is started through a link, so the provider reports `unavailable` for a linked `intent-<action>.mjs` rather than a pass.
+- **`repoDir` must stay inside the session cwd**, links included. The check happens before the run, not during it: someone who can write inside the repository while a call runs can swap the script, which they could already do by editing it. Fabric's `context.scope` is not intersected with it.
+- **Missing kit:** a repository without `.intent/tools/intent-<action>.mjs` gets `unavailable` and a hint to run `pi-intent vendor`.
+- The kit itself still needs only Node, so adopters' CI runs the same scripts with no pi packages and no network.
+
 ## Package agents
 
 pi-delegate discovers these shipped agents through `pi-delegate.agents` in the package manifest:

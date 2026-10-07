@@ -767,7 +767,8 @@ test('CLI exit codes distinguish rejection and input gaps; no live Jev is called
   assert.equal(command('kit/intent-check.mjs', dir, ['--bogus']).status, 2);
   const judge = command('kit/intent-receipt.mjs', dir, ['0001-transitions', 'fixture/fake']);
   assert.equal(judge.status, 2, judge.stderr);
-  assert.match(judge.stderr, /install.*pi-fabric/);
+  // Without pi-fabric beside the project the producer asks for it; with pi-fabric installed (a devDependency here) Jev itself refuses the fake model before any request is sent.
+  assert.match(judge.stderr, /install.*pi-fabric|Invalid Jev request/);
   assert.equal(command('bin/pi-intent.mjs', dir).status, 2);
   const missing = command('kit/intent-check.mjs', join(dir, 'missing'));
   assert.equal(missing.status, 2);

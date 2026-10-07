@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0
+
+- Feature: pi-intent is a pi-fabric component and provider (issue #6). `pi-fabric` (>=0.108.1) is now a peer dependency. The extension registers the component `pi-intent`, which mounts the provider `intent` with typed actions `check`, `gate`, `conform` (execute) and `receipt` (network, spends on Jev). They run the repository's vendored kit scripts as subprocesses and return `{ verdict, exitCode, message, output, truncated }`. The provider offers no approve action (it is not a sandbox: the actions run the repository's own scripts, which are trusted code). A linked script is refused, a timeout, cancel, output overflow or the script exiting ends the whole process group (POSIX only; Windows reports unavailable), and `message` is capped at 500 characters. `repoDir` is confined to the session cwd. Configure an instance with `{ "components": [{ "id": "intent", "component": "pi-intent" }] }` in `.pi/fabric.json` (trusted project) or `~/.pi/agent/fabric.json`; pi-fabric needs Node 24 or later. The kit scripts stay zero-dependency Node for adopters' CI.
+
 ## 0.5.0
 
 - Docs: the Bend version notes (README, SPEC, REFERENCE, AGENTS, `kit/Lib.bend`) now name Bend 2.0.35, the version actually tested. `--verdict` still fails on `kit/Lib.bend` there, for the same reason as on 2.0.34: Bend's kernel recheck rejects a proof that applies a template (`~`) function hypothesis (for example `for ~inj: @a: A -> @b: A -> {a==b:A}` with a body that applies `inj(x, y)`), which `--check-only` accepts. Worth an upstream note; the gate stays on `--check-only` and reads Bend's output, not only its exit code (issue #4).

@@ -98,6 +98,8 @@ try {
 	console.log("agent smoke: packed manifest and frontmatter parsed; pi-delegate is a separately installed host package");
 	assert.deepEqual(manifest.bin, { "pi-intent": "./bin/pi-intent.mjs" });
 	assert.deepEqual(Object.keys(manifest.dependencies ?? {}), [], "pi-intent must not bundle or depend on other packages at runtime");
+	assert.ok(manifest.peerDependencies?.["pi-fabric"], "the extension declares pi-fabric as its host peer dependency");
+	assert.ok(!Object.keys(manifest.peerDependencies ?? {}).some((name) => name !== "pi-fabric" && !name.startsWith("@earendil-works/") && name !== "typebox"), "the extension depends on pi-fabric only, besides pi itself");
 
 	const installDirectory = join(temporaryDirectory, "install");
 	mkdirSync(installDirectory);
