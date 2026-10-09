@@ -38,6 +38,12 @@ export const WINDOW_SAMPLE_INTERVAL_MS = 15 * 60_000;
  */
 export const GAP_WINDOW_ID = "__gap__";
 export const USAGE_FETCH_TIMEOUT_MS = 10_000;
+/**
+ * How long close() waits for in-flight usage work at session shutdown. Pi
+ * awaits shutdown handlers, so this bounds how long a hung credential lookup or
+ * history lock can hold the session open.
+ */
+export const USAGE_FETCH_CLOSE_DRAIN_MS = 2_000;
 const MAX_RESPONSE_BYTES = 128 * 1024;
 const MAX_ERROR_CHARS = 512;
 const BASE_BACKOFF_MS = 30_000;
@@ -122,7 +128,13 @@ export type UsageFetchResultStatus =
 	 * `api_key` account, #24). Unmeasured, not a failure: no OAuth call is made,
 	 * the failure ladder does not advance, and the account is not disabled.
 	 */
-	| "not-supported";
+	| "not-supported"
+	/**
+	 * The fetcher was closed at session shutdown (#188). Nothing was written for
+	 * this account, and the failure ladder did not advance: stopping is not an
+	 * endpoint failure.
+	 */
+	| "stopped";
 
 export interface UsageFetchResult {
 	readonly providerId: string;
@@ -579,9 +591,15 @@ async function fetchWithTimeout(
 	url: string,
 	init: RequestInit,
 	timeoutMs: number,
+	stop?: AbortSignal,
 ): Promise<UsageFetchResponse> {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
+	// Closing the fetcher aborts the call too, so shutdown does not wait out
+	// the full timeout for an answer nothing will record.
+	const onStop = (): void => controller.abort();
+	stop?.addEventListener("abort", onStop, { once: true });
+	if (stop?.aborted === true) controller.abort();
 	try {
 		return await fetchImpl(url, { ...init, signal: controller.signal });
 	} catch (error) {
@@ -597,6 +615,7 @@ async function fetchWithTimeout(
 		);
 	} finally {
 		clearTimeout(timeout);
+		stop?.removeEventListener("abort", onStop);
 	}
 }
 
@@ -605,6 +624,7 @@ async function queryEndpoint(
 	access: string,
 	fetchImpl: UsageFetchImplementation,
 	timeoutMs: number,
+	stop?: AbortSignal,
 ): Promise<UsageReading> {
 	const headers: Record<string, string> =
 		account.family === "openai-codex"
@@ -620,6 +640,7 @@ async function queryEndpoint(
 		url,
 		{ headers },
 		timeoutMs,
+		stop,
 	);
 	if (response.status < 200 || response.status >= 300) {
 		const body = await response.text().catch(() => "");
@@ -781,6 +802,12 @@ export class UsageFetcher {
 		{ readonly promise: Promise<unknown>; readonly controller: AbortController }
 	>();
 	readonly #lastWindowGapAtMs = new Map<string, number>();
+	readonly #closeDrainMs: number;
+	/** Aborted by close(); in-flight endpoint calls listen to it. */
+	readonly #stopController = new AbortController();
+	/** Public operations still running, so close() can wait for them. */
+	readonly #active = new Set<Promise<unknown>>();
+	#closed = false;
 
 	constructor(options: {
 		readonly lockPath: string;
@@ -795,6 +822,8 @@ export class UsageFetcher {
 		readonly timeoutMs?: number;
 		readonly onUsageRecorded?: (providerId: string) => void;
 		readonly windowHistoryOptions?: WindowHistoryWriteOptions;
+		/** Test seam; production uses USAGE_FETCH_CLOSE_DRAIN_MS. */
+		readonly closeDrainMs?: number;
 	}) {
 		this.#lockPath = options.lockPath;
 		this.#usage = options.usage;
@@ -827,6 +856,61 @@ export class UsageFetcher {
 		this.#timeoutMs = options.timeoutMs ?? USAGE_FETCH_TIMEOUT_MS;
 		this.#onUsageRecorded = options.onUsageRecorded;
 		this.#windowHistoryOptions = options.windowHistoryOptions;
+		this.#closeDrainMs = options.closeDrainMs ?? USAGE_FETCH_CLOSE_DRAIN_MS;
+	}
+
+	/**
+	 * Stops background usage work at session shutdown (#188).
+	 *
+	 * Pi starts usage fetches detached, so one can still be running when the
+	 * session shuts down. It used to carry on writing: the next account's
+	 * reservation, the reading, the window samples. Those writes went wherever
+	 * the store pointed, and in tests that recreated a temp root the test had
+	 * already removed.
+	 *
+	 * After close, no new attempt starts, an in-flight endpoint call is
+	 * aborted (an Antigravity call the same way its deadline aborts it, lease
+	 * held until it settles), and each write point returns `stopped` instead of
+	 * writing. A
+	 * shutdown abort is not an endpoint failure, so it never advances the
+	 * failure ladder. close() then waits for in-flight work to reach one of
+	 * those points, but no longer than the drain bound: a hung credential
+	 * lookup or history lock must not hold Pi's shutdown open. Work still
+	 * running past the bound can finish one write it had already started.
+	 */
+	async close(): Promise<void> {
+		this.#closed = true;
+		this.#stopController.abort();
+		const active = [...this.#active];
+		if (active.length === 0) return;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<void>((resolve) => {
+			timer = setTimeout(resolve, this.#closeDrainMs);
+			timer.unref?.();
+		});
+		try {
+			await Promise.race([Promise.allSettled(active), deadline]);
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	#track<T>(operation: Promise<T>): Promise<T> {
+		this.#active.add(operation);
+		void operation
+			.finally(() => this.#active.delete(operation))
+			.catch(() => undefined);
+		return operation;
+	}
+
+	#stopped(account: UsageFetchAccount): UsageFetchResult {
+		return { providerId: account.providerId, status: "stopped" };
+	}
+
+	/** Every shared-store write goes through here, so none can follow close(). */
+	#append(record: Parameters<SharedUsageStore["append"]>[0]): boolean {
+		if (this.#closed) return false;
+		return this.#sharedStore.append(record);
 	}
 
 	#notifyUsageRecorded(providerId: string): void {
@@ -858,6 +942,7 @@ export class UsageFetcher {
 		recordedAtMs: number,
 		reason: string,
 	): Promise<void> {
+		if (this.#closed) return;
 		const key = this.#accountKey(account);
 		const previous = this.#lastWindowGapAtMs.get(key);
 		if (
@@ -889,6 +974,7 @@ export class UsageFetcher {
 	): Promise<boolean> {
 		let persisted = true;
 		for (const window of reading.windows) {
+			if (this.#closed) return false;
 			const baseSample = {
 				providerId: account.providerId,
 				accountId: account.providerId,
@@ -936,7 +1022,8 @@ export class UsageFetcher {
 		account: UsageFetchAccount,
 		config: MultiAccountConfig,
 	): Promise<UsageFetchResult> {
-		return this.#fetchAccount(account, config, false);
+		if (this.#closed) return this.#stopped(account);
+		return this.#track(this.#fetchAccount(account, config, false));
 	}
 
 	/**
@@ -963,7 +1050,10 @@ export class UsageFetcher {
 		// the same tick joins this refresh rather than starting its own.
 		const inFlight = this.#inFlightFailureRefresh.get(key);
 		if (inFlight !== undefined) return inFlight;
-		const pending = this.#refreshAfterFailure(account, config, failedAtMs);
+		if (this.#closed) return this.#stopped(account);
+		const pending = this.#track(
+			this.#refreshAfterFailure(account, config, failedAtMs),
+		);
 		this.#inFlightFailureRefresh.set(key, pending);
 		try {
 			return await pending;
@@ -1043,6 +1133,7 @@ export class UsageFetcher {
 		config: MultiAccountConfig,
 		failedAtMs: number,
 	): Promise<UsageFetchResult> {
+		if (this.#closed) return this.#stopped(account);
 		if (!isCanonicalManagedProviderId(account.providerId, account.family)) {
 			return { providerId: account.providerId, status: "failed" };
 		}
@@ -1106,7 +1197,7 @@ export class UsageFetcher {
 			// an unbounded call with no durable backoff state is how a stampede
 			// starts.
 			const attemptedAtMs = this.#now();
-			const reserved = this.#sharedStore.append({
+			const reserved = this.#append({
 				recordType: "usage-attempt",
 				tokens: null,
 				providerId: account.providerId,
@@ -1157,6 +1248,7 @@ export class UsageFetcher {
 		config: MultiAccountConfig,
 		bypassHeaderFreshness: boolean,
 	): Promise<UsageFetchResult> {
+		if (this.#closed) return this.#stopped(account);
 		if (!isCanonicalManagedProviderId(account.providerId, account.family)) {
 			return { providerId: account.providerId, status: "failed" };
 		}
@@ -1253,7 +1345,7 @@ export class UsageFetcher {
 				};
 			}
 			const attemptedAtMs = this.#now();
-			const reserved = this.#sharedStore.append({
+			const reserved = this.#append({
 				recordType: "usage-attempt",
 				tokens: null,
 				providerId: account.providerId,
@@ -1387,11 +1479,12 @@ export class UsageFetcher {
 
 	/**
 	 * Races the shared in-flight raw fetch against this attempt's bounded
-	 * deadline. Losing that race calls `entry.controller.abort()`, so the abort
+	 * deadline and against close(). Losing either race calls
+	 * `entry.controller.abort()`, so the abort
 	 * this repository issues is exactly the abort the fork's own three legs
 	 * observe -- but this process still awaits that call's OWN settlement, not
 	 * merely the deadline, before releasing the machine-shared lease: hitting
-	 * the deadline hands lease ownership to `leaseGuard`, which
+	 * the deadline, or close(), hands lease ownership to `leaseGuard`, which
 	 * `#drainAntigravityLease` renews at the lease's own `renewalIntervalMs`
 	 * until the real promise actually settles, then releases. The caller's own
 	 * `finally { if (!leaseGuard.handedOff) lease.release(); }` becomes a no-op
@@ -1406,11 +1499,11 @@ export class UsageFetcher {
 		leaseGuard: AntigravityLeaseGuard,
 	): Promise<unknown> {
 		const entry = this.#antigravityRawFetch(account, apiKey);
-		let timedOut = false;
+		let abandoned = false;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const deadline = new Promise<never>((_resolve, reject) => {
 			timer = setTimeout(() => {
-				timedOut = true;
+				abandoned = true;
 				entry.controller.abort();
 				reject(
 					new UsageEndpointError(
@@ -1426,11 +1519,34 @@ export class UsageFetcher {
 		// `#antigravityRawFetch` already attached its own settle handler too, so
 		// this is belt-and-suspenders, not the only protection.
 		entry.promise.catch(() => {});
+		// close() gives up on the call the same way the deadline does (#188): it
+		// aborts the shared call and hands the lease to the drain, so shutdown
+		// does not wait up to a full deadline for an Antigravity poll. Like the
+		// deadline's abort, this also ends the call for any other instance that
+		// joined it.
+		const stop = this.#stopController.signal;
+		let onStop: (() => void) | undefined;
+		const stopped = new Promise<never>((_resolve, reject) => {
+			onStop = () => {
+				abandoned = true;
+				entry.controller.abort();
+				reject(
+					new UsageEndpointError(
+						"Antigravity usage fetch stopped at session shutdown",
+						"network-error",
+					),
+				);
+			};
+			if (stop.aborted) onStop();
+			else stop.addEventListener("abort", onStop, { once: true });
+		});
+		stopped.catch(() => {});
 		try {
-			return await Promise.race([entry.promise, deadline]);
+			return await Promise.race([entry.promise, deadline, stopped]);
 		} finally {
 			if (timer !== undefined) clearTimeout(timer);
-			if (timedOut) {
+			if (onStop !== undefined) stop.removeEventListener("abort", onStop);
+			if (abandoned) {
 				leaseGuard.handedOff = true;
 				this.#drainAntigravityLease(leaseGuard.lease, entry.promise);
 			}
@@ -1518,6 +1634,7 @@ export class UsageFetcher {
 	): Promise<UsageFetchResult> {
 		try {
 			const credential = await this.#resolveCredential(account.providerId);
+			if (this.#closed) return this.#stopped(account);
 			if (typeof credential !== "string" || credential.length === 0) {
 				throw new UsageEndpointError(
 					"credential unavailable",
@@ -1532,7 +1649,10 @@ export class UsageFetcher {
 							credential,
 							this.#fetchImpl,
 							this.#timeoutMs,
+							this.#stopController.signal,
 						);
+			// The ledger records through the shared store, so it is a write point too.
+			if (this.#closed) return this.#stopped(account);
 			const capturedAtMs = this.#now();
 			this.#usage.record({
 				providerId: account.providerId,
@@ -1548,7 +1668,7 @@ export class UsageFetcher {
 			});
 			this.#notifyUsageRecorded(account.providerId);
 			await this.#persistWindowSamples(account, reading, capturedAtMs);
-			this.#sharedStore.append({
+			this.#append({
 				recordType: "usage-attempt",
 				tokens: null,
 				providerId: account.providerId,
@@ -1567,6 +1687,9 @@ export class UsageFetcher {
 				capturedAtMs,
 			};
 		} catch (error) {
+			// A call aborted by close() did not fail; recording it would advance
+			// the ladder on every shutdown that caught a fetch in flight.
+			if (this.#closed) return this.#stopped(account);
 			const failure =
 				error instanceof UsageEndpointError
 					? error
@@ -1577,7 +1700,7 @@ export class UsageFetcher {
 				BASE_BACKOFF_MS * 2 ** Math.max(0, failureCount - 1),
 			);
 			const disabled = failureCount >= USAGE_FETCH_DISABLE_AFTER_FAILURES;
-			this.#sharedStore.append({
+			this.#append({
 				recordType: "usage-attempt",
 				tokens: null,
 				providerId: account.providerId,
@@ -1616,9 +1739,19 @@ export class UsageFetcher {
 		accounts: readonly UsageFetchAccount[],
 		config: MultiAccountConfig,
 	): Promise<readonly UsageFetchResult[]> {
+		if (this.#closed) return accounts.map((account) => this.#stopped(account));
+		return this.#track(this.#fetchAccounts(accounts, config));
+	}
+
+	async #fetchAccounts(
+		accounts: readonly UsageFetchAccount[],
+		config: MultiAccountConfig,
+	): Promise<readonly UsageFetchResult[]> {
 		const results: UsageFetchResult[] = [];
 		for (const account of accounts) {
-			const result = await this.fetchAccount(account, config);
+			// Accounts run in sequence, so a poll can outlive the session.
+			// #fetchAccount starts an account only while the fetcher is open.
+			const result = await this.#fetchAccount(account, config, false);
 			results.push(result);
 
 			// Window cadence is deliberately a call-driven comparison, not a timer.

@@ -17,6 +17,18 @@ export type EffectiveAccountGroupResolution =
 			readonly source: "unrestricted";
 	  };
 
+/**
+ * The operator's group policy is ambiguous for this session: two configured
+ * cwd defaults canonicalize to the same exact directory but name different
+ * groups. The store is not at fault, so this is reported as a policy cause.
+ */
+export class AccountGroupPolicyConflictError extends Error {
+	constructor() {
+		super("Conflicting account-group defaults canonicalize to the same exact cwd.");
+		this.name = "AccountGroupPolicyConflictError";
+	}
+}
+
 export type AccountGroupPolicyConfig = Pick<
 	MultiAccountConfig,
 	"accountGroupCwdDefaults" | "defaultAccountGroup"
@@ -61,9 +73,7 @@ export function resolveEffectiveAccountGroup(
 	)) {
 		if (canonicalizeAccountGroupCwd(configuredCwd) !== canonicalCwd) continue;
 		if (cwdDefault !== undefined && cwdDefault !== groupId) {
-			throw new Error(
-				"Conflicting account-group defaults canonicalize to the same exact cwd.",
-			);
+			throw new AccountGroupPolicyConflictError();
 		}
 		cwdDefault = groupId;
 	}

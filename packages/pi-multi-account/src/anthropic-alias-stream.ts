@@ -9,6 +9,11 @@ import {
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { projectResponseHeaders } from "./diagnostics.js";
+import {
+  readImageStripPolicy,
+  stripOldImages,
+  type ImageStripPolicyReader,
+} from "./image-strip.js";
 import { projectAliasAssistantEvent } from "./public-assistant-projection.js";
 
 export const ANTHROPIC_ALIAS_API = "hypha-anthropic-oauth" as const;
@@ -61,9 +66,15 @@ function reattributeStream(
  * complete options object (including apiKey) to upstream. Its only request-side
  * model change is a shallow clone with provider rebound to `anthropic`, which
  * keeps the exact upstream OAuth/Claude Code transport path active.
+ *
+ * `imageStripping` reads the operator's opt-in old-image policy for each
+ * request (src/image-strip.ts). Off or absent, the caller's context object is
+ * forwarded unchanged. Only alias requests pass through here, so the base
+ * `anthropic` provider never strips.
  */
 export function createAnthropicAliasStream(
   upstreamStream: AnthropicUpstreamStream,
+  imageStripping?: ImageStripPolicyReader,
 ): AnthropicUpstreamStream {
   return (aliasModel, context, options) => {
     const upstreamModel: Model<Api> = {
@@ -86,7 +97,11 @@ export function createAnthropicAliasStream(
     }
 
     return reattributeStream(
-      upstreamStream(upstreamModel, context, upstreamOptions),
+      upstreamStream(
+        upstreamModel,
+        stripOldImages(context, readImageStripPolicy(imageStripping)),
+        upstreamOptions,
+      ),
       aliasModel,
     );
   };

@@ -205,7 +205,7 @@ export function convertPiMessagesToAnthropic(
       toolResults.push({
         type: "tool_result",
         tool_use_id: firstId,
-        content: convertToolResultContentToAnthropic(message.content),
+        content: convertToolResultContentToAnthropic(message.content, message.isError),
         is_error: message.isError,
       });
       satisfiedIds.add(firstId);
@@ -217,7 +217,7 @@ export function convertPiMessagesToAnthropic(
         toolResults.push({
           type: "tool_result",
           tool_use_id: nextId,
-          content: convertToolResultContentToAnthropic(nextMessage.content),
+          content: convertToolResultContentToAnthropic(nextMessage.content, nextMessage.isError),
           is_error: nextMessage.isError,
         });
         satisfiedIds.add(nextId);
@@ -268,7 +268,10 @@ export function convertPiToolsToAnthropic(tools: Tool[], isOAuth: boolean): Tool
 
 function convertToolResultContentToAnthropic(
   content: (TextContent | ImageContent)[],
+  isError: boolean,
 ): string | ToolResultContentBlock[] {
+  if (isError) return convertErrorToolResultContentToAnthropic(content);
+
   const hasImages = content.some((block) => block.type === "image");
   if (!hasImages) {
     return sanitizeSurrogates(
@@ -300,4 +303,20 @@ function convertToolResultContentToAnthropic(
   }
 
   return blocks;
+}
+
+// Anthropic rejects an error tool_result that holds an image block or has empty
+// content. The whole history is resent on every request, so one such result
+// would fail every later turn. Send error results as text only.
+function convertErrorToolResultContentToAnthropic(content: (TextContent | ImageContent)[]): string {
+  const lines = content
+    .filter((block): block is TextContent => block.type === "text")
+    .map((block) => block.text);
+  const imageCount = content.filter((block) => block.type === "image").length;
+  if (imageCount > 0) {
+    const noun = imageCount === 1 ? "image" : "images";
+    lines.push(`(${imageCount} ${noun} omitted: an error tool result cannot carry images)`);
+  }
+  const text = sanitizeSurrogates(lines.join("\n"));
+  return text.trim().length > 0 ? text : "(tool error with no output)";
 }

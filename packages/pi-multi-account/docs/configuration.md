@@ -93,6 +93,7 @@ Key behavior:
 | `cooldownMaxMs` | `300000` | Maximum bounded cooldown. |
 | `preemptiveExpiryWindowMs` | `120000` | Prefer a fresher same-family credential before expiry. Set `0` to disable. |
 | `usageFetchEnabled` | all `true` | Enable fail-soft provider usage fetches by family. |
+| `imageStripping` | off | Stopgap: remove old images from `unified` and Anthropic alias requests. See [Removing old images (stopgap)](#removing-old-images-stopgap). |
 | `accountLabels` | `{}` | Operator display labels keyed by canonical provider ID. |
 | `projectLabels` | `{}` | Display labels keyed by `project-<24 hex>` digest. |
 | `monthlySubscriptionUsd` | `{}` | Legacy, retroactive monthly price for subscription-value reporting, kept readable for compatibility. Superseded by `accountRateHistory` (see `multi-account account set-plan`); reading or writing either field never converts, deletes, or migrates the other, and neither reporting surface sums them together. |
@@ -101,6 +102,44 @@ Key behavior:
 persisted config and rediscovers accounts and provider catalogs. A failed reload
 leaves the last valid in-memory config active and returns a sanitized command
 error.
+
+### Removing old images (stopgap)
+
+A session that collects many screenshots can exceed the provider's request limit
+on every turn. Context compression does not remove images for the `unified`
+model or for Anthropic aliases, because it chooses the payload format from the
+session model's API, and those APIs name no known format. Set
+`imageStripping` to remove old images from those requests:
+
+```json
+{
+  "imageStripping": { "enabled": true, "keepNewest": 8 }
+}
+```
+
+With `enabled: true`, each outgoing request keeps the images of the newest
+`keepNewest` messages that hold an image. In every older message, each run of
+image blocks becomes one text block, `[image removed to fit the request limit]`.
+This includes images in tool results. `keepNewest` is a whole number from `1`
+through `1000` and defaults to `8`. `enabled` is required.
+
+The policy applies to every `unified` attempt that routes to a numbered alias,
+whatever the account's family, and to every request sent to a numbered
+Anthropic alias (`anthropic-account-N`). Base providers (`anthropic`,
+`openai-codex`, `openai`, and `google-antigravity`) are never changed, whether a `unified` call routes to them or a
+request goes to them directly. Requests to other alias families and the session
+file are never changed either: only the request copy loses its
+images, so the model can no longer see them. With the setting absent or `enabled: false`,
+requests are unchanged. `/multi-account reload` applies a change to the next
+request.
+
+Each new image-bearing message moves the cutoff, so an older message changes and
+the provider's prompt cache misses from that point on that turn. Expect extra
+cache writes while the policy is on.
+
+This is a stopgap. It will be removed when pi-context-aware folds media itself.
+Removal will keep accepting and ignoring the key, because the first explicit
+config write materializes it with its default value.
 
 ### Configuring cross-family routing
 

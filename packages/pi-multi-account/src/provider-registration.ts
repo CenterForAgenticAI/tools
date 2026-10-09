@@ -62,6 +62,7 @@ import {
 import { MANAGED_FAMILIES, type ManagedFamily } from "./config.js";
 import { cloneProviderModelCatalog } from "./catalog-rebinding.js";
 import type { ModelSupportRegistry } from "./model-support.js";
+import type { ImageStripPolicyReader } from "./image-strip.js";
 import {
 	mergeRefreshedCredentials,
 	projectAntigravityOAuthCredential,
@@ -91,6 +92,8 @@ export interface ProviderRegistrationInput {
 	resolveLabel?: (providerId: string) => string;
 	/** Session-local model divergence used to prune known-unsupported aliases. */
 	modelSupport?: ModelSupportRegistry;
+	/** Live opt-in old-image policy for Anthropic aliases (src/image-strip.ts). */
+	imageStripping?: ImageStripPolicyReader;
 }
 
 export interface RegistrationRecord {
@@ -296,6 +299,7 @@ export function registerDiscoveredProviders(
 		config,
 		resolveLabel,
 		modelSupport,
+		imageStripping,
 	} = input;
 
 	const registered: RegistrationRecord[] = [];
@@ -443,6 +447,7 @@ export function registerDiscoveredProviders(
 					createAnthropicAliasProviderConfig(
 						anthropicCaptured,
 						modelsFor(slot.providerId, getAnthropicModels()),
+						imageStripping,
 					),
 					slot.providerId,
 					resolveLabel,

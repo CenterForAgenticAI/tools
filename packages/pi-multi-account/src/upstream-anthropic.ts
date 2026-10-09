@@ -13,6 +13,7 @@ import {
 } from "./anthropic-alias-stream.js";
 import { streamAnthropicAdaptive } from "./anthropic-adaptive-stream.js";
 import { toPinnedAnthropicContext } from "./anthropic-context-compat.js";
+import type { ImageStripPolicyReader } from "./image-strip.js";
 
 export type UpstreamAnthropicExtension = (pi: ExtensionAPI) => void;
 
@@ -233,6 +234,7 @@ export async function registerUpstreamAnthropicProvider(
   upstream?: UpstreamAnthropicExtension,
   adaptiveStream: AnthropicLegacyStream = streamAnthropicAdaptive,
   registerAliasApi: AliasApiRegistrar = registerAliasApiWithCompat,
+  imageStripping?: ImageStripPolicyReader,
 ): Promise<CapturedAnthropicProvider> {
   const extension = upstream ?? (await loadUpstreamAnthropicExtension());
   const captured = captureUpstreamAnthropicProvider(pi, extension);
@@ -254,7 +256,7 @@ export async function registerUpstreamAnthropicProvider(
     name: captured.name,
     config: adapted,
   };
-  registerAliasApi(createAnthropicAliasStream(streamSimple));
+  registerAliasApi(createAnthropicAliasStream(streamSimple, imageStripping));
   pi.registerProvider(derived.name, derived.config);
   return derived;
 }
@@ -292,6 +294,7 @@ export function reassertAnthropicBaseRegistration(
 export function createAnthropicAliasProviderConfig(
   captured: CapturedAnthropicProvider,
   models: readonly ProviderModelConfig[],
+  imageStripping?: ImageStripPolicyReader,
 ): ProviderConfig {
   if (models.length === 0) {
     throw new UpstreamAnthropicContractError(
@@ -306,7 +309,7 @@ export function createAnthropicAliasProviderConfig(
 
   const upstreamStream = captured.config.streamSimple as unknown as AnthropicUpstreamStream;
 
-  const aliasStream = createAnthropicAliasStream(upstreamStream) as unknown as NonNullable<
+  const aliasStream = createAnthropicAliasStream(upstreamStream, imageStripping) as unknown as NonNullable<
     ProviderConfig["streamSimple"]
   >;
 

@@ -140,11 +140,35 @@ export function providerErrorCodeFromMessage(
 	}
 	// Provider error envelopes are small. Refuse oversized/unbounded diagnostic
 	// strings rather than parsing arbitrary assistant output.
-	if (errorMessage.length > 4_096) return undefined;
+	if (errorMessage.length > MAX_ENVELOPE_MESSAGE_LENGTH) return undefined;
 
 	if (CODEX_QUOTA_EXHAUSTED_MESSAGES.has(errorMessage.trim())) {
 		return "quota_exhausted";
 	}
+
+	const providerType = providerErrorEnvelopeType(errorMessage);
+	// The type is provider-supplied. An own-property lookup keeps an inherited
+	// name such as `constructor` or `__proto__` from resolving to a function or
+	// object and flowing on as a code.
+	return providerType !== undefined &&
+		Object.hasOwn(STRUCTURED_PROVIDER_ERROR_CODES, providerType)
+		? STRUCTURED_PROVIDER_ERROR_CODES[providerType]
+		: undefined;
+}
+
+const MAX_ENVELOPE_MESSAGE_LENGTH = 4_096;
+
+/**
+ * Parses the provider error envelope described above and returns its raw
+ * `error.type` string, or `undefined` when the message carries no envelope.
+ * The result is provider-supplied: callers must match it against a closed
+ * list before keeping it.
+ */
+function providerErrorEnvelopeType(errorMessage: unknown): string | undefined {
+	if (typeof errorMessage !== "string" || errorMessage.length === 0) {
+		return undefined;
+	}
+	if (errorMessage.length > MAX_ENVELOPE_MESSAGE_LENGTH) return undefined;
 
 	const envelopeStart = errorMessage.indexOf("{");
 	if (envelopeStart < 0) return undefined;
@@ -161,8 +185,197 @@ export function providerErrorCodeFromMessage(
 		return undefined;
 	}
 	const providerType = (envelope.error as Record<string, unknown>).type;
-	if (typeof providerType !== "string") return undefined;
-	return STRUCTURED_PROVIDER_ERROR_CODES[providerType];
+	return typeof providerType === "string" ? providerType : undefined;
+}
+
+/**
+ * Anthropic error types kept as failure evidence. A closed list: a type the
+ * provider invents, or one that merely resembles these, is dropped.
+ */
+export const ANTHROPIC_ERROR_TYPES = [
+	"invalid_request_error",
+	"authentication_error",
+	"billing_error",
+	"permission_error",
+	"not_found_error",
+	"rate_limit_error",
+	"timeout_error",
+	"api_error",
+	"overloaded_error",
+] as const;
+
+export type AnthropicErrorType = (typeof ANTHROPIC_ERROR_TYPES)[number];
+
+const ANTHROPIC_ERROR_TYPE_SET: ReadonlySet<string> = new Set(
+	ANTHROPIC_ERROR_TYPES,
+);
+
+/**
+ * Projects a provider error envelope onto the closed Anthropic error-type
+ * list, with the same envelope rules as `providerErrorCodeFromMessage`. The
+ * routing code map is deliberately not reused: it only holds the types that
+ * route, and evidence needs the types that do not (`api_error`,
+ * `timeout_error`, `billing_error`).
+ */
+export function providerErrorTypeFromMessage(
+	errorMessage: unknown,
+): AnthropicErrorType | undefined {
+	const providerType = providerErrorEnvelopeType(errorMessage);
+	return providerType !== undefined && ANTHROPIC_ERROR_TYPE_SET.has(providerType)
+		? (providerType as AnthropicErrorType)
+		: undefined;
+}
+
+/**
+ * Upstream failures that arrive as fixed strings with no envelope. pi-ai
+ * throws the first from a stream that ends without a stop reason; the Anthropic
+ * SDK produces the other two. Exact match only: arbitrary provider prose never
+ * becomes evidence.
+ */
+const UPSTREAM_FAILURE_MESSAGES = Object.freeze({
+	"Anthropic stream ended without a stop reason": "no-stop-reason",
+	"Connection error.": "connection-error",
+	"Request timed out.": "request-timeout",
+} as const);
+
+export type UpstreamFailureKind =
+	(typeof UPSTREAM_FAILURE_MESSAGES)[keyof typeof UPSTREAM_FAILURE_MESSAGES];
+
+export function upstreamFailureKindFromMessage(
+	errorMessage: unknown,
+): UpstreamFailureKind | undefined {
+	if (typeof errorMessage !== "string") return undefined;
+	if (errorMessage.length > MAX_ENVELOPE_MESSAGE_LENGTH) return undefined;
+	const text = errorMessage.trim();
+	return Object.hasOwn(UPSTREAM_FAILURE_MESSAGES, text)
+		? UPSTREAM_FAILURE_MESSAGES[text as keyof typeof UPSTREAM_FAILURE_MESSAGES]
+		: undefined;
+}
+
+/**
+ * Closed sub-reasons for a detected context overflow. They name which limit
+ * the provider reported, so an operator knows whether to shorten the text or
+ * drop media. `unknown` means the structured facts did not say.
+ */
+export const CONTEXT_OVERFLOW_REASONS = [
+	"input-tokens",
+	"request-bytes",
+	"media-limit",
+	"unknown",
+] as const;
+
+export type ContextOverflowReason = (typeof CONTEXT_OVERFLOW_REASONS)[number];
+
+/**
+ * Structured provider codes and envelope types that name an overflow limit.
+ * `request_too_large` is Anthropic's HTTP 413 envelope type for the request
+ * byte limit; the others are OpenAI error codes.
+ */
+const OVERFLOW_REASON_BY_CODE: Readonly<Record<string, ContextOverflowReason>> =
+	Object.freeze({
+		request_too_large: "request-bytes",
+		context_length_exceeded: "input-tokens",
+		image_too_large: "media-limit",
+		image_file_too_large: "media-limit",
+	});
+
+function overflowReasonForCode(code: unknown): ContextOverflowReason | undefined {
+	return typeof code === "string" && Object.hasOwn(OVERFLOW_REASON_BY_CODE, code)
+		? OVERFLOW_REASON_BY_CODE[code]
+		: undefined;
+}
+
+function boundedStatus(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599
+		? value
+		: undefined;
+}
+
+/**
+ * The HTTP status Pi writes directly before a provider error body, as in
+ * `413 {...}`, `413: {...}` or `Retry failed after 3 attempts: 413 {...}`.
+ * Only Pi's own framing before the first `{` is read, and the caller uses it
+ * only when a provider error body follows.
+ */
+function errorBodyStatusPrefix(text: string): number | undefined {
+	const bodyStart = text.indexOf("{");
+	if (bodyStart < 0) return undefined;
+	const match = /(?:^|[\s:])([1-5]\d\d):? $/.exec(text.slice(0, bodyStart));
+	return match?.[1] === undefined ? undefined : Number(match[1]);
+}
+
+interface OverflowErrorBody {
+	readonly type?: string;
+	readonly code?: string;
+}
+
+/**
+ * The provider error body after Pi's framing: `{"error":{"type","code"}}`,
+ * with an optional top-level `"type":"error"`. Anthropic's 413 body has no
+ * top-level `type`, so the routing envelope parser does not accept it. Only
+ * the two string fields are returned; callers match them against a closed list.
+ */
+function overflowErrorBody(text: string): OverflowErrorBody | undefined {
+	const bodyStart = text.indexOf("{");
+	if (bodyStart < 0) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text.slice(bodyStart));
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+	const body = parsed as Record<string, unknown>;
+	if (body.type !== undefined && body.type !== "error") return undefined;
+	if (typeof body.error !== "object" || body.error === null || Array.isArray(body.error)) return undefined;
+	const error = body.error as Record<string, unknown>;
+	const type = typeof error.type === "string" ? error.type : undefined;
+	const code = typeof error.code === "string" ? error.code : undefined;
+	if (type === undefined && code === undefined) return undefined;
+	return { ...(type === undefined ? {} : { type }), ...(code === undefined ? {} : { code }) };
+}
+
+/**
+ * Names which limit a detected context overflow hit, from structured facts
+ * only: an HTTP status, the provider envelope's error type, or a provider
+ * error code, each matched against a closed list. Provider prose is never
+ * read for meaning and never returned. Facts that disagree, or no fact at
+ * all, give `unknown` rather than a guess.
+ *
+ * Call this only after the overflow itself was detected. Anthropic reports a
+ * token overflow as HTTP 400 `invalid_request_error`, so that pair names
+ * `input-tokens` only in that context: it assumes a detected overflow with
+ * that generic pair is a token overflow.
+ */
+export function contextOverflowReason(source: unknown): ContextOverflowReason {
+	try {
+		if (typeof source !== "object" || source === null) return "unknown";
+		const fields = source as Record<string, unknown>;
+		const text =
+			typeof fields.errorMessage === "string"
+				? fields.errorMessage
+				: typeof fields.message === "string"
+					? fields.message
+					: undefined;
+		const bounded = text !== undefined && text.length <= MAX_ENVELOPE_MESSAGE_LENGTH ? text : undefined;
+		const body = bounded === undefined ? undefined : overflowErrorBody(bounded);
+		// Text before a `{` is Pi's framing only when a real error body follows it.
+		const status =
+			boundedStatus(fields.httpStatus) ??
+			boundedStatus(fields.status) ??
+			(bounded === undefined || body === undefined ? undefined : errorBodyStatusPrefix(bounded));
+		const reasons = new Set<ContextOverflowReason>();
+		for (const code of [fields.code, body?.type, body?.code]) {
+			const reason = overflowReasonForCode(code);
+			if (reason !== undefined) reasons.add(reason);
+		}
+		if (status === 413) reasons.add("request-bytes");
+		if (status === 400 && body?.type === "invalid_request_error") reasons.add("input-tokens");
+		const [only, ...rest] = [...reasons];
+		return only !== undefined && rest.length === 0 ? only : "unknown";
+	} catch {
+		return "unknown";
+	}
 }
 
 function numericServerHint(

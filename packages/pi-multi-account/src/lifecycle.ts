@@ -92,6 +92,12 @@ export interface LifecycleDependencies {
    */
   readonly settleTurn: () => void | Promise<void>;
   readonly clearStatus: () => void | Promise<void>;
+  /**
+   * Stops detached background work that writes to shared stores, and waits
+   * for it within its own bound (#188). Runs first in shutdown, so nothing
+   * started by this session writes after Pi tears the session down.
+   */
+  readonly stopBackgroundWork: () => Promise<void>;
   /** Executes the operator-only exact logical-model switch command. */
   readonly switchModel: (
     args: string,
@@ -326,6 +332,7 @@ export class MultiAccountLifecycle {
     // its commit.
     this.#shutdownAbort.abort();
     this.cancelPendingActivity("shutdown");
+    await this.#isolated("lifecycle.stop-background-work", this.#dependencies.stopBackgroundWork);
     await this.#isolated("lifecycle.command-shutdown", () => this.#dependencies.commands.shutdown());
     await this.#isolated("lifecycle.state-clear", () => this.#dependencies.state.clearAll());
     await this.#isolated("lifecycle.usage-clear", () => this.#dependencies.usage.clear());

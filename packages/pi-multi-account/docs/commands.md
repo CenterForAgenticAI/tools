@@ -48,6 +48,31 @@ removed, or unauthenticated members are individually inactive. Other listed usab
 members can serve; an unknown, empty, or wholly unusable group blocks requests
 rather than widening access. Discovery and login remain available.
 
+Each session caches its resolved group in the machine-wide
+`session-account-groups.json` store. Many sessions starting together, such as a
+burst of delegate workers, queue for that store and wait up to two seconds. If the
+store stays busy past that, the request fails with `store-busy`. That failure is
+transient. A request made at least two seconds later reads the store again.
+
+A `resolution-failed` failure means the session's group could not be read safely.
+Managed routing stays blocked. The error, the direct-provider notice, and
+`group status` name one of four causes, and its diagnostic records the same
+`cause`. None of them contains the store's contents or the raw error.
+
+| Cause | Meaning | Recovery |
+| --- | --- | --- |
+| `filesystem` | The store file could not be read or written. | Fix the file's permissions or free disk space. The session reads the store again on a request made at least two seconds later, as for `store-busy`. |
+| `store-invalid` | The store's contents, or this session's id, failed validation. | Move `session-account-groups.json` aside, then run `/multi-account reload` in each blocked session. |
+| `policy` | Two `accountGroupCwdDefaults` keys resolve to the same directory but name different groups. | Correct `accountGroupCwdDefaults` in the global config, then run `/multi-account reload`. |
+| `unknown` | Any other error. | Run `/multi-account reload`. If it fails again, check `/multi-account log` and restart Pi. |
+
+Moving the store aside discards every session's saved `group use` choice and
+cached group. Sessions fall back to their cwd or global default on their next
+resolution. A running session's new delegate workers cannot inherit its group
+until that session runs `/multi-account reload` or restarts. If `store-invalid`
+returns with a fresh store, the session id is the cause: a `--session-id` must
+be at most 256 characters.
+
 `group status` distinguishes recognized and available, excluded, unknown or removed,
 authentication unavailable, model unavailable, virtual model unsupported by active
 group, and authorization snapshot unavailable. A virtual-only provider is blocked
@@ -83,7 +108,10 @@ if (discovered.status === "available") {
 ```
 
 `src/public-status.js` is plain JavaScript with no imports at all, typed by the
-hand-written `src/public-status.d.ts`. Plain Node loads it from
+hand-written `src/public-status.d.ts`. `npm run typecheck` checks the
+declarations with `skipLibCheck` off and checks the JavaScript against them
+through `// @ts-check` and JSDoc (`tsconfig.public-status.json`), and
+`test/public-status-types.test.ts` pins the declared shapes. Plain Node loads it from
 `node_modules` without a TypeScript loader, and importing it never loads this
 extension or Pi. When this extension is loaded it registers the
 service on `pi.events` once per extension load and removes it at
@@ -108,10 +136,13 @@ The contract is version 1 and is frozen:
 - The one cost estimate is this month's API-equivalent figure, labelled
   `estimate-not-billing`. A failed cost read, an unpriced month, or an invalid
   figure publishes no estimate and keeps the accounts. The read itself writes
-  nothing. The month figure counts closed day digests plus today's rows, so the
-  first public read of a new day also starts the background period closer
-  that a provider response would start, without waiting for it. Until it
-  finishes, that read can omit the previous day's spend.
+  nothing and makes no network call. The month figure counts closed day
+  digests plus today's rows, so the first public read of a new UTC day also
+  schedules the background period closer, without waiting for it. This is the
+  same leased, once-a-day closer that the first provider response of the day
+  runs. That closer can refresh OpenRouter pricing over the network and append
+  day digests to retained cost state, even when no provider has run that day.
+  Until it finishes, that read can omit the previous day's spend.
 
 Version 1 accepts only the `anthropic` and `openai-codex` families. Google
 Antigravity accounts are omitted from the snapshot rather than published, so a

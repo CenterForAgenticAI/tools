@@ -144,10 +144,15 @@ import {
 	type InstalledDeclarationStatus,
 } from "./models-declaration.js";
 import { createLogicalDispatch } from "./logical-dispatch.js";
-import type { AccountGroupFailureBlockReason } from "./account-group-failure.js";
+import {
+	describeAccountGroupBlock,
+	type AccountGroupFailureBlockReason,
+	type AccountGroupResolutionFailureCause,
+} from "./account-group-failure.js";
 import type { ModelsCatalogs } from "./commands.js";
 import {
 	NOOP_LOGICAL_ATTRIBUTION_ATTEMPT,
+	logicalFailureDiagnosticFields,
 	safeBeginAttributionAttempt,
 	type LogicalAttributionAttempt,
 	type LogicalAttributionLifecycle,
@@ -204,9 +209,14 @@ export {
 	type RouteResolverUnresolvedReason,
 	type RouteResolverUnresolvedResult,
 } from "./route-resolver.js";
-import type { EffectiveAccountGroupResolution } from "./group-policy.js";
+import {
+	AccountGroupPolicyConflictError,
+	type EffectiveAccountGroupResolution,
+} from "./group-policy.js";
 import {
 	SessionAccountGroupStore,
+	SessionAccountGroupStoreBusyError,
+	SessionAccountGroupStoreError,
 	type SessionIdSource,
 } from "./session-account-groups.js";
 import { projectKeyForCwd } from "./project-identity.js";
@@ -219,7 +229,11 @@ import {
 	type SharedUsageSnapshot,
 } from "./shared-usage.js";
 import { CredentialWarmer, type WarmCandidate } from "./warmer.js";
-import { restoreManagedAliasModel } from "./session-restore.js";
+import {
+	applySavedDefaultModel,
+	hasExplicitModelFlag,
+	restoreManagedAliasModel,
+} from "./session-restore.js";
 import {
 	accountFingerprint,
 	resolveAccountLabelWithinLimit,
@@ -1940,6 +1954,10 @@ export interface MultiAccountExtensionOptions {
 	>;
 	/** Test seam; production derives a bounded non-reversible project key. */
 	readonly projectKey?: string;
+	/** Test seam; production waits up to two seconds for a contended group store. */
+	readonly accountGroupStoreLeaseWaitMs?: number;
+	/** Test seam; production waits two seconds before re-reading a busy or unreadable group store. */
+	readonly accountGroupStoreBusyRetryMs?: number;
 	/**
 	 * Test seam; production loads the reviewed Antigravity boundary through the
 	 * real published barrels (`createAntigravityProviderConfig`). Overriding
@@ -2059,38 +2077,17 @@ function delegateWorkerOriginOwnerSessionId(
 	return data["ownerSessionId"];
 }
 
-/**
- * Persist an inherited effective result under the child's own session id without
- * consulting the child's real cwd/default policy. This makes a delegate child a
- * valid parent for the next durable or in-process hop while preserving the
- * inherited source exactly.
- */
-function cacheInheritedAccountGroupResolution(
-	store: SessionAccountGroupStore,
-	sessionManager: SessionIdSource,
-	cwd: string,
-	resolution: EffectiveAccountGroupResolution,
-): EffectiveAccountGroupResolution {
-	if (resolution.source === "session-override") {
-		store.setOverride(sessionManager, resolution.groupId);
-		return store.resolveAndCache({ sessionManager, cwd, config: {} });
+/** Bounded cause label only; raw error text never reaches diagnostics. */
+function classifyAccountGroupResolutionFailure(error: unknown): AccountGroupResolutionFailureCause {
+	if (error instanceof SessionAccountGroupStoreError) return "store-invalid";
+	if (error instanceof AccountGroupPolicyConflictError) return "policy";
+	if (
+		error instanceof Error &&
+		typeof (error as NodeJS.ErrnoException).code === "string"
+	) {
+		return "filesystem";
 	}
-	store.clearOverride(sessionManager);
-	if (resolution.source === "cwd-default") {
-		return store.resolveAndCache({
-			sessionManager,
-			cwd,
-			config: { accountGroupCwdDefaults: { [cwd]: resolution.groupId } },
-		});
-	}
-	if (resolution.source === "global-default") {
-		return store.resolveAndCache({
-			sessionManager,
-			cwd,
-			config: { defaultAccountGroup: resolution.groupId },
-		});
-	}
-	return store.resolveAndCache({ sessionManager, cwd, config: {} });
+	return "unknown";
 }
 
 
@@ -2163,6 +2160,9 @@ export const createMultiAccountExtension =
 				"pi-multi-account",
 				"session-account-groups.json",
 			),
+			...(options.accountGroupStoreLeaseWaitMs === undefined
+				? {}
+				: { leaseWaitMs: options.accountGroupStoreLeaseWaitMs }),
 		});
 		const configPath = join(baseDirectory, "pi-multi-account", CONFIG_FILE);
 		const authPath = join(baseDirectory, AUTH_FILE);
@@ -2226,7 +2226,17 @@ export const createMultiAccountExtension =
 			},
 		});
 		const maintainedCodexStream = await loadMaintainedCodexStream();
-		const anthropicCaptured = await registerUpstreamAnthropicProvider(pi);
+		// The alias API registered here reads the live old-image policy on each
+		// request. `config` is assigned later in this factory; a read before then
+		// throws, which readImageStripPolicy treats as off.
+		const imageStrippingPolicy = () => config.imageStripping;
+		const anthropicCaptured = await registerUpstreamAnthropicProvider(
+			pi,
+			undefined,
+			undefined,
+			undefined,
+			imageStrippingPolicy,
+		);
 		// The reviewed Antigravity boundary loads the five reviewed published
 		// barrels and registers the extension-owned compat alias API before any
 		// account is discovered, exactly like the Anthropic base provider above.
@@ -2505,15 +2515,18 @@ export const createMultiAccountExtension =
 		const recordAccountGroupBlock = (
 			key: string,
 			message: string,
-			groupId?: string,
+			fields?: { readonly groupId?: string; readonly cause?: AccountGroupResolutionFailureCause },
 		): void => {
-			if (reportedAccountGroupBlocks.has(key)) return;
-			reportedAccountGroupBlocks.add(key);
+			// One record per reason and cause: a retried failure that changes cause
+			// is a new fact, but a repeated one must not flood the bounded log.
+			const reportKey = fields?.cause === undefined ? key : `${key}:${fields.cause}`;
+			if (reportedAccountGroupBlocks.has(reportKey)) return;
+			reportedAccountGroupBlocks.add(reportKey);
 			diagnostics.record(
 				"warning",
 				`routing.account-group-${key}`,
 				message,
-				groupId === undefined ? undefined : { groupId },
+				fields,
 			);
 		};
 		const hasConfiguredAccountGroupPolicy = (): boolean =>
@@ -2526,12 +2539,22 @@ export const createMultiAccountExtension =
 		let accountGroupResolutionInitialized = false;
 		let accountGroupScopeBlocked = false;
 		let accountGroupBlockReason: AccountGroupFailureBlockReason | undefined;
-		const blockAccountGroupScope = (key: AccountGroupFailureBlockReason, message: string): void => {
+		let accountGroupBlockCause: AccountGroupResolutionFailureCause | undefined;
+		let accountGroupBlockedAtMs = 0;
+		const accountGroupStoreBusyRetryMs = options.accountGroupStoreBusyRetryMs ?? 2_000;
+		const blockAccountGroupScope = (
+			key: AccountGroupFailureBlockReason,
+			message: string,
+			cause?: AccountGroupResolutionFailureCause,
+		): void => {
 			accountGroupBlockReason = key;
+			accountGroupBlockCause = cause;
+			// Monotonic: a wall-clock step back must not postpone the busy retry.
+			accountGroupBlockedAtMs = performance.now();
 			accountGroupResolutionInitialized = true;
 			accountGroupScopeBlocked = true;
 			effectiveAccountGroupResolution = undefined;
-			recordAccountGroupBlock(key, message);
+			recordAccountGroupBlock(key, message, cause === undefined ? undefined : { cause });
 		};
 		const rememberAccountGroupResolution = (
 			resolution: EffectiveAccountGroupResolution,
@@ -2539,9 +2562,15 @@ export const createMultiAccountExtension =
 			accountGroupResolutionInitialized = true;
 			accountGroupScopeBlocked = false;
 			accountGroupBlockReason = undefined;
+			accountGroupBlockCause = undefined;
 			effectiveAccountGroupResolution = resolution;
 			return resolution;
 		};
+		/** A blocked scope names its reason and recovery; a membership exclusion keeps its own text. */
+		const accountGroupBlockNotice = (fallback: string): string =>
+			accountGroupScopeBlocked && accountGroupBlockReason !== undefined
+				? `Multi-account blocked this turn: ${describeAccountGroupBlock({ reason: accountGroupBlockReason, cause: accountGroupBlockCause })}`
+				: fallback;
 		const accountGroupScopeRestrictsRouting = (): boolean =>
 			policyConfigError !== undefined ||
 			accountGroupScopeBlocked ||
@@ -2621,12 +2650,7 @@ export const createMultiAccountExtension =
 						return;
 					}
 					rememberAccountGroupResolution(
-						cacheInheritedAccountGroupResolution(
-							sessionAccountGroups,
-							sessionManager,
-							cwd,
-							inherited,
-						),
+						sessionAccountGroups.cacheInheritedResolution(sessionManager, inherited),
 					);
 					return;
 				}
@@ -2653,31 +2677,58 @@ export const createMultiAccountExtension =
 						return;
 					}
 					rememberAccountGroupResolution(
-						cacheInheritedAccountGroupResolution(
-							sessionAccountGroups,
-							sessionManager,
-							cwd,
-							inherited,
-						),
+						sessionAccountGroups.cacheInheritedResolution(sessionManager, inherited),
 					);
 					return;
 				}
 				resolveOwnSessionAccountGroup(sessionManager, cwd);
-			} catch {
+			} catch (error) {
+				if (error instanceof SessionAccountGroupStoreBusyError) {
+					blockAccountGroupScope(
+						"store-busy",
+						"Other sessions held the account-group store past the wait bound; routing is blocked until the store is read again.",
+					);
+					return;
+				}
 				blockAccountGroupScope(
 					"resolution-failed",
-					"The active account group could not be read safely; routing is blocked until the session account-group store is repaired.",
+					"The active account group could not be read safely; managed routing is blocked. The cause field names the recovery.",
+					classifyAccountGroupResolutionFailure(error),
 				);
 			}
+		};
+		/**
+		 * Resolve once per session, except that a busy store and a filesystem
+		 * error are treated as transient: the store is read again on a later
+		 * request after the retry delay. No other block reason is retried here, so
+		 * invalid store contents, conflicting policy, and unverified delegate
+		 * origins stay blocked until reload or restart.
+		 */
+		const accountGroupBlockIsTransient = (): boolean =>
+			accountGroupBlockReason === "store-busy" ||
+			(accountGroupBlockReason === "resolution-failed" &&
+				accountGroupBlockCause === "filesystem");
+		const ensureSessionAccountGroupScope = (
+			accountContext: ExtensionContext | undefined,
+		): void => {
+			if (
+				accountGroupResolutionInitialized &&
+				!(
+					accountGroupScopeBlocked &&
+					accountGroupBlockIsTransient() &&
+					performance.now() - accountGroupBlockedAtMs >= accountGroupStoreBusyRetryMs
+				)
+			) {
+				return;
+			}
+			initializeSessionAccountGroupScope(accountContext);
 		};
 		const enforceSessionAccountGroup = (
 			accounts: readonly OperatorManagedAccount[],
 			accountContext: ExtensionContext | undefined,
 		): OperatorManagedAccount[] => {
 			if (policyConfigError !== undefined) return [];
-			if (!accountGroupResolutionInitialized) {
-				initializeSessionAccountGroupScope(accountContext);
-			}
+			ensureSessionAccountGroupScope(accountContext);
 			if (
 				accountGroupScopeBlocked ||
 				effectiveAccountGroupResolution === undefined
@@ -2700,7 +2751,7 @@ export const createMultiAccountExtension =
 				recordAccountGroupBlock(
 					`${enforced.reason}:${enforced.groupId ?? "unknown"}`,
 					enforced.message,
-					enforced.groupId,
+					enforced.groupId === undefined ? undefined : { groupId: enforced.groupId },
 				);
 			}
 			return enforced.accounts;
@@ -2999,6 +3050,7 @@ export const createMultiAccountExtension =
 				config,
 				resolveLabel: (providerId) => resolveLabelFor(providerId),
 				modelSupport,
+				imageStripping: imageStrippingPolicy,
 			});
 			// Pi refreshes provider availability asynchronously after every
 			// registerProvider call. Without one final awaited refresh, an immediate
@@ -3077,6 +3129,7 @@ export const createMultiAccountExtension =
 					createAnthropicAliasProviderConfig(
 						anthropicCaptured,
 						anthropicModels,
+						imageStrippingPolicy,
 					),
 				);
 			} else if (family === "openai") {
@@ -3204,7 +3257,11 @@ export const createMultiAccountExtension =
 			if (policyConfigError !== undefined) throw new Error(policyConfigError);
 			const resolution = effectiveAccountGroupResolution;
 			if (accountGroupScopeBlocked || resolution === undefined) {
-				throw new Error("The effective session account group is unavailable; managed routing is blocked.");
+				throw new Error(
+					accountGroupBlockReason === undefined
+						? "The effective session account group is unavailable; managed routing is blocked."
+						: `The effective session account group is unavailable; managed routing is blocked: ${describeAccountGroupBlock({ reason: accountGroupBlockReason, cause: accountGroupBlockCause })}`,
+				);
 			}
 			if (resolution.source === "unrestricted") return { resolution };
 			const members = config.accountGroups?.[resolution.groupId] ?? [];
@@ -3623,6 +3680,8 @@ export const createMultiAccountExtension =
 			inputContext: ExtensionContext,
 		): boolean => {
 			if (policyConfigError !== undefined) return false;
+			// Only retry a resolved-once scope; first resolution stays at session_start.
+			if (accountGroupResolutionInitialized) ensureSessionAccountGroupScope(inputContext);
 			if (!accountGroupScopeRestrictsRouting()) return true;
 			// Pi virtual routers may choose arbitrary physical targets. No public
 			// cross-host hook here can authorize those targets before they send.
@@ -3795,7 +3854,7 @@ export const createMultiAccountExtension =
 				{ providerId: activeProviderId },
 			);
 			inputContext.ui.notify(
-				"Multi-account blocked a provider outside the active account group.",
+				accountGroupBlockNotice("Multi-account blocked a provider outside the active account group."),
 				"warning",
 			);
 			return { action: "handled" };
@@ -4353,6 +4412,7 @@ export const createMultiAccountExtension =
 			compaction: new CompactionRouter(),
 			settleTurn,
 			clearStatus: () => warmer.stop(),
+			stopBackgroundWork: () => usageFetcher.close(),
 			invalidateLogicalTerminalAssociations: () => {
 				attributionStore?.cancelActiveAttempts();
 				logicalTerminalAssociations.advanceGeneration();
@@ -4552,7 +4612,8 @@ export const createMultiAccountExtension =
 				);
 				runContext.abort();
 				runContext.ui.notify(
-					policyConfigError ?? "Multi-account aborted a provider run outside the active account group.",
+					policyConfigError ??
+						accountGroupBlockNotice("Multi-account aborted a provider run outside the active account group."),
 					"warning",
 				);
 				return;
@@ -4582,7 +4643,7 @@ export const createMultiAccountExtension =
 		});
 		pi.on(
 			"session_start",
-			guarded("lifecycle.session-start", async (_event, startupContext) => {
+			guarded("lifecycle.session-start", async (startEvent, startupContext) => {
 				// Pi executes factories during resource loading, before pi-delegate
 				// opens its trusted bind frame. Capture ownership here before any
 				// UI or routing initialization, and retain it after the frame ends.
@@ -4833,11 +4894,13 @@ export const createMultiAccountExtension =
 						deps: {
 							captureSelectionSnapshot(modelId) {
 								if (policyConfigError !== undefined) throw new Error(policyConfigError);
-								if (!accountGroupResolutionInitialized) initializeSessionAccountGroupScope(context);
+								ensureSessionAccountGroupScope(context);
 								const resolution = effectiveAccountGroupResolution;
 								const members = resolution === undefined || resolution.source === "unrestricted" ? [] : [...(config.accountGroups?.[resolution.groupId] ?? [])];
 								const policy = resolution === undefined || accountGroupScopeBlocked || policyConfigError !== undefined
-									? { kind: "blocked" as const, reason: policyConfigError !== undefined ? "config-invalid" as const : accountGroupBlockReason ?? "context-unavailable" }
+									? policyConfigError !== undefined
+										? { kind: "blocked" as const, reason: "config-invalid" as const }
+										: { kind: "blocked" as const, reason: accountGroupBlockReason ?? "context-unavailable", ...(accountGroupBlockCause === undefined ? {} : { cause: accountGroupBlockCause }) }
 									: { kind: "resolved" as const, resolution: resolution.source === "unrestricted" ? { source: "unrestricted" as const } : { source: resolution.source, groupId: resolution.groupId }, members };
 								const accountLimit = config.accountLimit;
 								const nowMs = Date.now();
@@ -4871,6 +4934,10 @@ export const createMultiAccountExtension =
 							onSupersededTerminal: (physical: AssistantMessage) => {
 								commitSupersededLogicalFailure(physical);
 							},
+							// A getter, so a reload changes the next request's policy.
+							get imageStripping() {
+								return config.imageStripping;
+							},
 							get recoveryTiming() {
 								return {
 									recoveryIdleTimeoutMs: config.recoveryIdleTimeoutMs,
@@ -4892,6 +4959,15 @@ export const createMultiAccountExtension =
 								: {}),
 							onDiagnostic: (message: string) => {
 								diagnostics.record("info", "logical.provider", message);
+							},
+							// Level `error` keeps it ahead of routine header observations.
+							onFailure: (evidence) => {
+								diagnostics.record(
+									"error",
+									"logical.failure",
+									"The unified call failed.",
+									logicalFailureDiagnosticFields(evidence),
+								);
 							},
 						},
 					});
@@ -5018,6 +5094,44 @@ export const createMultiAccountExtension =
 					);
 				} catch (error) {
 					diagnostics.recordError("session.restore", error);
+				}
+				try {
+					const outcome = await applySavedDefaultModel({
+						reason: startEvent.reason,
+						// An in-process worker or a delegate child process is configured by
+						// its dispatcher; the saved default describes the foreground only.
+						delegateSession:
+							delegateOwnedSession ||
+							delegateDriverChildMarker !== undefined ||
+							delegateDriverOwnerSessionId !== undefined,
+						session: startupContext.sessionManager,
+						// A command-line model choice or a model scope is explicit: the host
+						// already honoured it, and the saved default must not replace it.
+						explicitSelection:
+							hasExplicitModelFlag(process.argv.slice(2)) ||
+							startupContext.scopedModels.length > 0,
+						readSavedDefault: () => pi.getSettings(),
+						current: { provider: currentModel?.provider, modelId: currentModel?.id },
+						isManagedProvider: (providerId) =>
+							isRestorableManagedProvider(providerId, config.accountLimit),
+						findModel: ({ provider, modelId }) =>
+							provider === LOGICAL_PROVIDER_ID &&
+							logicalRoutingState?.status !== "matched" &&
+							logicalRoutingState?.status !== "mismatched"
+								? undefined
+								: providerModels(startupContext, provider).find(
+										(candidate) => candidate.id === modelId,
+									),
+						setModel,
+					});
+					diagnostics.record(
+						"info",
+						"session.startup-default",
+						"Saved default model evaluated at session start.",
+						{ outcome },
+					);
+				} catch (error) {
+					diagnostics.recordError("session.startup-default", error);
 				}
 				try {
 					logicalRouteIndicator?.modelSelected(currentModel?.provider);

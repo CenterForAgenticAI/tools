@@ -23,6 +23,14 @@ import { acquireMachineLease } from "./machine-lease.js";
 const STORE_VERSION = 1;
 const STORE_LEASE_TTL_MS = 5_000;
 const MAX_SESSION_ID_LENGTH = 256;
+/**
+ * Concurrent child sessions start together and each writes its own record. One
+ * critical section is a few milliseconds, so a short bounded wait clears a
+ * burst instead of failing every loser at once (issue 167).
+ */
+const DEFAULT_LEASE_WAIT_MS = 2_000;
+const LEASE_BACKOFF_START_MS = 5;
+const LEASE_BACKOFF_MAX_MS = 100;
 
 export interface SessionIdSource {
 	getSessionId(): string;
@@ -31,6 +39,15 @@ export interface SessionIdSource {
 export interface SessionAccountGroupStoreOptions {
 	readonly storePath: string;
 	readonly lockPath?: string;
+	/** Longest time one write waits for a contended lease. Zero tries once. */
+	readonly leaseWaitMs?: number;
+	/** Test seam; production blocks the thread for the backoff interval. */
+	readonly sleep?: (ms: number) => void;
+	/**
+	 * Test seam; production uses a monotonic clock for the wait deadline so a
+	 * wall-clock step cannot stretch the blocking wait.
+	 */
+	readonly now?: () => number;
 }
 
 export interface ResolveAndCacheAccountGroupInput {
@@ -54,6 +71,23 @@ export class SessionAccountGroupStoreError extends Error {
 		super(`[multi-account session groups] ${message}`);
 		this.name = "SessionAccountGroupStoreError";
 	}
+}
+
+/** Another live holder kept the store lease for the whole bounded wait. */
+export class SessionAccountGroupStoreBusyError extends SessionAccountGroupStoreError {
+	constructor() {
+		super("store is busy.");
+		this.name = "SessionAccountGroupStoreBusyError";
+	}
+}
+
+// Resolution runs inside synchronous routing filters, so the wait cannot yield.
+function monotonicNow(): number {
+	return performance.now();
+}
+
+function sleepSync(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -205,10 +239,17 @@ function writeState(storePath: string, state: SessionGroupState): void {
 export class SessionAccountGroupStore {
 	readonly #storePath: string;
 	readonly #lockPath: string;
+	readonly #leaseWaitMs: number;
+	readonly #sleep: (ms: number) => void;
+	readonly #now: () => number;
 
 	constructor(options: SessionAccountGroupStoreOptions) {
 		this.#storePath = options.storePath;
 		this.#lockPath = options.lockPath ?? `${options.storePath}.lock`;
+		const leaseWaitMs = options.leaseWaitMs ?? DEFAULT_LEASE_WAIT_MS;
+		this.#leaseWaitMs = Number.isFinite(leaseWaitMs) && leaseWaitMs > 0 ? leaseWaitMs : 0;
+		this.#sleep = options.sleep ?? sleepSync;
+		this.#now = options.now ?? monotonicNow;
 	}
 
 	readOverride(sessionId: string): string | undefined {
@@ -239,6 +280,26 @@ export class SessionAccountGroupStore {
 		});
 	}
 
+	/**
+	 * Persist an inherited effective result under the child's own session id in
+	 * one locked write, without consulting the child's cwd or default policy. An
+	 * inherited session override stays a manual override for the next hop; every
+	 * other source replaces any record the child had.
+	 */
+	cacheInheritedResolution(
+		sessionManager: SessionIdSource,
+		resolution: EffectiveAccountGroupResolution,
+	): EffectiveAccountGroupResolution {
+		const sessionId = sessionIdFrom(sessionManager);
+		const effective = copyResolution(resolution);
+		this.#update((state) => {
+			state.sessions[sessionId] = effective.source === "session-override"
+				? { effective, manualOverrideGroupId: effective.groupId }
+				: { effective };
+		});
+		return copyResolution(effective);
+	}
+
 	resolveAndCache(
 		input: ResolveAndCacheAccountGroupInput,
 	): EffectiveAccountGroupResolution {
@@ -264,15 +325,27 @@ export class SessionAccountGroupStore {
 		return copyResolution(resolved);
 	}
 
-	#update(mutator: (state: SessionGroupState) => void): void {
-		const lease = acquireMachineLease({
-			lockPath: this.#lockPath,
-			ttlMs: STORE_LEASE_TTL_MS,
-			reclaimMalformed: true,
-		});
-		if (lease === undefined) {
-			throw new SessionAccountGroupStoreError("store is busy.");
+	#acquireLease(): NonNullable<ReturnType<typeof acquireMachineLease>> {
+		const deadlineMs = this.#now() + this.#leaseWaitMs;
+		let backoffMs = LEASE_BACKOFF_START_MS;
+		for (;;) {
+			const lease = acquireMachineLease({
+				lockPath: this.#lockPath,
+				ttlMs: STORE_LEASE_TTL_MS,
+				reclaimMalformed: true,
+			});
+			if (lease !== undefined) return lease;
+			const remainingMs = deadlineMs - this.#now();
+			if (!(remainingMs > 0)) throw new SessionAccountGroupStoreBusyError();
+			// Jitter keeps a burst of children from retrying in lockstep.
+			const delayMs = Math.min(remainingMs, LEASE_BACKOFF_MAX_MS, backoffMs * (0.5 + Math.random()));
+			this.#sleep(Math.max(1, Math.ceil(delayMs)));
+			backoffMs = Math.min(LEASE_BACKOFF_MAX_MS, backoffMs * 2);
 		}
+	}
+
+	#update(mutator: (state: SessionGroupState) => void): void {
+		const lease = this.#acquireLease();
 		try {
 			const state = readState(this.#storePath);
 			mutator(state);

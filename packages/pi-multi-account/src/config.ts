@@ -45,6 +45,12 @@ import {
 	type SubscriptionPlanCatalogOverride,
 } from "./subscription-plan-catalog.js";
 import {
+	DEFAULT_IMAGE_STRIP_KEEP_NEWEST,
+	DEFAULT_IMAGE_STRIP_POLICY,
+	MAX_IMAGE_STRIP_KEEP_NEWEST,
+	type ImageStripPolicy,
+} from "./image-strip.js";
+import {
 	MAX_TIER_MODEL_ID_LENGTH,
 	type TierModelDestination,
 	type TierModelMap,
@@ -273,6 +279,12 @@ export interface MultiAccountConfig {
 	readonly preemptiveExpiryWindowMs: number;
 	/** Whether undocumented provider usage fetches run for each managed family. */
 	readonly usageFetchEnabled?: Readonly<Record<AllowedFamily, boolean>>;
+	/**
+	 * Opt-in removal of old images from `unified` and Anthropic alias requests.
+	 * Off by default. A stopgap until pi-context-aware owns media folding; see
+	 * `src/image-strip.ts`.
+	 */
+	readonly imageStripping?: ImageStripPolicy;
 }
 
 export const DEFAULT_USAGE_FETCH_ENABLED: Readonly<
@@ -317,6 +329,7 @@ export const DEFAULT_CONFIG: MultiAccountConfig = {
 	// while they still have useful life.
 	preemptiveExpiryWindowMs: 120_000,
 	usageFetchEnabled: DEFAULT_USAGE_FETCH_ENABLED,
+	imageStripping: DEFAULT_IMAGE_STRIP_POLICY,
 };
 
 const CONFIG_KEYS = new Set<keyof MultiAccountConfig>([
@@ -343,7 +356,36 @@ const CONFIG_KEYS = new Set<keyof MultiAccountConfig>([
 	"modelFallbackEgress",
 	"preemptiveExpiryWindowMs",
 	"usageFetchEnabled",
+	"imageStripping",
 ]);
+
+const IMAGE_STRIPPING_KEYS = new Set(["enabled", "keepNewest"]);
+
+function parseImageStripping(value: unknown): ImageStripPolicy {
+	if (value === undefined) return DEFAULT_IMAGE_STRIP_POLICY;
+	if (!isRecord(value)) {
+		throw new ConfigValidationError("imageStripping must be a JSON object.");
+	}
+	if (Object.keys(value).some((key) => !IMAGE_STRIPPING_KEYS.has(key))) {
+		throw new ConfigValidationError("imageStripping has an unsupported field.");
+	}
+	const enabled = value["enabled"];
+	if (typeof enabled !== "boolean") {
+		throw new ConfigValidationError("imageStripping.enabled must be a boolean.");
+	}
+	const keepNewest = value["keepNewest"] ?? DEFAULT_IMAGE_STRIP_KEEP_NEWEST;
+	if (
+		typeof keepNewest !== "number" ||
+		!Number.isSafeInteger(keepNewest) ||
+		keepNewest < 1 ||
+		keepNewest > MAX_IMAGE_STRIP_KEEP_NEWEST
+	) {
+		throw new ConfigValidationError(
+			`imageStripping.keepNewest must be an integer from 1 through ${MAX_IMAGE_STRIP_KEEP_NEWEST}.`,
+		);
+	}
+	return Object.freeze({ enabled, keepNewest });
+}
 
 /**
  * Validates the optional `accountLabels` map. Rejects non-object containers and
@@ -1286,6 +1328,7 @@ export function parseConfig(value: unknown): MultiAccountConfig {
 		value["preemptiveExpiryWindowMs"] ??
 		DEFAULT_CONFIG.preemptiveExpiryWindowMs;
 	const usageFetchEnabled = parseUsageFetchEnabled(value["usageFetchEnabled"]);
+	const imageStripping = parseImageStripping(value["imageStripping"]);
 
 	if (!isAccountLimit(accountLimit)) {
 		throw new ConfigValidationError(
@@ -1403,6 +1446,7 @@ export function parseConfig(value: unknown): MultiAccountConfig {
 		modelFallbackEgress,
 		preemptiveExpiryWindowMs,
 		usageFetchEnabled,
+		imageStripping,
 	};
 	if (defaultAccountGroup === undefined) return parsedConfig;
 	return { ...parsedConfig, defaultAccountGroup };

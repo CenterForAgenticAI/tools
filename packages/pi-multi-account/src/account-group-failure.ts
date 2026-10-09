@@ -5,16 +5,25 @@ import type { EffectiveAccountGroupResolution } from "./group-policy.js";
 export type AccountGroupFailureBlockReason =
 	| "delegate-origin-unresolved" | "context-unavailable"
 	| "driver-origin-unresolved" | "delegate-resolution-unavailable"
-	| "driver-resolution-unavailable" | "config-invalid" | "resolution-failed";
+	| "driver-resolution-unavailable" | "config-invalid" | "resolution-failed" | "store-busy";
 const BLOCK_REASONS: readonly AccountGroupFailureBlockReason[] = [
 	"delegate-origin-unresolved", "context-unavailable", "driver-origin-unresolved",
-	"delegate-resolution-unavailable", "driver-resolution-unavailable", "config-invalid", "resolution-failed",
+	"delegate-resolution-unavailable", "driver-resolution-unavailable", "config-invalid", "resolution-failed", "store-busy",
 ];
+
+/** Bounded cause of a `resolution-failed` block; raw error text never leaves the classifier. */
+export type AccountGroupResolutionFailureCause = "store-invalid" | "filesystem" | "policy" | "unknown";
+const RESOLUTION_FAILURE_CAUSES: readonly string[] = ["store-invalid", "filesystem", "policy", "unknown"];
 
 /** Already-authorized policy only; never resolve a cwd or a delegate identity here. */
 export type AccountGroupFailurePolicy =
 	| { readonly kind: "resolved"; readonly resolution: EffectiveAccountGroupResolution; readonly members: readonly string[] }
-	| { readonly kind: "blocked"; readonly reason: AccountGroupFailureBlockReason };
+	| {
+		readonly kind: "blocked";
+		readonly reason: AccountGroupFailureBlockReason;
+		/** Read only for `resolution-failed`; missing or unrecognized formats as `unknown`. */
+		readonly cause?: AccountGroupResolutionFailureCause;
+	};
 
 /** Copied availability facts, not credentials, status metadata or raw provider errors. */
 export interface AccountGroupFailureCandidate extends Pick<AccountGroupMemberAvailability, "providerId" | "eligible"> {
@@ -33,6 +42,7 @@ export type AccountGroupFailureReason =
 
 export interface AccountGroupFailureView {
 	readonly reason: AccountGroupFailureReason;
+	readonly cause?: AccountGroupResolutionFailureCause;
 	readonly source?: EffectiveAccountGroupResolution["source"];
 	readonly groupId?: string;
 	readonly outsideEligible: boolean;
@@ -62,6 +72,15 @@ function managedProvider(providerId: string): boolean {
 	return MANAGED_FAMILIES.some((family) => providerId === family || providerId.startsWith(`${family}-account-`));
 }
 
+// Each cause names a recovery that exists. None tells the operator to repair
+// the store: no command does that, and the store may not be at fault.
+const CAUSE_TEXT: Readonly<Record<AccountGroupResolutionFailureCause, readonly [string, string]>> = {
+	"store-invalid": ["resolution-failed (store-invalid): the session account-group store failed validation", "Move session-account-groups.json aside (this clears saved group choices), then run /multi-account reload."],
+	"filesystem": ["resolution-failed (filesystem): the session account-group store could not be read or written", "Check the file's permissions and free disk space; this session retries the store automatically."],
+	"policy": ["resolution-failed (policy): two accountGroupCwdDefaults entries resolve to the same directory with different groups", "Correct accountGroupCwdDefaults in the global configuration and run /multi-account reload."],
+	"unknown": ["resolution-failed (unknown): the session policy could not be read safely", "Run /multi-account reload; if it still fails, check /multi-account log and restart Pi."],
+};
+
 const REASON_TEXT: Readonly<Record<AccountGroupFailureReason, readonly [string, string]>> = {
 	"delegate-origin-unresolved": ["delegate-origin-unresolved: the delegate parent could not be verified", "Start a worker from a verified parent session."],
 	"context-unavailable": ["context-unavailable: the session policy context is unavailable", "Wait for the session context, then try again."],
@@ -69,7 +88,9 @@ const REASON_TEXT: Readonly<Record<AccountGroupFailureReason, readonly [string, 
 	"delegate-resolution-unavailable": ["delegate-resolution-unavailable: the parent policy is unavailable", "Restore the verified parent session policy before starting a worker."],
 	"driver-resolution-unavailable": ["driver-resolution-unavailable: the durable parent policy is unavailable", "Restore the verified parent session policy before starting a child."],
 	"config-invalid": ["config-invalid: the account policy configuration is invalid", "Correct the global configuration and run /multi-account reload."],
-	"resolution-failed": ["resolution-failed: the session policy could not be read safely", "Repair the session account-group store before trying again."],
+	"resolution-failed": CAUSE_TEXT.unknown,
+	// A transient lease conflict, not damage: never tell the operator to repair.
+	"store-busy": ["store-busy: other sessions held the account-group store for too long", "Try again in a moment; this session retries the store automatically."],
 	"policy-unavailable": ["the authorized account-group policy is unavailable", "Check /multi-account group status before trying again."],
 	"no-serving-members": ["no listed member serves this model", "Select a model served by a listed member or choose another group."],
 	"no-managed-serving-members": ["no eligible managed member serves this unified model", "Select a listed physical model or choose a group with managed members."],
@@ -80,13 +101,27 @@ const REASON_TEXT: Readonly<Record<AccountGroupFailureReason, readonly [string, 
 	"availability-unresolved": ["no eligible managed member is available; the cause is not established", "Check /multi-account group status, sign in if needed, or choose another group."],
 };
 
+/** A cause applies only to `resolution-failed`; anything unrecognized is `unknown`. */
+function blockCause(reason: AccountGroupFailureReason, cause: unknown): AccountGroupResolutionFailureCause | undefined {
+	if (reason !== "resolution-failed") return undefined;
+	return typeof cause === "string" && RESOLUTION_FAILURE_CAUSES.includes(cause)
+		? cause as AccountGroupResolutionFailureCause : "unknown";
+}
+
+function blockReason(reason: unknown): AccountGroupFailureReason {
+	return typeof reason === "string" && Object.hasOwn(REASON_TEXT, reason) &&
+		(BLOCK_REASONS as readonly string[]).includes(reason)
+		? reason as AccountGroupFailureBlockReason : "policy-unavailable";
+}
+
 function failureView(
 	reason: AccountGroupFailureReason,
 	modelId: string,
 	outsideEligible: boolean,
 	resolution?: Exclude<EffectiveAccountGroupResolution, { readonly source: "unrestricted" }>,
+	cause?: AccountGroupResolutionFailureCause,
 ): AccountGroupFailureView {
-	const [text, help] = REASON_TEXT[reason];
+	const [text, help] = cause === undefined ? REASON_TEXT[reason] : CAUSE_TEXT[cause];
 	const model = safeLabel(modelId, 128, "selected-model");
 	const groupId = resolution === undefined ? undefined : safeLabel(resolution.groupId, 64, "selected-group");
 	const source = resolution?.source;
@@ -94,7 +129,7 @@ function failureView(
 	const message = `${heading} cannot serve ${model}: ${text}. ${help}${outsideEligible ? " Eligible accounts exist outside this group; they remain excluded." : ""}`;
 	// Only named output facts; never return caller policy, candidate objects or prose.
 	if (groupId === undefined || source === undefined) {
-		return Object.freeze({ reason, outsideEligible, message, help });
+		return Object.freeze({ reason, ...(cause === undefined ? {} : { cause }), outsideEligible, message, help });
 	}
 	return Object.freeze({ reason, groupId, source, outsideEligible, message, help });
 }
@@ -108,9 +143,8 @@ function failureView(
 export function formatAccountGroupFailure(input: AccountGroupFailureInput): AccountGroupFailureView | undefined {
 	const policy = input.policy;
 	if (policy.kind === "blocked") {
-		const reason = Object.hasOwn(REASON_TEXT, policy.reason) && BLOCK_REASONS.includes(policy.reason)
-			? policy.reason : "policy-unavailable";
-		return failureView(reason, input.modelId, false);
+		const reason = blockReason(policy.reason);
+		return failureView(reason, input.modelId, false, undefined, blockCause(reason, policy.cause));
 	}
 	if (policy.kind !== "resolved") return failureView("policy-unavailable", input.modelId, false);
 	const resolution = policy.resolution;
@@ -146,4 +180,20 @@ export function formatAccountGroupFailure(input: AccountGroupFailureInput): Acco
 	else if (managed.every((row) => row.coolingDown === true)) reason = "cooldown";
 	else reason = "availability-unresolved";
 	return failureView(reason, input.modelId, outsideEligible, resolution);
+}
+/**
+ * Operator text for a blocked scope outside a unified call, such as
+ * `group status` and direct-provider notices. Same closed text as the
+ * unified error; never caller prose.
+ */
+export function describeAccountGroupBlock(
+	policy: {
+		readonly reason: AccountGroupFailureBlockReason;
+		readonly cause?: AccountGroupResolutionFailureCause | undefined;
+	},
+): string {
+	const reason = blockReason(policy.reason);
+	const cause = blockCause(reason, policy.cause);
+	const [text, help] = cause === undefined ? REASON_TEXT[reason] : CAUSE_TEXT[cause];
+	return `${text}. ${help}`;
 }

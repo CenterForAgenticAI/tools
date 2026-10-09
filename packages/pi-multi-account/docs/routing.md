@@ -48,6 +48,31 @@ runs at `agent_settled`, after Pi's retry and compaction loop has finished. A
 visible pause before failover is normally Pi's backoff, not an extra retry made
 by this extension.
 
+## Startup default model
+
+Pi resolves the saved default model (`defaultProvider` and `defaultModel` in
+`settings.json`, written by Pi's `Ctrl+S`) while resources load, before this
+extension registers its alias providers. A saved default that names a managed alias
+or the `unified` provider is therefore not found, and Pi starts on a fallback
+model.
+
+On `session_start` with reason `startup` or `new`, the extension reads the
+effective saved default through `pi.getSettings()` and selects it through
+`pi.setModel` when all of these hold:
+
+- the session holds no conversation message;
+- Pi's own argument parser reads no model, provider, or models option, so
+  value-consuming options and the end-of-options marker behave as in Pi, and no
+  model scope is active;
+- the session is not a delegate worker or delegate child;
+- the saved provider is one this extension manages; and
+- the model is registered and is not already active.
+
+It never acts on `resume`, `fork`, or `reload`, and it does not write settings.
+Any miss leaves Pi's own fallback in place. The outcome is recorded as the
+`session.startup-default` diagnostic. A resumed session keeps restoring its own
+last model from its `model_change` entries.
+
 ## Delegate account-group confinement
 
 In-process and durable delegate children inherit the parent's complete cached
@@ -140,7 +165,10 @@ continuation. The rules are fixed:
   once, cools nothing, and the consumer receives the provider's own text and its
   `code`.
 - A context overflow is sent once. A setup-shaped overflow is published as
-  `context_length_exceeded (provider_error)`, so the host still compacts.
+  `context_length_exceeded (provider_error)`, so the host still compacts. Every
+  overflow footer, setup-shaped or not, names a closed sub-reason
+  (`input-tokens`, `request-bytes`, `media-limit`, or `unknown`) taken only from
+  structured provider facts; see [diagnostic retention](diagnostic-retention.md).
 - A route served through `tierModelMap` under a different API model ID is one
   attempt with no in-call recovery.
 - Routed Codex calls are pinned to SSE and may recover. A Google Antigravity

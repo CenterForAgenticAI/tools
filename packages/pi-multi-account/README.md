@@ -49,7 +49,7 @@ Every subcommand and argument is in [Commands, tools, and autocomplete](docs/com
 
 ### Public account status subpath
 
-Import `@centerforagenticai/pi-multi-account/public-status` and call `discoverPublicAccountStatusReader(pi.events)`. Use the package name your installation resolves: the package is installed under its published name. The subpath is a plain JavaScript module with no imports, so plain Node can load it and it never loads the extension or Pi. The v1 contract uses the query channel `pi-multi-account:public-status-service-query:v1` and returns a `public-status-v1` snapshot, or `owner-unavailable` until `session_start` finishes and after `session_shutdown`, and `source-error` when the owner fails. Version 1 covers only Anthropic and OpenAI Codex accounts; Google Antigravity accounts are omitted. Each account's `label` is the label you configured in `accountLabels`, or else the provider id. It is never read from a token. See [Commands, tools, and autocomplete](docs/commands.md#public-live-account-status-public-status).
+Import `@centerforagenticai/pi-multi-account/public-status` and call `discoverPublicAccountStatusReader(pi.events)`. Use the package name your installation resolves: the package is installed under its published name. The subpath is a plain JavaScript module with no imports, so plain Node can load it and it never loads the extension or Pi. The v1 contract uses the query channel `pi-multi-account:public-status-service-query:v1` and returns a `public-status-v1` snapshot, or `owner-unavailable` until `session_start` finishes and after `session_shutdown`, and `source-error` when the owner fails. Version 1 covers only Anthropic and OpenAI Codex accounts; Google Antigravity accounts are omitted. Each account's `label` is the label you configured in `accountLabels`, or else the provider id. It is never read from a token. The read itself writes nothing, but the first read of a new UTC day schedules the once-a-day cost period closer, which can refresh OpenRouter pricing over the network and append day digests. See [Commands, tools, and autocomplete](docs/commands.md#public-live-account-status-public-status).
 
 ## Configuration
 
@@ -69,6 +69,7 @@ When `PI_CODING_AGENT_DIR` is unset, the root is `~/.pi/agent`. Missing configur
 | `preferredModels` / `tierModelMap` | `{}` | Resolve explicit cross-family and cross-tier model identity. |
 | `accountGroups` and defaults | `{}` | Restrict a session, exact cwd, or global fallback to named account allow-lists. |
 | `usageFetchEnabled` | all managed families `true` | Enable fail-soft provider usage fetches. |
+| `imageStripping` | off | Stopgap: replace images older than the newest `keepNewest` image-bearing messages in `unified` and Anthropic alias requests. See [Removing old images](docs/configuration.md#removing-old-images-stopgap). |
 
 Account groups may list exact configured Pi provider IDs, including built-in API
 and custom providers. Unknown, removed, or unavailable members stay inactive;

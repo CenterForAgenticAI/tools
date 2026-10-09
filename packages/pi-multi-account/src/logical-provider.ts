@@ -40,16 +40,23 @@ import type {
 	MultiAccountConfig,
 } from "./config.js";
 import {
+	CONTEXT_OVERFLOW_REASONS,
 	PROVIDER_ERROR_CODES,
 	TRANSPORT_FAILURE_KINDS,
 	classifyFailure,
+	contextOverflowReason,
 	providerErrorCodeFromMessage,
+	providerErrorTypeFromMessage,
+	upstreamFailureKindFromMessage,
 } from "./error-classification.js";
 import type {
+	AnthropicErrorType,
+	ContextOverflowReason,
 	FailureCategory,
 	ProviderErrorCode,
 	ProviderFailureSignal,
 	TransportFailureKind,
+	UpstreamFailureKind,
 } from "./error-classification.js";
 import { resolveTierModel } from "./tier-model-resolver.js";
 import type { TierModelMap } from "./tier-model-resolver.js";
@@ -59,16 +66,19 @@ import type { ProviderType, Vendor } from "./vendor.js";
 export { LOGICAL_PROVIDER_ID } from "./models-declaration.js";
 import { LOGICAL_PROVIDER_ID } from "./models-declaration.js";
 import { forceCodexSseOptions } from "./codex-adapter.js";
+import { readImageStripPolicy, stripOldImages, type ImageStripPolicy } from "./image-strip.js";
 import {
 	buildBoundedRecoveryFinalErrorMessage,
 	createRecoveryEngine,
 	isRecoveryStartEvent,
+	RECOVERY_MAX_PROVIDER_SENDS_PER_CALL,
 	type RecoveryClock,
 	type RecoveryDispatchRequest,
 	type RecoveryEngine,
 	type RecoveryPhysicalAttempt,
 	type RecoveryResult,
 	type RecoveryRetrySafety,
+	type RecoveryTerminationReason,
 	type RecoveryTimer,
 	type RecoveryTimingConfig,
 } from "./recovery-engine.js";
@@ -138,13 +148,96 @@ export interface LogicalPhysicalAccount {
 	};
 }
 
+/**
+ * How far the last attempt got: no `start` yet, a `start` (response headers)
+ * with no content, or content already seen.
+ */
+export type LogicalFailurePhase = "opening" | "started" | "streaming";
+
+/**
+ * How the last attempt ended. `error-terminal` is a provider error event;
+ * `stream-threw` a thrown iterator; `dispatch-rejected` a rejected open;
+ * `stalled` the stall guard; `no-terminal` a stream that ended bare;
+ * `aborted` the provider's aborted terminal; `unfinished` no terminal had
+ * been observed when the call ended (the engine stopped waiting).
+ */
+export type LogicalFailureEnding =
+	| "error-terminal"
+	| "stream-threw"
+	| "dispatch-rejected"
+	| "stalled"
+	| "no-terminal"
+	| "aborted"
+	| "unfinished";
+
+/** Why the call made no further send, in a closed vocabulary. */
+export type LogicalFailureStop =
+	| "send-cap"
+	| "no-candidate"
+	| "output-seen"
+	| "unclassified-failure"
+	| RecoveryTerminationReason;
+
+/**
+ * Closed facts about the last attempt's failure. Every member is an enum value
+ * or a bounded integer picked from provider data; nothing is copied from it.
+ */
+export interface LogicalFailureShape {
+	readonly phase: LogicalFailurePhase;
+	readonly ending: LogicalFailureEnding;
+	/** Whole seconds from dispatch to failure, 0 through 86400. */
+	readonly elapsedSeconds: number;
+	readonly stop: LogicalFailureStop;
+	/** The provider's own error-envelope type, when it is on the fixed list. */
+	readonly errorType?: AnthropicErrorType;
+	/** A fixed upstream message that carries no envelope. */
+	readonly upstream?: UpstreamFailureKind;
+	/** An HTTP status from 100 through 599. */
+	readonly httpStatus?: number;
+	readonly transportKind?: TransportFailureKind;
+}
+
 /** Safe physical cause of a failed logical call; never contains provider prose. */
 export interface LogicalFailureEvidence {
 	readonly providerId?: string;
 	readonly category: FailureCategory | "context-overflow" | "host-stale-install";
+	/** Which limit a `context-overflow` hit, from structured provider facts only. */
+	readonly overflowReason?: ContextOverflowReason;
 	/** Physical invocations, not the unknown inner send count of Antigravity. */
 	readonly attemptCount: number;
+	/** Present when a physical attempt opened. */
+	readonly shape?: LogicalFailureShape;
 }
+
+/**
+ * Flat, named diagnostic fields for one failure. Fields are copied by name;
+ * the evidence object itself never reaches the diagnostic log.
+ */
+export function logicalFailureDiagnosticFields(
+	evidence: LogicalFailureEvidence,
+): Readonly<Record<string, string | number>> {
+	const { providerId, category, overflowReason, attemptCount, shape } = evidence;
+	return {
+		...(providerId === undefined ? {} : { providerId }),
+		category,
+		...(overflowReason !== undefined && OVERFLOW_REASON_SET.has(overflowReason) ? { overflowReason } : {}),
+		attemptCount,
+		...(shape === undefined
+			? {}
+			: {
+					phase: shape.phase,
+					ending: shape.ending,
+					elapsedSeconds: shape.elapsedSeconds,
+					stop: shape.stop,
+					...(shape.errorType === undefined ? {} : { errorType: shape.errorType }),
+					...(shape.upstream === undefined ? {} : { upstream: shape.upstream }),
+					...(shape.httpStatus === undefined ? {} : { httpStatus: shape.httpStatus }),
+					...(shape.transportKind === undefined ? {} : { transportKind: shape.transportKind }),
+				}),
+	};
+}
+
+const OVERFLOW_REASON_SET: ReadonlySet<string> = new Set(CONTEXT_OVERFLOW_REASONS);
 
 /** One physical attempt the logical provider makes. */
 export interface LogicalDispatchCall {
@@ -286,6 +379,11 @@ export interface LogicalProviderDeps {
 	/** Private session correlation for the public terminal and physical route. */
 	onPublicTerminal?: (physical: AssistantMessage, publicMessage: AssistantMessage) => void;
 	onDiagnostic?: (message: string) => void;
+	/**
+	 * One closed evidence record for each failed (not aborted) call. A sink that
+	 * throws cannot change the call's result.
+	 */
+	onFailure?: (evidence: LogicalFailureEvidence) => void;
 	onShutdownAbort?: () => void;
 	/**
 	 * A failed physical terminal the call recovered past. It was never
@@ -305,6 +403,8 @@ export interface LogicalProviderDeps {
 	recoveryClock?: RecoveryClock;
 	/** Injected only by tests; production uses `TRANSPORT_SILENCE_TIMEOUT_MS`. */
 	transportSilenceTimeoutMs?: number;
+	/** Live opt-in old-image policy (src/image-strip.ts); omitted means off. */
+	imageStripping?: ImageStripPolicy | undefined;
 }
 
 export interface LogicalProvider {
@@ -419,6 +519,39 @@ function finiteNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value)
 		? value
 		: undefined;
+}
+
+/** The `message` of a thrown value, or `undefined` when it has none or reading it throws. */
+function rawMessageOf(error: unknown): unknown {
+	try {
+		return typeof error === "object" && error !== null
+			? (error as { message?: unknown }).message
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Only a real HTTP status survives as failure evidence. */
+function boundedHttpStatus(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599
+		? value
+		: undefined;
+}
+
+const FAILURE_ELAPSED_MAX_SECONDS = 86_400;
+
+function boundedElapsedSeconds(elapsedMs: number): number {
+	if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return 0;
+	return Math.min(FAILURE_ELAPSED_MAX_SECONDS, Math.floor(elapsedMs / 1000));
+}
+
+/** What the attempt recorded about its own failure, once, when it happened. */
+interface FailureShapeHints {
+	readonly ending: LogicalFailureEnding;
+	readonly failedAtMs: number;
+	readonly errorType?: AnthropicErrorType;
+	readonly upstream?: UpstreamFailureKind;
 }
 
 const EXHAUSTION_LENGTH_MAX_OUTPUT_TOKENS = 1;
@@ -1195,6 +1328,7 @@ export function createLogicalProvider(
 		box.hostStaleInstall = true;
 		box.hostMissingDependency = fault.missingDependency;
 		box.overflow = false;
+		box.overflowReason = undefined;
 		box.preStartRetryable = false;
 		try {
 			deps.onDiagnostic?.(
@@ -1208,6 +1342,41 @@ export function createLogicalProvider(
 	/** The account did nothing wrong; report it as handled so nothing cools it. */
 	const hostFaultReceipt = (): HostRetryCooldownReceipt => ({ alreadyCooled: true, rollback: () => {} });
 
+	/** Whether the attempt produced content: nothing after it is ever sent again. */
+	const attemptHadOutput = (box: AttemptRecordBox): boolean => {
+		const content = box.physicalTerminal?.content;
+		return box.sawOutput || (Array.isArray(content) && content.length > 0);
+	};
+
+	/**
+	 * Keep the closed facts of how an attempt failed, once. The provider's own
+	 * text is read here only to pick enum values and is never stored.
+	 */
+	const noteFailureShape = (
+		box: AttemptRecordBox,
+		ending: LogicalFailureEnding,
+		raw?: unknown,
+	): void => {
+		if (box.shapeHints !== undefined) return;
+		const errorType = providerErrorTypeFromMessage(raw);
+		const upstream = upstreamFailureKindFromMessage(raw);
+		box.shapeHints = {
+			ending,
+			failedAtMs: box.clock.now(),
+			...(errorType === undefined ? {} : { errorType }),
+			...(upstream === undefined ? {} : { upstream }),
+		};
+	};
+
+	/**
+	 * Record whether an attempt overflowed and, from structured facts only,
+	 * which limit it hit. Only the closed sub-reason is kept, never the source.
+	 */
+	const noteOverflow = (box: AttemptRecordBox, overflow: boolean, source: unknown): void => {
+		box.overflow = overflow;
+		box.overflowReason = overflow ? contextOverflowReason(source) : undefined;
+	};
+
 	const retrySafetyFor = (box: AttemptRecordBox): RecoveryRetrySafety => {
 		const { physicalTerminal: message, failure, overflow } = box;
 		if (box.invalidated) return { status: "unsafe", reason: "unknown" };
@@ -1219,9 +1388,7 @@ export function createLogicalProvider(
 		if (overflow) return { status: "unsafe", reason: "invalid-request" };
 		// Nothing after any output is ever sent again; the engine enforces the
 		// same rule from the events it observed.
-		if (box.sawOutput || (Array.isArray(message?.content) && message.content.length > 0)) {
-			return { status: "unsafe", reason: "unknown" };
-		}
+		if (attemptHadOutput(box)) return { status: "unsafe", reason: "unknown" };
 		if (failure === undefined) return { status: "unsafe", reason: "unknown" };
 		const category = classifyFailure(failure).category;
 		if (category === "quota-rate-limit") {
@@ -1258,6 +1425,8 @@ export function createLogicalProvider(
 		physicalTerminal?: AssistantMessage;
 		failure?: ProviderFailureSignal;
 		overflow: boolean;
+		/** The closed overflow sub-reason, set with `overflow`. */
+		overflowReason?: ContextOverflowReason | undefined;
 		/**
 		 * A non-terminal event other than `start` reached the engine; nothing
 		 * after it is resent. The provider's `start` only reports that response
@@ -1287,6 +1456,11 @@ export function createLogicalProvider(
 		receipt?: HostRetryCooldownReceipt;
 		attempt: LogicalAttributionAttempt;
 		account: LogicalPhysicalAccount;
+		/** The call's clock and this attempt's dispatch time, for the failure's elapsed seconds. */
+		readonly clock: RecoveryClock;
+		readonly dispatchedAtMs: number;
+		/** How this attempt's failure ended; set once, when the failure is recorded. */
+		shapeHints?: FailureShapeHints;
 	}
 
 	/**
@@ -1326,7 +1500,13 @@ export function createLogicalProvider(
 				});
 				return box.receipt;
 			};
-			const attributeFailure = (message: AssistantMessage, failure: ProviderFailureSignal): void => {
+			const attributeFailure = (
+				message: AssistantMessage,
+				failure: ProviderFailureSignal,
+				ending: LogicalFailureEnding,
+				raw?: unknown,
+			): void => {
+				noteFailureShape(box, ending, raw);
 				const receipt = recordFailureOnce(message);
 				box.failure = failure;
 				box.physicalTerminal = message;
@@ -1383,7 +1563,7 @@ export function createLogicalProvider(
 							// A corroborated subscription-exhaustion length terminal is an
 							// account-local quota failure, never an accepted answer.
 							const replacement = exhaustionLengthError(requestedModelId, match);
-							attributeFailure(replacement, safeProjectFailureSignal(replacement, dispatchedModelId));
+							attributeFailure(replacement, safeProjectFailureSignal(replacement, dispatchedModelId), "error-terminal");
 							await attempt.waitForTerminal();
 							yield { type: "error", reason: "error", error: replacement };
 							return;
@@ -1395,6 +1575,7 @@ export function createLogicalProvider(
 						return;
 					}
 					if (outcome === "abort") {
+						noteFailureShape(box, "aborted");
 						box.physicalTerminal = message;
 						safeAttributionCall(() => attempt.abort(message));
 						await attempt.waitForTerminal();
@@ -1408,7 +1589,7 @@ export function createLogicalProvider(
 						// The raw setup text never leaves this attempt. Only its overflow
 						// form changes the outcome: the host must still compact.
 						const disposition = setupFailureDisposition(message, message.errorMessage);
-						box.overflow = disposition === "context-overflow";
+						noteOverflow(box, disposition === "context-overflow", message);
 						// "fetch failed", a reset socket or a 503 before `start`: nothing
 						// was produced, so one other account may serve the request.
 						box.preStartRetryable = disposition === "retryable";
@@ -1421,9 +1602,9 @@ export function createLogicalProvider(
 							// A diagnostic sink failure cannot replace a provider result.
 						}
 					} else if (setupFailureDisposition(message, message.errorMessage) === "context-overflow") {
-						box.overflow = (message as { code?: unknown }).code === undefined;
+						noteOverflow(box, (message as { code?: unknown }).code === undefined, message);
 					}
-					attributeFailure(message, failure);
+					attributeFailure(message, failure, "error-terminal", message.errorMessage);
 					await attempt.waitForTerminal();
 					yield event;
 					return;
@@ -1453,13 +1634,15 @@ export function createLogicalProvider(
 						syntheticErrorMessage(requestedModelId, buildBoundedRecoveryFinalErrorMessage()),
 						raw,
 					);
-					box.overflow = disposition === "context-overflow";
+					noteOverflow(box, disposition === "context-overflow", error);
 					box.preStartRetryable = disposition === "retryable";
 				}
 				if (box.physicalTerminal === undefined) {
 					attributeFailure(
 						syntheticErrorMessage(requestedModelId, buildBoundedRecoveryFinalErrorMessage()),
 						safeProjectFailureSignal(error, dispatchedModelId),
+						error instanceof PhysicalAttemptStall ? "stalled" : "stream-threw",
+						rawMessageOf(error),
 					);
 				}
 				throw error;
@@ -1477,6 +1660,7 @@ export function createLogicalProvider(
 				requestedModelId,
 				"the dispatched stream ended without a terminal event",
 			);
+			noteFailureShape(box, "no-terminal");
 			box.physicalTerminal = syntheticMessage;
 			safeAttributionCall(() => attempt.fail(syntheticMessage));
 			await attempt.waitForTerminal();
@@ -1675,12 +1859,19 @@ export function createLogicalProvider(
 				}
 			}
 		};
+		// A base provider id equals its family token (`anthropic`,
+		// `openai-codex`). Base-provider requests stay byte-identical whatever
+		// the policy, so only numbered aliases get the stripped copy.
+		const physicalContext =
+			account.providerId === account.family
+				? input.context
+				: stripOldImages(input.context, readImageStripPolicy(() => deps.imageStripping));
 		const open = async (): Promise<AsyncIterable<unknown>> => {
 			try {
 				return await deps.dispatch({
 					providerId: account.providerId,
 					modelId: dispatchedModelId,
-					context: input.context,
+					context: physicalContext,
 					options: physicalOptions,
 				});
 			} catch (error) {
@@ -1691,6 +1882,7 @@ export function createLogicalProvider(
 					buildBoundedRecoveryFinalErrorMessage(),
 				);
 				box.failure = safeProjectFailureSignal(error, dispatchedModelId);
+				noteFailureShape(box, "dispatch-rejected", rawMessageOf(error));
 				if (!hasStructuredFailureEvidence(box.failure) && isHostStaleInstallFailure(error)) {
 					markHostStaleInstall(box, account, error);
 					box.receipt = hostFaultReceipt();
@@ -1700,7 +1892,7 @@ export function createLogicalProvider(
 							? (error as { message?: unknown }).message
 							: undefined;
 					const disposition = setupFailureDisposition(syntheticMessage, raw);
-					box.overflow = disposition === "context-overflow";
+					noteOverflow(box, disposition === "context-overflow", error);
 					box.preStartRetryable = disposition === "retryable";
 					box.receipt = coordinator.recordFailure({
 						account,
@@ -1783,11 +1975,63 @@ export function createLogicalProvider(
 		return { output, retrySafety };
 	};
 
+	/** One closed evidence record per failed call; a sink failure cannot replace the result. */
+	const reportFailure = (evidence: LogicalFailureEvidence): void => {
+		try {
+			deps.onFailure?.(evidence);
+		} catch {
+			// A diagnostic sink failure cannot replace a provider result.
+		}
+	};
+
+	/** The closed shape of the last attempt's failure. Never reads provider text. */
+	const failureShape = (box: AttemptRecordBox, stop: LogicalFailureStop): LogicalFailureShape => {
+		const hints = box.shapeHints;
+		const httpStatus = boundedHttpStatus(box.failure?.httpStatus);
+		const transportKind =
+			box.failure?.transportKind !== undefined &&
+			TRANSPORT_FAILURE_KIND_SET.has(box.failure.transportKind)
+				? box.failure.transportKind
+				: undefined;
+		return Object.freeze({
+			phase: attemptHadOutput(box) ? "streaming" : box.heldStart !== undefined ? "started" : "opening",
+			ending: hints?.ending ?? "unfinished",
+			elapsedSeconds: boundedElapsedSeconds((hints?.failedAtMs ?? box.clock.now()) - box.dispatchedAtMs),
+			stop,
+			...(hints?.errorType === undefined ? {} : { errorType: hints.errorType }),
+			...(hints?.upstream === undefined ? {} : { upstream: hints.upstream }),
+			...(httpStatus === undefined ? {} : { httpStatus }),
+			...(transportKind === undefined ? {} : { transportKind }),
+		});
+	};
+
+	/**
+	 * Why the call made no further send. The engine's own reason stands unless it
+	 * is `unknown`, where the attempt's own facts say more.
+	 */
+	const failureStop = (
+		result: Extract<RecoveryResult, { status: "exhausted" | "terminated" }>,
+		last: AttemptRecordBox | undefined,
+	): LogicalFailureStop => {
+		if (result.status === "exhausted") {
+			return result.attempts >= RECOVERY_MAX_PROVIDER_SENDS_PER_CALL ? "send-cap" : "no-candidate";
+		}
+		if (result.reason !== "unknown") return result.reason;
+		if (last === undefined) return "unknown";
+		if (attemptHadOutput(last)) return "output-seen";
+		const classifiedElsewhere =
+			last.invalidated || last.hostStaleInstall === true || last.overflow || last.preStartRetryable;
+		return !classifiedElsewhere && classifyFailure(last.failure ?? {}).category === "unknown"
+			? "unclassified-failure"
+			: "unknown";
+	};
+
 	/** Named terminal facts only: a provider may attach arbitrary private fields. */
 	const safeFailureMessage = (
 		modelId: string,
 		box: AttemptRecordBox | undefined,
 		errorMessage: string,
+		stop: LogicalFailureStop,
 		keepContent = false,
 	): AssistantMessage & { readonly logicalFailure: LogicalFailureEvidence } => {
 		const physical = box?.physicalTerminal;
@@ -1806,7 +2050,9 @@ export function createLogicalProvider(
 		const category = stale ? "host-stale-install" : box?.overflow === true ? "context-overflow" :
 			box?.preStartRetryable === true && classified === "unknown" ? "transport" : classified;
 		const attemptCount = box?.ordinal ?? 0;
-		const evidence = `[${providerId === undefined ? "" : `physical provider: ${providerId}; `}cause: ${VISIBLE_FAILURE_CAUSES[category]}; attempts: ${attemptCount}]`;
+		const shape = box === undefined ? undefined : failureShape(box, stop);
+		const overflowReason = category === "context-overflow" ? box?.overflowReason ?? "unknown" : undefined;
+		const evidence = `[${providerId === undefined ? "" : `physical provider: ${providerId}; `}cause: ${VISIBLE_FAILURE_CAUSES[category]}; ${overflowReason === undefined ? "" : `overflow: ${overflowReason}; `}attempts: ${attemptCount}]`;
 		return {
 			...syntheticErrorMessage(
 				modelId,
@@ -1819,7 +2065,9 @@ export function createLogicalProvider(
 			logicalFailure: Object.freeze({
 				...(providerId === undefined ? {} : { providerId }),
 				category,
+				...(overflowReason === undefined ? {} : { overflowReason }),
 				attemptCount,
+				...(shape === undefined ? {} : { shape }),
 			}),
 		};
 	};
@@ -1863,7 +2111,8 @@ export function createLogicalProvider(
 		// Keep validated usage and named failure facts, never arbitrary physical
 		// fields, content no consumer saw, or the provider's own error text. An
 		// aborted terminal carries no error text at all.
-		const projected = safeFailureMessage(modelId, last, errorMessage);
+		const projected = safeFailureMessage(modelId, last, errorMessage, failureStop(result, last));
+		if (!aborted) reportFailure(projected.logicalFailure);
 		const message: AssistantMessage = aborted
 			? { ...withoutErrorMessage(projected), stopReason: "aborted" }
 			: { ...projected, stopReason: "error" };
@@ -1895,8 +2144,10 @@ export function createLogicalProvider(
 				const projected = safeFailureMessage(
 					modelId, box,
 					box.overflow ? SETUP_CONTEXT_OVERFLOW_MESSAGE : buildBoundedRecoveryFinalErrorMessage(),
+					"output-seen",
 					true,
 				);
+				if (!aborted) reportFailure(projected.logicalFailure);
 				return aborted ? { ...withoutErrorMessage(projected), stopReason: "aborted" } : projected;
 			};
 			try {
@@ -2042,6 +2293,8 @@ export function createLogicalProvider(
 					}
 					const box: AttemptRecordBox = {
 						ordinal: boxes.length + 1,
+						clock,
+						dispatchedAtMs: clock.now(),
 						overflow: false,
 						sawOutput: false,
 						preStartRetryable: false,

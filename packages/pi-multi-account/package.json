@@ -1,5 +1,5 @@
 {
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Global Anthropic and OpenAI Codex multi-account OAuth routing for Pi.",
   "type": "module",
   "bin": {
@@ -36,7 +36,7 @@
     "upstream:verify-baseline": "node scripts/upstream-verify-baseline.mjs",
     "upstream:diff": "node scripts/upstream-diff.mjs",
     "upstream:update": "node scripts/upstream-update.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.public-status.json --noEmit"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -65,11 +65,11 @@
     "undici": "^8.10.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^1.0.4",
-    "@earendil-works/pi-coding-agent": "^1.0.4",
-    "@earendil-works/pi-tui": "^1.0.4",
+    "@earendil-works/pi-ai": "^1.1.0",
+    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@earendil-works/pi-tui": "^1.1.0",
     "@types/node": "^24.0.0",
-    "typebox": "1.3.35",
+    "typebox": "1.3.36",
     "typescript": "^5.9.0",
     "vitest": "^4.1.11"
   },
@@ -78,5 +78,10 @@
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
+  },
+  "overrides": {
+    "@earendil-works/pi-coding-agent": {
+      "undici": "$undici"
+    }
   }
 }

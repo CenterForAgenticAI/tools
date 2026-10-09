@@ -1,4 +1,5 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { parseArgs } from "@earendil-works/pi-coding-agent";
 
 /** Session fields used to recover an explicit model selection. */
 interface ModelChangeEntryLike {
@@ -281,6 +282,145 @@ export async function restoreManagedAliasModel(input: {
 	}
 	try {
 		return (await input.setModel(model)) ? "restored" : "set-model-rejected";
+	} catch {
+		return "set-model-failed";
+	}
+}
+
+/**
+ * Why the saved default model was not (or did not need to be) applied at
+ * startup. Every value is a bounded enum member so diagnostics never carry
+ * provider or model text read from settings.
+ */
+export type StartupDefaultOutcome =
+	| "applied"
+	| "not-startup"
+	| "delegate-session"
+	| "existing-session"
+	| "explicit-selection"
+	| "settings-unavailable"
+	| "no-saved-default"
+	| "unmanaged-provider"
+	| "already-active"
+	| "model-unavailable"
+	| "model-lookup-failed"
+	| "set-model-rejected"
+	| "set-model-failed";
+
+/**
+ * Asks Pi's own parser which model-selection options it recognized so this
+ * helper cannot disagree with Pi's value consumption or end-of-options rules.
+ */
+export function hasExplicitModelFlag(argv: readonly string[]): boolean {
+	const parsed = parseArgs([...argv]);
+	return (
+		parsed.model !== undefined ||
+		parsed.provider !== undefined ||
+		parsed.models !== undefined
+	);
+}
+
+function hasConversationMessages(session: SessionBranchReader): boolean {
+	const branch = session.getBranch();
+	if (!Array.isArray(branch)) return true;
+	return branch.some(
+		(entry) =>
+			typeof entry === "object" &&
+			entry !== null &&
+			(entry as { type?: unknown }).type === "message",
+	);
+}
+
+/**
+ * Applies the operator's saved default model to a fresh session once the
+ * managed alias providers exist.
+ *
+ * Pi chooses the startup model inside `createAgentSession`, strictly before
+ * extensions load. A saved default that names a managed alias cannot be found
+ * yet, so Pi falls back to a base provider and the operator starts every new
+ * session on a model they did not choose. This runs after registration and
+ * selects that alias.
+ *
+ * It is deliberately narrow. It acts only on `startup` and `new`, only in the
+ * foreground session, only while the session holds no conversation message,
+ * never when the command line or a model scope chose the model, only for a
+ * provider this extension manages, and never writes a setting.
+ */
+export async function applySavedDefaultModel(input: {
+	readonly reason: unknown;
+	readonly delegateSession: boolean;
+	readonly session: SessionBranchReader;
+	readonly explicitSelection: boolean;
+	readonly readSavedDefault: () => unknown;
+	readonly current: {
+		readonly provider: string | undefined;
+		readonly modelId: string | undefined;
+	};
+	readonly isManagedProvider: (providerId: string) => boolean;
+	readonly findModel: (
+		selection: PersistedModelSelection,
+	) => Model<Api> | undefined;
+	readonly setModel: (model: Model<Api>) => Promise<boolean>;
+}): Promise<StartupDefaultOutcome> {
+	if (input.reason !== "startup" && input.reason !== "new") {
+		return "not-startup";
+	}
+	// A delegate worker or child is configured by its dispatcher; the operator's
+	// saved default describes the foreground session only.
+	if (input.delegateSession) return "delegate-session";
+	try {
+		if (hasConversationMessages(input.session)) return "existing-session";
+	} catch {
+		return "existing-session";
+	}
+	if (input.explicitSelection) return "explicit-selection";
+
+	let saved: unknown;
+	try {
+		saved = input.readSavedDefault();
+	} catch {
+		return "settings-unavailable";
+	}
+	if (saved === undefined || saved === null || typeof saved !== "object") {
+		return "settings-unavailable";
+	}
+	// Copy the two named fields; the settings object never travels further.
+	const { defaultProvider, defaultModel } = saved as {
+		defaultProvider?: unknown;
+		defaultModel?: unknown;
+	};
+	const selection = boundedSelection(defaultProvider, defaultModel);
+	if (selection === undefined) return "no-saved-default";
+
+	let managed: boolean;
+	try {
+		managed = input.isManagedProvider(selection.provider);
+	} catch {
+		return "model-lookup-failed";
+	}
+	if (!managed) return "unmanaged-provider";
+	if (
+		selection.provider === input.current.provider &&
+		selection.modelId === input.current.modelId
+	) {
+		return "already-active";
+	}
+
+	let model: Model<Api> | undefined;
+	try {
+		model = input.findModel(selection);
+	} catch {
+		return "model-lookup-failed";
+	}
+	if (
+		model === undefined ||
+		model.provider !== selection.provider ||
+		model.id !== selection.modelId
+	) {
+		return "model-unavailable";
+	}
+	try {
+		return (await input.setModel(model)) ? "applied" : "set-model-rejected";
 	} catch {
 		return "set-model-failed";
 	}

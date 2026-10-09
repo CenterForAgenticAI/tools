@@ -25,8 +25,9 @@
  * 99ac00f290efbcb93e7f23e6b7482d8727367aa7, upstream baseline
  * 53266ecb51b6d1890ef3f7251a64cb1d71d96099, source src/stream.ts.
  * Local delta: adaptive thinking emits type=adaptive and mapped output effort
- * without budget_tokens; request-local retry/timeout options reach the SDK; and
- * refusal or unknown stop reasons retain bounded, structured error details.
+ * without budget_tokens and, absent a caller output cap, the model's full
+ * maxTokens; request-local retry/timeout options reach the SDK; and refusal or
+ * unknown stop reasons retain bounded, structured error details.
  */
 
 import { Anthropic } from "@anthropic-ai/sdk";
@@ -253,8 +254,21 @@ export function streamAnthropicAdaptive(
           : { fetch: createTransportActivityFetch(onTransportActivity) }),
       });
 
+      const forceAdaptiveThinking =
+        (model.compat as { forceAdaptiveThinking?: boolean } | undefined)
+          ?.forceAdaptiveThinking === true;
+      // The pinned default sends one third of the model's output cap. Legacy
+      // thinking keeps answer room because budget_tokens stays below that cap.
+      // Adaptive thinking has no budget, so at high effort it could spend the
+      // whole third on reasoning and stop before any answer text. Adaptive
+      // requests therefore default to the model's full output cap, as Pi's own
+      // Anthropic provider does. A caller-supplied maxTokens still wins.
+      const adaptiveThinking = Boolean(
+        options?.reasoning && model.reasoning && forceAdaptiveThinking,
+      );
       const maxTokens =
-        options?.maxTokens || Math.floor(model.maxTokens / 3);
+        options?.maxTokens ||
+        (adaptiveThinking ? model.maxTokens : Math.floor(model.maxTokens / 3));
 
       const params: MessageCreateParamsStreaming = {
         model: model.id,
@@ -279,9 +293,6 @@ export function streamAnthropicAdaptive(
       // budget must stay below the output cap. Adaptive thinking carries no
       // budget, so that condition applies to the legacy branch only.
       if (options?.reasoning && model.reasoning) {
-        const forceAdaptiveThinking =
-          (model.compat as { forceAdaptiveThinking?: boolean } | undefined)
-            ?.forceAdaptiveThinking === true;
         if (forceAdaptiveThinking) {
           const defaultEfforts: Record<string, string> = {
             minimal: "low",

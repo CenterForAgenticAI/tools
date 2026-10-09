@@ -6,7 +6,7 @@ For contributors and integrators: module ownership, provider request boundaries,
 
 | Layer | Modules |
 | --- | --- |
-| Provider integration | `upstream-anthropic.ts`, `anthropic-context-compat.ts`, `anthropic-alias-stream.ts`, `codex-adapter.ts`, `provider-registration.ts`, `catalog-rebinding.ts` |
+| Provider integration | `upstream-anthropic.ts`, `anthropic-context-compat.ts`, `anthropic-alias-stream.ts`, `codex-adapter.ts`, `provider-registration.ts`, `catalog-rebinding.ts`, `image-strip.ts` |
 | Account discovery and credentials | `discovery.ts`, `credential-lifecycle.ts`, `credential-refresh.ts`, `warmer.ts`, `account-labels.ts` |
 | Routing policy | `runtime-state.ts`, `error-classification.ts`, `cooldowns.ts`, `routing.ts`, `preflight.ts`, `model-support.ts` |
 | Continuation lifecycle | `continuation.ts`, `watchdog.ts`, `compaction.ts`, `lifecycle.ts` |
