@@ -10,8 +10,8 @@ criteria.
 
 pi-work helps an agent turn an outcome into a checked graph of work. It owns the
 workspec format and the evidence used to establish completion. The agent in the
-current Pi session still decides what runs next, while pi-delegate owns worker
-execution.
+current Pi session still decides what runs next, while the selected dispatch
+backend owns worker execution.
 
 - Draft and promote a workspec without losing its criteria.
 - Validate the graph, dependencies, write scope, and evidence declarations.
@@ -30,10 +30,10 @@ A failed or unexecuted check does not pass. Detailed evidence rules are in
 The agent running the Pi session calls pi-work tools and commands. pi-work reads
 and writes Markdown drafts, YAML workspecs, and a cache under `.work/` that it
 can rebuild from those sources. It checks
-evidence in the target Git worktree. For execution, `work_dispatch` asks the
-loaded pi-delegate runtime to dispatch one node; pi-delegate then owns the
-worker, isolation, escalation, and result handling. pi-work has no scheduler,
-daemon, or persistent run-state service.
+evidence in the target Git worktree. For execution, `work_dispatch` submits one
+node to Fabric by default, or to pi-delegate when selected. pi-work keeps the
+brief, plan receipt, digests, and status cache; the backend supplies the worker
+run and result. pi-work has no scheduler, daemon, or persistent run-state service.
 
 ## Install and enable
 
@@ -75,7 +75,7 @@ one-run loading, and limiting which package resources load.
 | Tool | `work_amend_criterion` | Change one criterion through an append-only recorded amendment. |
 | Tool | `work_status` | Derive each node as done, ready, blocked, or needing a decision. An open decision with `gates` prevents planning and dispatch of the named top-level nodes and their subtrees; one without `gates` blocks every node. An applicable decision makes a node `needs-decision` unless another prerequisite already makes it `blocked`. |
 | Tool | `work_plan` | Compile ready node addresses into plans that point to stored worker briefs, without dispatching. |
-| Tool | `work_dispatch` | Compile and submit exactly one node through pi-delegate, or return the plan without claiming dispatch occurred. |
+| Tool | `work_dispatch` | Compile and submit exactly one node through the selected backend, or return the plan without claiming dispatch occurred. |
 | Tool | `work_verify` | Verify a node's declared evidence in a named Git tree. |
 | Commands | `/work-draft`, `/work-promote`, `/work-decompose` | Guide authoring, promotion, and decomposition. |
 | Commands | `/work-status`, `/work-next` | Show derived state or hand off one ready round. |
@@ -85,6 +85,48 @@ one-run loading, and limiting which package resources load.
 
 Paths passed to tools are relative to the allowed base directory for that call.
 Absolute paths are rejected rather than rewritten.
+
+## Dispatch backends
+
+`work_dispatch` accepts `backend: "fabric"` or `backend: "pi-delegate"`.
+Selection is ordered:
+
+1. An explicit `backend` selects that executor; it never falls back to another.
+2. With no override, an available Fabric host adapter is the default.
+3. Without a Fabric host adapter, pi-work uses pi-delegate. An explicitly
+   selected Fabric backend without an adapter, or an unavailable selected
+   pi-delegate client, returns a plan-only result rather than claiming dispatch
+   occurred.
+
+Load pi-fabric alongside pi-work and restart Pi for Fabric dispatch. Fabric
+needs no pi-delegate installation. Fabric is discovered only when the
+`fabric_exec` tool is registered and Pi exposes an event bus. Without that
+discovery, dispatch uses pi-delegate, then plan-only if pi-delegate is
+unavailable. An event bus alone does not select Fabric. A missing or silent
+discovered listener causes a bounded timeout, not an automatic pi-delegate
+retry. An unknown dispatch state is not permission to submit a second worker.
+
+Before submitting a Fabric run, pi-work automatically bootstraps the fixed
+`pi-work-dispatch` program in `.pi/fabric/programs/<digest>.json` under
+`PI_FABRIC_PROJECT_ROOT`, or the session cwd when that variable is absent.
+It writes a candidate record atomically, reuses an existing digest record,
+and invokes it by full digest through `pi-fabric:program:run:v1`.
+No manual `programs.save` call or program promotion is required. pi-work
+registers a Fabric provider for its tools as well.
+
+Fabric supplies the worktree, model, tool-level write confinement, completion
+delivery, and schema-validated worker result. File touches become parent-directory
+write roots; the brief still limits the worker to the declared files. Nodes with
+write roots run with `shell: "unconfined"` to execute evidence commands. This is
+not a shell sandbox. Fabric's `agents.childQuestions` must remain `"cancel"`
+(the default); `"route"` is rejected because node escalation is disabled.
+
+Fabric dispatch confinement is directory-level `writableRoots` plus a best-effort post-run content diff,
+not a hard file-level guard. Files over 8 MiB are compared by size and mtime.
+Snapshot traversal has no file-count or time bound.
+
+A dispatch receipt proves submission and correlation, not completion:
+`work_verify` must rerun evidence against the returned tree and commit.
 
 ## Configuration
 
@@ -110,9 +152,10 @@ The full hook behaviour is in [docs/INSTALLING.md](docs/INSTALLING.md).
 ## When it runs
 
 pi-work runs only when an agent or person invokes one of its tools or slash
-commands. It registers no Pi lifecycle event handlers and starts no background
-process. `work_dispatch` performs at most one pi-delegate dispatch per call; it
-never waits, sequences, retries, or polls. `work_verify` runs only the evidence
+commands. It registers context and session-start hooks for Fabric completion
+announcements, but starts no scheduler or background service. `work_dispatch`
+submits at most one node per call; it never sequences, retries, or polls. The
+Fabric host-event call awaits a bounded reply. `work_verify` runs only the evidence
 declared for the selected node.
 
 ## Develop

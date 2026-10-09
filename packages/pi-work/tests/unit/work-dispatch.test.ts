@@ -242,6 +242,7 @@ test("the work_dispatch schema accepts model and fallbackModels and still reject
 	assert.equal(Value.Check(WorkDispatchParameters, { ...base, model: "   " }), false, "pi-delegate silently drops a blank model");
 	assert.equal(Value.Check(WorkDispatchParameters, { ...base, fallbackModels: [" "] }), false);
 	assert.equal(Value.Check(WorkDispatchParameters, { ...base, model: " a/b" }), false);
+	assert.equal(Value.Check(WorkDispatchParameters, { ...base, fallbackModels: ["c/d", "c/d"] }), false, "duplicates are rejected, not silently deduplicated downstream");
 	assert.equal(Value.Check(WorkDispatchParameters, { ...base, escalation: "local" }), false);
 });
 
@@ -299,6 +300,35 @@ test("work_dispatch without overrides keeps the node's worker.model and sends no
 		assert.ok("runs" in request);
 		assert.equal(request.runs[0].model, "test/model");
 		assert.equal("fallbackModels" in request.runs[0], false);
+	} finally {
+		await rm(repo.root, { recursive: true, force: true });
+	}
+});
+
+test("work_dispatch under the legacy request grammar carries model and fallbackModels (#58)", async () => {
+	const repo = await fixture();
+	try {
+		const requests: DelegateDispatchRequest[] = [];
+		const tool = createWorkDispatchTool({
+			clientProvider: async () => ({
+				status: "available",
+				grammar: "legacy",
+				client: {
+					async dispatch(request) {
+						requests.push(request);
+						const slot = "runs" in request ? request.runs[0] : request;
+						const bytes = await readFile(slot.reads[0]);
+						return receipt(request, createHash("sha256").update(bytes).digest("hex"));
+					},
+				},
+			}),
+		});
+		const result = await tool.execute("test", { path: "spec.yaml", nodeAddress: ["node"], worktreePath: repo.root, expectedCommit: repo.commit, model: "override/model", fallbackModels: ["backup/one"] }, undefined, undefined, { cwd: repo.root } as never) as { details: WorkDispatchDetails };
+		assert.equal(result.details.outcome, "dispatched");
+		const request = requests[0]!;
+		assert.equal("runs" in request, false, "the legacy grammar sends the flat request");
+		assert.equal((request as { model?: string }).model, "override/model");
+		assert.deepEqual((request as { fallbackModels?: readonly string[] }).fallbackModels, ["backup/one"]);
 	} finally {
 		await rm(repo.root, { recursive: true, force: true });
 	}

@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { readStatusCache, statusCachePath } from "../status/cache.js";
+import { readFabricDispatchResult, fabricResultInputs } from "../dispatch/fabric/result.js";
+import { readFabricOwnership, verifyFabricDispatchDigests } from "../dispatch/fabric/receipt.js";
+
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
@@ -33,6 +38,33 @@ import {
 } from "./results.js";
 import { inspectTree, monitorTree, verifyTreeUnchanged, type TreeCheck, type TreeSnapshot } from "./tree.js";
 import { runUser, type HostUserCapabilities, type SessionReader } from "./user.js";
+
+/** Dispatch accounting supplies inputs only; this boundary never mints proof. */
+async function readFabricVerificationInputs(specPath: string, address: readonly string[], target: VerificationTarget, dispatchTree: VerificationTarget = target): Promise<{ readonly checklistReports?: ChecklistReports; readonly failure?: VerificationFailure }> {
+ const cachePath = statusCachePath(dispatchTree.worktreePath, specPath);
+ try {
+  const ownership = await readFabricOwnership(cachePath, address, target.worktreePath);
+  const cache = await readStatusCache(cachePath);
+  if (ownership && (ownership.specPath !== specPath || cache.findings.length > 0 || !cache.cache || cache.cache.specPath !== ownership.specPath)) throw new Error("Dispatch owner cache is unreadable or invalid");
+  const entries = Object.values(cache.cache?.dispatch ?? {}).filter(entry => ownership
+   ? entry.dispatchId === ownership.dispatchId
+   : entry.dispatchId === undefined && entry.slot.backend === "fabric" && (entry.worktreePath === target.worktreePath || entry.slot.workerCwd === target.worktreePath) && JSON.stringify(entry.address) === JSON.stringify(address));
+  // Preserve valid legacy accounting, but ignore malformed caches without tree-local ownership.
+  if (!ownership && entries.length === 0) return {};
+  const entry = entries[0];
+  if (entries.length !== 1 || !entry || entry.slot.backend !== "fabric" || JSON.stringify(entry.address) !== JSON.stringify(address)) throw new Error("Dispatch identity missing or mismatched in cache");
+  const saved = await readFabricDispatchResult(entry, cachePath, dispatchTree.worktreePath);
+  if (!saved) throw new Error("Fabric receipt outside cache storage");
+  const receipt: unknown = JSON.parse(await readFile(entry.receiptPath, "utf8"));
+  if (ownership && (typeof receipt !== "object" || receipt === null || !("dispatchId" in receipt) || receipt.dispatchId !== ownership.dispatchId)) throw new Error("Dispatch receipt identity mismatch");
+  if (!await verifyFabricDispatchDigests(saved.receipt, saved.digestInputs)) return { failure: { code: "verification-aborted", message: "Fabric dispatch input digest mismatch" } };
+  const inputs = fabricResultInputs(saved.workerResult, saved.receipt.forks[0]?.workerCwd ?? entry.worktreePath, entry.address).verify;
+  if (inputs.expectedCommit !== target.expectedCommit) return { failure: { code: "verification-aborted", message: "Fabric result does not match the explicit verification target" } };
+  return { checklistReports: inputs.checklistReports };
+ } catch {
+  return { failure: { code: "verification-aborted", message: "Fabric dispatch result or digest inputs are unreadable or invalid" } };
+ }
+}
 
 /** Attestations live with the verifier that mints them. Serialized data has no entry point. */
 const recorded = new Map<string, { readonly update: ObservedVerificationCacheUpdate; readonly sourceDigest: string }>();
@@ -94,6 +126,7 @@ export interface ObservationalVerifierAdapters {
 export type PersistVerification = (update: VerificationCacheUpdate) => Promise<StatusCacheVerificationWriteResult>;
 
 export interface AuthorityVerifier {
+	readonly readFabricInputs: typeof readFabricVerificationInputs;
 	readonly inspectTarget: (target: VerificationTarget) => Promise<TreeCheck>;
 	readonly verifyNode: (request: VerifyNodeRequest) => Promise<VerificationResult>;
 	readonly verifyNodeAndCache: (request: VerifyNodeRequest, persist?: PersistVerification) => Promise<{ result: VerificationResult; cacheUpdate?: VerificationCacheUpdate; cacheWrite?: StatusCacheVerificationWriteResult }>;
@@ -383,7 +416,7 @@ function makeAuthorityVerifier(capabilities: VerifierCapabilities): AuthorityVer
 		return { result, cacheUpdate, cacheWrite };
 	}
 
-	return Object.freeze({ inspectTarget: (target: VerificationTarget) => inspectTree(target.worktreePath, target.expectedCommit), verifyNode, verifyNodeAndCache, isCriterionPassed, isCompleteChecklist, isNodePassed, isCacheUpdate, verificationFailures: collectVerificationFailures });
+	return Object.freeze({ readFabricInputs: readFabricVerificationInputs, inspectTarget: (target: VerificationTarget) => inspectTree(target.worktreePath, target.expectedCommit), verifyNode, verifyNodeAndCache, isCriterionPassed, isCompleteChecklist, isNodePassed, isCacheUpdate, verificationFailures: collectVerificationFailures });
 }
 
 function makeObservationalVerifier(adapters: ObservationalVerifierAdapters): ObservationalVerifier {

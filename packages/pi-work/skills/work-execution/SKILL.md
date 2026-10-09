@@ -2,7 +2,7 @@
 name: work-execution
 description: >-
   Execute a validated pi-work node or wave when you need the ready-set,
-  by-reference work_plan brief, pi-delegate fallback, explicit tree-bound
+  by-reference work_plan brief, Fabric default, pi-delegate fallback, explicit tree-bound
   verification, remediation, scope amendments, or a post-integration
   refactor pass. Use after decomposition and before claiming any node is done.
 disable-model-invocation: false
@@ -11,8 +11,9 @@ disable-model-invocation: false
 # Work execution
 
 This is a judgment loop for the session agent, not an execution engine. pi-work
-owns the work contract and evidence; pi-delegate owns worker execution,
-isolation, escalation, monitoring, and collapse. Do not invent a scheduler, a
+owns the work contract, brief, plan receipt, digests, status cache, and evidence;
+the selected backend (Fabric by default, or pi-delegate) owns worker execution
+and result delivery. Do not invent a scheduler, a
 retry daemon, a dispatch receipt, or a second cache.
 
 Load and reuse `orchestrate-work` by name when several ready nodes can run in
@@ -112,7 +113,17 @@ work_plan({
 - `confineWrites: true`, `escalation: "off"`, and `worktree`; and
 - a `touch-overlap` advisory when selected scopes overlap.
 
-`touches` becomes delegate `writableRoots`, but the current pi-delegate
+For Fabric, `touches` is converted to directory `writableRoots`; file touches
+use their parent directory. The brief retains the exact file contract. Workers
+must stay inside declared touches even when a writable directory is wider.
+Nodes with writable roots use `shell: "unconfined"` so evidence commands can
+run. This is tool-level write confinement, not a shell sandbox.
+
+Fabric dispatch confinement is directory-level `writableRoots` plus a best-effort post-run content diff,
+not a hard file-level guard. Files over 8 MiB are compared by size and mtime.
+Snapshot traversal has no file-count or time bound.
+
+For pi-delegate, `touches` becomes delegate `writableRoots`, but the current pi-delegate
 policy keeps the worker cwd writable and treats those roots as additions; it
 does not narrow the cwd to `touches`. Use a dedicated worker tree, treat writes
 outside `touches` as a contract violation, and use literal relative directory
@@ -182,23 +193,51 @@ cleaned-up temporary worktree.
 
 ## Round 2: dispatch honestly
 
-Use `work_dispatch` to dispatch one planned node. It performs exactly one
-pi-delegate dispatch through the live pi-delegate instance and records a
-durable node-to-run receipt. It never loops, waits, or retries. Do not write a
-fake receipt.
+Use `work_dispatch` to submit one planned node and record a durable node-to-run
+receipt. Select `backend: "fabric"` or `backend: "pi-delegate"` explicitly to
+use that executor without cross-backend fallback. Without an override, pi-work
+selects an available Fabric host adapter first, then pi-delegate if no adapter
+exists. An explicitly selected Fabric backend without a host adapter, or an
+unavailable selected pi-delegate client, returns a plan-only result.
+
+Load pi-fabric alongside pi-work and restart Pi. A Fabric dispatch needs no
+pi-delegate.
+
+Before submission, pi-work automatically bootstraps the fixed
+`pi-work-dispatch` candidate program at `.pi/fabric/programs/<digest>.json`
+under `PI_FABRIC_PROJECT_ROOT`, or the session cwd if unset. It reuses an existing
+record and invokes the full digest through `pi-fabric:program:run:v1`; no manual
+`programs.save` or promotion step is needed.
+
+Fabric is discovered only when the `fabric_exec` tool is registered and Pi exposes
+an event bus. Without that discovery, dispatch uses pi-delegate, then plan-only
+if pi-delegate is unavailable. An event bus alone does not select Fabric. A
+missing or silent discovered listener times out without retrying through pi-delegate.
+Treat an unknown dispatch state as indeterminate; inspect the run before any
+redispatch. The host-event request waits for a bounded reply; it never loops or
+retries. Do not fabricate a receipt.
+
+Fabric returns a schema-validated result and worktree receipt. Use the returned
+tree and commit for independent verification, and inspect completion announcements
+rather than polling. Fabric requires `agents.childQuestions: "cancel"` (the
+default); `"route"` is rejected to preserve escalation off.
 
 When a node's configured worker model keeps failing, re-dispatch it through
 `work_dispatch` with the optional `model` and `fallbackModels` parameters instead
 of bypassing it with a plain `delegate` call. They apply to this dispatch only,
 `model` beats the node's `worker.model`, and the ledger entry records the
-requested and resolved model as the pi-delegate runtime reports them (the
+requested and resolved model as the selected backend reports them (the
 `fallbackModels` list itself is not recorded). The worker brief still shows the
-node's own `worker.model`; the override applies to the run only.
+node's own `worker.model`; the override applies to the run only. Fabric checks
+the requested model followed by `fallbackModels` against exact available keys
+before submitting one run. If none is available, it rejects without dispatch;
+a run failure does not trigger another model attempt.
 
-When the pi-delegate runtime is unavailable in the session, for example when
-pi-delegate is not loaded, `work_dispatch` returns a `degraded` result with
+When the selected pi-delegate runtime is unavailable in the session,
+`work_dispatch` returns a `degraded` result with
 `dispatchState: "not-dispatched"` and a `delegate-client-unavailable` finding,
-and carries the plan back. Only then fall back to the paste-ready delegate invocation in the `PlanReceipt`. That
+and carries the plan back. Only then, if pi-delegate becomes available, use
+the paste-ready delegate invocation in the `PlanReceipt`. That
 fallback is not a `work_dispatch` receipt and cannot advance lifecycle.
 
 For the fallback, when a plan's receipt has `worktree: false`, use the real
@@ -294,7 +333,9 @@ files look similar.
 ## Amendment flow: a worker needs a path outside `touches`
 
 A declared-scope escape is a contract problem, not permission to edit broadly.
-The current delegate guard may still allow a path inside the worker cwd because
+Fabric confines tool writes to directory roots, which may be wider than file
+touches; its unconfined shell is not a sandbox. The current pi-delegate guard
+may still allow a path inside the worker cwd because
 that cwd is its primary writable root; a path outside the cwd is refused unless
 an explicit root permits it. Follow this exact amendment flow for any needed
 scope widening. The names and fields below are the real pi-delegate escalation
@@ -304,7 +345,9 @@ surface, checked against its `src/escalation-tools.ts`, `src/index.ts`, and
 ### A. Raise from the worker
 
 A worker dispatched by `work_dispatch` (or from a `work_plan` receipt) runs with
-`escalation: "off"` and has no `escalate_*` tools. It stops before writing
+escalation disabled: Fabric requires `agents.childQuestions: "cancel"`
+(the default), while pi-delegate uses `escalation: "off"` and has no
+`escalate_*` tools. It stops before writing
 outside `touches` and reports the needed change in its result; you then amend the
 node yourself. The raise flow below applies only to a manual `delegate` call you
 opt into `escalation: "local"`.

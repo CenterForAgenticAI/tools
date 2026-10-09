@@ -1,4 +1,5 @@
 import { readFile, realpath } from "node:fs/promises";
+import { readFabricDispatchResult } from "../dispatch/fabric/result.js";
 import path from "node:path";
 
 import { validateWorkspec, type Finding } from "../schema/index.js";
@@ -435,7 +436,15 @@ export async function getWorkStatus(request: StatusRequest): Promise<WorkStatusR
 	if (afterRefresh) return afterRefresh;
 	const context = cacheContext(treeCheck.snapshot.identity, graphBuild.graph, cacheResult.cache, cacheResult.findings, specPath, source, inherited);
 	const refreshFindings: StatusFinding[] = request.refresh && refresh.status === "blocked" ? [{ code: "refresh-authority-unavailable", message: refresh.message }] : [];
-	const details = deriveStatusDetails(validation.spec, specPath, treeCheck.snapshot.identity, { ...context, findings: [...graphBuild.findings, ...context.findings, ...refreshFindings] }, cachePath, refresh.status === "blocked" ? refresh : refreshBlocked());
+	const dispatch: Record<string, StatusCacheDispatchEntry & { readonly workerResult?: import("./types.js").FabricWorkerResult }> = { ...context.dispatch };
+	// Returned worker accounting is an observation, never completion authority.
+ for (const [runId, entry] of Object.entries(context.dispatch)) {
+  try {
+   const saved = await readFabricDispatchResult(cacheResult.cache?.dispatch[entry.runId] ?? entry, cachePath);
+   if (saved) dispatch[runId] = redactObservationStrings({ ...entry, workerResult: saved.workerResult }, inherited);
+  } catch { /* Invalid or missing accounting must not grant status authority. */ }
+ }
+ const details = deriveStatusDetails(validation.spec, specPath, treeCheck.snapshot.identity, { ...context, dispatch, findings: [...graphBuild.findings, ...context.findings, ...refreshFindings] }, cachePath, refresh.status === "blocked" ? refresh : refreshBlocked());
 	return { ok: true, details: { ...details, refreshed: false } };
 }
 

@@ -50,6 +50,13 @@ export interface DelegateRuntimeReceipt {
 	readonly resultPath: string;
 }
 
+/** Fabric metadata is additive; legacy receipt/cache readers keep their existing path. */
+export interface FabricDispatchReceipt extends DelegateRuntimeReceipt {
+	readonly backend: "fabric";
+	readonly resumeCount: number;
+	readonly totalAttempts: number;
+}
+
 /** The released direct-request subset, retained for pi-delegate without #263. */
 export interface LegacyDelegateDispatchRequest {
 	readonly agent: string;

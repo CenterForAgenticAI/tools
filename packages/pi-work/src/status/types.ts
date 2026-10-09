@@ -90,6 +90,8 @@ export interface StatusCacheDispatchInputDigest {
 
 /** The runtime-reported slot fields are optional where pi-delegate cannot resolve them at receipt time. */
 export interface StatusCacheDispatchSlot {
+	/** Absent on legacy pi-delegate entries. */
+	readonly backend?: "fabric" | "pi-delegate";
 	readonly agent: string;
 	readonly workerCwd?: string;
 	readonly branch?: string;
@@ -105,6 +107,7 @@ export interface StatusCacheDispatchSlot {
 }
 
 export interface StatusCacheDispatchEntry {
+	readonly dispatchId?: string;
 	readonly runId: string;
 	readonly forkName: string;
 	readonly nodeId: string;
@@ -194,6 +197,20 @@ export interface WorkStatusDetails {
 export interface WorkStatusResult {
 	readonly ok: boolean;
 	readonly details: WorkStatusDetails;
+}
+
+/** Untrusted worker accounting; never a verification or lifecycle authority. */
+export interface FabricWorkerResult {
+	readonly changedPaths: readonly string[];
+	readonly commit: string;
+	readonly evidence: string;
+	readonly checklist: readonly ChecklistReportInput[];
+	readonly gaps: string;
+}
+
+export interface FabricResultFinding {
+	readonly code: "fabric-result-invalid";
+	readonly message: string;
 }
 
 export interface ChecklistReportInput {

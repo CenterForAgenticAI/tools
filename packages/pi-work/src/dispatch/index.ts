@@ -4,6 +4,7 @@ import path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import type { PlanReceipt } from "../plan/index.js";
+import { selectDispatchBackend, type DispatchBackendName, type DispatchBackendResult, type FabricHost } from "./backend.js";
 import { writeDispatchCacheEntry } from "../status/cache.js";
 import type { StatusCacheDispatchEntry, StatusCacheDispatchWriteResult } from "../status/types.js";
 import { decodeDelegateRuntimeReceipt, delegateRuntimeErrorCode, errorMessage, loadDelegateClient } from "./runtime.js";
@@ -16,16 +17,21 @@ import type {
 	LegacyDelegateDispatchRequest,
 	DelegateRuntimeReceipt,
 	DispatchFinding,
-	DispatchResult,
+	DispatchResult as LegacyDispatchResult,
 	DispatchTarget,
 } from "./types.js";
 
 export * from "./types.js";
+export * from "./backend.js";
+export { createFabricDispatchBackend } from "./fabric/index.js";
+export type DispatchResult = DispatchBackendResult;
 export { decodeDelegateRuntimeReceipt, loadDelegateClient } from "./runtime.js";
 
 export type DispatchCacheWriter = (cachePath: string, specPath: string, worktreePath: string, entry: StatusCacheDispatchEntry) => Promise<StatusCacheDispatchWriteResult>;
 
 export interface DispatchDependencies {
+	readonly backend?: DispatchBackendName;
+	readonly fabricHost?: FabricHost;
 	readonly clientProvider?: DelegateClientProvider;
 	readonly cacheWriter?: DispatchCacheWriter;
 }
@@ -34,6 +40,7 @@ export interface DispatchPlanInput {
 	readonly plan: PlanReceipt;
 	readonly target: DispatchTarget;
 	readonly context: ExtensionContext;
+	readonly signal?: AbortSignal;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -49,13 +56,22 @@ function nonEmptyStrings(value: unknown): value is readonly string[] {
 	return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string" && item.length > 0);
 }
 
+/** A model ref has no whitespace; pi-delegate silently drops a blank one, which would run the wrong model (#58). */
+function modelRef(value: unknown): value is string {
+	return typeof value === "string" && /^\S+$/.test(value);
+}
+
+function modelRefs(value: unknown): value is readonly string[] {
+	return Array.isArray(value) && value.length > 0 && value.every(modelRef) && new Set(value).size === value.length;
+}
+
 function validLegacyRequest(value: unknown): value is LegacyDelegateDispatchRequest {
 	if (!record(value)) return false;
 	const allowed = ["agent", "task", "cwd", "reads", "skills", "model", "fallbackModels", "writableRoots", "confineWrites", "escalation"];
 	if (!onlyKeys(value, allowed) || typeof value.agent !== "string" || value.agent.length === 0 || typeof value.task !== "string" || value.task.length === 0 || typeof value.cwd !== "string" || !path.isAbsolute(value.cwd) || path.normalize(value.cwd) !== value.cwd || !Array.isArray(value.reads) || value.reads.length !== 1 || typeof value.reads[0] !== "string" || !path.isAbsolute(value.reads[0]) || value.confineWrites !== true || value.escalation !== "off") return false;
 	if (value.skills !== undefined && !nonEmptyStrings(value.skills)) return false;
-	if (value.model !== undefined && (typeof value.model !== "string" || value.model.length === 0)) return false;
-	if (value.fallbackModels !== undefined && !nonEmptyStrings(value.fallbackModels)) return false;
+	if (value.model !== undefined && !modelRef(value.model)) return false;
+	if (value.fallbackModels !== undefined && !modelRefs(value.fallbackModels)) return false;
 	return value.writableRoots === undefined || nonEmptyStrings(value.writableRoots);
 }
 
@@ -98,11 +114,11 @@ export function validateDelegateDispatchRequest(value: unknown): value is Delega
 	return validLegacyRequest(value) || validCanonicalRequest(value);
 }
 
-function rejected(plan: PlanReceipt, finding: DispatchFinding): DispatchResult {
+function rejected(plan: PlanReceipt, finding: DispatchFinding): LegacyDispatchResult {
 	return { outcome: "rejected", dispatchState: "not-dispatched", plan, findings: [finding] };
 }
 
-function degraded(plan: PlanReceipt, message: string): DispatchResult {
+function degraded(plan: PlanReceipt, message: string): LegacyDispatchResult {
 	return { outcome: "degraded", dispatchState: "not-dispatched", plan, findings: [{ code: "delegate-client-unavailable", message }] };
 }
 
@@ -199,6 +215,19 @@ function cacheEntry(receipt: DelegateRuntimeReceipt, fork: DelegateRuntimeForkRe
  * dispatch, so this module cannot poll, wait on, steer, cancel, or sequence a run.
  */
 export async function dispatchPlan(input: DispatchPlanInput, dependencies: DispatchDependencies = {}): Promise<DispatchResult> {
+	const backend = selectDispatchBackend(dependencies, {
+		name: "pi-delegate",
+		dispatch: (request) => dispatchDelegatePlan(request, dependencies),
+	});
+	try {
+		const result = await backend.dispatch(input);
+		return { ...result, backend: result.outcome === "degraded" ? "plan-only" : backend.name };
+	} catch (error) {
+		return { backend: backend.name, outcome: "indeterminate", dispatchState: "unknown", plan: input.plan, findings: [{ code: "delegate-runtime-error", message: errorMessage(error) }] };
+	}
+}
+
+async function dispatchDelegatePlan(input: DispatchPlanInput, dependencies: DispatchDependencies): Promise<LegacyDispatchResult> {
 	const legacy = legacyRequest(input.plan, input.target);
 	if ("code" in legacy) return rejected(input.plan, legacy);
 	const provider = dependencies.clientProvider ?? loadDelegateClient;

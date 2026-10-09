@@ -12,6 +12,7 @@ import { renderFinding } from "../schema/findings.js";
 import { createVerifier, type VerificationTarget } from "../verify/internal.js";
 import { redactCommandFailure } from "../verify/output.js";
 import { captureEvidenceEnvironment } from "../verify/executable.js";
+import { readFabricOwnership } from "../dispatch/fabric/receipt.js";
 import type { VerificationCacheUpdate, VerificationFailure, VerificationResult } from "../verify/results.js";
 import { resolveSpecPath } from "../verify/tree.js";
 import { boundedTextWithHint, staleLoadCheck, type StaleLoadCheck } from "../load-identity.js";
@@ -134,8 +135,25 @@ export function createWorkVerifyTool(options: WorkVerifyToolOptions = {}) {
 				return [...(node.acceptance ?? []).flatMap((criterion) => criterion.evidence.kind === "command" ? criterion.evidence.inherit_env ?? [] : []), ...(isCompositeNode(node) ? node.work.flatMap(collect) : [])];
 			});
 			const inherited = captureEvidenceEnvironment([...new Set(names)]).inherited;
+			// Dispatch accounting belongs to the spec's original tree, not a separate
+			// worker tree. Evidence still runs against the explicit target's spec.
+			let dispatchRoot = tree.snapshot.identity.worktreePath;
+			let dispatchSpecPath = canonicalSpecPath;
+			try {
+				const ownership = await readFabricOwnership(statusCachePath(dispatchRoot, canonicalSpecPath), located.address, tree.snapshot.identity.worktreePath);
+				if (ownership) {
+					dispatchSpecPath = ownership.specPath;
+					// Recover the owner's root from the spec's tree-relative path, not the worker's old path.
+					dispatchRoot = path.resolve(path.dirname(dispatchSpecPath), ...pathInput.relativePath.split(path.sep).slice(0, -1).map(() => ".."));
+					if (resolveSpecPath(dispatchRoot, pathInput.relativePath) !== dispatchSpecPath) throw new Error("Dispatch spec identity mismatch");
+				}
+			} catch {
+				return resultPayload(failureDetails(params, [{ code: "verification-aborted", message: "Dispatch owner or cache cannot be checked" }]));
+			}
+			const fabricInputs = await verifier.readFabricInputs(dispatchSpecPath, located.address, { worktreePath: tree.snapshot.identity.worktreePath, expectedCommit: tree.snapshot.identity.resolvedCommit }, { worktreePath: dispatchRoot, expectedCommit: params.expectedCommit });
+			if (fabricInputs.failure) return resultPayload(failureDetails(params, [fabricInputs.failure]));
 			const { result, cacheUpdate, cacheWrite } = await verifier.verifyNodeAndCache(
-				{ node: located.node, address: located.address, specPath: canonicalSpecPath, source, target, inherited, checklistReports: params.checklistReports, signal },
+				{ node: located.node, address: located.address, specPath: canonicalSpecPath, source, target, inherited, checklistReports: params.checklistReports ?? fabricInputs.checklistReports, signal },
 				(update) => writeVerificationCacheEntry(statusCachePath(tree.snapshot.identity.worktreePath, canonicalSpecPath), canonicalSpecPath, tree.snapshot.identity.worktreePath, { address: located.address, update }),
 			);
 			const cacheFailure: VerificationFailure[] = cacheWrite !== undefined && cacheWrite.status !== "written"

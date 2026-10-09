@@ -174,13 +174,15 @@ function decodeDispatchDigest(value: unknown): StatusCacheDispatchInputDigest | 
 
 function decodeDispatchSlot(value: unknown): StatusCacheDispatchSlot | undefined {
 	if (!record(value)) return undefined;
-	const allowed = new Set(["agent", "workerCwd", "branch", "maxRounds", "cloneMode", "collapseMode", "confineWrites", "readOnly", "requestedModel", "resolvedModel", "skills", "inputDigests"]);
+	const allowed = new Set(["backend", "agent", "workerCwd", "branch", "maxRounds", "cloneMode", "collapseMode", "confineWrites", "readOnly", "requestedModel", "resolvedModel", "skills", "inputDigests"]);
 	if (Object.keys(value).some((key) => !allowed.has(key)) || !string(value.agent) || value.agent.length === 0 || !Number.isInteger(value.maxRounds) || (value.maxRounds as number) < 1 || !optionalString(value, "workerCwd") || !optionalString(value, "branch") || !optionalString(value, "cloneMode") || !optionalString(value, "collapseMode") || !optionalBoolean(value, "confineWrites") || !optionalBoolean(value, "readOnly") || !optionalString(value, "requestedModel") || !optionalString(value, "resolvedModel") || !Array.isArray(value.inputDigests)) return undefined;
+	if (value.backend !== undefined && value.backend !== "fabric" && value.backend !== "pi-delegate") return undefined;
 	if (value.workerCwd !== undefined && (!path.isAbsolute(value.workerCwd as string) || path.normalize(value.workerCwd as string) !== value.workerCwd)) return undefined;
 	if (value.skills !== undefined && (!Array.isArray(value.skills) || value.skills.length === 0 || !value.skills.every((skill) => string(skill) && skill.length > 0))) return undefined;
 	const inputDigests = value.inputDigests.map(decodeDispatchDigest);
 	if (inputDigests.some((digest) => digest === undefined)) return undefined;
 	return {
+		...(value.backend === undefined ? {} : { backend: value.backend }),
 		agent: value.agent,
 		...(value.workerCwd === undefined ? {} : { workerCwd: value.workerCwd as string }),
 		...(value.branch === undefined ? {} : { branch: value.branch as string }),
@@ -198,10 +200,11 @@ function decodeDispatchSlot(value: unknown): StatusCacheDispatchSlot | undefined
 
 function decodeDispatchEntry(value: unknown): StatusCacheDispatchEntry | undefined {
 	const keys = ["runId", "forkName", "nodeId", "address", "createdAt", "worktreePath", "headCommit", "branch", "briefPath", "briefSha256", "slot", "receiptPath", "resultPath"];
-	if (!record(value) || !exactKeys(value, keys) || !string(value.runId) || value.runId.length === 0 || !string(value.forkName) || value.forkName.length === 0 || !string(value.nodeId) || value.nodeId.length === 0 || !validAddress(value.address) || !validTimestamp(value.createdAt) || !string(value.worktreePath) || !path.isAbsolute(value.worktreePath) || path.normalize(value.worktreePath) !== value.worktreePath || !string(value.headCommit) || !/^[0-9a-f]{40}$/.test(value.headCommit) || !string(value.branch) || value.branch.length === 0 || !string(value.briefPath) || !path.isAbsolute(value.briefPath) || path.normalize(value.briefPath) !== value.briefPath || !validSha256(value.briefSha256) || !string(value.receiptPath) || !path.isAbsolute(value.receiptPath) || path.normalize(value.receiptPath) !== value.receiptPath || !string(value.resultPath) || !path.isAbsolute(value.resultPath) || path.normalize(value.resultPath) !== value.resultPath) return undefined;
+	if (!record(value) || !exactKeys(value, value.dispatchId === undefined ? keys : [...keys, "dispatchId"]) || (value.dispatchId !== undefined && (!string(value.dispatchId) || !/^[0-9a-f-]{36}$/.test(value.dispatchId))) || !string(value.runId) || value.runId.length === 0 || !string(value.forkName) || value.forkName.length === 0 || !string(value.nodeId) || value.nodeId.length === 0 || !validAddress(value.address) || !validTimestamp(value.createdAt) || !string(value.worktreePath) || !path.isAbsolute(value.worktreePath) || path.normalize(value.worktreePath) !== value.worktreePath || !string(value.headCommit) || !/^[0-9a-f]{40}$/.test(value.headCommit) || !string(value.branch) || value.branch.length === 0 || !string(value.briefPath) || !path.isAbsolute(value.briefPath) || path.normalize(value.briefPath) !== value.briefPath || !validSha256(value.briefSha256) || !string(value.receiptPath) || !path.isAbsolute(value.receiptPath) || path.normalize(value.receiptPath) !== value.receiptPath || !string(value.resultPath) || !path.isAbsolute(value.resultPath) || path.normalize(value.resultPath) !== value.resultPath) return undefined;
 	const slot = decodeDispatchSlot(value.slot);
 	if (!slot) return undefined;
 	return {
+		...(value.dispatchId === undefined ? {} : { dispatchId: value.dispatchId as string }),
 		runId: value.runId,
 		forkName: value.forkName,
 		nodeId: value.nodeId,

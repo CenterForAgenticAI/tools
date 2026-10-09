@@ -21,10 +21,11 @@ export const WorkDispatchParameters = Type.Object({
 	nodeAddress: NodeAddressSchema,
 	worktreePath: Type.String({ minLength: 1 }),
 	expectedCommit: Type.String({ minLength: 1 }),
+	backend: Type.Optional(Type.Union([Type.Literal("fabric"), Type.Literal("pi-delegate")])),
 	// Invocation-scoped worker overrides, passed through to pi-delegate (#56).
 	// Model refs contain no whitespace; pi-delegate silently drops blank values, so reject them here.
 	model: Type.Optional(Type.String({ minLength: 1, pattern: "^\\S+$" })),
-	fallbackModels: Type.Optional(Type.Array(Type.String({ minLength: 1, pattern: "^\\S+$" }), { minItems: 1 })),
+	fallbackModels: Type.Optional(Type.Array(Type.String({ minLength: 1, pattern: "^\\S+$" }), { minItems: 1, uniqueItems: true })),
 }, { additionalProperties: false });
 
 export type WorkDispatchPreflightFinding =
@@ -39,6 +40,7 @@ interface WorkDispatchBase {
 	readonly worktreePath: string;
 	readonly expectedCommit: string;
 	readonly truncated: boolean;
+	readonly backend: DispatchResult["backend"];
 }
 
 export type WorkDispatchDetails =
@@ -56,6 +58,7 @@ function preflightDetails(params: Partial<{ path: string; nodeAddress: NodeAddre
 		nodeAddress: params.nodeAddress ?? [],
 		worktreePath: params.worktreePath ?? "",
 		expectedCommit: params.expectedCommit ?? "",
+		backend: "plan-only",
 		outcome: "rejected",
 		dispatchState: "not-dispatched",
 		findings,
@@ -77,6 +80,7 @@ function renderFinding(finding: WorkDispatchPreflightFinding | DispatchFinding):
 
 function render(details: WorkDispatchDetails): string {
 	const lines = [`${details.outcome}: ${details.nodeAddress.join(" /") || "no node"}`, `tree: ${details.worktreePath}@${details.expectedCommit}`];
+	if ("plan" in details) lines.push(`backend: ${details.backend}`);
 	if ("plan" in details) lines.push(`plan: ${details.plan.briefPath} sha256=${details.plan.briefSha256}`);
 	if (details.outcome === "dispatched") {
 		lines.push(`dispatch: ${details.receipt.runId}/${details.receipt.forks[0]?.name ?? "unknown"}`);
@@ -97,7 +101,7 @@ export function createWorkDispatchTool(dependencies: DispatchDependencies = {}) 
 	return defineTool({
 		name: "work_dispatch",
 		label: "Dispatch work node",
-		description: "Compile and submit exactly one Workspec node through pi-delegate, or return a paste-ready degraded plan.",
+		description: "Compile and submit exactly one Workspec node through the selected backend, or return a paste-ready degraded plan.",
 		parameters: WorkDispatchParameters,
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const nodeAddress = params.nodeAddress as NodeAddress;
@@ -144,7 +148,8 @@ export function createWorkDispatchTool(dependencies: DispatchDependencies = {}) 
 					cachePath: statusCachePath(root, specPath),
 				},
 				context: ctx,
-			}, dependencies);
+				...(signal === undefined ? {} : { signal }),
+			}, { ...dependencies, ...(params.backend === undefined ? {} : { backend: params.backend }) });
 			return response({ ...input, worktreePath: root, expectedCommit: tree.snapshot.identity.resolvedCommit, ...result, truncated: false });
 		},
 	});
