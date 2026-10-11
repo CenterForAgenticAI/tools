@@ -1,0 +1,671 @@
+[
+  {
+    "file": "legacy/pi-delegate/delegate.md",
+    "source": {
+      "url": "https://raw.githubusercontent.com/CenterForAgenticAI/tools/6b3eb3a367b51f988839e2aa46731a914b42b66f/packages/pi-delegate/builtin-agents/delegate.md",
+      "path": "packages/pi-delegate/builtin-agents/delegate.md",
+      "commit": "6b3eb3a367b51f988839e2aa46731a914b42b66f",
+      "licence": "MIT",
+      "sha256": "3d8c8c76e52faa60c77e37dbf1701385dfcffa82bca4d28b6aaf0d7c042fffbd"
+    },
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "systemPromptMode"
+      },
+      {
+        "path": "inheritProjectContext"
+      },
+      {
+        "path": "inheritSkills"
+      }
+    ],
+    "values": {
+      "name": "delegate",
+      "instructions.mode": "append",
+      "context.project": true,
+      "context.skills": false
+    }
+  },
+  {
+    "file": "legacy/pi-delegate/publisher.md",
+    "source": {
+      "url": "https://raw.githubusercontent.com/CenterForAgenticAI/tools/6b3eb3a367b51f988839e2aa46731a914b42b66f/packages/pi-delegate/builtin-agents/publisher.md",
+      "path": "packages/pi-delegate/builtin-agents/publisher.md",
+      "commit": "6b3eb3a367b51f988839e2aa46731a914b42b66f",
+      "licence": "MIT",
+      "sha256": "2063008bd09d50a3d2a664120dca7e3ecf5920b6ca02db7398497b41d4354861"
+    },
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "systemPromptMode"
+      },
+      {
+        "path": "inheritProjectContext"
+      },
+      {
+        "path": "inheritSkills"
+      }
+    ],
+    "values": {
+      "name": "publisher",
+      "instructions.mode": "replace",
+      "context.project": true,
+      "context.skills": false,
+      "tools": [
+        {
+          "name": "bash",
+          "portable": "execute",
+          "namespace": null
+        }
+      ]
+    }
+  },
+  {
+    "file": "legacy/pi-delegate/worker.md",
+    "source": {
+      "url": "https://raw.githubusercontent.com/CenterForAgenticAI/tools/6b3eb3a367b51f988839e2aa46731a914b42b66f/packages/pi-delegate/builtin-agents/worker.md",
+      "path": "packages/pi-delegate/builtin-agents/worker.md",
+      "commit": "6b3eb3a367b51f988839e2aa46731a914b42b66f",
+      "licence": "MIT",
+      "sha256": "3fb8c5edc40d0cf7eb65e933c84bea97c6b8876d6907b1e4f879aed9d3ba7c78"
+    },
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "thinking"
+      },
+      {
+        "path": "systemPromptMode"
+      },
+      {
+        "path": "inheritProjectContext"
+      },
+      {
+        "path": "inheritSkills"
+      },
+      {
+        "path": "defaultProgress"
+      }
+    ],
+    "values": {
+      "name": "worker",
+      "model": [
+        "gpt-5.6-luna"
+      ],
+      "effort.default": "high",
+      "instructions.mode": "replace",
+      "context.project": true,
+      "context.skills": false,
+      "runtimes.pi-delegate": {
+        "required": false,
+        "defaultProgress": true
+      }
+    }
+  },
+  {
+    "file": "legacy/pi-delegate/smoke-narrow.md",
+    "source": {
+      "package": "@centerforagenticai/pi-delegate",
+      "path": "fixtures/smoke-narrow.md",
+      "licence": "MIT",
+      "sha256": "7d50e3f4847fd29411dd044264f35476ce18831f9616a12fe7e3fc53d2a8a3a2"
+    },
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "allowNestedDelegate"
+      }
+    ],
+    "values": {
+      "name": "smoke-narrow",
+      "agents": [
+        "*"
+      ],
+      "tools": [
+        {
+          "name": "read",
+          "portable": "read",
+          "namespace": null
+        },
+        {
+          "name": "delegate_status",
+          "portable": "agent",
+          "namespace": null
+        }
+      ]
+    }
+  },
+  {
+    "file": "legacy/pi-delegate/smoke-nested.md",
+    "source": {
+      "package": "@centerforagenticai/pi-delegate",
+      "path": "fixtures/smoke-nested.md",
+      "licence": "MIT",
+      "sha256": "6583f0c17907d0bec9718ce7276971733afa1980dbca61a82f528b4e590f8459"
+    },
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "allowNestedDelegate"
+      }
+    ],
+    "values": {
+      "name": "smoke-nested",
+      "agents": [
+        "*"
+      ],
+      "tools": [
+        {
+          "name": "read",
+          "portable": "read",
+          "namespace": null
+        },
+        {
+          "name": "delegate",
+          "portable": "agent",
+          "namespace": null
+        }
+      ]
+    }
+  },
+  {
+    "file": "legacy/pi-delegate/smoke-plain.md",
+    "source": {
+      "package": "@centerforagenticai/pi-delegate",
+      "path": "fixtures/smoke-plain.md",
+      "licence": "MIT",
+      "sha256": "f052f9c3a212bd408e8bc23e49f500165409c185303ef96fb30a1c7023aaa75a"
+    },
+    "expect": "valid",
+    "values": {
+      "name": "smoke-plain",
+      "tools": [
+        {
+          "name": "read",
+          "portable": "read",
+          "namespace": null
+        },
+        {
+          "name": "delegate",
+          "portable": "agent",
+          "namespace": null
+        }
+      ]
+    }
+  },
+  {
+    "file": "legacy/pi-prompt-graph/auditor.md",
+    "source": {
+      "package": "@centerforagenticai/pi-prompt-graph",
+      "path": ".spec/research/spike-harness/agents/auditor.md",
+      "licence": "MIT",
+      "sha256": "a351ca34f6e45a8f9443c8f5c4c920aede73b2f13213d6fe7c40f7e820ddb305"
+    },
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "thinking"
+      },
+      {
+        "path": "systemPromptMode"
+      },
+      {
+        "path": "inheritProjectContext"
+      },
+      {
+        "path": "inheritSkills"
+      }
+    ],
+    "values": {
+      "name": "auditor",
+      "model": [
+        "openai/gpt-5.6-luna"
+      ],
+      "effort.default": "high",
+      "tools": [
+        {
+          "name": "read",
+          "portable": "read",
+          "namespace": null
+        },
+        {
+          "name": "bash",
+          "portable": "execute",
+          "namespace": null
+        }
+      ],
+      "instructions.mode": "replace",
+      "context.project": true,
+      "context.skills": false
+    }
+  },
+  {
+    "file": "legacy/pi-prompt-graph/reviewer.md",
+    "source": {
+      "package": "@centerforagenticai/pi-prompt-graph",
+      "path": ".spec/research/spike-harness/agents/reviewer.md",
+      "licence": "MIT",
+      "sha256": "e78d15ebfea2a9a90dc0c1699e6c2967203a007cca2ae4c7c111797fa1cb0dd1"
+    },
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "thinking"
+      },
+      {
+        "path": "systemPromptMode"
+      },
+      {
+        "path": "inheritProjectContext"
+      },
+      {
+        "path": "inheritSkills"
+      }
+    ],
+    "values": {
+      "name": "reviewer",
+      "model": [
+        "openai/gpt-5.6-luna"
+      ],
+      "effort.default": "high",
+      "tools": [
+        {
+          "name": "read",
+          "portable": "read",
+          "namespace": null
+        },
+        {
+          "name": "bash",
+          "portable": "execute",
+          "namespace": null
+        }
+      ],
+      "instructions.mode": "replace",
+      "context.project": true,
+      "context.skills": false
+    }
+  },
+  {
+    "file": "legacy/pi-prompt-graph/writer.md",
+    "source": {
+      "package": "@centerforagenticai/pi-prompt-graph",
+      "path": ".spec/research/spike-harness/agents/writer.md",
+      "licence": "MIT",
+      "sha256": "ca7e3c590aab67e854c680270c8e9b77a20bcdd598b3f6f188b83c900099948e"
+    },
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "thinking"
+      },
+      {
+        "path": "systemPromptMode"
+      },
+      {
+        "path": "inheritProjectContext"
+      },
+      {
+        "path": "inheritSkills"
+      }
+    ],
+    "values": {
+      "name": "writer",
+      "model": [
+        "openai/gpt-5.6-luna"
+      ],
+      "effort.default": "high",
+      "tools": [
+        {
+          "name": "read",
+          "portable": "read",
+          "namespace": null
+        },
+        {
+          "name": "bash",
+          "portable": "execute",
+          "namespace": null
+        },
+        {
+          "name": "edit",
+          "portable": "edit",
+          "namespace": null
+        },
+        {
+          "name": "write",
+          "portable": "edit",
+          "namespace": null
+        }
+      ],
+      "instructions.mode": "replace",
+      "context.project": true,
+      "context.skills": false
+    }
+  },
+  {
+    "file": "external/claude-code-debugger.md",
+    "source": {
+      "url": "https://raw.githubusercontent.com/wshobson/agents/46891e7e60da0e52baf1050b7b6391b64e84c6d9/plugins/debugging-toolkit/agents/debugger.md",
+      "path": "plugins/debugging-toolkit/agents/debugger.md",
+      "commit": "46891e7e60da0e52baf1050b7b6391b64e84c6d9",
+      "licence": "MIT",
+      "sha256": "3d0e9b906e5f5e29e76758cf5b170023c5cbd9f2d908bfd8263043e60d342f87"
+    },
+    "sample": "q4",
+    "expect": "valid",
+    "values": {
+      "name": "debugging-toolkit-debugger",
+      "model": [
+        "sonnet"
+      ]
+    }
+  },
+  {
+    "file": "converter/opencode-css.md",
+    "source": {
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/663fbd7573705c13fcb3a4adabf53312e1e3ae59/packages/console/app/.opencode/agent/css.md",
+      "path": "packages/console/app/.opencode/agent/css.md",
+      "commit": "663fbd7573705c13fcb3a4adabf53312e1e3ae59",
+      "licence": "MIT",
+      "sha256": "2e17787bad0dc54a8775209128ab5c0a4fc631d2e9fd3cada724f141e1c12c09"
+    },
+    "sample": "q4",
+    "expect": "converter"
+  },
+  {
+    "file": "valid/minimal.md",
+    "expect": "valid",
+    "values": {
+      "schemaVersion": 1,
+      "version": null,
+      "instructions.text": "Follow the task brief exactly.\n",
+      "instructions.mode": "replace",
+      "instructions.include": [],
+      "model": [
+        "inherit"
+      ],
+      "effort.default": null,
+      "effort.min": null,
+      "effort.max": null,
+      "context.project": true,
+      "context.user": true,
+      "context.skills": true,
+      "context.files": [],
+      "tools": "inherit",
+      "disallowedTools": [],
+      "agents": [],
+      "skills": [],
+      "services": [],
+      "requires": [],
+      "workspace.isolation": "shared",
+      "invocation.model": true,
+      "invocation.user": true,
+      "limits.maxTurns": null,
+      "limits.timeoutMinutes": null,
+      "result.schema": null,
+      "result.artifacts": [],
+      "runtimes": {},
+      "license": null,
+      "metadata": {}
+    }
+  },
+  {
+    "file": "valid/claude-code-color.md",
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "color"
+      }
+    ],
+    "values": {
+      "runtimes.claude-code": {
+        "required": false,
+        "color": "blue"
+      }
+    }
+  },
+  {
+    "file": "valid/snake-case-max-turns.md",
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "max_turns"
+      }
+    ],
+    "values": {
+      "limits.maxTurns": 10
+    }
+  },
+  {
+    "file": "valid/mcp-double-underscore.md",
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "tools[0]"
+      }
+    ],
+    "values": {
+      "tools": [
+        {
+          "name": "mcp:github/create_issue",
+          "portable": null,
+          "namespace": "mcp"
+        }
+      ]
+    }
+  },
+  {
+    "file": "valid/uppercase-name.md",
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "name"
+      }
+    ],
+    "values": {
+      "name": "Code_Reviewer"
+    }
+  },
+  {
+    "file": "invalid/unknown-top-level-field.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "surprise"
+      }
+    ]
+  },
+  {
+    "file": "invalid/unknown-tool.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "tools[1]"
+      }
+    ]
+  },
+  {
+    "file": "invalid/name-with-colon.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "name"
+      }
+    ]
+  },
+  {
+    "file": "invalid/effort-and-thinking.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "thinking"
+      }
+    ]
+  },
+  {
+    "file": "invalid/context-project-and-inherit.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "inheritProjectContext"
+      }
+    ]
+  },
+  {
+    "file": "valid/default-reads.md",
+    "expect": "valid",
+    "warnings": [
+      {
+        "path": "defaultReads"
+      }
+    ],
+    "values": {
+      "context.files": [
+        {
+          "path": "AGENTS.md",
+          "required": false
+        }
+      ]
+    }
+  },
+  {
+    "file": "valid/context-files.md",
+    "expect": "valid",
+    "values": {
+      "context.files": [
+        {
+          "path": "README.md",
+          "required": false
+        },
+        {
+          "path": "docs/format.md",
+          "required": true
+        }
+      ]
+    }
+  },
+  {
+    "file": "invalid/context-file-absolute.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "context.files[0]"
+      }
+    ]
+  },
+  {
+    "file": "invalid/context-file-parent.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "context.files[0].path"
+      }
+    ]
+  },
+  {
+    "file": "invalid/context-file-glob.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "context.files[0]"
+      }
+    ]
+  },
+  {
+    "file": "invalid/context-unknown-key.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "context.history"
+      }
+    ]
+  },
+  {
+    "file": "invalid/package-mcp-servers.md",
+    "options": {
+      "origin": "package"
+    },
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "mcpServers"
+      }
+    ]
+  },
+  {
+    "file": "invalid/package-runtime-hooks.md",
+    "options": {
+      "origin": "package"
+    },
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "runtimes.claude-code.hooks"
+      }
+    ]
+  },
+  {
+    "file": "invalid/missing-description.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "description"
+      }
+    ]
+  },
+  {
+    "file": "invalid/empty-body.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "instructions"
+      }
+    ]
+  },
+  {
+    "file": "invalid/unknown-effort.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "effort"
+      }
+    ]
+  },
+  {
+    "file": "invalid/unknown-isolation.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "workspace.isolation"
+      }
+    ]
+  },
+  {
+    "file": "invalid/missing-opening-fence.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": ""
+      }
+    ]
+  },
+  {
+    "file": "invalid/empty-tools.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "tools"
+      }
+    ]
+  },
+  {
+    "file": "invalid/effort-min-above-max.md",
+    "expect": "invalid",
+    "errors": [
+      {
+        "path": "effort"
+      }
+    ]
+  }
+]

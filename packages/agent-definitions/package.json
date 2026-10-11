@@ -1,0 +1,68 @@
+{
+  "version": "0.1.0",
+  "description": "One file format for coding-agent definitions: schema, parser, conformance suite, linter and converters.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./conformance": {
+      "types": "./dist/conformance.d.ts",
+      "import": "./dist/conformance.js",
+      "default": "./dist/conformance.js"
+    },
+    "./schema.json": "./schema/agent-definition.schema.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "fixtures",
+    "schema",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "lint": "eslint . --cache --cache-location node_modules/.cache/eslint/",
+    "format:check": "prettier --check src tests scripts eslint.config.js package.json tsconfig.json tsconfig.build.json",
+    "format": "prettier --write src tests scripts eslint.config.js package.json tsconfig.json tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
+    "test": "node --test tests/*.test.ts",
+    "test:coverage": "c8 --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 --all --src src --include 'src/**/*.ts' --reporter=text --reporter=lcov --reporter=cobertura node --test tests/*.test.ts",
+    "smoke:package": "node scripts/package-smoke.mjs",
+    "check": "npm run lint && npm run format:check && npm run typecheck && npm run test:coverage && npm run build && npm run smoke:package"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "name": "@centerforagenticai/agent-definitions",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/agent-definitions"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/agent-definitions#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.19.1",
+    "c8": "^12.0.0",
+    "eslint": "^10.12.0",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.9",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.1"
+  }
+}

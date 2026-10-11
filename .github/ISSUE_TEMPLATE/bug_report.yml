@@ -19,6 +19,7 @@ body:
         - "@centerforagenticai/pi-dev"
         - "@centerforagenticai/pi-adaptive-thinking"
         - "@centerforagenticai/pi-intent"
+        - "@centerforagenticai/agent-definitions"
     validations:
       required: true
   - type: input

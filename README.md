@@ -1,11 +1,12 @@
 # Center for Agentic AI tools
 
-Public releases of [Pi](https://github.com/earendil-works/pi) extensions and services maintained by the Center for AI Research. Each package lives in `packages/<name>/`, is published to npm under the `@centerforagenticai` scope, and is tagged here as `<name>@vX.Y.Z`.
+Public releases of [Pi](https://github.com/earendil-works/pi) extensions, services and libraries maintained by the Center for AI Research. Each package lives in `packages/<name>/`, is published to npm under the `@centerforagenticai` scope, and is tagged here as `<name>@vX.Y.Z`.
 
 ## Packages
 
 | Package | Kind | Status | What it does |
 | --- | --- | --- | --- |
+| [agent-definitions](packages/agent-definitions) | library | experimental | A portable file format for coding-agent definitions, with its schema, parser, validation, discovery rules and conformance suite. |
 | [pi-adaptive-thinking](packages/pi-adaptive-thinking) | extension | experimental | Lets the agent raise or lower its own thinking effort within configured bounds, with status and bounds commands. |
 | [pi-artifacts](packages/pi-artifacts) | extension | experimental | Cross-device registry and viewer for session documents and browser-viewable media, with a lightweight applet host. |
 | [pi-callbacks](packages/pi-callbacks) | extension | stable | Persistent reminders, polling checks, background scripts, and token-based external callbacks that wake a Pi agent. |

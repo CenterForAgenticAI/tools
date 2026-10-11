@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://www.centerforairesearch.org/schemas/agent-definition-0.1.json",
+  "title": "Agent Definition 0.1 frontmatter",
+  "description": "The canonical YAML-frontmatter authoring shape. The Markdown body supplies instructions.text.",
+  "type": "object",
+  "required": ["name", "description"],
+  "additionalProperties": false,
+  "$defs": {
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "stringList": { "type": "array", "items": { "$ref": "#/$defs/nonEmptyString" } },
+    "csvOrStringList": {
+      "oneOf": [
+        { "$ref": "#/$defs/nonEmptyString" },
+        { "$ref": "#/$defs/stringList" }
+      ]
+    },
+    "effortLevel": { "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
+    "toolList": {
+      "oneOf": [
+        { "$ref": "#/$defs/nonEmptyString" },
+        { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/nonEmptyString" } }
+      ]
+    },
+    "skill": {
+      "oneOf": [
+        { "$ref": "#/$defs/nonEmptyString" },
+        {
+          "type": "object",
+          "required": ["name"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "$ref": "#/$defs/nonEmptyString" },
+            "source": { "$ref": "#/$defs/nonEmptyString" },
+            "version": { "$ref": "#/$defs/nonEmptyString" },
+            "required": { "type": "boolean", "default": true }
+          }
+        }
+      ]
+    },
+    "artifact": {
+      "oneOf": [
+        { "$ref": "#/$defs/nonEmptyString" },
+        {
+          "type": "object",
+          "required": ["path"],
+          "additionalProperties": false,
+          "properties": {
+            "path": { "$ref": "#/$defs/nonEmptyString" },
+            "check": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        }
+      ]
+    },
+    "contextFilePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "allOf": [
+        { "not": { "pattern": "^(?:[/\\\\~]|[A-Za-z]:)" } },
+        { "not": { "pattern": "\\\\" } },
+        { "not": { "pattern": "\\u0000" } },
+        { "not": { "pattern": "(?:^|/)\\.\\.(?:/|$)" } },
+        { "not": { "pattern": "[*?\\[\\]{}]" } }
+      ]
+    },
+    "contextFile": {
+      "oneOf": [
+        { "$ref": "#/$defs/contextFilePath" },
+        {
+          "type": "object",
+          "required": ["path"],
+          "additionalProperties": false,
+          "properties": {
+            "path": { "$ref": "#/$defs/contextFilePath" },
+            "required": { "type": "boolean", "default": false }
+          }
+        }
+      ]
+    }
+  },
+  "properties": {
+    "schemaVersion": { "const": 1, "default": 1 },
+    "name": { "$ref": "#/$defs/nonEmptyString", "pattern": "^[^:]+$" },
+    "description": { "$ref": "#/$defs/nonEmptyString" },
+    "version": { "$ref": "#/$defs/nonEmptyString" },
+    "instructions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["append", "replace"], "default": "replace" },
+        "include": { "$ref": "#/$defs/stringList", "default": [] }
+      }
+    },
+    "model": {
+      "oneOf": [
+        { "$ref": "#/$defs/nonEmptyString" },
+        { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/nonEmptyString" } }
+      ],
+      "default": "inherit"
+    },
+    "effort": {
+      "oneOf": [
+        { "$ref": "#/$defs/effortLevel" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "default": { "$ref": "#/$defs/effortLevel" },
+            "min": { "$ref": "#/$defs/effortLevel" },
+            "max": { "$ref": "#/$defs/effortLevel" }
+          }
+        }
+      ]
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project": { "type": "boolean", "default": true },
+        "user": { "type": "boolean", "default": true },
+        "skills": { "type": "boolean", "default": true },
+        "files": { "type": "array", "items": { "$ref": "#/$defs/contextFile" }, "default": [] }
+      }
+    },
+    "tools": {
+      "anyOf": [
+        { "const": "inherit" },
+        { "$ref": "#/$defs/toolList" }
+      ],
+      "default": "inherit"
+    },
+    "disallowedTools": { "$ref": "#/$defs/csvOrStringList", "default": [] },
+    "agents": { "$ref": "#/$defs/csvOrStringList", "default": [] },
+    "skills": {
+      "oneOf": [
+        { "$ref": "#/$defs/nonEmptyString" },
+        { "type": "array", "items": { "$ref": "#/$defs/skill" } }
+      ],
+      "default": []
+    },
+    "services": { "$ref": "#/$defs/stringList", "default": [] },
+    "requires": { "$ref": "#/$defs/stringList", "default": [] },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "isolation": { "enum": ["shared", "worktree", "ephemeral"], "default": "shared" }
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": "boolean", "default": true },
+        "user": { "type": "boolean", "default": true }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxTurns": { "type": "integer", "minimum": 1 },
+        "timeoutMinutes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "type": "object" },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" }, "default": [] }
+      }
+    },
+    "runtimes": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+      "additionalProperties": {
+        "type": "object",
+        "properties": { "required": { "type": "boolean", "default": false } }
+      }
+    },
+    "license": { "$ref": "#/$defs/nonEmptyString" },
+    "metadata": { "type": "object", "additionalProperties": { "type": "string" } },
+
+    "systemPrompt": { "type": "string", "minLength": 1, "deprecated": true },
+    "systemPromptMode": { "enum": ["append", "replace"], "deprecated": true },
+    "inheritProjectContext": { "type": "boolean", "deprecated": true },
+    "omitClaudeMd": { "type": "boolean", "deprecated": true },
+    "inheritSkills": { "type": "boolean", "deprecated": true },
+    "thinking": { "$ref": "#/$defs/effortLevel", "deprecated": true },
+    "thinkingMin": { "$ref": "#/$defs/effortLevel", "deprecated": true },
+    "thinkingMax": { "$ref": "#/$defs/effortLevel", "deprecated": true },
+    "fallbackModels": { "$ref": "#/$defs/stringList", "deprecated": true },
+    "nestedDelegateAgents": { "$ref": "#/$defs/csvOrStringList", "deprecated": true },
+    "allowNestedDelegate": { "type": "boolean", "deprecated": true },
+    "artifact": { "oneOf": [{ "const": false }, { "$ref": "#/$defs/nonEmptyString" }], "deprecated": true },
+    "defaultProgress": { "type": "boolean", "deprecated": true },
+    "defaultReads": {
+      "oneOf": [
+        { "$ref": "#/$defs/nonEmptyString" },
+        { "type": "array", "items": { "$ref": "#/$defs/contextFilePath" } }
+      ],
+      "deprecated": true
+    },
+    "isolation": { "enum": ["shared", "worktree", "ephemeral"], "deprecated": true },
+    "maxTurns": { "type": "integer", "minimum": 1, "deprecated": true },
+    "color": { "deprecated": true },
+    "permissionMode": { "deprecated": true },
+    "hooks": { "deprecated": true },
+    "memory": { "deprecated": true },
+    "background": { "deprecated": true },
+    "initialPrompt": { "deprecated": true },
+    "mcpServers": { "deprecated": true }
+  }
+}
