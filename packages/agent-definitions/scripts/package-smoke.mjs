@@ -36,6 +36,9 @@ try {
 		"package/dist/index.d.ts",
 		"package/dist/conformance.js",
 		"package/dist/conformance.d.ts",
+		"package/dist/pi-durable.js",
+		"package/dist/pi-durable.d.ts",
+		"package/dist/bin.js",
 		"package/schema/agent-definition.schema.json",
 		"package/fixtures/manifest.json",
 		...fixtureEntries.map(({ file }) => `package/fixtures/${file}`),
@@ -76,6 +79,7 @@ try {
 	const probe = [
 		`import { parseDefinition, splitFrontmatter } from ${JSON.stringify(pack.name)};`,
 		`import { runConformance } from ${JSON.stringify(`${pack.name}/conformance`)};`,
+		`import { lowerToPiDurable } from ${JSON.stringify(`${pack.name}/pi-durable`)};`,
 		`import schema from ${JSON.stringify(`${pack.name}/schema.json`)} with { type: "json" };`,
 		`const split = splitFrontmatter("---\\nname: smoke\\n---\\nBody\\n");`,
 		`if (!split.ok || split.frontmatter !== "name: smoke" || split.body !== "Body\\n") {`,
@@ -89,13 +93,30 @@ try {
 		`if (!parsed.ok || parsed.definition.name !== "smoke" || schema.$schema !== "https://json-schema.org/draft/2020-12/schema") {`,
 		`	throw new Error("unexpected package API result: " + JSON.stringify(parsed));`,
 		`}`,
+		`const lowered = lowerToPiDurable(parsed.definition, { parentModel: "test/model", parentTools: ["read"], enforcedBy: ["agents"] });`,
+		`if (!lowered.ok || lowered.input.model.modelId !== "model") {`,
+		`	throw new Error("unexpected pi-durable result: " + JSON.stringify(lowered));`,
+		`}`,
 	].join("\n");
 	execFileSync(process.execPath, ["--input-type=module", "-e", probe], {
 		cwd: project,
 		stdio: ["ignore", "pipe", "pipe"],
 	});
 
-	console.log(`package smoke ok: ${listed.length} entries, installed and imported by name`);
+	// The installed command must run through npm's bin link.
+	fs.writeFileSync(path.join(project, "smoke.md"), "---\nname: smoke\ndescription: Smoke test.\n---\nBody\n");
+	const lintOutput = execFileSync(
+		path.join(project, "node_modules", ".bin", "agent-definitions"),
+		["lint", "smoke.md"],
+		{
+			cwd: project,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		},
+	);
+	if (!lintOutput.startsWith("1 files, 0 errors")) throw new Error(`unexpected lint output: ${lintOutput}`);
+
+	console.log(`package smoke ok: ${listed.length} entries, installed and imported by name, command ran`);
 } finally {
 	fs.rmSync(tmp, { recursive: true, force: true });
 }

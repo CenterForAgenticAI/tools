@@ -1,5 +1,7 @@
 // Splits an agent definition file into its YAML frontmatter and its Markdown
-// body. The rules are in docs/format.md under "File layout".
+// body, and joins them back. The rules are in docs/format.md under "File layout".
+
+import { stringify } from "yaml";
 
 export type SplitErrorCode = "missing-opening-fence" | "missing-closing-fence";
 
@@ -50,4 +52,15 @@ export function splitFrontmatter(source: string): SplitResult {
 		body: lines.slice(closing + 1).join("\n"),
 		bodyLine: closing + 2,
 	};
+}
+
+/**
+ * Write frontmatter fields and a body as one definition file. Keys keep their
+ * insertion order; `undefined` values are left out. Empty fields give an empty
+ * frontmatter block. `splitFrontmatter` returns the same body unchanged.
+ */
+export function joinFrontmatter(fields: Readonly<Record<string, unknown>>, body: string): string {
+	const present = Object.entries(fields).filter(([, value]) => value !== undefined);
+	const yaml = present.length === 0 ? "" : stringify(Object.fromEntries(present), { lineWidth: 0 });
+	return `---\n${yaml}---\n${body}`;
 }

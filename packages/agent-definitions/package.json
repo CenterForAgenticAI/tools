@@ -1,7 +1,10 @@
 {
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "One file format for coding-agent definitions: schema, parser, conformance suite, linter and converters.",
   "type": "module",
+  "bin": {
+    "agent-definitions": "./dist/bin.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -12,6 +15,11 @@
       "types": "./dist/conformance.d.ts",
       "import": "./dist/conformance.js",
       "default": "./dist/conformance.js"
+    },
+    "./pi-durable": {
+      "types": "./dist/pi-durable.d.ts",
+      "import": "./dist/pi-durable.js",
+      "default": "./dist/pi-durable.js"
     },
     "./schema.json": "./schema/agent-definition.schema.json",
     "./package.json": "./package.json"

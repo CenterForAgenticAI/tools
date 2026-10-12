@@ -2,9 +2,9 @@
 
 One file format for coding-agent definitions. A definition is a Markdown file with YAML frontmatter. The frontmatter says what the agent is for and what it may do. The body is its instructions.
 
-The same file is meant to load in pi-delegate, pi-fabric and pi-prompt-graph, and to work as a Claude Code subagent file. Converters will import files from other tools and export to them, with a report of what each target could not keep.
+The same file is meant to load in pi-delegate, pi-fabric and pi-prompt-graph, and to work as a Claude Code subagent file. Converters import files from other tools and export to them, with a report of what each target could not keep.
 
-This repository holds the schema, parser, validation, discovery rules and conformance suite, published as `@centerforagenticai/agent-definitions`. [docs/format.md](docs/format.md) describes the file layout, fields, defaults and diagnostics.
+This repository holds the schema, parser, validation, discovery rules, conformance suite, linter, converters and a pi-durable adapter, published as `@centerforagenticai/agent-definitions`. [docs/format.md](docs/format.md) describes the file layout, fields, defaults and diagnostics.
 
 ```sh
 npm install @centerforagenticai/agent-definitions
@@ -50,6 +50,17 @@ if (!parsed.ok) {
 
 `parseDefinition` normalizes defaults and compatibility spellings. It returns `ok: false` exactly when a diagnostic has severity `error`. See [docs/format.md](docs/format.md) for all fields, diagnostic paths, policy checks, and defaults.
 
+## Command line
+
+The package installs the `agent-definitions` command.
+
+```sh
+npx @centerforagenticai/agent-definitions lint .pi/agents
+npx @centerforagenticai/agent-definitions convert --from claude-code --to agent-definitions .claude/agents/reviewer.md
+```
+
+`lint` checks files before a runtime loads them. `convert` is a dry run unless you pass `--write`, and it prints the lowering report.
+
 ## Glossary
 
 - **Agent definition**: the reusable file that describes one agent. Not a "role".
@@ -71,9 +82,12 @@ Use Node 24. Run `npm install`, then `npm run check`. It runs lint, the format c
 - [docs/format.md](docs/format.md): fields, defaults, policy checks and diagnostics.
 - [docs/discovery.md](docs/discovery.md): where runtimes look for definition files, and in what order.
 - [docs/conformance.md](docs/conformance.md): how another project checks that it reads definitions the same way.
+- [docs/lint.md](docs/lint.md): the `lint` command, its checks and exit status.
+- [docs/convert.md](docs/convert.md): the `convert` command and what each foreign format keeps and loses.
+- [docs/pi-durable.md](docs/pi-durable.md): lowering a definition to pi-durable `configure()` input.
 - [docs/decisions.md](docs/decisions.md): each format decision and the reason for it.
 - [fixtures/README.md](fixtures/README.md): the conformance fixtures and where each copied file came from.
 
 ## Status
 
-Version 0.1 ships the schema, parser, validation, discovery and conformance suite. A linter command and import and export converters are planned.
+Version 0.1 shipped the schema, parser, validation, discovery and conformance suite. Version 0.2 adds the `agent-definitions` command with `lint` and `convert`, converters for Claude Code, Codex, GitHub Copilot, Gemini CLI, OpenCode and pi-agents, and the `pi-durable` subpath.

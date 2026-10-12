@@ -1,6 +1,6 @@
 # Format decisions
 
-The maintainers settled eighteen decisions on 7 October 2026, then five parser defaults and six field decisions on 8 October, and the context, release and skill-scoping decisions on 8 and 9 October. Each row gives the decision and the reason for it.
+The maintainers settled eighteen decisions on 7 October 2026, then five parser defaults and six field decisions on 8 October, the context, release and skill-scoping decisions on 8 and 9 October, and one converter decision on 12 October. Each row gives the decision and the reason for it.
 
 Some reasons cite earlier design notes that are not published: decisions D6, D8 to D10, D14 and D19, and section 13 of a design draft from 24 September 2026.
 
@@ -79,7 +79,12 @@ F16 to F19 replace pi-delegate's `defaultReads` with one field for everything an
 | R2 | Publish to npm as `@centerforagenticai/agent-definitions`, with the source in the CenterForAgenticAI/tools repository on GitHub, as pi-delegate and pi-context-aware are. An internal build is also published to the maintainers' private registry. | A shared format needs a public home that anyone can install from. |
 | R3 | Samples from private repositories move to those repositories, which run the conformance runner ([conformance.md](conformance.md)) against them. The OpenCode and Claude Code samples stay here; both are MIT-licensed. | The public mirror must not carry private agent files, and each repository can still test its own. |
 | R4 | Publish `README.md` and this file, rewritten so they name no private people, paths or hosts. | The reasons for the format belong with it. |
-| R5 | Record the pi-durable research in the issue tracker: related work, an export to pi-agents' six-field profile, a pi-durable adapter, and Fabric actor templates read from these files. Draft a note to the pi-agents author once 0.1 is public. | No agent file format exists for pi-durable. At least five projects load their own small field sets. |
+| R5 | Record the pi-durable research in the issue tracker: related work, an export to pi-agents' seven-field profile (first recorded here as six; `delegate` is the seventh key), a pi-durable adapter, and Fabric actor templates read from these files. Draft a note to the pi-agents author once 0.1 is public. | No agent file format exists for pi-durable. At least five projects load their own small field sets. |
 | R6 | Each copied sample records where it came from. A file published at a fixed commit records the commit-pinned HTTPS URL. A file with no such URL records the public npm package whose source repository holds it, and its path there. Both record the licence and the SHA-256 of the copied bytes. | The digest pins the bytes either way. Six useful MIT samples have no public URL, and a private repository path would not help a public reader. |
 | R7 | The schema's `$id` is `https://www.centerforairesearch.org/schemas/agent-definition-0.1.json`. | It is the publisher's own domain. A JSON Schema `$id` names the schema; validators do not fetch it, so the URL need not serve the file. |
 
+## Converter names, 12 October 2026
+
+| ID | Decision | Reason |
+|---|---|---|
+| F21 | Converters keep `name` as written. A name that is not lowercase letters, digits and hyphens keeps its `name-spelling` warning after conversion, including a round trip. | Other files and callers refer to an agent by its name. A converter that renamed it would break those references without saying so. |
