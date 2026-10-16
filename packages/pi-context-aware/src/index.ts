@@ -23,7 +23,8 @@
  *   5. Command `/compact-then [<seed>]`: same as the tool, but typed. With no
  *      seed, generates one and either uses it (auto-gen) or pops an editor
  *      for approval/edit (user-approve).
- *   6. Command `/context-aware-mode <auto-gen|user-approve|autonomous|status>`:
+ *   6. Command `/context-aware-seed-mode <auto-gen|user-approve|autonomous|status>`
+ *      (alias `/context-aware-mode`):
  *      flip or inspect the seed-generation default. `autonomous` is a preset
  *      for auto generation + seed rewriting + never-blocking ambiguity handling.
  *   7. Command `/context-aware-seed-rewrite <on|off|status>`: enable/disable
@@ -65,6 +66,9 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Api, AssistantMessage, ImageContent, Message, Model, ProviderHeaders, TextContent } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { compatCanDispatch } from "./platform/model-transport.js";
+import { registerFoldEngine } from "./folds/fold-engine.js";
+import { foldEngineFingerprint } from "./parity/fingerprint.js";
+import { registerFoldParityRecorder } from "./parity/recorder.js";
 import { decideBuiltinCompactionFallback, extrapolateBoundedInputTokens } from "./compaction/compaction-fallback-guard.js";
 import {
 	BorderedLoader,
@@ -76,19 +80,21 @@ import {
 	keyHint,
 	SessionManager,
 	serializeConversation,
-	type BeforeAgentStartEvent,
 	type BeforeAgentStartEventResult,
 	type ContextEvent,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
+	type ExtensionHandler,
+	type SessionBeforeCompactEvent,
+	type SessionBeforeCompactResult,
 	type SessionInfo,
 } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Type, type Static } from "typebox";
 import {
 	buildAmbiguousProceedPrompt,
@@ -161,13 +167,18 @@ import {
 	type ContextAwareProactiveCompactionSourcesV1,
 	type ContextAwareServiceV1,
 } from "./context-service.js";
+import { stripHistoricalImages } from "./media/image-stripping.js";
 import {
 	buildContextTelemetry,
+	buildUnknownContextTelemetry,
 	contextBand,
-	URGENT_FRACTION,
-	WARN_FRACTION,
+	DEFAULT_PRESSURE_BAND_EDGES,
+	type ContextPressureBandEdges,
 } from "./platform/context-telemetry.js";
+import { compactionOwnerIdentity } from "./compaction/owner-identity.js";
+import { contextPolicyBands, createContextPolicyController, effectivePressureLadder, type ContextPolicyController } from "./policy/context-policy.js";
 import { buildCheckinPrompt, type CheckinSnapshot } from "./platform/checkin.js";
+import { applyPromptSections, PROMPT_SECTION, sectionContent } from "./platform/prompt-sections.js";
 import { arbitrateQueuedInteraction } from "./compaction/idle-arbitration.js";
 import { consumeFocusSeed } from "./workstream/focus-seed.js";
 import {
@@ -179,6 +190,7 @@ import {
 	stripCacheReference,
 	isGeneratedSeedProvenance,
 	isGroundedSideEffectAuthoritySurface,
+	isSeedAuthorityRejectionReason,
 	latestMutationAuthorityFromText,
 	SEED_AUTHORITY_GUARD_IMPLEMENTATION_VERSION,
 	type GeneratedSeedProvenance,
@@ -217,7 +229,7 @@ import {
 	type WorkstreamCompactionProjection,
 } from "./workstream/workstream-context.js";
 import { replayWorkstreamEntries } from "./workstream/workstream-replay.js";
-import { prepareSessionFocusArguments } from "./tool-arguments.js";
+import { MAX_FOCUS_REF_VALUE_CHARS, prepareSessionFocusArguments, SESSION_FOCUS_ACTIONS, SESSION_FOCUS_REF_KINDS, SESSION_FOCUS_STATUSES, stringEnum } from "./tool-arguments.js";
 import { redactPinnedVerbatimBlock, redactText } from "./workstream/workstream-safety.js";
 import { appendWorkstreamSnapshot } from "./workstream/workstream-state.js";
 import {
@@ -256,6 +268,7 @@ import {
 	type TasksRuntimeDeps,
 } from "./session-tasks/session-tasks-runtime.js";
 import { probeSessionBusy } from "./session/session-busy-probe.js";
+import { createModesExtensionController, type ModesExtensionController } from "./modes/modes-extension.js";
 import { buildTasksContextEnvelope, tasksCompactionCarry, tasksSettleCorrection, tasksSettleReminder, type TasksAudience } from "./session-tasks/session-tasks-view.js";
 import {
 	createWorkstreamFocusWidget,
@@ -295,6 +308,23 @@ import {
 	decideCompactionCommit,
 	type CompactionCommitDecision,
 } from "./compaction/compaction-commit-guard.js";
+import { createClaimController, type ClaimController } from "./compaction/owner-claim.js";
+import { OwnerCallRefused } from "./compaction/owner-input.js";
+import {
+	createOwnerActions,
+	ownerPressure,
+	ownerSeedMessage,
+	OWNER_SEED_DELIVERY,
+	type OwnerRequestFocus,
+} from "./compaction/owner-actions.js";
+import {
+	CARRY_ENTRY_TYPE,
+	hasOwnCarryEntry,
+	readCarryItems,
+	readFabricCarryItems,
+	renderCarryIntoSummary,
+} from "./compaction/owner-carry.js";
+import { renderFoldIndex } from "./compaction/owner-folds.js";
 import {
 	classifyCompactionError,
 	clearRetainedSummariesForSession,
@@ -322,6 +352,14 @@ import {
 	appendWorkerCompactionSatisfiedForSession,
 } from "./compaction/worker-compaction-contract.js";
 import {
+	contextPressureVerdict,
+	measuredUsage,
+	usageView,
+	workerTurnSizeFields,
+	type MeasuredUsageView,
+	type UsageView,
+} from "./compaction/usage-view.js";
+import {
 	classifyRestartNotice,
 	formatRestartNotice,
 	resolveRestartNotice,
@@ -334,6 +372,11 @@ import {
 	type PiAutoCompactionSetting,
 } from "./compaction/compaction-ownership.js";
 import {
+	detectCompactionBlocker,
+	type CompactionBlocker,
+	type RegisteredToolView,
+} from "./compaction/compaction-blocker.js";
+import {
 	CONFIG_LAYERS,
 	CONFIG_POLICY_ENTRY_TYPE,
 	DEFAULT_CONTEXT_CACHE_CONFIG,
@@ -342,6 +385,7 @@ import {
 	DEFAULT_SESSION_NAMING_CONFIG,
 	DEFAULT_WORKSTREAM_CONFIG,
 	DEFAULT_BUSY_PROBE_CONFIG,
+	DEFAULT_IMAGE_STRIPPING_CONFIG,
 	configLayerFromValues,
 	configPolicyEntry,
 	formatLayerAttribution,
@@ -354,6 +398,7 @@ import {
 	type Config,
 	type ConfigLayerInput,
 	type ContextCacheConfig,
+	type ImageStrippingConfig,
 	type ProactiveCompactionConfig,
 	type ResolvedConfig,
 	type SeedAuthorityGuardMode,
@@ -364,6 +409,9 @@ import {
 	type SessionNamingConfig,
 } from "./platform/config-layers.js";
 import { answerRecall, recallSchema, type RecallCachePool } from "./cache/recall.js";
+import { erasedSessionIds } from "./erasure/database.js";
+import { registerSessionErasure } from "./erasure/extension.js";
+import { guardErasureWrites } from "./erasure/write-boundary.js";
 
 import { loadPiAiCompat } from "./platform/pi-ai-compat.js";
 
@@ -430,6 +478,8 @@ type ResolvedProactiveCompactionConfig = Omit<ContextAwareProactiveCompactionCon
 
 interface EffectiveConfig extends Config {
 	proactiveCompaction: ResolvedProactiveCompactionConfig;
+	/** Extension detected at session start that cancels every compaction. */
+	compactionBlocker?: CompactionBlocker;
 }
 const CONFIG_DIR = getAgentDir();
 
@@ -1333,6 +1383,17 @@ function getContextCacheConfig(cfg: Config): ContextCacheConfig {
 	return { ...DEFAULT_CONTEXT_CACHE_CONFIG, ...cfg.contextCache };
 }
 
+function getImageStrippingConfig(cfg: Config): ImageStrippingConfig {
+	return { ...DEFAULT_IMAGE_STRIPPING_CONFIG, ...cfg.imageStripping };
+}
+
+function formatImageStripping(cfg: EffectiveConfig): string {
+	const stripping = getImageStrippingConfig(cfg);
+	if (!stripping.enabled) return "off";
+	if (cfg.compactionBlocker) return `inactive (${cfg.compactionBlocker.extension} manages context)`;
+	return `on (the newest ${stripping.keepRecent} image-bearing messages keep their images)`;
+}
+
 function getRestartNoticeConfig(cfg: Config): Required<RestartNoticeConfig> {
 	const minAwayMs = cfg.restartNotice?.minAwayMs;
 	return {
@@ -1357,6 +1418,23 @@ function contextAwareProactiveCompactionEnabled(cfg: Config): boolean {
 
 const SUMMARIZER_DEFERRED_HANDOFF_MESSAGE =
 	"Context-aware compaction handoffs are unavailable while summarizer.enabled is false because summary ownership is deferred to another compactor. Set summarizer.enabled to true and retry compact_session or /compact-then.";
+
+/**
+ * Whether context-aware may start or complete a compaction in this session.
+ * False when summary ownership is deferred, or when another extension cancels
+ * every compaction (see compaction-blocker.ts).
+ */
+function contextAwareCompactionAvailable(cfg: EffectiveConfig): boolean {
+	return contextAwareSummarizerEnabled(cfg) && cfg.compactionBlocker === undefined;
+}
+
+function compactionBlockedMessage(blocker: CompactionBlocker): string {
+	return `Compaction is unavailable because ${blocker.extension} cancels every compaction. Use ${blocker.replacementTool} to reduce context instead, or remove ${blocker.extension} from this profile's packages and reload Pi.`;
+}
+
+function compactionUnavailableMessage(cfg: EffectiveConfig): string {
+	return cfg.compactionBlocker ? compactionBlockedMessage(cfg.compactionBlocker) : SUMMARIZER_DEFERRED_HANDOFF_MESSAGE;
+}
 
 function getWorkstreamConfig(cfg: Config): WorkstreamConfig {
 	return { ...DEFAULT_WORKSTREAM_CONFIG, ...cfg.workstream };
@@ -1412,6 +1490,9 @@ function globalConfigLayer(): ConfigLayerInput {
  * reuses this parser unchanged, and a malformed value here cannot damage the
  * host's own settings.
  */
+/** Settings an untrusted project's own file may not change: they decide who owns compaction. */
+const UNTRUSTED_OWNERSHIP_PATHS: readonly string[] = ["summarizer.enabled", "compactionClaim.enabled"];
+
 function projectConfigLayer(
 	cwd: string | undefined,
 	options: { readonly trusted?: boolean } = {},
@@ -1425,13 +1506,14 @@ function projectConfigLayer(
 	if (options.trusted !== false) return layer;
 
 	// Summary ownership is a host-level capability decision. A checked-in file
-	// from an untrusted project must not be able to claim or cede that hook.
+	// from an untrusted project must not be able to claim or cede that hook, or
+	// claim compaction from Fabric, which is the same decision one level up.
 	const values = new Map(layer.values);
-	values.delete("summarizer.enabled");
+	for (const ownership of UNTRUSTED_OWNERSHIP_PATHS) values.delete(ownership);
 	return {
 		...layer,
 		values,
-		rejected: layer.rejected.filter((configPath) => configPath !== "summarizer.enabled"),
+		rejected: layer.rejected.filter((configPath) => !UNTRUSTED_OWNERSHIP_PATHS.includes(configPath)),
 	};
 }
 
@@ -1442,13 +1524,14 @@ function projectConfigLayer(
  *
  * The worktree top-level, not the repository common dir: the file is tracked,
  * so each worktree holds its own checked-out copy of the same project setting.
+ * That needs one git command; extension load runs it synchronously.
  */
 const projectRootMemo = new Map<string, string | null>();
 
 function projectRootForConfig(cwd: string): string | null {
 	const cached = projectRootMemo.get(cwd);
 	if (cached !== undefined) return cached;
-	const root = discoverGitProject(cwd)?.root ?? (fs.existsSync(cwd) ? cwd : null);
+	const root = fs.existsSync(cwd) ? gitPath(cwd, ["rev-parse", "--show-toplevel"]) ?? cwd : null;
 	projectRootMemo.set(cwd, root);
 	return root;
 }
@@ -1509,7 +1592,10 @@ function resolveConfig(ctx?: ExtensionContext): ResolvedConfig {
 	]);
 }
 
-function resolvedProactiveCompaction(resolved: ResolvedConfig): ResolvedProactiveCompactionConfig {
+function resolvedProactiveCompaction(
+	resolved: ResolvedConfig,
+	blocker?: CompactionBlocker,
+): ResolvedProactiveCompactionConfig {
 	const sourceAt = (path: string): ContextAwareProactiveCompactionSourcesV1["enabled"] =>
 		resolved.byPath.get(path)?.layer ?? "default";
 	const sources: Required<ContextAwareProactiveCompactionSourcesV1> = {
@@ -1527,21 +1613,53 @@ function resolvedProactiveCompaction(resolved: ResolvedConfig): ResolvedProactiv
 	const diagnostics = [
 		proactiveCliDiagnostic,
 		summarizerDeferred ? "Proactive compaction is inactive because summarizer.enabled is false." : undefined,
+		blocker ? `Proactive compaction is inactive because ${blocker.extension} cancels every compaction.` : undefined,
 	].filter((value): value is string => value !== undefined);
 	return {
 		...configured,
-		enabled: configured.enabled && !summarizerDeferred,
+		enabled: configured.enabled && !summarizerDeferred && blocker === undefined,
 		source,
 		sources,
 		...(diagnostics.length > 0 ? { diagnostic: diagnostics.join(" ") } : {}),
 	};
 }
 
+// Keyed by the session manager so every Pi context wrapper for one session
+// sees the same detection result.
+const compactionBlockerBySession = new WeakMap<ExtensionContext["sessionManager"], CompactionBlocker>();
+
+function sessionCompactionBlocker(ctx: ExtensionContext | undefined): CompactionBlocker | undefined {
+	if (!ctx) return undefined;
+	try {
+		return compactionBlockerBySession.get(ctx.sessionManager);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Record whether a loaded extension cancels every compaction. Runs at
+ * session_start because Pi rejects tool lookups while extensions load.
+ */
+function refreshCompactionBlocker(pi: ExtensionAPI, ctx: ExtensionContext): void {
+	let tools: readonly RegisteredToolView[] = [];
+	try {
+		tools = pi.getAllTools();
+	} catch (err) {
+		debugLog(`compaction blocker detection could not list tools: ${compactError(err)}`);
+	}
+	const blocker = detectCompactionBlocker(tools, { env: process.env, modelBaseUrl: ctx.model?.baseUrl });
+	if (blocker) compactionBlockerBySession.set(ctx.sessionManager, blocker);
+	else compactionBlockerBySession.delete(ctx.sessionManager);
+}
+
 function readConfig(ctx?: ExtensionContext): EffectiveConfig {
 	const resolved = resolveConfig(ctx);
+	const compactionBlocker = sessionCompactionBlocker(ctx);
 	return {
 		...resolved.config,
-		proactiveCompaction: resolvedProactiveCompaction(resolved),
+		proactiveCompaction: resolvedProactiveCompaction(resolved, compactionBlocker),
+		...(compactionBlocker ? { compactionBlocker } : {}),
 	};
 }
 
@@ -1638,6 +1756,7 @@ function resolveCompactionOwnership(
 			cfg.proactiveCompaction.enabled,
 			piSetting.enabled,
 			contextAwareSummarizerEnabled(cfg),
+			cfg.compactionBlocker?.extension,
 		),
 	};
 }
@@ -1651,7 +1770,9 @@ function formatCompactionOwnership(ctx: ExtensionContext): string {
 		? "competing (context-aware + Pi native)"
 		: resolved.assessment.state === "deferred"
 			? "deferred to another compactor"
-			: resolved.assessment.state;
+			: resolved.assessment.state === "blocked"
+				? `blocked by ${resolved.assessment.blockedBy}, which cancels every compaction`
+				: resolved.assessment.state;
 	const source = resolved.piSetting.source === "default"
 		? "default at startup"
 		: `${resolved.piSetting.source} startup setting${resolved.piSetting.settingsPath ? `: ${userRootRelativePath(resolved.piSetting.settingsPath)}` : ""}`;
@@ -1941,6 +2062,10 @@ function registerContextAwareFlags(pi: ExtensionAPI): void {
 		description: "Ephemeral proactive compaction override: on, off, threshold (78%), or output reserve (reserve=16k).",
 		type: "string",
 	});
+	pi.registerFlag("context-aware-modes-suggest-tool", {
+		description: "Ephemeral mode suggestion tool override: on/off.",
+		type: "string",
+	});
 }
 
 function rawCliFlagWasRequested(name: string): boolean {
@@ -2031,6 +2156,17 @@ function applyCliConfigOverrides(pi: ExtensionAPI, options: { finalAttempt?: boo
 		}
 	}
 
+	const modesSuggestTool = pi.getFlag("context-aware-modes-suggest-tool");
+	if (typeof modesSuggestTool === "string" && modesSuggestTool.trim()) {
+		const parsed = parseSeedRewriteFlag(modesSuggestTool);
+		if (parsed === null) {
+			warn(`Ignoring invalid --context-aware-modes-suggest-tool=${modesSuggestTool}; expected on/off.`);
+		} else {
+			overrides.set("modes.suggestTool", parsed);
+			notes.push(`modes.suggestTool=${parsed ? "on" : "off"}`);
+		}
+	}
+
 	const proactive = pi.getFlag("context-aware-proactive");
 	if (typeof proactive === "string" && proactive.trim()) {
 		const parsed = parseProactiveSetting(proactive);
@@ -2064,22 +2200,25 @@ function applyCliConfigOverrides(pi: ExtensionAPI, options: { finalAttempt?: boo
 // Usage helpers
 // ---------------------------------------------------------------------------
 
-interface UsageView {
-	tokens: number;
-	window: number;
-	fraction: number;
-	headroom: number;
-}
-
+/**
+ * Pi reports `tokens: null` after a compaction or an overflow recovery, until
+ * the next response. The view is then unmeasured: every surface that shows the
+ * size says it is unknown instead of 0% (#163), and every compaction decision
+ * must narrow it with `measuredUsage` first (#165, #168).
+ */
 function readUsage(ctx: ExtensionContext, additionalTokens = 0): UsageView | null {
 	const usage = ctx.getContextUsage();
 	const window = ctx.model?.contextWindow;
 	if (!usage || !window || window <= 0) return null;
-	const tokens = (usage.tokens ?? 0) + Math.max(0, additionalTokens);
-	return { tokens, window, fraction: tokens / window, headroom: Math.max(0, window - tokens) };
+	return usageView(usage.tokens, window, additionalTokens);
 }
 
-function readMeasuredUsage(ctx: ExtensionContext): UsageView | null {
+/** The size for a notice: the measured status line, or `size unknown`. */
+function usageNoticeLabel(u: UsageView, bands?: ContextPressureBandEdges): string {
+	return u.unmeasured ? "size unknown" : buildStatusLine(u, bands);
+}
+
+function readMeasuredUsage(ctx: ExtensionContext): MeasuredUsageView | null {
 	const usage = ctx.getContextUsage();
 	const window = ctx.model?.contextWindow;
 	if (usage?.tokens == null || !window || window <= 0) return null;
@@ -2090,9 +2229,10 @@ function readMeasuredUsage(ctx: ExtensionContext): UsageView | null {
 /**
  * Pi fires before_agent_start before it adds the submitted prompt to agent state,
  * so ctx.getContextUsage() does not include that prompt yet. Account for the
- * pending user message once when taking the fixed outer-turn marker snapshot.
+ * starting message once when taking the fixed outer-turn marker snapshot.
  */
-function estimatePendingPromptTokens(event: Pick<BeforeAgentStartEvent, "prompt" | "images">): number {
+function estimatePendingPromptTokens(event: { prompt: string; images?: readonly ImageContent[] } | { message: Parameters<typeof estimateTokens>[0] }): number {
+	if ("message" in event) return estimateTokens(event.message);
 	return estimateTokens({
 		role: "user",
 		content: [
@@ -2109,21 +2249,20 @@ function fmtTokens(n: number): string {
 	return String(n);
 }
 
-function severityIcon(fraction: number): string {
-	if (fraction >= URGENT_FRACTION) return "🔴";
-	if (fraction >= WARN_FRACTION) return "🟡";
-	return "🟢";
+function severityIcon(fraction: number, bands: ContextPressureBandEdges = DEFAULT_PRESSURE_BAND_EDGES): string {
+	const band = contextBand(fraction, bands);
+	return band === "URGENT" ? "🔴" : band === "WARN" ? "🟡" : "🟢";
 }
 
 /** Compact one-line: "🟢 24% (47.2k/200k)" used in notify() messages. */
-function buildStatusLine(u: UsageView): string {
+function buildStatusLine(u: UsageView, bands?: ContextPressureBandEdges): string {
 	const pct = (u.fraction * 100).toFixed(0);
-	return `${severityIcon(u.fraction)} ${pct}% (${fmtTokens(u.tokens)}/${fmtTokens(u.window)})`;
+	return `${severityIcon(u.fraction, bands)} ${pct}% (${fmtTokens(u.tokens)}/${fmtTokens(u.window)})`;
 }
 
 /** Shared footer space gets only glanceable pressure; detailed usage/config stays in commands and notices. */
-function buildFooterStatusLine(u: UsageView): string {
-	return `${severityIcon(u.fraction)} ${(u.fraction * 100).toFixed(0)}%`;
+function buildFooterStatusLine(u: UsageView, bands?: ContextPressureBandEdges): string {
+	return `${severityIcon(u.fraction, bands)} ${(u.fraction * 100).toFixed(0)}%`;
 }
 
 function refreshStatus(ctx: ExtensionContext): void {
@@ -2132,17 +2271,35 @@ function refreshStatus(ctx: ExtensionContext): void {
 	// Clear the pre-qualification key so a reload does not leave a duplicate
 	// footer entry behind in a host that preserves extension status rows.
 	ctx.ui.setStatus("ctx-aware", undefined);
-	ctx.ui.setStatus("caair.context-aware/context-pressure", usage ? buildFooterStatusLine(usage) : undefined);
+	const line = usage === null ? undefined : usage.unmeasured ? "size unknown" : buildFooterStatusLine(usage, contextPolicyBands(readConfig(ctx)));
+	ctx.ui.setStatus("caair.context-aware/context-pressure", line);
 }
 
-function buildContextUsageGuidanceBlock(compactionAvailable = true): string {
+interface CompactionBlockedGuidance {
+	/** Package that cancels every compaction. */
+	readonly blockedBy: string;
+	/** How the model calls the tool that still reduces context, for example `compress`. */
+	readonly invocation: string;
+}
+
+function buildContextUsageGuidanceBlock(
+	compactionAvailable = true,
+	blocked?: CompactionBlockedGuidance,
+	bands: ContextPressureBandEdges = DEFAULT_PRESSURE_BAND_EDGES,
+): string {
 	const pressureRules = compactionAvailable
 		? [
 			"OK: compact only at natural phase boundaries.",
 			"WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call compact_session at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer delegate with task_only/snippet clone_mode and concise collapsed results). Compact first for broad/full-context delegation.",
 			"URGENT: before nontrivial tool use, call compact_session unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.",
 		]
-		: [
+		: blocked
+			? [
+				`OK: no action needed. Compaction is not available in this session because ${blocked.blockedBy} cancels every compaction; ${blocked.invocation} reduces context instead.`,
+				`WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call ${blocked.invocation} on finished, older ranges, keep the next action small and reassess, or delegate bounded work with controlled context (prefer delegate with task_only/snippet clone_mode and concise collapsed results).`,
+				`URGENT: before nontrivial tool use, call ${blocked.invocation} on finished, older ranges unless finishing one atomic edit/validation that would be unsafe to interrupt; then reduce context immediately.`,
+			]
+			: [
 			"OK: no action needed.",
 			"WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, keep the next action small and reassess, or delegate bounded work with controlled context (prefer delegate with task_only/snippet clone_mode and concise collapsed results). Compaction is not available in this session.",
 			"URGENT: finish only the atomic edit or validation that would be unsafe to interrupt, keep every further action small, prefer bounded delegation, and tell the user that context is nearly full. Compaction is not available in this session.",
@@ -2150,7 +2307,8 @@ function buildContextUsageGuidanceBlock(compactionAvailable = true): string {
 	return `<context-awareness>
 Context-aware operating rule: messages delimited by <context-telemetry>...</context-telemetry> are extension-injected context-budget telemetry, not user messages or user requests. Never acknowledge, quote, explain, or apologize for a telemetry envelope in the user-facing response unless the user explicitly asks about it; silently use it only to decide context-management behavior. The envelope does not supersede the preceding user request or tool result.
 Envelope format: <context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">...</context-telemetry>, with a <pressure /> element containing band, rounded usage-percent, approximate-headroom, and an optional action.
-Bands: OK <${formatPercent(WARN_FRACTION)}, WARN >=${formatPercent(WARN_FRACTION)}, URGENT >=${formatPercent(URGENT_FRACTION)}.
+Bands: OK <${formatPercent(bands.warnFraction)}, WARN >=${formatPercent(bands.warnFraction)}, URGENT >=${formatPercent(bands.urgentFraction)}.
+UNKNOWN: the size is not measured yet, for example right after a compaction or an overflow. Do not assume it is low; keep the next action small until a measured band arrives.
 ${pressureRules.join("\n")}
 Use search_prior_sessions early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
 </context-awareness>`;
@@ -2604,7 +2762,9 @@ async function listSessions(
 	includeWorktrees: boolean,
 ): Promise<SessionListResult> {
 	if (scope === "all") {
-		return { sessions: await listAllSessionsShared(), scannedCwds: [], scopeLabel: "all projects" };
+		const sessions = await listAllSessionsShared();
+		const erased = erasedSessionIds(configuredAgentDir());
+		return { sessions: sessions.filter((session) => !erased.has(session.id)), scannedCwds: [], scopeLabel: "all projects" };
 	}
 
 	const scannedCwds = collectProjectCwds(cwd, includeWorktrees);
@@ -2613,7 +2773,8 @@ async function listSessions(
 		const sessions = await SessionManager.list(candidateCwd);
 		for (const s of sessions) byPath.set(s.path, s);
 	}
-	const sessions = [...byPath.values()].sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	const erased = erasedSessionIds(configuredAgentDir());
+	const sessions = [...byPath.values()].filter((session) => !erased.has(session.id)).sort((a, b) => b.modified.getTime() - a.modified.getTime());
 	return {
 		sessions,
 		scannedCwds,
@@ -3886,6 +4047,18 @@ type CompactionScheduleResult =
 	| { ok: false; reason: "active"; active: CompactionFlight }
 	| { ok: false; reason: "nothing-to-compact"; toolMessage: string; serviceStatus: "nothing-to-compact" };
 
+/**
+ * A compaction asked for through the compaction-owner claim. The seed, when the
+ * request had one, is sent as a labelled message once the compaction commits; a
+ * request without a seed compacts and sends nothing.
+ */
+interface OwnerHandoff {
+	readonly runId: string;
+	readonly seed?: string;
+}
+/** By session: a session has one compaction in flight at a time. */
+const ownerHandoffs = new Map<string, OwnerHandoff>();
+
 const compactionFlights = new Map<string, CompactionFlight>();
 const pendingCompactions = new Map<string, PendingCompaction>();
 const coreCompactionHandoffs = new Map<string, PendingCompaction>();
@@ -4163,6 +4336,7 @@ function markCompactionFlight(sessionKey: string, runId: string, state: Compacti
 }
 
 function clearCompactionFlight(sessionKey: string, runId: string): void {
+	if (ownerHandoffs.get(sessionKey)?.runId === runId) ownerHandoffs.delete(sessionKey);
 	const existing = compactionFlights.get(sessionKey);
 	if (!existing || existing.runId !== runId) return;
 	compactionFlights.delete(sessionKey);
@@ -4207,6 +4381,7 @@ function discardSessionCompaction(
 	pendingCompactions.delete(sessionKey);
 	coreCompactionHandoffs.delete(sessionKey);
 	pendingCompactionSeedMetadata.delete(sessionKey);
+	ownerHandoffs.delete(sessionKey);
 	lastSeedHandoffBySession.delete(sessionKey);
 	refusedCompactionCommits.delete(sessionKey);
 	refusedCommitAttempts.delete(sessionKey);
@@ -4228,7 +4403,7 @@ function discardSessionCompaction(
  * Guard: tracks sessions where a clarification was sent to the user but not yet
  * answered. While set, the compact_session tool throws immediately on retry
  * (unless the caller sets rewrite_seed=false to bypass expansion entirely).
- * Cleared on `before_agent_start` (i.e. when a new user message arrives).
+ * Cleared on a user `before_agent_start`, when the user provides new input.
  */
 const pendingClarification = new Map<string, { reason: string }>();
 const pendingCheckins = new Map<string, { prompt: string }>();
@@ -4331,7 +4506,9 @@ function handleInvalidatedCompactionFailure(
 				ctx.ui.notify(decision.notification!.message, decision.notification!.level);
 			});
 		}
-		if (decision.injectRecoveryFollowUp && !shuttingDownSessions.has(sessionKey)) {
+		// A compaction asked for through the owner claim has no user-authored seed to recover.
+		const ownerRequested = ownerHandoffs.get(sessionKey)?.runId === runId;
+		if (decision.injectRecoveryFollowUp && !ownerRequested && !shuttingDownSessions.has(sessionKey)) {
 			const buildRecoveryFollowUp = decision.recoveryFollowUp;
 			if (buildRecoveryFollowUp) sendCompactionRecoveryFollowUp(pi, ctx, seed, buildRecoveryFollowUp, metadata);
 		}
@@ -4615,8 +4792,8 @@ function sendCompactionRecoveryFollowUp(
 	metadata?: SeedHandoffMetadata,
 	failure?: Error,
 ): void {
-	if (!contextAwareSummarizerEnabled(readConfig(ctx))) {
-		debugLog("suppressed compaction recovery handoff because summarizer ownership is deferred");
+	if (!contextAwareCompactionAvailable(readConfig(ctx))) {
+		debugLog("suppressed compaction recovery handoff because compaction is unavailable to context-aware");
 		return;
 	}
 	const followUp = buildFollowUp(seed);
@@ -4695,7 +4872,19 @@ async function sendCompactionSeedFollowUp(
 	carrySelection: readonly string[] = [],
 	handoffModel?: Model<Api>,
 ): Promise<boolean> {
-	if (!contextAwareSummarizerEnabled(readConfig(ctx))) return false;
+	if (!contextAwareCompactionAvailable(readConfig(ctx))) return false;
+	// A compaction asked for through the owner claim carries a program's seed, or none.
+	// The seed is a labelled message that starts a turn, never a user message, and none
+	// of the handoff machinery (rewrite, authority guard, cache listing) applies to it.
+	const ownerHandoff = ownerHandoffs.get(sessionMetadataKey(ctx));
+	if (ownerHandoff) {
+		ownerHandoffs.delete(sessionMetadataKey(ctx));
+		if (!ownerHandoff.seed) return true;
+		// A worker's next prompt belongs to its supervisor, so the seed is recorded, not sent.
+		if (!roleBehaviour(ctx).autoSendSeed) recordCompactionReceipt(pi, ctx, ownerHandoff.seed);
+		else pi.sendMessage(ownerSeedMessage(ownerHandoff.seed), OWNER_SEED_DELIVERY);
+		return true;
+	}
 	if (handoffModel) {
 		const ref = modelRef(handoffModel);
 		let selected: boolean;
@@ -4707,7 +4896,7 @@ async function sendCompactionSeedFollowUp(
 		if (!selected) {
 			throw new Error(`Could not select post-compaction model "${ref}": no API key is available.`);
 		}
-		if (!contextAwareSummarizerEnabled(readConfig(ctx))) return false;
+		if (!contextAwareCompactionAvailable(readConfig(ctx))) return false;
 	}
 	if (!roleBehaviour(ctx).autoSendSeed) {
 		recordCompactionReceipt(pi, ctx, seed);
@@ -4944,7 +5133,10 @@ function buildCompactionInstructions(
 		transcriptPath
 			? `Start the compaction summary with this exact line so the next-phase agent can recover full pre-compaction context if needed:\n${TRANSCRIPT_REFERENCE_PREFIX} ${transcriptPath}`
 			: null,
-		`The generated next-phase handoff brief (auto-sent after Pi drains input queued during this compaction; this is not literal human input) is:\n\n---\n${seed}\n---\n\nTailor the summary so the next phase has every piece of context it needs to act on that brief without re-deriving prior work.`,
+		// A compaction asked for through the owner claim may have no seed: nothing is sent after it.
+		seed.length > 0
+			? `The generated next-phase handoff brief (auto-sent after Pi drains input queued during this compaction; this is not literal human input) is:\n\n---\n${seed}\n---\n\nTailor the summary so the next phase has every piece of context it needs to act on that brief without re-deriving prior work.`
+			: null,
 	]
 		.filter(Boolean)
 		.join("\n\n");
@@ -5003,13 +5195,16 @@ function runCompaction(
 	rememberSeedHandoff(sessionKey, seed, metadata);
 	if (metadata) pendingCompactionSeedMetadata.set(sessionKey, metadata);
 	const customInstructions = buildCompactionInstructions(ctx, seed, summaryFocus, summaryFocusHints);
+	const ownerRequested = ownerHandoffs.get(sessionKey)?.runId === runId;
 
 	const usageBefore = readUsage(ctx);
-	debugLog(`${runId}: launch requested session=${sessionKey} transcript=${transcriptPath ?? "(none)"} seedChars=${seed.length} focusCount=${[summaryFocus, ...summaryFocusHints].filter(Boolean).length} usage=${usageBefore ? `${usageBefore.tokens}/${usageBefore.window}` : "unknown"} metadata=${metadata ? "yes" : "no"}`);
+	// An unmeasured view carries a zero placeholder; log it as unknown, never as an empty context.
+	const launchUsageMeasured = measuredUsage(usageBefore);
+	debugLog(`${runId}: launch requested session=${sessionKey} transcript=${transcriptPath ?? "(none)"} seedChars=${seed.length} focusCount=${[summaryFocus, ...summaryFocusHints].filter(Boolean).length} usage=${launchUsageMeasured ? `${launchUsageMeasured.tokens}/${launchUsageMeasured.window}` : "unknown"} metadata=${metadata ? "yes" : "no"}`);
 	safeUi(ctx, `${runId}: launch`, () => {
 		clearSeedPreviewWidget(ctx);
 		ctx.ui.notify(
-			`Compacting${usageBefore ? ` (${buildStatusLine(usageBefore)})` : ""} — seed prompt queued for next phase.`,
+			`Compacting${usageBefore ? ` (${usageNoticeLabel(usageBefore, contextPolicyBands(readConfig(ctx)))})` : ""}${seed.length > 0 ? " — seed prompt queued for next phase." : "."}`,
 			"info",
 		);
 		ctx.ui.setWorkingVisible(true);
@@ -5035,7 +5230,7 @@ function runCompaction(
 						ctx.ui.setWorkingVisible(false);
 						const after = readUsage(ctx);
 						ctx.ui.notify(
-							`Compacted${after ? ` (${buildStatusLine(after)})` : ""}. Sending seed prompt for next phase…`,
+							`Compacted${after ? ` (${usageNoticeLabel(after, contextPolicyBands(readConfig(ctx)))})` : ""}.${seed.length > 0 ? " Sending seed prompt for next phase…" : ""}`,
 							"info",
 						);
 					});
@@ -5128,6 +5323,8 @@ function runCompaction(
 					clearSeedPreviewWidget(ctx);
 					if (metadata) pendingCompactionSeedMetadata.delete(sessionKey);
 					markCompactionFlight(sessionKey, runId, "failed");
+					// A retry is the same request: it keeps the seed a claim owner asked for.
+					const ownerHandoffToKeep = ownerHandoffs.get(sessionKey)?.runId === runId ? ownerHandoffs.get(sessionKey) : undefined;
 					clearCompactionFlight(sessionKey, runId);
 					const requeued = refusal.retryAllowed
 						? queueCompactionAfterCurrentTurn(
@@ -5142,6 +5339,7 @@ function runCompaction(
 						)
 						: undefined;
 					if (requeued?.ok) {
+						if (ownerHandoffToKeep) ownerHandoffs.set(sessionKey, ownerHandoffToKeep);
 						debugLog(`${runId}: commit refused after ${refusal.waitedMs}ms; queued again for the next idle boundary`);
 						// The settlement that would normally start queued work may
 						// already have passed while the summary was being generated,
@@ -5212,7 +5410,7 @@ function runCompaction(
 						});
 					}
 					if (decision.debugNote) debugLog(`${runId}: ${decision.debugNote}`);
-					if (!decision.injectRecoveryFollowUp) return;
+					if (!decision.injectRecoveryFollowUp || ownerRequested) return;
 					waitUntilIdle(ctx)
 						.then(() => {
 							if (!compactionRuntimeIsActive(ctx, sessionKey) || lifecycle?.isActive?.() === false) {
@@ -5275,7 +5473,7 @@ const compactionOwedByRefusal = new Map<string, number>();
 const outputLimitRecoveryAttempted = new Set<string>();
 
 type PendingOutputLimitRecovery = {
-	usage: UsageView;
+	usage: MeasuredUsageView;
 	proactive: ProactiveCompactionConfig;
 	budget: GenerationBudgetAssessment;
 };
@@ -5286,12 +5484,12 @@ type ProactiveCompactionEffectiveness = "reduced" | "unchanged" | "increased" | 
 
 type ProactiveCompactionAttempt = {
 	runId: string;
-	usageBefore: UsageView;
+	usageBefore: MeasuredUsageView;
 };
 
 type ProactiveCompactionOutcome = {
-	usageBefore: UsageView;
-	usageAfter: UsageView | null;
+	usageBefore: MeasuredUsageView;
+	usageAfter: MeasuredUsageView | null;
 	effectiveness: ProactiveCompactionEffectiveness;
 };
 
@@ -5299,7 +5497,7 @@ const proactiveCompactionAttempts = new Map<string, ProactiveCompactionAttempt>(
 
 type PendingProactiveCompactionMeasurement = {
 	runId: string;
-	usageBefore: UsageView;
+	usageBefore: MeasuredUsageView;
 };
 
 // Pi may leave context usage unmeasurable at the compaction boundary. Keep the
@@ -5309,7 +5507,7 @@ const providerDrainTools = new Map<string, string[]>();
 const shuttingDownSessions = new Set<string>();
 
 type ProactiveCompactionRequest = {
-	usage: UsageView;
+	usage: MeasuredUsageView;
 	proactive: ProactiveCompactionConfig;
 	trigger: ProactiveCompactionTrigger;
 };
@@ -5691,13 +5889,16 @@ type ProactiveCompactionTrigger =
 	| { kind: "generation-reserve"; budget: GenerationBudgetAssessment };
 
 type ProactiveCompactionDecision =
-	| { ok: true; proactive: ProactiveCompactionConfig; trigger: ProactiveCompactionTrigger }
+	| { ok: true; proactive: ProactiveCompactionConfig; trigger: ProactiveCompactionTrigger; usage: MeasuredUsageView }
 	| { ok: false; reason: string };
 
+const PROACTIVE_SIZE_UNMEASURED_REASON = "context size unmeasured";
+
+/** Takes only a measured size: an unknown size is never an empty context. */
 function generationBudgetForUsage(
 	ctx: ExtensionContext,
 	proactive: ProactiveCompactionConfig,
-	u: UsageView,
+	u: MeasuredUsageView,
 ): GenerationBudgetAssessment {
 	return assessGenerationBudget({
 		contextWindow: u.window,
@@ -5727,20 +5928,26 @@ function shouldProactivelyCompact(
 	if (stopReason === "length" && outputLimitRecoveryAttempted.has(key)) {
 		return { ok: false, reason: "output-limit recovery already attempted" };
 	}
-	const generationBudget = generationBudgetForUsage(ctx, proactive, u);
+	// An unmeasured size is unknown, not empty. Wait for a measured size rather
+	// than read it as 0% used (#168); estimating here could start a compaction
+	// loop on a session that compaction cannot shrink. Pi's own overflow
+	// recovery is not suppressed while nothing is pending.
+	const measured = measuredUsage(u);
+	if (!measured) return { ok: false, reason: PROACTIVE_SIZE_UNMEASURED_REASON };
+	const generationBudget = generationBudgetForUsage(ctx, proactive, measured);
 	const trigger: ProactiveCompactionTrigger | null = !generationBudget.safe
 		? { kind: "generation-reserve", budget: generationBudget }
-		: u.fraction >= proactive.thresholdFraction
+		: measured.fraction >= proactive.thresholdFraction
 			? { kind: "threshold" }
 			: null;
 	if (!trigger) return { ok: false, reason: "below threshold with safe generation reserve" };
 	const cooldownUntil = proactiveCompactionCooldownUntil.get(key) ?? 0;
 	if (Date.now() < cooldownUntil) return { ok: false, reason: "cooldown" };
-	return { ok: true, proactive, trigger };
+	return { ok: true, proactive, trigger, usage: measured };
 }
 
 function describeProactiveTrigger(
-	u: UsageView,
+	u: MeasuredUsageView,
 	proactive: ProactiveCompactionConfig,
 	trigger: ProactiveCompactionTrigger,
 ): string {
@@ -5750,11 +5957,15 @@ function describeProactiveTrigger(
 	return `Context ${formatPercent(u.fraction)} used; proactive compact+handoff threshold ${formatPercent(proactive.thresholdFraction)} crossed.`;
 }
 
-function assistantUsageView(ctx: ExtensionContext, message: AssistantMessage): UsageView | null {
+/**
+ * The size behind a reply: its own usage, else Pi's measured size. An
+ * unmeasured size is no evidence that context constrained the output.
+ */
+function assistantUsageView(ctx: ExtensionContext, message: AssistantMessage): MeasuredUsageView | null {
 	const window = ctx.model?.contextWindow;
-	if (!window || window <= 0) return readUsage(ctx);
+	if (!window || window <= 0) return measuredUsage(readUsage(ctx));
 	const tokens = calculateContextTokens(message.usage);
-	if (tokens <= 0) return readUsage(ctx);
+	if (tokens <= 0) return measuredUsage(readUsage(ctx));
 	return {
 		tokens,
 		window,
@@ -5768,6 +5979,7 @@ function recordWorkerCompactionPressure(
 	cfg: EffectiveConfig,
 	u: UsageView | null,
 	stopReason: string | undefined,
+	turnEntryId: string | undefined,
 ): void {
 	try {
 		appendWorkerCompactionForTurn(ctx.sessionManager, {
@@ -5776,8 +5988,8 @@ function recordWorkerCompactionPressure(
 			checkpoint: isProactiveCompactionCheckpoint(stopReason),
 			stopReason,
 			thresholdFraction: cfg.proactiveCompaction.thresholdFraction,
-			generationSafe: u === null ? undefined : generationBudgetForUsage(ctx, cfg.proactiveCompaction, u).safe,
-			...(u === null ? {} : { usage: { tokens: u.tokens, contextWindow: u.window, fraction: u.fraction } }),
+			...(turnEntryId === undefined ? {} : { turnEntryId }),
+			...workerTurnSizeFields(u, (measured) => generationBudgetForUsage(ctx, cfg.proactiveCompaction, measured).safe),
 		});
 	} catch (error) {
 		debugLog(`worker compaction advisory append failed: ${compactError(error)}`);
@@ -5792,7 +6004,7 @@ function recordWorkerCompactionSatisfied(ctx: ExtensionContext): void {
 	}
 }
 
-function recordProactiveCompactionQueued(ctx: ExtensionContext, usageBefore: UsageView, runId: string): void {
+function recordProactiveCompactionQueued(ctx: ExtensionContext, usageBefore: MeasuredUsageView, runId: string): void {
 	proactiveCompactionAttempts.set(sessionMetadataKey(ctx), {
 		runId,
 		usageBefore,
@@ -5800,8 +6012,8 @@ function recordProactiveCompactionQueued(ctx: ExtensionContext, usageBefore: Usa
 }
 
 function classifyProactiveCompactionEffectiveness(
-	usageBefore: UsageView,
-	usageAfter: UsageView | null,
+	usageBefore: MeasuredUsageView,
+	usageAfter: MeasuredUsageView | null,
 ): ProactiveCompactionEffectiveness {
 	if (usageAfter === null) return "unknown";
 	if (usageAfter.tokens < usageBefore.tokens) return "reduced";
@@ -5812,8 +6024,11 @@ function isConfirmedIneffectiveProactiveCompaction(outcome: ProactiveCompactionO
 	return outcome.effectiveness === "unchanged" || outcome.effectiveness === "increased";
 }
 
-function readPostCompactionMeasuredUsage(ctx: ExtensionContext, message?: Message): UsageView | null {
-	if (message?.role === "assistant") {
+function readPostCompactionMeasuredUsage(ctx: ExtensionContext, message?: Message): MeasuredUsageView | null {
+	// Like Pi's own post-compaction measurement, an error or aborted reply is no evidence of the
+	// context size: its usage can be a partial count captured at stream start. Fall through to Pi's
+	// measured value, which already excludes such replies, and otherwise stay pending.
+	if (message?.role === "assistant" && message.stopReason !== "error" && message.stopReason !== "aborted") {
 		const window = ctx.model?.contextWindow;
 		const tokens = calculateContextTokens(message.usage);
 		if (window && window > 0 && tokens > 0) {
@@ -5914,9 +6129,14 @@ function reattemptOwedCompactionAtIdleBoundary(ctx: ExtensionContext): void {
 	const refusalCooldownUntil = compactionOwedByRefusal.get(sessionKey);
 	if (refusalCooldownUntil === undefined) return;
 	const proactive = readConfig(ctx).proactiveCompaction;
-	const u = readUsage(ctx);
-	const contextStillOverThreshold = !!u
-		&& (u.fraction >= proactive.thresholdFraction || !generationBudgetForUsage(ctx, proactive, u).safe);
+	// An unmeasured size cannot show the session recovered, so the owed
+	// compaction stays owed until a measured size decides (#165).
+	const verdict = contextPressureVerdict(
+		readUsage(ctx),
+		proactive.thresholdFraction,
+		(measured) => generationBudgetForUsage(ctx, proactive, measured).safe,
+	);
+	const contextStillOverThreshold = verdict === "unknown" ? "unknown" : verdict === "over";
 	const currentCooldownUntil = proactiveCompactionCooldownUntil.get(sessionKey) ?? 0;
 	const refusalCooldownStillCurrent = currentCooldownUntil === refusalCooldownUntil;
 	const withinCooldown = Date.now() < currentCooldownUntil;
@@ -5931,6 +6151,9 @@ function reattemptOwedCompactionAtIdleBoundary(ctx: ExtensionContext): void {
 			debugLog(`${sessionKey}: owed compaction marker dropped at the idle boundary (recovered, cooldown lapsed, or replaced by a genuine-failure cooldown) (#101)`);
 			break;
 		case "none":
+			if (contextStillOverThreshold === "unknown") {
+				debugLog(`${sessionKey}: owed compaction kept at the idle boundary; the context size is unmeasured (#165)`);
+			}
 			break;
 	}
 }
@@ -5948,7 +6171,7 @@ function shouldRecoverContextConstrainedOutputLimit(
 	ctx: ExtensionContext,
 	cfg: EffectiveConfig,
 	message: AssistantMessage,
-): { usage: UsageView; proactive: ProactiveCompactionConfig; budget: GenerationBudgetAssessment } | null {
+): { usage: MeasuredUsageView; proactive: ProactiveCompactionConfig; budget: GenerationBudgetAssessment } | null {
 	if (message.stopReason !== "length") return null;
 	const proactive = cfg.proactiveCompaction;
 	if (!proactive.enabled) return null;
@@ -5961,7 +6184,7 @@ function shouldRecoverContextConstrainedOutputLimit(
 
 function launchStaticGenerationReserveHandoff(
 	ctx: ExtensionContext,
-	u: UsageView,
+	u: MeasuredUsageView,
 	proactive: ProactiveCompactionConfig,
 	trigger: ProactiveCompactionTrigger,
 	lifecycle?: CompactionLifecycleObserver,
@@ -6042,7 +6265,7 @@ function isProactiveJobActive(
 function scheduleProactiveCompaction(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
-	u: UsageView,
+	u: MeasuredUsageView,
 	proactive: ProactiveCompactionConfig,
 	trigger: ProactiveCompactionTrigger,
 ): void {
@@ -7005,26 +7228,25 @@ const searchSchema = Type.Object({
 });
 export type SearchPriorSessionsInput = Static<typeof searchSchema>;
 
+// Rules that name valid values or required fields live in the errors of
+// prepareSessionFocusArguments, not in these descriptions: every request
+// carries this schema.
 const focusSchema = Type.Object({
-	action: Type.Union([
-		Type.Literal("get"), Type.Literal("start"), Type.Literal("edit"), Type.Literal("ref"),
-		Type.Literal("boundary"), Type.Literal("status"), Type.Literal("detach"), Type.Literal("activity"), Type.Literal("pin"),
-	], { description: "Focus operation. Use start only when the purpose must survive an expected compaction, handoff, or restart, or the user explicitly requests focus, and no focus exists; use pin to set or clear the static pinned verbatim block." }),
-	objective: Type.Optional(Type.String({ description: "Required for start/edit. State one concise overall purpose, not a copy of the user's prompt.", maxLength: 1_000 })),
+	action: stringEnum(SESSION_FOCUS_ACTIONS, { description: "Use start only when the purpose must survive an expected compaction, handoff, or restart, or the user explicitly requests focus." }),
+	objective: Type.Optional(Type.String({ description: "start/edit: one overall purpose, not the prompt.", maxLength: 1_000 })),
 	ref: Type.Optional(Type.Object({
-		kind: Type.Union([Type.Literal("gitlab-mr"), Type.Literal("github-issue"), Type.Literal("graft-spec"), Type.Literal("branch"), Type.Literal("commit"), Type.Literal("path"), Type.Literal("url"), Type.Literal("other")], { description: "Reference kind used to resume the durable workstream." }),
-		value: Type.String({ description: "Reference value needed to resume the workstream.", maxLength: 512 }),
-	}, { description: "Use only for a reference needed to resume the work; do not log transient branches, worktrees, commits, or paths." })),
-	refKind: Type.Optional(Type.Union([Type.Literal("gitlab-mr"), Type.Literal("github-issue"), Type.Literal("graft-spec"), Type.Literal("branch"), Type.Literal("commit"), Type.Literal("path"), Type.Literal("url"), Type.Literal("other")], { description: "Legacy flat form: reference kind needed to resume the workstream." })),
-	refValue: Type.Optional(Type.String({ description: "Legacy flat form: reference value needed to resume the workstream.", maxLength: 512 })),
-	boundary: Type.Optional(Type.String({ description: "Lasting constraint that must survive context loss; do not record routine instructions.", maxLength: 512 })),
-	pinned_block: Type.Optional(Type.String({ description: `Static redacted-once text reproduced byte-for-byte from its stored value on every request. Set only durable facts and an instruction to re-derive volatile facts. Bound: MAX_PINNED_VERBATIM_BLOCK_CHARS (${MAX_PINNED_VERBATIM_BLOCK_CHARS} characters).`, maxLength: MAX_PINNED_VERBATIM_BLOCK_CHARS })),
-	clear: Type.Optional(Type.Boolean({ description: "Clear the pinned verbatim block when action is pin." })),
-	status: Type.Optional(Type.Union([Type.Literal("active"), Type.Literal("paused"), Type.Literal("completed"), Type.Literal("detached")], { description: "Lifecycle transition. Pause, complete, or detach only when the workstream's durable lifecycle changes." })),
-	remove: Type.Optional(Type.Boolean({ description: "Remove the supplied reference or boundary instead of adding it." })),
-	reason: Type.Optional(Type.String({ description: "Short reason for this recorded focus mutation.", maxLength: 240 })),
+		kind: stringEnum(SESSION_FOCUS_REF_KINDS),
+		value: Type.String({ maxLength: MAX_FOCUS_REF_VALUE_CHARS }),
+	}, { description: "Only a reference needed to resume the work." })),
+	boundary: Type.Optional(Type.String({ description: "A lasting constraint.", maxLength: 512 })),
+	pinned_block: Type.Optional(Type.String({ description: "pin: durable text repeated verbatim on every request.", maxLength: MAX_PINNED_VERBATIM_BLOCK_CHARS })),
+	clear: Type.Optional(Type.Boolean()),
+	status: Type.Optional(stringEnum(SESSION_FOCUS_STATUSES)),
+	remove: Type.Optional(Type.Boolean()),
+	reason: Type.Optional(Type.String({ maxLength: 240 })),
 });
-export type SessionFocusInput = Static<typeof focusSchema>;
+/** The legacy flat reference form is accepted but no longer advertised; prepareSessionFocusArguments checks it. */
+export type SessionFocusInput = Static<typeof focusSchema> & { readonly refKind?: string; readonly refValue?: string };
 
 function currentWorkstreamIdentity(ctx: ExtensionContext): { workstreamId: string; piSessionId: string } {
 	const piSessionId = ctx.sessionManager.getSessionId();
@@ -7107,6 +7329,8 @@ const tasksRuntimeDeps: TasksRuntimeDeps = {
 
 type TaskContinuationPhase = "continuation" | "correction";
 
+const TASK_REMINDER_CUSTOM_TYPE = "context-aware-task-reminder" as const;
+
 interface TaskContinuationState {
 	readonly revision: number;
 	readonly phase: TaskContinuationPhase;
@@ -7145,6 +7369,71 @@ const taskContinuationBySession = new Map<string, TaskContinuationState>();
 const taskContinuationDiagnosticRevision = new Map<string, number>();
 /** An advisory authority warning is emitted at most once per task revision. */
 const taskContinuationAuthorityAdvisoryRevision = new Map<string, number>();
+/**
+ * The continuation bound as the branch records it, for a process that has no
+ * memory of it: a restart, or a pi-durable resume that settles the same run
+ * again (#171). Without it, every restart granted a fresh continuation and
+ * correction for the same task revision.
+ *
+ * Each delivered reminder persists as a `custom_message` carrying its revision
+ * and phase. A later user message lifts the bound, as the `input` handler does
+ * in memory. A `sendUserMessage` delivery is shaped like user input, so the
+ * marker written before it claims it, in order, as in `abortStandsUnanswered`.
+ */
+function taskContinuationFromBranch(ctx: ExtensionContext): TaskContinuationState | undefined {
+	const sessionManager = ctx.sessionManager as unknown as { getBranch?: () => readonly unknown[] };
+	if (typeof sessionManager.getBranch !== "function") return undefined;
+	let branch: readonly unknown[];
+	try {
+		branch = sessionManager.getBranch();
+	} catch {
+		return undefined;
+	}
+	if (!Array.isArray(branch)) return undefined;
+
+	let state: TaskContinuationState | undefined;
+	let unclaimedDeliveries = 0;
+	for (const value of branch) {
+		const entry = value as {
+			type?: string;
+			customType?: string;
+			data?: unknown;
+			details?: unknown;
+			message?: { role?: string };
+		} | undefined;
+		if (entry?.type === "custom" && entry.customType === EXTENSION_DELIVERY_ENTRY_TYPE) {
+			const marker = entry.data as { retracted?: unknown } | undefined;
+			if (marker?.retracted === true) unclaimedDeliveries = Math.max(0, unclaimedDeliveries - 1);
+			else unclaimedDeliveries++;
+			continue;
+		}
+		if (entry?.type === "custom_message" && entry.customType === TASK_REMINDER_CUSTOM_TYPE) {
+			state = taskContinuationFromReminderDetails(entry.details) ?? state;
+			continue;
+		}
+		if (entry?.type !== "message" || entry.message?.role !== "user") continue;
+		if (unclaimedDeliveries > 0) {
+			unclaimedDeliveries--;
+			continue;
+		}
+		state = undefined;
+	}
+	return state;
+}
+
+/** One delivered reminder's bound, or undefined when its details are malformed. */
+function taskContinuationFromReminderDetails(details: unknown): TaskContinuationState | undefined {
+	if (typeof details !== "object" || details === null) return undefined;
+	const { revision, phase, authorityGuard } = details as { revision?: unknown; phase?: unknown; authorityGuard?: unknown };
+	if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision <= 0) return undefined;
+	if (phase !== "continuation" && phase !== "correction") return undefined;
+	const guard = authorityGuard as { substituted?: unknown; reasons?: unknown } | null | undefined;
+	const reasons = guard?.substituted === true && Array.isArray(guard.reasons)
+		? guard.reasons.filter(isSeedAuthorityRejectionReason)
+		: undefined;
+	return { revision, phase, ...(reasons === undefined ? {} : { authorityRejectionReasons: reasons }) };
+}
+
 /**
  * Whether the user's abort still stands, unanswered by anything they said.
  *
@@ -7302,6 +7591,22 @@ function taskContinuationDebugOnce(sessionKey: string, revision: number, message
 /** Sessions already warned about a task list with no claimant, so it is said once. */
 const missingTasksClaimantWarned = new Set<string>();
 
+/** Per session, the reasons already given for image stripping not applying. */
+const imageStrippingReported = new Map<string, Set<ImageStrippingReportKind>>();
+
+type ImageStrippingReportKind = "stepped-down" | "unsupported";
+
+/** Report once per session and reason that enabled image stripping did not apply. */
+function reportImageStrippingOnce(ctx: ExtensionContext, kind: ImageStrippingReportKind, message: string): void {
+	const sessionKey = sessionMetadataKey(ctx);
+	const reported = imageStrippingReported.get(sessionKey) ?? new Set<ImageStrippingReportKind>();
+	if (reported.has(kind)) return;
+	reported.add(kind);
+	imageStrippingReported.set(sessionKey, reported);
+	debugLog(`image stripping: ${message}`);
+	safeUi(ctx, "image stripping", () => ctx.ui.notify(message, "warning"));
+}
+
 /**
  * Record a session holding a task list that nothing can update.
  *
@@ -7361,7 +7666,8 @@ async function remindOfOpenTasks(pi: ExtensionAPI, ctx: ExtensionContext): Promi
 		}
 		return;
 	}
-	const previous = taskContinuationBySession.get(sessionKey);
+	// Memory is fresher: a reminder only reaches the branch once its turn runs.
+	const previous = taskContinuationBySession.get(sessionKey) ?? taskContinuationFromBranch(ctx);
 	let phase: TaskContinuationPhase = "continuation";
 	let reminder = normalReminder;
 	if (previous?.revision === snapshot.revision) {
@@ -7467,7 +7773,7 @@ async function remindOfOpenTasks(pi: ExtensionAPI, ctx: ExtensionContext): Promi
 	}
 	try {
 		deliverGeneratedFollowUp(pi, {
-			customType: "context-aware-task-reminder",
+			customType: TASK_REMINDER_CUSTOM_TYPE,
 			seed: reminder,
 			content: reminder,
 			preamble: "Extension-generated task continuation (not user-authored input):",
@@ -7497,7 +7803,7 @@ function checkinSnapshot(ctx: ExtensionContext): CheckinSnapshot {
 	return {
 		focus: authoritativeWorkstream(ctx),
 		tasks: currentTasks(tasksRuntimeDeps, ctx),
-		pressure: readUsage(ctx),
+		pressure: measuredUsage(readUsage(ctx)),
 	};
 }
 
@@ -7530,7 +7836,7 @@ function queueCheckin(pi: ExtensionAPI, ctx: ExtensionContext): void {
 		return;
 	}
 	const sessionKey = sessionMetadataKey(ctx);
-	pendingCheckins.set(sessionKey, { prompt: buildCheckinPrompt(checkinSnapshot(ctx), { compactionAvailable: contextAwareSummarizerEnabled(readConfig(ctx)) }) });
+	pendingCheckins.set(sessionKey, { prompt: buildCheckinPrompt(checkinSnapshot(ctx), { compactionAvailable: contextAwareCompactionAvailable(readConfig(ctx)) }) });
 	ctx.ui.notify("Check-in queued; it will run when the current turn settles.", "info");
 	deliverPendingCheckin(pi, ctx);
 }
@@ -8000,7 +8306,8 @@ function buildServiceSnapshot(ctx: ExtensionContext) {
 	}
 
 	return buildContextAwareSnapshotV1({
-		pressure: usage ? { tokens: usage.tokens, contextWindow: usage.window } : null,
+		// An unmeasured size is reported as UNKNOWN, not as 0 tokens (issue #163).
+		pressure: usage && !usage.unmeasured ? { tokens: usage.tokens, contextWindow: usage.window } : null,
 		session: {
 			id: sessionId,
 			cwd: ctx.cwd,
@@ -8034,6 +8341,7 @@ function buildServiceSnapshot(ctx: ExtensionContext) {
 			compactionModel: cfg.compactionModel,
 			proactiveCompaction: { ...cfg.proactiveCompaction },
 		},
+		pressureBands: contextPolicyBands(cfg),
 	});
 }
 
@@ -8096,10 +8404,14 @@ function createContextAwareService(
 	runtime: WorkstreamRuntime,
 	ctx: ExtensionContext,
 	sessionSignal: AbortSignal,
+	modes: ModesExtensionController,
+	policy: ContextPolicyController,
 ): ContextAwareServiceV1 {
 	return {
 		protocolVersion: CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION,
 		getSnapshot: () => buildServiceSnapshot(ctx),
+		modes: modes.capability(),
+		policy: policy.capability(ctx),
 		promoteArtifact(request): ContextAwareArtifactPromotionResultV1 {
 			let validated: ReturnType<typeof validateContextAwareArtifactPromotionRequestV1>;
 			try {
@@ -8218,11 +8530,11 @@ function createContextAwareService(
 			const requestedAt = new Date().toISOString();
 			let provenance = serviceProvenance(ctx, request, requestedAt);
 			const cfg = readConfig(ctx);
-			if (!contextAwareSummarizerEnabled(cfg)) {
+			if (!contextAwareCompactionAvailable(cfg)) {
 				return {
 					status: "failed",
 					code: "SERVICE_UNAVAILABLE",
-					message: SUMMARIZER_DEFERRED_HANDOFF_MESSAGE,
+					message: compactionUnavailableMessage(cfg),
 					stage: "scheduling",
 					recoverable: true,
 					provenance,
@@ -8276,11 +8588,12 @@ function createContextAwareService(
 			if (combinedSignal.aborted) {
 				return { status: "cancelled", requestId: request.requestId, stage: "preparation", provenance };
 			}
-			if (!contextAwareSummarizerEnabled(readConfig(ctx))) {
+			const compactionConfig = readConfig(ctx);
+			if (!contextAwareCompactionAvailable(compactionConfig)) {
 				return {
 					status: "failed",
 					code: "SERVICE_UNAVAILABLE",
-					message: SUMMARIZER_DEFERRED_HANDOFF_MESSAGE,
+					message: compactionUnavailableMessage(compactionConfig),
 					stage: "scheduling",
 					recoverable: true,
 					provenance,
@@ -8601,11 +8914,125 @@ function ensureSessionNamingController(pi: ExtensionAPI, ctx: ExtensionContext, 
 }
 
 export default function (pi: ExtensionAPI) {
+	// Register opening protection before any other lifecycle callback can write.
+	let flushParity = async (): Promise<void> => {};
+	const erasureProtection = registerSessionErasure(pi, configuredAgentDir, () => flushParity(), { registerStartup: false });
+	pi = guardErasureWrites(pi, erasureProtection.isBlocked, erasureProtection.start);
 	installProcessDiagnostics();
 	registerContextAwareFlags(pi);
 	resetCliConfigOverrides();
 	applyCliConfigOverrides(pi);
 	const runtime = createWorkstreamRuntime(getWorkstreamConfig(readConfig()));
+	const modesController = createModesExtensionController(pi, {
+		suggestToolEnabled: (ctx) => readConfig(ctx).modes?.suggestTool !== false,
+	});
+	modesController.register();
+	const policyController = createContextPolicyController(pi, {
+		resolve: (ctx) => resolveConfig(ctx),
+		appendSessionOverride: appendSessionConfigOverride,
+	});
+	policyController.register();
+
+	// -- Compaction owner claim ---------------------------------------------
+
+	const wantsCompactionClaim = (cfg: EffectiveConfig): boolean =>
+		cfg.compactionClaim?.enabled === true && contextAwareCompactionAvailable(cfg);
+
+	// The latest context this extension's own hooks received. A `compact.*` call acts through
+	// it rather than the context Fabric passes: Fabric's is its own, outside this extension's
+	// erasure guard, and its session manager is not the one the compaction bookkeeping keys on.
+	// The call's context is the fallback for a call before any hook has run.
+	let ownerClaimCtx: ExtensionContext | undefined;
+	const ownerClaimSession = (call: { context: ExtensionContext | undefined }): ExtensionContext => {
+		// A call never makes a claim: only this extension's own hooks do. Without this check a
+		// handler captured before a shutdown or reload would claim again through sync below.
+		if (!claimController.active) throw new OwnerCallRefused("the compaction owner claim is not held");
+		const ctx = ownerClaimCtx ?? call.context;
+		if (!ctx) throw new OwnerCallRefused("no session is active yet");
+		// The setting may have been turned off since the last boundary: withdraw before acting.
+		claimController.sync(ctx);
+		if (!claimController.active) throw new OwnerCallRefused("the compaction owner claim was withdrawn");
+		return ctx;
+	};
+	const claimController: ClaimController = createClaimController({
+		// Some hosts have no event bus; with none, nothing can answer a claim.
+		events: pi.events ?? { emit: () => {} },
+		owner: compactionOwnerIdentity(),
+		debug: debugLog,
+		// The claim exists to let this extension write summaries, so it is held only when the
+		// setting is on and nothing stops this extension from compacting (a deferred summarizer,
+		// or an extension that cancels every compaction).
+		wanted: (ctx) => wantsCompactionClaim(readConfig(ctx)),
+		actions: createOwnerActions({
+			sessionFor: ownerClaimSession,
+			queue: (ctx, focus: OwnerRequestFocus, seed) => {
+				const sessionKey = sessionMetadataKey(ctx);
+				// Fabric's controller keeps one pending request, and a new request replaces it
+				// (pi-fabric b67da914 `CompactController.request`). The same holds here for a
+				// request this owner queued that has not started.
+				const earlier = ownerHandoffs.get(sessionKey);
+				if (earlier && getActiveCompactionFlight(sessionKey)?.runId === earlier.runId) {
+					if (cancelQueuedCompaction(earlier.runId).status === "cancelled") {
+						debugLog(`${earlier.runId}: replaced by a newer compact.request through the owner claim`);
+					}
+				}
+				const runId = `owner-${Date.now().toString(36)}-${++compactionRunCounter}`;
+				const scheduled = queueCompactionAfterCurrentTurn(ctx, "", focus.summaryFocus, undefined, [...focus.hints], undefined, runId);
+				if (!scheduled.ok) {
+					if (scheduled.reason === "nothing-to-compact") return { status: "nothing-to-compact", message: scheduled.toolMessage };
+					// A compaction already running, or one another caller queued: refused, not a fault.
+					throw new OwnerCallRefused(`compaction ${scheduled.active.runId} is already ${scheduled.active.state}`);
+				}
+				// The seed is sent only after this compaction commits (see sendCompactionSeedFollowUp).
+				ownerHandoffs.set(sessionKey, { runId, ...(seed === undefined ? {} : { seed }) });
+				let state: "queued" | "running" = "queued";
+				if (arbitrateQueuedInteraction({ isIdle: ctx.isIdle() }).mayRun) {
+					const started = runPendingCompaction(pi, ctx);
+					if (started && !started.ok && started.reason === "nothing-to-compact") {
+						ownerHandoffs.delete(sessionKey);
+						return { status: "nothing-to-compact", message: started.toolMessage };
+					}
+					state = "running";
+				}
+				return { status: state, runId };
+			},
+			cancel: (ctx) => {
+				const sessionKey = sessionMetadataKey(ctx);
+				const queued = ownerHandoffs.get(sessionKey);
+				if (!queued) return { cancelled: false, reason: "no compaction requested through the claim is waiting" };
+				const result = cancelQueuedCompaction(queued.runId);
+				if (result.status === "cancelled") ownerHandoffs.delete(sessionKey);
+				return result.status === "cancelled"
+					? { cancelled: true }
+					: { cancelled: false, reason: result.status === "too-late" ? "the compaction has already started" : "the compaction is no longer queued" };
+			},
+			readCarry: (ctx) => {
+				const branch = ctx.sessionManager.getBranch();
+				// Taking over: until this extension writes its own list, Fabric's stored one is the list.
+				return hasOwnCarryEntry(branch) ? readCarryItems(branch) : readFabricCarryItems(branch);
+			},
+			writeCarry: (_ctx, items) => {
+				pi.appendEntry(CARRY_ENTRY_TYPE, { version: 1, items: [...items] });
+			},
+			pressure: (ctx) => {
+				const ladder = effectivePressureLadder(readConfig(ctx)).ladder;
+				return ownerPressure(readMeasuredUsage(ctx)?.fraction ?? null, ladder);
+			},
+			status: (ctx) => {
+				const cfg = readConfig(ctx);
+				const queued = ownerHandoffs.get(sessionMetadataKey(ctx));
+				return {
+					fabricFallback: cfg.compactionClaim?.fabricFallback !== false,
+					carryItems: (() => {
+						const branch = ctx.sessionManager.getBranch();
+						return (hasOwnCarryEntry(branch) ? readCarryItems(branch) : readFabricCarryItems(branch)).length;
+					})(),
+					queued: queued !== undefined,
+					...(queued ? { runId: queued.runId } : {}),
+				};
+			},
+		}),
+	});
 
 	// -- 0. Durable workstream focus surfaces -------------------------------
 
@@ -8657,7 +9084,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "session_focus",
 		label: "Session Focus",
-		description: "Optionally start, inspect, or update durable focus when the purpose must survive an expected compaction, handoff, or restart, or the user explicitly requests focus; never use it for routine progress tracking. Agent-created objectives are unpinned; agent mutations cannot replace a pinned user objective.",
+		description: "Optionally start, inspect, or update durable focus; never use it for routine progress tracking.",
 		promptSnippet: "Default to no focus. After any required thinking-effort preflight, start only when the purpose must survive an expected compaction, handoff, or restart, or the user explicitly requests focus. Complexity or length alone is not enough; self-contained answers and routine one-file edits stay unfocused. Do not log ordinary steps, branches, commits, tests, or phase completion.",
 		parameters: focusSchema,
 		prepareArguments: prepareSessionFocusArguments,
@@ -8777,10 +9204,16 @@ export default function (pi: ExtensionAPI) {
 	// -- 1. Persistent UI projections --------------------------------------
 
 	pi.on("session_start", async (event, ctx) => {
+		if (erasureProtection.isBlocked()) return;
 		// Pi resolves extension flag values after loading extension factories. Read
 		// them again at the first session boundary so both package and -e loading
 		// paths observe the same effective runtime configuration.
 		applyCliConfigOverrides(pi, { finalAttempt: true });
+		modesController.start(ctx);
+		policyController.start(ctx);
+		refreshCompactionBlocker(pi, ctx);
+		ownerClaimCtx = ctx;
+		claimController.start(ctx);
 		registerHandoffSurfaces(ctx);
 		piAutoCompactionSettingBySession.delete(ctx.sessionManager);
 		lastCompactionOwnershipStateBySession.delete(ctx.sessionManager);
@@ -8869,7 +9302,7 @@ export default function (pi: ExtensionAPI) {
 		if (pi.events) {
 			disposeContextService = provideContextAwareServiceV1(
 				pi.events,
-				createContextAwareService(pi, runtime, ctx, contextServiceAbortController.signal),
+				createContextAwareService(pi, runtime, ctx, contextServiceAbortController.signal, modesController, policyController),
 			);
 		}
 		warnForCompactionOwnership(ctx, { refreshPiSetting: true });
@@ -8877,6 +9310,38 @@ export default function (pi: ExtensionAPI) {
 		// on every turn — no need for a session_start display message which
 		// would be noisy across unrelated sessions sharing the same project dir.
 	});
+	pi.on("session_tree", async (_event, ctx) => {
+		claimController.sync(ctx);
+		modesController.restore(ctx);
+		policyController.sync(ctx, "branch");
+		refreshStatus(ctx);
+	});
+	// Image stripping (issue #163): the protocol comes from the
+	// request body, because a logical or alias model api names no wire format.
+	pi.on("before_provider_request", (event, ctx) => {
+		const cfg = readConfig(ctx);
+		const stripping = getImageStrippingConfig(cfg);
+		if (!stripping.enabled) return undefined;
+		if (cfg.compactionBlocker) {
+			reportImageStrippingOnce(ctx, "stepped-down", `Image stripping is enabled but inactive because ${cfg.compactionBlocker.extension} manages context in this session.`);
+			return undefined;
+		}
+		const outcome = stripHistoricalImages(event.payload, { keepRecent: stripping.keepRecent });
+		if (outcome.kind === "unsupported") {
+			reportImageStrippingOnce(ctx, "unsupported", `Image stripping is enabled but cannot apply to this request: ${outcome.reason}. Images in requests of this shape are sent unchanged.`);
+			return undefined;
+		}
+		if (outcome.kind === "unchanged") return undefined;
+		debugLog(`image stripping: removed ${outcome.removedImages} image(s) from ${outcome.strippedMessages} message(s) protocol=${outcome.protocol} keepRecent=${stripping.keepRecent}`);
+		return outcome.payload;
+	});
+	// Observe bcp's context transform before our outgoing-history repair below.
+	const foldEngine = registerFoldEngine(pi);
+	// From this module: `dist/folds/` beside the bundled `dist/extension.js`, and
+	// beside `dist/index.js` for the unbundled build.
+	const foldsDir = fileURLToPath(new URL("./folds/", import.meta.url));
+	const parityRecorder = registerFoldParityRecorder(pi, { engine: foldEngine, agentDir: configuredAgentDir(), fingerprint: foldEngineFingerprint(foldsDir) });
+	flushParity = () => parityRecorder.flush();
 	pi.on("context", async (event, ctx) => {
 		const sessionKey = sessionMetadataKey(ctx);
 		if (providerDrainTools.has(sessionKey)) {
@@ -8955,6 +9420,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("turn_end", async (event, ctx) => {
 		const sessionKey = sessionMetadataKey(ctx);
 		if (shuttingDownSessions.has(sessionKey)) return;
+		policyController.sync(ctx, "session-entry");
 		const workstreamCfg = getWorkstreamConfig(readConfig(ctx));
 		if (workstreamCfg.enabled && workstreamCfg.registryEnabled) syncSessionRegistry(runtime, ctx);
 		const current = workstreamCfg.enabled ? authoritativeWorkstream(ctx) : null;
@@ -8963,7 +9429,10 @@ export default function (pi: ExtensionAPI) {
 		const usage = readUsage(ctx);
 		const cfg = readConfig(ctx);
 		const stopReason = (event.message as { stopReason?: string } | undefined)?.stopReason;
-		recordWorkerCompactionPressure(ctx, cfg, usage, stopReason);
+		// The persisted assistant entry keys the advisory to this turn. Read it
+		// defensively: hosts older than the field leave the advisory unkeyed.
+		const turnEntryId = (event as { messageEntryId?: unknown }).messageEntryId;
+		recordWorkerCompactionPressure(ctx, cfg, usage, stopReason, typeof turnEntryId === "string" ? turnEntryId : undefined);
 		const pendingOutputLimitRecovery = pendingOutputLimitRecoveries.get(sessionKey);
 		if (pendingOutputLimitRecovery) {
 			pendingOutputLimitRecoveries.delete(sessionKey);
@@ -8976,14 +9445,18 @@ export default function (pi: ExtensionAPI) {
 			);
 		} else {
 			const proactiveDecision = shouldProactivelyCompact(ctx, cfg, usage, stopReason);
-			if (proactiveDecision.ok && usage) {
+			if (proactiveDecision.ok) {
 				scheduleProactiveCompaction(
 					pi,
 					ctx,
-					usage,
+					proactiveDecision.usage,
 					proactiveDecision.proactive,
 					proactiveDecision.trigger,
 				);
+			} else if (proactiveDecision.reason === PROACTIVE_SIZE_UNMEASURED_REASON) {
+				// The rare state a diagnosis needs: no compaction because Pi
+				// has not measured the size yet (#168).
+				debugLog(`proactive compaction waits for a measured context size session=${sessionKey} stopReason=${stopReason ?? "unknown"} (#168)`);
 			}
 		}
 		refreshStatus(ctx);
@@ -9002,7 +9475,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_settled", async (_event, ctx) => {
 		const sessionKey = sessionMetadataKey(ctx);
 		if (shuttingDownSessions.has(sessionKey)) return;
-		const cfg = getWorkstreamConfig(readConfig(ctx));
+		ownerClaimCtx = ctx;
+		const settledConfig = readConfig(ctx);
+		claimController.sync(ctx, wantsCompactionClaim(settledConfig));
+		const cfg = getWorkstreamConfig(settledConfig);
 		if (cfg.enabled) await recordWorkstreamActivity(pi, ctx, runtime, cfg);
 		if (cfg.enabled && cfg.registryEnabled) syncSessionRegistry(runtime, ctx);
 		// Another extension may start a run from an earlier settlement handler.
@@ -9028,12 +9504,17 @@ export default function (pi: ExtensionAPI) {
 		if (cfg.enabled) await remindOfOpenTasks(pi, ctx);
 	});
 	pi.on("session_shutdown", async (_event, ctx) => {
+		// Withdraw first, so Fabric's engine compacts again even if later shutdown work fails.
+		claimController.shutdown();
+		ownerClaimCtx = undefined;
+		modesController.shutdown(ctx);
 		const sessionKey = sessionMetadataKey(ctx);
 		pendingCheckins.delete(sessionKey);
 		taskContinuationBySession.delete(sessionKey);
 		taskContinuationDiagnosticRevision.delete(sessionKey);
 		taskContinuationAuthorityAdvisoryRevision.delete(sessionKey);
 		missingTasksClaimantWarned.delete(sessionKey);
+		imageStrippingReported.delete(sessionKey);
 		runtime.modelRegistryWarningSessions.delete(sessionKey);
 		refreshWorkstreamFocusWidget(ctx, null);
 		clearSeedPreviewWidget(ctx);
@@ -9112,6 +9593,7 @@ export default function (pi: ExtensionAPI) {
 	// -- 2. Cache-aware context injection ------------------------------------
 
 	pi.on("input", (event, ctx) => {
+		if (erasureProtection.isBlocked()) return { action: "handled" as const };
 		if (event.source !== "interactive" && event.source !== "rpc") return;
 		const sessionKey = sessionMetadataKey(ctx);
 		rememberDeliveredPrompt(sessionKey, event.text, event.images);
@@ -9127,22 +9609,34 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("before_agent_start", async (event, ctx): Promise<BeforeAgentStartEventResult> => {
 		const sessionKey = sessionMetadataKey(ctx);
-		rememberDeliveredPrompt(sessionKey, event.prompt, event.images);
-		const recovering = interruptedPrompts.get(sessionKey)?.find((pending) =>
-			pending.state === "delivering" && pending.expectedText === event.prompt && imageContentEqual(pending.expectedImages, event.images),
-		);
-		if (recovering) recovering.state = "accepted";
+		ownerClaimCtx = ctx;
+		claimController.sync(ctx);
+		// Only user starts carry prompt/images; custom starts carry their message.
+		if ("prompt" in event) {
+			rememberDeliveredPrompt(sessionKey, event.prompt, event.images);
+			const recovering = interruptedPrompts.get(sessionKey)?.find((pending) =>
+				pending.state === "delivering" && pending.expectedText === event.prompt && imageContentEqual(pending.expectedImages, event.images),
+			);
+			if (recovering) recovering.state = "accepted";
+			// New user input answers a pending clarification; a custom continuation does not.
+			pendingClarification.delete(sessionKey);
+		}
 		const config = readConfig(ctx);
 		const cfg = getWorkstreamConfig(config);
 		const current = cfg.enabled ? consumeDelegatedFocusSeed(pi, ctx) : authoritativeWorkstream(ctx);
 		refreshWorkstreamFocusWidget(ctx, cfg.enabled ? current : null);
 		if (cfg.enabled && cfg.registryEnabled) syncSessionRegistry(runtime, ctx);
 
-		// Clear any pending clarification guard — a new user message means the
-		// user has seen the clarification and is providing new input.
-		pendingClarification.delete(sessionKey);
-
-		let addition = buildContextUsageGuidanceBlock(contextAwareSummarizerEnabled(config));
+		const contextAwarenessBlock = buildContextUsageGuidanceBlock(
+			contextAwareCompactionAvailable(config),
+			config.compactionBlocker
+				? {
+					blockedBy: config.compactionBlocker.extension,
+					invocation: extensionToolReachability(pi, config.compactionBlocker.replacementTool).invocation,
+				}
+				: undefined,
+			contextPolicyBands(config),
+		);
 		// Same audience split as the task list below: a dispatched session is told
 		// its objective belongs to the supervisor that sent it (#66).
 		const audience: TasksAudience = readConfig(ctx).sessionRole === "worker" ? "worker" : "foreground";
@@ -9150,21 +9644,20 @@ export default function (pi: ExtensionAPI) {
 		// so it must not name it when this session does not hold it either.
 		const tasksTool = extensionToolReachability(pi, "session_tasks");
 		const focusTool = extensionToolReachability(pi, "session_focus");
+		let focusGuidance: string | null = null;
 		if (cfg.enabled && focusTool.available) {
-			let focusGuidance = buildDurableFocusGuidanceBlock(audience, tasksTool.available);
+			focusGuidance = buildDurableFocusGuidanceBlock(audience, tasksTool.available);
 			focusGuidance = renderReachableToolInvocation(focusGuidance, "session_tasks", tasksTool);
 			focusGuidance = renderReachableToolInvocation(focusGuidance, "session_focus", focusTool);
-			addition += `\n\n${focusGuidance}`;
 		}
+		let cacheBlock: string | null = null;
 		try {
 			flushCacheMigrationNotices(ctx);
-			let cacheBlock: string | null = null;
 			if (config.contextCache?.enabled !== false && sessionRoleBehaviour(config.sessionRole).injectCacheListing) {
 				const cacheSources = getCacheReadPools(ctx);
 				flushCacheMigrationNotices(ctx);
 				cacheBlock = buildCacheSystemPromptBlock(cacheSources, config);
 			}
-			if (cacheBlock) addition += `\n\n${cacheBlock}`;
 		} catch (err) {
 			// The cache listing is an optional addition. Losing it must not discard
 			// the usage guidance, focus guidance, workstream envelope and telemetry
@@ -9172,7 +9665,6 @@ export default function (pi: ExtensionAPI) {
 			debugLog(`context cache: system prompt block failed: ${compactError(err)}`);
 		}
 		const workstreamEnvelope = buildWorkstreamContextEnvelope(cfg.enabled ? current : null);
-		if (workstreamEnvelope) addition += `\n\n${workstreamEnvelope}`;
 		// A separate, smaller envelope: the task list is re-rendered every turn
 		// from replay rather than relying on an earlier message surviving
 		// compaction. Keep this mutable state out of the system prompt: changing a
@@ -9189,20 +9681,26 @@ export default function (pi: ExtensionAPI) {
 			audience,
 			toolAvailable: tasksTool.available,
 		}), "session_tasks", tasksTool);
-		// Append branch-derived metadata after all existing prompt content. It is
-		// stable between requests until a compaction changes the current branch,
-		// so the existing cached prefix is never reordered or per-request mutated.
+		// Branch-derived metadata is stable between requests until a compaction
+		// changes the current branch, so its section changes only then.
+		let compactionCountPrompt: string | null = null;
 		try {
-			const history = collectCompactionHistory(ctx.sessionManager.getBranch());
-			const compactionCountPrompt = formatCompactionCountPrompt(history);
-			if (compactionCountPrompt) addition += `\n\n${compactionCountPrompt}`;
+			compactionCountPrompt = formatCompactionCountPrompt(collectCompactionHistory(ctx.sessionManager.getBranch()));
 		} catch {
 			// Minimal/custom session managers may not expose a readable branch.
 		}
+		// Each block is its own named prompt section, so Pi sends a change to one
+		// block as an update to that section and leaves the others byte-identical.
+		const forcedSystemPrompt = applyPromptSections(event, {
+			[PROMPT_SECTION.contextAwareness]: sectionContent(PROMPT_SECTION.contextAwareness, contextAwarenessBlock),
+			[PROMPT_SECTION.focusGuidance]: sectionContent(PROMPT_SECTION.focusGuidance, focusGuidance),
+			[PROMPT_SECTION.contextCache]: sectionContent(PROMPT_SECTION.contextCache, cacheBlock),
+			[PROMPT_SECTION.sessionFocus]: workstreamEnvelope,
+			[PROMPT_SECTION.compactionHistory]: compactionCountPrompt,
+		});
 		const u = readUsage(ctx, estimatePendingPromptTokens(event));
-		const result: BeforeAgentStartEventResult = {
-			systemPrompt: `${event.systemPrompt}\n\n${addition}`,
-		};
+		const sizeUnmeasured = u?.unmeasured === true;
+		const result: BeforeAgentStartEventResult = forcedSystemPrompt === undefined ? {} : { systemPrompt: forcedSystemPrompt };
 		const restartNotice = resolveRestartNotice(
 			pendingRestartNotices.get(sessionKey),
 			Date.now(),
@@ -9211,16 +9709,24 @@ export default function (pi: ExtensionAPI) {
 		pendingRestartNotices.delete(sessionKey);
 		const restartMessage = restartNotice ? formatRestartNotice(restartNotice) : undefined;
 		if (u) {
-			const usageMessage = buildContextTelemetry(u, { compactionAvailable: contextAwareSummarizerEnabled(config) });
+			const usageMessage = sizeUnmeasured
+				? buildUnknownContextTelemetry()
+				: buildContextTelemetry(u, {
+					compactionAvailable: contextAwareCompactionAvailable(config),
+					replacementTool: config.compactionBlocker?.replacementTool,
+					bands: contextPolicyBands(config),
+				});
 			result.message = {
 				customType: "context-aware-usage-marker",
 				content: [tasksContextMessage, restartMessage, usageMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
 				display: false,
-				details: {
-					band: contextBand(u.fraction),
-					percent: Math.round(u.fraction * 100),
-					headroom: u.headroom,
-				},
+				details: sizeUnmeasured
+					? { band: "UNKNOWN", percent: null, headroom: null }
+					: {
+						band: contextBand(u.fraction, contextPolicyBands(config)),
+						percent: Math.round(u.fraction * 100),
+						headroom: u.headroom,
+					},
 			};
 		} else if (restartMessage || tasksContextMessage) {
 			result.message = {
@@ -9234,11 +9740,29 @@ export default function (pi: ExtensionAPI) {
 
 	// -- 3. Compaction summary annotation / override model -------------------
 
-	pi.on("session_before_compact", async (event, ctx) => {
+	// What the claim wrapper below tells the hook, and what the hook tells it back.
+	interface OwnerHookRecovery {
+		/**
+		 * Offered a failed model summary before the hook cancels or defers to Pi's summarizer.
+		 * Under the claim Fabric has already yielded, so the failure is always handled here and
+		 * the hook returns `result` as it is: Fabric's summary, a deferral, or undefined, which
+		 * leaves the compaction to Pi's summarizer. The hook's own cancellations (exhausted
+		 * overflow, exhausted transient transport, a built-in retry that would overflow) assume
+		 * Fabric or Pi can take over later; under the claim a cancel would leave nobody compacting.
+		 */
+		recover(reason: string, hookRunId: string): Promise<{ readonly result: SessionBeforeCompactResult | undefined }>;
+		/** True once recover ran, so the wrapper does not offer the same failure twice. */
+		tried: boolean;
+	}
+	const contextAwareBeforeCompact = async (
+		event: SessionBeforeCompactEvent,
+		ctx: ExtensionContext,
+		recovery?: OwnerHookRecovery,
+	): Promise<SessionBeforeCompactResult | undefined> => {
 		const hookRunId = `before-compact-${Date.now().toString(36)}`;
 		const sessionKey = sessionMetadataKey(ctx);
 		const cfg = readConfig(ctx);
-		if (!contextAwareSummarizerEnabled(cfg)) {
+		if (!contextAwareCompactionAvailable(cfg)) {
 			const activePreparation = proactivePreparationJobs.get(sessionKey);
 			const proactiveLifecycleAtDeferral = currentProactiveLifecycle(sessionKey);
 			const proactiveOwnedCompaction = activePreparation !== undefined
@@ -9258,7 +9782,7 @@ export default function (pi: ExtensionAPI) {
 					cancellationStage: "disabled",
 				});
 			}
-			debugLog(`${hookRunId}: context-aware summarizer disabled; deferring ${event.reason} compaction without a result`);
+			debugLog(`${hookRunId}: compaction unavailable to context-aware; deferring ${event.reason} compaction without a result`);
 			return proactiveLifecycleAtDeferral.state === "compacting" ? { cancel: true } : undefined;
 		}
 		const workstreamCfg = getWorkstreamConfig(cfg);
@@ -9302,7 +9826,9 @@ export default function (pi: ExtensionAPI) {
 		debugLog(`${hookRunId}: session_before_compact entered session=${sessionKey} reason=${event.reason} willRetry=${event.willRetry} transcript=${transcriptPath ?? "(none)"} modelOverride=${cfg.compactionModel ?? "(active)"} handoff=${handoffMetadata ? "yes" : "no"} workstream=${workstreamProjection ? "yes" : "no"} cache=${cacheEnabled ? "on" : "off"} summarize=${prep.messagesToSummarize?.length ?? "?"} turnPrefix=${prep.turnPrefixMessages?.length ?? "?"} tokensBefore=${prep.tokensBefore ?? "?"} firstKept=${prep.firstKeptEntryId ?? "?"}`);
 
 		// If there is nothing to inject or augment, let pi's built-in compaction run unchanged.
-		if (!transcriptPath && !cfg.compactionModel && !handoffMetadata && !cacheEnabled && !workstreamProjection) {
+		// Holding the claim means this extension writes the summary, so the focus, the fold
+		// index and the carry items are always worth a model summary.
+		if (!claimController.active && !transcriptPath && !cfg.compactionModel && !handoffMetadata && !cacheEnabled && !workstreamProjection) {
 			debugLog(`${hookRunId}: no context-aware augmentation needed; falling back to built-in compaction`);
 			return;
 		}
@@ -9596,6 +10122,7 @@ export default function (pi: ExtensionAPI) {
 			};
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
+			if (recovery && !event.signal?.aborted) return (await recovery.recover(msg, hookRunId)).result;
 			if (err instanceof ContextOverflowRecoveryExhaustedError) {
 				debugLog(`${hookRunId}: compaction overflow recovery exhausted; cancelling instead of repeating the oversized built-in request: ${compactError(err)}`);
 				safeUi(ctx, `${hookRunId}: compaction overflow recovery exhausted`, () => {
@@ -9673,9 +10200,87 @@ export default function (pi: ExtensionAPI) {
 			});
 			return; // fall back
 		}
-	});
+	};
+
+	/**
+	 * While the compaction-owner claim is held Fabric yields, so this extension writes the
+	 * summary alone. The wrapper adds what the claim promises, around the unchanged hook above:
+	 *
+	 * - the fold index goes into the summary instructions, so the summary can point at a fold;
+	 * - the carry items are written into the summary's Constraints section;
+	 * - when the model summary fails, or none can be made, Fabric's deterministic summary
+	 *   stands in (setting `compactionClaim.fabricFallback`), and without it the hook returns
+	 *   no result, so Pi's own summarizer runs.
+	 *
+	 * With no claim held it calls the hook with the event untouched, so behavior is the same as
+	 * before the claim existed.
+	 */
+	const ownerAwareBeforeCompact: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult> = async (event, ctx) => {
+		ownerClaimCtx = ctx;
+		claimController.sync(ctx);
+		if (!claimController.active) return contextAwareBeforeCompact(event, ctx);
+
+		const cfg = readConfig(ctx);
+		const branch = event.branchEntries ?? ctx.sessionManager.getBranch();
+		const carry = hasOwnCarryEntry(branch) ? readCarryItems(branch) : readFabricCarryItems(branch);
+		const foldIndex = renderFoldIndex(branch);
+		const claimedEvent: SessionBeforeCompactEvent = foldIndex
+			? { ...event, customInstructions: appendInstructionOnce(event.customInstructions, foldIndex) }
+			: event;
+
+		const recovery: OwnerHookRecovery = {
+			tried: false,
+			recover: async (reason, hookRunId) => {
+				recovery.tried = true;
+				if (cfg.compactionClaim?.fabricFallback === false) {
+					debugLog(`${hookRunId}: model summary failed (${reason}); Fabric fallback is off, leaving the summary to Pi's summarizer`);
+					return { result: undefined };
+				}
+				const fallback = claimController.fallback(event, ctx, { carry });
+				if (!fallback.ok) {
+					debugLog(`${hookRunId}: model summary failed (${reason}) and Fabric's fallback is unavailable (${fallback.reason}); leaving the summary to Pi's summarizer`);
+					return { result: undefined };
+				}
+				// The same commit guard as the model summary: nothing is applied under a running turn.
+				const sessionKey = sessionMetadataKey(ctx);
+				const commit = await guardCompactionCommit(pi, ctx, hookRunId, cfg);
+				if (!commit.commit) {
+					deferRefusedCompactionCommit(pi, ctx, sessionKey, hookRunId, commit);
+					return { result: { cancel: true } };
+				}
+				refusedCommitAttempts.delete(sessionKey);
+				refusedCompactionCommits.delete(sessionKey);
+				nativeCompactionRetries.delete(sessionKey);
+				clearRetainedSummariesForSession(sessionKey);
+				debugLog(`${hookRunId}: model summary failed (${reason}); using Fabric's deterministic summary`);
+				safeUi(ctx, `${hookRunId}: Fabric fallback`, () => {
+					ctx.ui.notify(`Compaction summary failed (${reason}); using Fabric's deterministic summary.`, "warning");
+				});
+				return { result: { compaction: fallback.compaction } };
+			},
+		};
+
+		let result = await contextAwareBeforeCompact(claimedEvent, ctx, recovery);
+		// No result means Pi's summarizer would run (no model, no credentials). That is also a
+		// summary this extension could not make, so Fabric's stands in for it first.
+		if (result === undefined && !recovery.tried && !event.signal?.aborted) {
+			result = (await recovery.recover("no model summary could be produced", `before-compact-${Date.now().toString(36)}`)).result;
+		}
+		// Also with an empty list: lines an earlier summary carried forward must go when cleared.
+		if (result?.compaction && !isFabricFallback(result.compaction)) {
+			result = { ...result, compaction: { ...result.compaction, summary: renderCarryIntoSummary(result.compaction.summary, carry) } };
+		}
+		return result;
+	};
+	const isFabricFallback = (compaction: { details?: unknown }): boolean => {
+		const details = compaction.details;
+		return typeof details === "object" && details !== null && (details as { claimOwner?: unknown }).claimOwner !== undefined;
+	};
+
+	pi.on("session_before_compact", ownerAwareBeforeCompact);
 
 	pi.on("session_compact", async (event, ctx) => {
+		modesController.resend(ctx);
 		recordWorkerCompactionSatisfied(ctx);
 		const sessionKey = sessionMetadataKey(ctx);
 		clearRetainedSummariesForSession(sessionKey);
@@ -9720,9 +10325,12 @@ export default function (pi: ExtensionAPI) {
 	// .pi/context-aware.json, which needs a session context (cwd and trust) that
 	// extension load does not have. Registration therefore happens in
 	// session_start through registerHandoffSurfaces.
-	const registerCompactSessionTool = (): void => pi.registerTool({
+	const registerCompactSessionTool = (hidden = false): void => pi.registerTool({
 		name: "compact_session",
 		label: "Compact + Hand Off",
+		// A hidden tool stays registered, but Pi does not declare it to the model
+		// and code-mode executors such as pi-fabric do not list it.
+		exposure: hidden ? "hidden" : "direct",
 		description:
 			"End the current work phase by summarizing the conversation and starting the next phase with a fresh context budget. The required `seed_prompt` both steers the summary and is auto-sent exactly once after compaction and any input Pi queued during compaction. Use this when wrapping up a coherent unit of work, when context is getting full, or when you want to deliberately bound a phase.",
 		promptSnippet:
@@ -9754,8 +10362,9 @@ export default function (pi: ExtensionAPI) {
 				// so throwing is the only way to surface a real error to the LLM.
 				throw new Error("Refused: seed_prompt is empty. Provide a concrete next-phase brief.");
 			}
-			if (!contextAwareSummarizerEnabled(readConfig(ctx))) {
-				throw new Error(SUMMARIZER_DEFERRED_HANDOFF_MESSAGE);
+			const compactionConfig = readConfig(ctx);
+			if (!contextAwareCompactionAvailable(compactionConfig)) {
+				throw new Error(compactionUnavailableMessage(compactionConfig));
 			}
 
 			// Guard: if a prior call sent a clarification to the user and the
@@ -9837,7 +10446,7 @@ export default function (pi: ExtensionAPI) {
 					seed_prompt: seed,
 					raw_seed_prompt: rawSeed,
 					summary_focus: focus,
-					tokens_before: usageBefore?.tokens ?? null,
+					tokens_before: measuredUsage(usageBefore)?.tokens ?? null,
 					context_window: usageBefore?.window ?? null,
 					...metadata,
 				},
@@ -10022,7 +10631,9 @@ export default function (pi: ExtensionAPI) {
 
 			return answerRecall(request, {
 				cachePools,
+				erasedSessionIds: erasedSessionIds(configuredAgentDir()),
 				sessions: sessionList.sessions.map((session) => ({
+					id: session.id,
 					path: session.path,
 					cwd: session.cwd,
 					allMessagesText: session.allMessagesText,
@@ -10073,8 +10684,9 @@ export default function (pi: ExtensionAPI) {
 			"Compact and start a new phase. Usage: /compact-then [<seed prompt> | /<prompt-template> <args>] [--model <provider/id>]. Loaded prompt templates are resolved before seed rewriting. With no seed, generates one per the configured mode (see /context-aware-mode). A selected model is applied after compaction and persists for later turns.",
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
-			if (!contextAwareSummarizerEnabled(readConfig(ctx))) {
-				ctx.ui.notify(SUMMARIZER_DEFERRED_HANDOFF_MESSAGE, "error");
+			const compactionConfig = readConfig(ctx);
+			if (!contextAwareCompactionAvailable(compactionConfig)) {
+				ctx.ui.notify(compactionUnavailableMessage(compactionConfig), "error");
 				return;
 			}
 			const { explicitSeed: explicit, requestedModelRef } = parseCompactThenArguments(args);
@@ -10228,19 +10840,35 @@ export default function (pi: ExtensionAPI) {
 	 * summarizer.enabled, the decision waits for session_start, which has the
 	 * trust answer. Otherwise the global and CLI layers are already decisive and
 	 * load registers immediately.
+	 *
+	 * When another extension cancels every compaction, session_start registers
+	 * compact_session again with hidden exposure: it stays registered, but no
+	 * model or code-mode executor is offered it. /compact-then stays registered
+	 * and refuses with the reason. A later session without the blocker restores
+	 * the tool.
 	 */
 	let handoffSurfacesRegistered = false;
+	let compactSessionHidden = false;
 	registerHandoffSurfaces = (ctx?: ExtensionContext): void => {
-		if (handoffSurfacesRegistered || !contextAwareSummarizerEnabled(readConfig(ctx))) return;
-		handoffSurfacesRegistered = true;
-		registerCompactSessionTool();
-		registerCompactThenCommand();
+		const cfg = readConfig(ctx);
+		if (!contextAwareSummarizerEnabled(cfg)) return;
+		const hidden = cfg.compactionBlocker !== undefined;
+		if (!handoffSurfacesRegistered) {
+			handoffSurfacesRegistered = true;
+			compactSessionHidden = hidden;
+			registerCompactSessionTool(hidden);
+			registerCompactThenCommand();
+			return;
+		}
+		if (hidden === compactSessionHidden) return;
+		compactSessionHidden = hidden;
+		registerCompactSessionTool(hidden);
 	};
 	if (!projectDeclaresSummarizerOwnership(process.cwd())) registerHandoffSurfaces();
 
-	// -- 7. Command: /context-aware-mode ------------------------------------
+	// -- 7. Command: /context-aware-seed-mode (alias /context-aware-mode) ----
 
-	pi.registerCommand("context-aware-mode", {
+	const seedModeCommand: Parameters<ExtensionAPI["registerCommand"]>[1] = {
 		description: "Get/set the seed mode for /compact-then (auto-gen | user-approve | autonomous | status).",
 		getArgumentCompletions: (prefix) => {
 			const items = [
@@ -10265,7 +10893,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (arg !== "auto-gen" && arg !== "user-approve" && arg !== "autonomous") {
-				ctx.ui.notify("Usage: /context-aware-mode <auto-gen|user-approve|autonomous|status>", "warning");
+				ctx.ui.notify("Usage: /context-aware-seed-mode <auto-gen|user-approve|autonomous|status>", "warning");
 				return;
 			}
 			try {
@@ -10287,6 +10915,11 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 		},
+	};
+	pi.registerCommand("context-aware-seed-mode", seedModeCommand);
+	pi.registerCommand("context-aware-mode", {
+		...seedModeCommand,
+		description: "Alias of /context-aware-seed-mode: get/set the seed mode for /compact-then (auto-gen | user-approve | autonomous | status).",
 	});
 
 	// -- 8. Command: /context-aware-seed-rewrite -----------------------------
@@ -10603,7 +11236,8 @@ Config: ${configFile()}${cliOverrideStatusLine()}`,
 		handler: async (_args, ctx) => {
 			ctx.ui.notify("Rebuilding context-aware worktree index from all sessions…", "info");
 			try {
-				const sessions = await SessionManager.listAll();
+				const erased = erasedSessionIds(configuredAgentDir());
+				const sessions = (await SessionManager.listAll()).filter((session) => !erased.has(session.id));
 				const result = rebuildWorktreeIndexFromSessions(sessions);
 				// Ensure the active cwd is represented even if there are no prior sessions for it.
 				updateWorktreeIndexForCwd(ctx.cwd);
@@ -10647,14 +11281,18 @@ Config: ${configFile()}${cliOverrideStatusLine()}`,
 			const proactiveSources = proactive.source === "mixed"
 				? `\nProactive sources: ${formatProactiveLeafSources(proactive)}`
 				: "";
-			const configLines = `Mode: ${modeLabel(cfg)}\nSeed mode: ${cfg.seedMode}${layerOf("seedMode")}\nSeed rewrite: ${cfg.seedRewrite ? "on" : "off"}${layerOf("seedRewrite")}\nAmbiguity mode: ${cfg.ambiguityMode}${layerOf("ambiguityMode")} (effective: ${effectiveAmbiguityMode(cfg)})\nSeed authority guard: ${cfg.seedAuthorityGuard}${layerOf("seedAuthorityGuard")}\nSeed authority guard implementation: ${SEED_AUTHORITY_GUARD_IMPLEMENTATION_VERSION}\nCompaction model: ${cmpLabel}${layerOf("compactionModel")}\nOverflow fallback model: ${cfg.overflowFallbackModel ?? "(none — reduced-payload retry only)"}${layerOf("overflowFallbackModel")}\nProactive compaction: ${formatResolvedProactiveCompaction(proactive)}${proactiveSources}\n${formatCompactionOwnership(ctx)}\n${formatProactiveLifecycle(ctx)}\n${formatSeedHandoffStatus(ctx)}\nCache scope: ${getContextCacheConfig(cfg).scope}${layerOf("contextCache.scope")}${cliOverrideStatusLine()}\nRun /context-status layers for full attribution.`;
+			const configLines = `Mode: ${modeLabel(cfg)}\nSeed mode: ${cfg.seedMode}${layerOf("seedMode")}\nSeed rewrite: ${cfg.seedRewrite ? "on" : "off"}${layerOf("seedRewrite")}\nAmbiguity mode: ${cfg.ambiguityMode}${layerOf("ambiguityMode")} (effective: ${effectiveAmbiguityMode(cfg)})\nSeed authority guard: ${cfg.seedAuthorityGuard}${layerOf("seedAuthorityGuard")}\nSeed authority guard implementation: ${SEED_AUTHORITY_GUARD_IMPLEMENTATION_VERSION}\nCompaction model: ${cmpLabel}${layerOf("compactionModel")}\nOverflow fallback model: ${cfg.overflowFallbackModel ?? "(none — reduced-payload retry only)"}${layerOf("overflowFallbackModel")}\nProactive compaction: ${formatResolvedProactiveCompaction(proactive)}${proactiveSources}\n${formatCompactionOwnership(ctx)}\n${formatProactiveLifecycle(ctx)}\n${formatSeedHandoffStatus(ctx)}\nImage stripping: ${formatImageStripping(cfg)}${[...new Set([layerOf("imageStripping.enabled"), layerOf("imageStripping.keepRecent")])].join("")}\nCache scope: ${getContextCacheConfig(cfg).scope}${layerOf("contextCache.scope")}${cliOverrideStatusLine()}\nRun /context-status layers for full attribution.`;
 			if (!u) {
 				ctx.ui.notify(`Context usage not available yet.\n${configLines}`, "warning");
 				return;
 			}
+			if (u.unmeasured) {
+				ctx.ui.notify(`Context size unknown: Pi has not measured it since the last compaction or overflow. Window ${u.window.toLocaleString()} tokens.\n${configLines}`, "info");
+				return;
+			}
 			const pct = (u.fraction * 100).toFixed(1);
 			ctx.ui.notify(
-				`${severityIcon(u.fraction)} ${u.tokens.toLocaleString()} / ${u.window.toLocaleString()} tokens (${pct}%) — headroom ${u.headroom.toLocaleString()}\n${configLines}`,
+				`${severityIcon(u.fraction, contextPolicyBands(cfg))} ${u.tokens.toLocaleString()} / ${u.window.toLocaleString()} tokens (${pct}%) — headroom ${u.headroom.toLocaleString()}\n${configLines}`,
 				"info",
 			);
 		},

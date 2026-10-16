@@ -3,6 +3,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { erasedSessionIds } from "../erasure/database.js";
 import {
 	REGISTRY_SCHEMA_VERSION,
 	parseRegistryProjection,
@@ -152,6 +153,9 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
 	const retentionMs = Math.max(1, options.retentionMs ?? SESSION_REGISTRY_RETENTION_MS);
 	const staleAfterMs = Math.max(1, options.staleAfterMs ?? SESSION_REGISTRY_STALE_AFTER_MS);
 	const makeId = options.idFactory ?? randomUUID;
+	const profileDir = path.basename(root) === "v1" && path.basename(path.dirname(root)) === "session-registry"
+		? path.dirname(path.dirname(root)) : undefined;
+	const erased = (id: string): boolean => profileDir !== undefined && erasedSessionIds(profileDir).has(id);
 
 	function ensurePrivateDirectory(value: string): boolean {
 		const parsed = path.parse(value);
@@ -200,7 +204,7 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
 
 	function read(piSessionId: string): RegistryProjection | null {
 		const filename = sessionFileName(piSessionId);
-		if (!filename) return null;
+		if (!filename || erased(piSessionId)) return null;
 		try {
 			if (!isSafeDirectory(root) || !isSafeDirectory(directory)) return null;
 			const target = path.join(directory, filename);
@@ -321,6 +325,7 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
 	function atomicWrite(projection: RegistryProjection): RegistryWriteResult {
 		const parsed = parseRegistryProjection(projection);
 		if (!parsed || parsed.projectKey !== projectKey) return result("projection does not satisfy the registry schema or project key");
+		if (erased(parsed.piSessionId)) return result("session was erased");
 		const filename = sessionFileName(parsed.piSessionId);
 		if (!filename) return result("Pi session ID is not filesystem-safe");
 		if (!ensurePrivateDirectories()) return result("registry root or project directory is not a private real directory");

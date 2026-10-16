@@ -118,8 +118,11 @@ export interface OwedCompactionReattemptInput {
 	 * only its own cooldown; it must never clear a genuine failure's cooldown.
 	 */
 	readonly refusalCooldownStillCurrent: boolean;
-	/** Context is still at/above the threshold (or the generation reserve is unsafe). */
-	readonly contextStillOverThreshold: boolean;
+	/**
+	 * Context is still at/above the threshold (or the generation reserve is
+	 * unsafe). `"unknown"` when Pi has not measured the size (#165).
+	 */
+	readonly contextStillOverThreshold: boolean | "unknown";
 	/** A proactive cooldown is currently blocking the next threshold re-trigger. */
 	readonly withinCooldown: boolean;
 }
@@ -141,6 +144,9 @@ export function decideOwedCompactionReattempt(
 	// touching whatever cooldown is in effect now, so a genuine failure keeps its
 	// cooldown (#101, CR-OWED-MARKER-STALE).
 	if (!input.refusalCooldownStillCurrent || !input.withinCooldown) return "clear-owed";
+	// Pi has not measured the size, so nothing shows the session recovered.
+	// Keep the marker and the cooldown until a measured size decides (#165).
+	if (input.contextStillOverThreshold === "unknown") return "none";
 	// The refusal's cooldown is still the one in effect but the session recovered
 	// on its own; drop the marker and leave the cooldown to expire normally.
 	if (!input.contextStillOverThreshold) return "clear-owed";

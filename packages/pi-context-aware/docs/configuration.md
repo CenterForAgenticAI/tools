@@ -52,7 +52,8 @@ the reply. The worker host reads the entry only after harvesting the reply and
 may compact at the round boundary using the entry's static summary
 instructions. A completed worker compaction appends `satisfied` with the
 revision it discharged. Repeated same-state observations are coalesced until
-usage has increased by at least one percentage point. Foreground sessions never
+usage has increased by at least one percentage point, and a turn end repeated for
+the same assistant entry, as after a pi-durable resume, never appends twice. Foreground sessions never
 write this channel.
 
 This channel is deliberately separate from the process-local `pi.events`
@@ -125,10 +126,32 @@ Default shape:
   "summarizer": {
     "enabled": true
   },
+  "compactionClaim": {
+    "enabled": false,
+    "fabricFallback": true
+  },
   "proactiveCompaction": {
     "enabled": true,
     "thresholdFraction": 0.78,
     "outputReserveTokens": 16384
+  },
+  "modes": {
+    "suggestTool": true
+  },
+  "imageStripping": {
+    "enabled": false,
+    "keepRecent": 5
+  },
+  "folds": {
+    "firstUserMessage": "keep",
+    "firstUserMessageMaxTokens": 8000
+  },
+  "contextPolicy": "summaries",
+  "pressureLadder": {
+    "foldNudgeStartFraction": 0.45,
+    "foldNudgeEndFraction": 0.75,
+    "seededCompactionFraction": 0.9,
+    "recoverableHideFraction": 0.95
   },
   "contextCache": {
     "enabled": true,
@@ -184,6 +207,7 @@ Available CLI flags:
 --context-aware-model <provider/id|none>
 --context-aware-overflow-fallback <provider/id|none>
 --context-aware-proactive <on|off|threshold|reserve=tokens>
+--context-aware-modes-suggest-tool <on|off>
 ```
 
 If CLI overrides are active, status commands include a `Runtime CLI overrides:` line.
@@ -228,11 +252,14 @@ Use this when you want safety and the chance to edit the exact handoff prompt.
 ### Commands
 
 ```text
-/context-aware-mode user-approve
-/context-aware-mode auto-gen
-/context-aware-mode autonomous
-/context-aware-mode status
+/context-aware-seed-mode user-approve
+/context-aware-seed-mode auto-gen
+/context-aware-seed-mode autonomous
+/context-aware-seed-mode status
 ```
+
+`/context-aware-mode` is an alias of `/context-aware-seed-mode` and takes the
+same arguments. It stays until a later major release.
 
 ## `seedAuthorityGuard`
 
@@ -645,7 +672,39 @@ Controls whether context-aware claims Pi's `session_before_compact` hook and ret
 
 Context-aware's explicit handoff flows depend on its summary contract, so while summarization is deferred, neither `compact_session` nor `/compact-then` is registered. Registration normally happens at extension load. When the current project's `.pi/context-aware.json` sets `summarizer.enabled`, it waits for `session_start`, because only a session can tell whether that project is trusted. The context-awareness guidance, telemetry actions, and check-in prompt stop telling the agent to compact. Tasks, focus, telemetry, and `search_prior_sessions` stay available. A `summarizer.enabled: false` set by a session policy entry after load cannot unregister the tool, so it still fails before starting compaction and tells you to set `summarizer.enabled` to `true`. Use the other compactor's own handoff command while this switch is off.
 
+An extension that cancels every compaction, such as `billion-context-pi`, has the same effect on these surfaces without any setting. Context-aware detects it at session start and hides `compact_session` instead of unregistering it. See [compaction blocked by another extension](commands-and-concepts.md#compaction-blocked-by-another-extension).
+
 This leaf participates in global, trusted-project, session-policy, and host-policy precedence. An untrusted project's `.pi/context-aware.json` cannot change summary ownership; its `summarizer.enabled` leaf is ignored until the project is trusted. There is no CLI flag or setter command for it; edit `~/.pi/agent/context-aware.json`, a trusted project `.pi/context-aware.json`, or a host/session policy entry.
+
+## `compactionClaim`
+
+Controls whether context-aware claims compaction from pi-fabric, so that this extension writes the compaction summary and Fabric's own compactor stands down.
+
+```json
+{
+  "compactionClaim": {
+    "enabled": false,
+    "fabricFallback": true
+  }
+}
+```
+
+`enabled` defaults to `false`. With it off, context-aware sends nothing to pi-fabric and compaction behaves exactly as it did before this setting existed. Leave it off while `billion-context-pi` is in the profile: that extension stays the only live context manager until it is removed, and the claim is meant to be turned on at that point. Turning it on while `billion-context-pi` is loaded does nothing, because context-aware cannot compact there. The setting, like `summarizer.enabled`, is ignored in an untrusted project's `.pi/context-aware.json`.
+
+With `enabled: true`, context-aware sends one claim on the `pi-fabric:compaction-owner:v1` channel at `session_start`. It names `pi-context-aware`, its version, and the actions it supports: `request`, `status`, `pressure`, `carry` and `cancel`. If pi-fabric is not loaded, nobody answers and nothing changes: Pi's own summarizer runs as usual. The claim does not take `/tree` branch summaries; pi-fabric keeps those.
+
+While the claim is held:
+
+- pi-fabric's compactor, its threshold trigger and its threshold deferral stand down. context-aware writes the summary alone.
+- `compact.request` queues a compaction at the next settled boundary. Its `instructions`, `reason`, `requestedBy` and `preserve` list become focus text for the summary. A `seed` starts the next phase: after the compaction commits, context-aware sends it as a labelled custom message that starts a turn, never as a user message. A request without a seed sends nothing. A new request replaces one that has not started, as pi-fabric's own controller does; while a compaction is running, a request is refused. `compact.cancel` drops a request that has not started.
+- Each action checks its own arguments with pi-fabric's limits (for example, a seed of at most 8192 characters and lists of at most 16 items), because any extension on the event bus can call the actions directly.
+- `compact.carry` keeps a short list of facts (at most 16 items, each at most 2048 characters) that every summary keeps until the list is cleared. Each call returns the whole list, and pi-fabric refuses an action result over 16 KiB, so a change that would make the list larger than that as JSON is refused and nothing is written. The list is stored in the session file, so it follows the branch, and it is written into the summary's Constraints section. At the claim, context-aware takes over the list pi-fabric already held.
+- `compact.pressure` reports the stage of the [pressure ladder](#pressureladder) and its four thresholds. `compact.status` reports whether the fallback is on, the carry count, and any queued request.
+- The model that writes the summary also sees an index of the active folds: each fold's topic, range and message refs, with a pointer to `context_recall` for the original text.
+
+`fabricFallback` decides what happens when the model summary fails or no model is available. With `true` (the default), the summary comes from pi-fabric's deterministic compactor, which also renders the carry list. With `false`, or when pi-fabric cannot produce one, context-aware returns no result and Pi's own summarizer runs. This also applies when overflow recovery or transient retries are exhausted: without the claim context-aware cancels the compaction in those cases, but while the claim is held pi-fabric has stood down, so a cancel would leave nobody to compact. Only if both fail is the last step of the [pressure ladder](#pressureladder), the recoverable hide at `recoverableHideFraction` (95%), left to act. That step is configured and reported but not yet acted on by this extension.
+
+The claim is withdrawn, and pi-fabric's compactor compacts again, when `enabled` becomes `false` (at the next turn or settled boundary), when the session shuts down, when the extension unloads, and when an action fails for a reason other than its input, returns a result pi-fabric would reject, or runs past pi-fabric's 30-second bound. A call that the calling program cancels keeps the claim. After such a failure context-aware does not claim again until the next session. Another extension that already holds the claim keeps it; context-aware does not take it over and does not ask again until the next session.
 
 ## `proactiveCompaction`
 
@@ -678,6 +737,17 @@ When enabled, after each provider-completed assistant turn, context-aware:
 8. re-checks, at the moment the summary is ready to commit, that no agent run is in flight, ending one first if it is;
 9. waits for Pi to drain input queued during compaction, then delivers the seed
    exactly once as a generated compaction handoff.
+
+### When Pi has not measured the context size
+
+Right after a compaction or an overflow recovery, Pi reports no context size until the next valid assistant reply. context-aware treats that size as unknown, not as empty and not as safe. While the size is unknown:
+
+- A new threshold or generation-reserve check waits. It does not estimate the size, because an estimate could start a compaction that cannot shrink the session and then repeat. No drain, seed preparation, or compaction starts from an unknown size. The debug log records that the check is waiting for a measured size.
+- A live owed-compaction marker is kept. A commit refused because an agent run was still in flight leaves a marker that is tied to the cooldown it set. While that same cooldown is still running, the idle boundary keeps both the marker and the cooldown, because an unknown size does not show that the session recovered.
+- A stale marker does not survive. Once the cooldown that set the marker has expired, or a later cooldown (for example after a genuine failure) has replaced it, the next idle boundary discards the marker. This happens even when the size is still unknown.
+- A measured size ends the wait. The next check then uses the normal threshold and reserve rules, including the cooldown.
+
+The wait has no time limit of its own: the extension stays proactively idle until Pi reports a valid size. A measured size comes from Pi's own report or from the first later assistant reply that completed without an error and was not aborted; the usage on an error or aborted reply is partial and is not used. Waiting does not recover an overflow. While the size is unknown, recovery depends on Pi's native automatic compaction settings. If Pi's automatic compaction is turned off, nothing compacts the session until the size is measured or you run `/compact` or `compact_session` yourself.
 
 The check runs after normal, tool-use, length-limited, and error turns, but not after a user-aborted turn. This matters for internal tool loops: Pi can otherwise proceed directly from a large tool result to another provider request without reaching an outer user-message boundary. Generation-reserve and threshold triggers share the proactive-compaction cooldown, whose full duration restarts when compaction completes. This prevents an ineffective compaction from immediately re-arming the provider drain. The separate one-shot output-limit recovery carries explicit state from the discarded length-limited response into its turn completion, so it may cross the ordinary proactive cooldown once without restoring a general generation-reserve exemption.
 
@@ -717,6 +787,173 @@ Verify a real reduction the way the issue's evidence was gathered: on the assist
 Thresholds accept either fractions (`0.78`) or percentages (`78`, `78%`). Valid range is 25%–95%. Reserve values accept exact tokens or `k`/`m` suffixes. Stall, first-output and commit-drain values accept milliseconds, seconds, or minutes (for example, `stall 30s`, `first-output 90s` and `commit-drain 10s`); only commit-drain accepts `0`, meaning never wait for an in-flight run. The equivalent ephemeral CLI override is `--context-aware-proactive reserve=32k`.
 
 The status output includes the effective values, their sources, and the current proactive lifecycle (`idle`, `pending`, `generating`, `queued`, `compacting`, `cooldown`, `failed`, or `cancelled`). It also shows the most recent proactive failure while a static fallback or cooldown remains active. A CLI threshold sets only `enabled` and `thresholdFraction`; a CLI reserve sets only `outputReserveTokens`. Unnamed values continue to come from their own winning layers, so the summary source can be `mixed`. Run `/context-status layers` for the full six-layer attribution.
+
+## `modes`
+
+Controls the model-facing `suggest_mode` tool. The default is `true`. Set
+`modes.suggestTool` to `false`, or use
+`--context-aware-modes-suggest-tool=off`, to hide the tool declaration. The
+layered resolver applies the same default → global → project → CLI → session →
+host precedence as the other leaves.
+
+## `imageStripping`
+
+Removes old images from each provider request. Off by default.
+
+Shape:
+
+```json
+{
+  "imageStripping": {
+    "enabled": false,
+    "keepRecent": 5
+  }
+}
+```
+
+When `enabled` is `true`, only the newest `keepRecent` image-bearing messages keep their images. `keepRecent` must be at least `1`, so the newest image always reaches the model. It counts request messages, not images: some providers put several tool results, and their images, into one message. Every older image is replaced in the request by a short text placeholder that names its type and size. Text, tool calls, and tool results stay. The session file is not changed, so every original stays recoverable.
+
+The wire format is read from the request body, not from the session model's api. Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses bodies are supported, so stripping also works when the model api is a logical name such as `unified` or an alias such as `hypha-anthropic-oauth`. When stripping is enabled but a request body has another shape (for example Google `contents`), the request is sent unchanged and context-aware warns once per session. Only the first unsupported shape is reported: a later request with a different unsupported shape is also sent unchanged, without a new warning. The warning is shown again after the session restarts.
+
+While billion-context-pi manages context in the session, stripping stays inactive and context-aware says so once. `/context-status` shows the effective state on its `Image stripping:` line.
+
+## `contextPolicy`
+
+Says how the session keeps its history. This release has one value:
+
+```ts
+"summaries"
+```
+
+`"summaries"` is the default: the model folds older ranges into summaries, and
+the originals stay recoverable. Other values come in later releases.
+
+An unsupported value never changes the policy:
+
+- `/context-policy <value>` refuses it with an error and records nothing.
+- A session or host policy entry that carries it is ignored, and the policy
+  keeps the value from the layers below.
+- A global or project file that carries it is ignored the same way.
+
+`/context-policy status` and the typed service report an ignored value as a
+diagnostic, and `/context-status layers` lists it under "Ignored as invalid".
+
+The policy is stored in the session's `context-aware.policy.v1` entries and is
+read from the current branch path. It follows the branch when you move with
+`/tree`, and a resumed session reads the same entries, so a restart returns the
+same value. There is no CLI flag for it.
+
+The policy is not a mode. It is separate from the `/mode` runtime, and nothing
+switches it automatically. Other extensions can read it through the `policy`
+capability of the [context service](context-service.md#context-policy).
+
+### Commands
+
+```text
+/context-policy status
+/context-policy summaries
+```
+
+`/context-policy summaries` records the value as a session override on the
+current branch.
+
+## `folds`
+
+Controls whether a native fold can replace the session's first user message
+(pi-context-aware#130). It applies to both live plans and shadow previews.
+
+```json
+{
+  "folds": {
+    "firstUserMessage": "keep",
+    "firstUserMessageMaxTokens": 8000
+  }
+}
+```
+
+- `keep` (default): keep the original opening user. Move the summary carrier to
+  the next covered entry. Drop an opening-only range with a reported reason.
+- `fold`: allow the opening user to fold, as in the earlier native engine.
+- `keep-under-tokens`: keep the opening user unless its estimated size exceeds
+  `firstUserMessageMaxTokens`. Equality keeps it. The kernel's token estimate
+  counts CJK characters individually and other characters at four per token.
+
+`firstUserMessageMaxTokens` defaults to `8000` and must be a positive whole
+number. It affects only `keep-under-tokens`. A folded opening is replaced by a
+user-role summary, so a user message still precedes the first assistant in the
+rendered request. The original remains in the session file.
+
+Both keys resolve independently through global, project, session, and host
+layers. There is no CLI flag or setter command. For session policy entries,
+use the dotted keys `folds.firstUserMessage` and
+`folds.firstUserMessageMaxTokens`. `/context-policy status` shows their
+effective values and sources. A settings change affects subsequent plans;
+it does not undo folds already stored in the session. Each effective value
+participates in the parity fingerprint, so changing either starts a new
+500-call window.
+
+## `pressureLadder`
+
+The pressure ladder is one set of context-usage thresholds. It belongs to the
+context policy, and the telemetry bands are derived from it.
+
+```json
+{
+  "pressureLadder": {
+    "foldNudgeStartFraction": 0.45,
+    "foldNudgeEndFraction": 0.75,
+    "seededCompactionFraction": 0.9,
+    "recoverableHideFraction": 0.95
+  }
+}
+```
+
+These are starting defaults and may change after pilot runs.
+
+| Ladder step | Setting | Default | Telemetry band | Telemetry action |
+| --- | --- | --- | --- | --- |
+| Below the ladder | — | under 45% | `OK` | none |
+| Fold nudges | `foldNudgeStartFraction` to `foldNudgeEndFraction` | 45% to 75% | `WARN`, from `foldNudgeStartFraction` | `gate-broad-work` |
+| Between the last fold nudge and compaction | — | 75% to 90% | `WARN` | `gate-broad-work` |
+| Seeded compaction | `seededCompactionFraction` | 90% | `URGENT`, from `seededCompactionFraction` | `compact-before-tool` |
+| Recoverable hide, only when compaction cannot run | `recoverableHideFraction` | 95% | `URGENT` | `compress-before-tool` or `finish-atomic-work` |
+
+So the band edges are:
+
+- `WARN` begins at `foldNudgeStartFraction`.
+- `URGENT` begins at `seededCompactionFraction`.
+
+When Pi has not measured the context size, for example right after a
+compaction or an overflow, the band is `UNKNOWN` and maps to no ladder step.
+The envelope then reports `usage-percent="unknown"` with no action, and the
+footer shows `size unknown`. The ladder applies again once a measured size
+arrives.
+
+The same edges drive the `<context-telemetry>` envelope, the `Bands:` line in
+the context-awareness guidance, the footer icon, and the `band` field of the
+typed service snapshot. Before the ladder, these bands were fixed at 60% and
+80%.
+
+The snapshot's `pressure.phaseBoundary` compaction advice also follows these
+edges: it is `not-advised` below WARN, `advised` in WARN, and `required` in
+URGENT. With the new defaults, 50% changes from `not-advised` to `advised`,
+and 85% changes from `required` to `advised`. This affects consumers of the
+existing snapshot field even if they do not use the new `policy` capability.
+
+In this release only the telemetry bands and phase-boundary advice read the
+ladder. Proactive compaction still triggers at
+`proactiveCompaction.thresholdFraction`, which defaults to
+78%. Fold nudges and the recoverable hide are not acted on yet.
+
+Each value must be a number greater than 0 and at most 1. A value outside that
+range is ignored, like any other invalid setting, and a lower layer supplies
+it. The resolved values must also keep their order: `foldNudgeStartFraction`
+≤ `foldNudgeEndFraction` ≤ `seededCompactionFraction` ≤
+`recoverableHideFraction`. When they do not, the whole ladder falls back to
+the defaults and `/context-policy status` shows a diagnostic.
+
+The ladder participates in the global, project, session, and host-policy
+layers. There is no CLI flag or setter command for it.
 
 ## `contextCache`
 

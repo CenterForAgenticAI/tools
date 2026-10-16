@@ -11,12 +11,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { prepareSessionTasksArguments } from "../tool-arguments.js";
+import { prepareSessionTasksArguments, SESSION_TASKS_ACTIONS, stringEnum } from "../tool-arguments.js";
 
 import {
 	MAX_TASK_NOTE_CHARS,
 	MAX_TASK_TITLE_CHARS,
 	MAX_TASK_ID_CHARS,
+	TASK_STATUSES,
 	addTask,
 	appendTasksSnapshot,
 	applyUpdates,
@@ -401,49 +402,49 @@ function renderTaskLine(task: Task, indent: string): string {
 // The tool
 // ---------------------------------------------------------------------------
 
+// Rules that name valid values (actions, statuses) live in the errors of
+// prepareSessionTasksArguments, and rules about notes, origins, and nesting in
+// the tool's own refusals, not in these descriptions: every request carries
+// this schema.
 const taskRefSchema = Type.String({
-	description: "Optional bounded opaque reference; not a task id or reconciliation key.",
 	maxLength: MAX_TASK_ID_CHARS,
 	pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$",
 });
 
-const seedTaskSchema = Type.Object({
-	title: Type.String({ description: "One line naming the task.", maxLength: MAX_TASK_TITLE_CHARS }),
-	note: Type.Optional(Type.String({ description: "Required when the status is blocked or deferred: why.", maxLength: MAX_TASK_NOTE_CHARS })),
+const taskIdSchema = Type.String({ maxLength: MAX_TASK_ID_CHARS });
+const taskStatusSchema = stringEnum(TASK_STATUSES);
+
+const seedTaskFields = {
+	title: Type.String({ maxLength: MAX_TASK_TITLE_CHARS }),
+	note: Type.Optional(Type.String({ maxLength: MAX_TASK_NOTE_CHARS })),
 	ref: Type.Optional(taskRefSchema),
-	status: Type.Optional(Type.Union([
-		Type.Literal("pending"), Type.Literal("active"), Type.Literal("done"), Type.Literal("blocked"), Type.Literal("deferred"),
-	], { description: "Defaults to pending." })),
-});
+	status: Type.Optional(taskStatusSchema),
+};
+const seedTaskSchema = Type.Object(seedTaskFields);
 
 const tasksSchema = Type.Object({
-	action: Type.Union([
-		Type.Literal("plan"), Type.Literal("add"), Type.Literal("update"),
-		Type.Literal("remove"), Type.Literal("reorder"), Type.Literal("list"), Type.Literal("subtree"),
-	], { description: "plan replaces the whole list and is the normal way to start. update takes an array so one call can flip several tasks." }),
-	tasks: Type.Optional(Type.Array(Type.Intersect([
-		seedTaskSchema,
-		Type.Object({ subtasks: Type.Optional(Type.Array(seedTaskSchema, { description: "One level only; a sub-task cannot have its own sub-tasks.", maxItems: 50 })) }),
-	]), { description: "For plan: the whole list, in order.", maxItems: 100 })),
-	title: Type.Optional(Type.String({ description: "For add: the new task's title.", maxLength: MAX_TASK_TITLE_CHARS })),
-	note: Type.Optional(Type.String({ description: "For add: an optional note.", maxLength: MAX_TASK_NOTE_CHARS })),
+	action: stringEnum(SESSION_TASKS_ACTIONS, { description: "plan replaces the whole list; update batches status changes." }),
+	tasks: Type.Optional(Type.Array(Type.Object({
+		...seedTaskFields,
+		subtasks: Type.Optional(Type.Array(seedTaskSchema, { maxItems: 50 })),
+	}), { description: "plan: the whole list, in order.", maxItems: 100 })),
+	title: Type.Optional(Type.String({ description: "add: the new task.", maxLength: MAX_TASK_TITLE_CHARS })),
+	note: Type.Optional(Type.String({ maxLength: MAX_TASK_NOTE_CHARS })),
 	ref: Type.Optional(taskRefSchema),
-	parent: Type.Optional(Type.String({ description: "For add: the task this becomes a step of.", maxLength: 32 })),
-	after: Type.Optional(Type.String({ description: "For add: place the new task after this sibling.", maxLength: 32 })),
-	before: Type.Optional(Type.String({ description: "For add: place the new task before this sibling.", maxLength: 32 })),
+	parent: Type.Optional(taskIdSchema),
+	after: Type.Optional(taskIdSchema),
+	before: Type.Optional(taskIdSchema),
 	updates: Type.Optional(Type.Array(Type.Object({
-		id: Type.String({ description: "The task to change.", maxLength: 32 }),
-		status: Type.Optional(Type.Union([
-			Type.Literal("pending"), Type.Literal("active"), Type.Literal("done"), Type.Literal("blocked"), Type.Literal("deferred"),
-		], { description: "blocked and deferred both require a note saying why." })),
-		title: Type.Optional(Type.String({ description: "Only for tasks you created; user and spec tasks cannot be retitled.", maxLength: MAX_TASK_TITLE_CHARS })),
+		id: taskIdSchema,
+		status: Type.Optional(taskStatusSchema),
+		title: Type.Optional(Type.String({ maxLength: MAX_TASK_TITLE_CHARS })),
 		ref: Type.Optional(taskRefSchema),
-		note: Type.Optional(Type.String({ description: "Required when moving to blocked or deferred.", maxLength: MAX_TASK_NOTE_CHARS })),
-	}), { description: "For update: one entry per task to change. Batch them; do not call once per task.", maxItems: 100 })),
-	ids: Type.Optional(Type.Array(Type.String({ maxLength: 32 }), { description: "For remove: the tasks to drop. For reorder: every task id, in the order you want.", maxItems: 100 })),
+		note: Type.Optional(Type.String({ maxLength: MAX_TASK_NOTE_CHARS })),
+	}), { description: "update: one entry per task, all in one call.", maxItems: 100 })),
+	ids: Type.Optional(Type.Array(taskIdSchema, { description: "remove: tasks to drop; reorder: every id in order.", maxItems: 100 })),
 });
 
-const TOOL_DESCRIPTION = "Keep an enumerable checklist for this session that survives compaction. Use it for multi-step work that will cross a compaction or a delegation, so the remaining tasks are still known afterwards. The subtree action reads current delegation state (current state), not complete history: delegate retention keeps at most MAX_STEPS=12 events per child and MAX_CHILDREN=16 children. When delegate support is available, a dispatch can seed a worker's list with `handoff: { tasks: [...] }`; otherwise subtree may be empty.";
+const TOOL_DESCRIPTION = "Session checklist that survives compaction. subtree reads current delegation state, not complete history. When delegate support is available, a dispatch can seed a worker's list with `handoff: { tasks: [...] }`.";
 
 const TOOL_PROMPT_SNIPPET = [
 	"Use session_tasks when a request contains several distinct pieces of work that will outlive one reply, not for a two-file edit.",

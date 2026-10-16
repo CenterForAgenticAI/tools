@@ -760,9 +760,6 @@ export interface TasksReplayResult {
 	readonly rejected: number;
 }
 
-/** Upper bound on task snapshot entries examined; the newest ones are kept. */
-export const MAX_TASKS_REPLAY_ENTRIES = 10_000;
-
 /**
  * Rebuild the list from the transcript.
  *
@@ -771,26 +768,19 @@ export const MAX_TASKS_REPLAY_ENTRIES = 10_000;
  * same list — including on a fork, where two branches can hold the same
  * revision number.
  *
- * The bound applies to task snapshot entries, newest first, never to the whole
- * transcript: a long session holds far more than `maxEntries` ordinary
- * entries, and cutting from the start would hide every snapshot written after
- * the cut. Snapshots are complete lists, so the newest ones are the ones that
- * decide the result.
+ * Every task snapshot is read. The highest revision can sit anywhere in the
+ * transcript, so a partial read could return an older list as current; the
+ * caller bounds the input by supplying only the selected branch. `rejected`
+ * counts task entries that fail to parse, nothing else.
  */
-export function replayTasksEntries(entries: readonly unknown[], maxEntries = MAX_TASKS_REPLAY_ENTRIES): TasksReplayResult {
+export function replayTasksEntries(entries: readonly unknown[]): TasksReplayResult {
 	if (!Array.isArray(entries)) return { snapshot: null, authority: null, rejected: 0 };
-	const limit = Math.max(0, Math.min(maxEntries, MAX_TASKS_REPLAY_ENTRIES));
 	let rejected = 0;
-	let examined = 0;
 	let best: TasksSnapshot | null = null;
+	// Newest first, so a complete tie keeps the latest entry in the transcript.
 	for (let index = entries.length - 1; index >= 0; index -= 1) {
 		const entry = entries[index];
 		if (!isTasksEntry(entry)) continue;
-		if (examined >= limit) {
-			rejected += 1;
-			continue;
-		}
-		examined += 1;
 		const snapshot = parseTasksEntry(entry);
 		if (!snapshot) {
 			rejected += 1;

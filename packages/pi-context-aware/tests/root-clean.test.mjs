@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 // .spec/. A new top-level entry needs a reason: add it here, in the same change.
 // Modelled on pi-caair-dev-tools/tools/tests/root-clean.test.ts.
 const PACKAGE_ROOT = fileURLToPath(new URL("../", import.meta.url));
-const IGNORED_ROOT_ENTRIES = new Set([".git", ".public-release-check", ".public-release-check.tar", ".npm", ".pi", ".worktrees", ".test-dist", ".coverage-tmp", "coverage", "dist", "node_modules", "package-dist"]);
+const IGNORED_ROOT_ENTRIES = new Set([".bun-cache", ".git", ".public-release-check", ".public-release-check.tar", ".npm", ".pi", ".worktrees", ".test-dist", ".coverage-tmp", "coverage", "dist", "node_modules", "package-dist"]);
 export const ALLOWED_ROOT_ENTRIES = new Set([
 	".gitattributes",
 	".githooks",
@@ -21,8 +21,9 @@ export const ALLOWED_ROOT_ENTRIES = new Set([
 	"LICENSE",
 	"README.md",
 	"docs", // Published documentation and the service contract.
+	"bun.lock",
+	"bunfig.toml",
 	"eslint.config.js",
-	"package-lock.json",
 	"package.json",
 	"renovate.json", // Renovate dependency-update configuration, maintained by the repository owners.
 	"scripts",
@@ -38,13 +39,18 @@ export function unexpectedRootEntries(entries) {
 	return entries.filter((entry) => !IGNORED_ROOT_ENTRIES.has(entry) && !ALLOWED_ROOT_ENTRIES.has(entry)).sort();
 }
 
+// The public-release verifier runs `npm install` inside the export, which has no
+// repository, so the directory listing there includes the lockfile npm wrote.
+// A tracked package-lock.json still fails: Bun's bun.lock is the lockfile.
+const EXPORT_GENERATED_ROOT_ENTRIES = new Set(["package-lock.json"]);
+
 function trackedRootEntries() {
 	const result = spawnSync("git", ["ls-files", "-z"], { cwd: PACKAGE_ROOT, encoding: "utf8" });
 	if (result.status === 0 && typeof result.stdout === "string" && result.stdout.length > 0) {
 		return [...new Set(result.stdout.split("\0").filter(Boolean).map((path) => path.split("/")[0]))];
 	}
 	// No repository (for example the public export): fall back to the directory listing.
-	return readdirSync(PACKAGE_ROOT);
+	return readdirSync(PACKAGE_ROOT).filter((entry) => !EXPORT_GENERATED_ROOT_ENTRIES.has(entry));
 }
 
 test("the root allowlist rejects a stray source file", () => {

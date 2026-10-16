@@ -6,6 +6,7 @@ import * as path from "node:path";
 import process from "node:process";
 import type { EventBus, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { TASKS_ENTRY_TYPE, createTasksSnapshot, planTasks } from "../src/session-tasks/session-tasks.js";
+import { piPromptHandler } from "./pi-prompt-render.js";
 import {
 	classifyRestartNotice,
 	formatRestartNotice,
@@ -125,7 +126,11 @@ function createHarness(): Harness {
 	const api = {
 		events: bus,
 		on(name: string, handler: (event: Record<string, unknown>, ctx: ExtensionContext) => unknown | Promise<unknown>) {
-			if (name === "session_start" || name === "before_agent_start") handlers.set(name, handler);
+			if (name === "session_start") {
+				const previous = handlers.get(name);
+				handlers.set(name, async (event, ctx) => { await previous?.(event, ctx); return handler(event, ctx); });
+			}
+			if (name === "before_agent_start") handlers.set(name, piPromptHandler(handler));
 		},
 		registerFlag() {},
 		getFlag() { return undefined; },
@@ -200,9 +205,13 @@ async function loadExtension(config: Record<string, unknown>, entryMinutesAgo = 
 
 async function runWiringCase(config: Record<string, unknown>, entryMinutesAgo = 2, injectionNow = NOW, usageTelemetry = true): Promise<{ first: Record<string, unknown> | undefined; second: Record<string, unknown> | undefined; root: string }> {
 	const originalNow = Date.now;
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	Date.now = () => NOW;
 	try {
 		const { harness, ctx, root } = await loadExtension(config, entryMinutesAgo, usageTelemetry);
+		// Runtime handlers resolve config too; retain this fixture's directory
+		// through injection rather than falling back to the worker's profile.
+		process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
 		await harness.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
 		Date.now = () => injectionNow;
 		const event = { type: "before_agent_start", prompt: "continue", systemPrompt: "base", systemPromptOptions: {} };
@@ -211,6 +220,8 @@ async function runWiringCase(config: Record<string, unknown>, entryMinutesAgo = 
 		return { first: first?.message, second: second?.message, root };
 	} finally {
 		Date.now = originalNow;
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 	}
 }
 

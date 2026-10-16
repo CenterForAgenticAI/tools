@@ -6,6 +6,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import * as path from "node:path";
+import { erasedSessionIds } from "../erasure/database.js";
+
+/** Only known profile pool layouts supply authority; arbitrary caller directories remain standalone. */
+export function erasedIdsForCacheDirectory(cacheDir: string): ReadonlySet<string> {
+	const resolved = path.resolve(cacheDir);
+	if (path.basename(path.dirname(resolved)) === "context-cache") return erasedSessionIds(path.dirname(path.dirname(resolved)));
+	if (path.basename(resolved) === "context" && path.basename(path.dirname(path.dirname(resolved))) === "sessions") return erasedSessionIds(path.dirname(path.dirname(path.dirname(resolved))));
+	return new Set();
+}
+
+function assertCacheWriterNotErased(cacheDir: string, sessionId: string): void {
+	if (erasedIdsForCacheDirectory(cacheDir).has(sessionId)) throw new Error("Erased sessions cannot write context-cache documents");
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -115,7 +128,9 @@ export function boundCacheListing(manifest: CacheManifest, maxListedFiles: numbe
 export function boundCacheDocuments(pools: readonly CacheReadPool[], maxListedFiles: number): BoundedCacheDocuments {
 	const documents = new Map<string, CacheDocument>();
 	for (const pool of pools) {
+		const erased = erasedIdsForCacheDirectory(pool.cacheDir);
 		for (const [file, entry] of Object.entries(readManifest(pool.cacheDir).files)) {
+			if (erased.has(entry.createdBy) || erased.has(entry.updatedBy)) continue;
 			if (!documents.has(file)) documents.set(file, { file, entry, cacheDir: pool.cacheDir, originScope: pool.originScope });
 		}
 	}
@@ -164,7 +179,11 @@ function copyMigratedCacheFile(sourceFile: string, destinationFile: string, dest
  */
 export function migrateCachePool(sourceDir: string, destinationDir: string): CacheMigrationResult {
 	if (path.resolve(sourceDir) === path.resolve(destinationDir)) return { changed: false, migratedFiles: [], failedFiles: [] };
+	const erased = erasedIdsForCacheDirectory(destinationDir);
 	const sourceManifest = readManifest(sourceDir);
+	for (const [file, entry] of Object.entries(sourceManifest.files)) {
+		if (erased.has(entry.createdBy) || erased.has(entry.updatedBy)) delete sourceManifest.files[file];
+	}
 	if (Object.keys(sourceManifest.files).length === 0) return { changed: false, migratedFiles: [], failedFiles: [] };
 
 	let destinationManifest = readManifest(destinationDir);
@@ -417,6 +436,7 @@ export function writeCacheFile(
 	content: string,
 	description: string,
 ): CacheManifest {
+	assertCacheWriterNotErased(cacheDir, sessionId);
 	writeCacheContent(cacheDir, file, content, false);
 	return cacheManifestAfterWrite(manifest, sessionId, file, content, description);
 }
@@ -440,6 +460,7 @@ export function promoteCacheFile(
 	description: string,
 	trustedSourceRoots?: readonly string[],
 ): { manifest: CacheManifest; entry: CacheFileEntry; rollback: () => void } {
+	assertCacheWriterNotErased(cacheDir, sessionId);
 	if (!isSafeCacheFileName(file)) throw new Error("file must be a safe cache filename with an extension");
 	if (!path.isAbsolute(sourcePath)) throw new Error("sourcePath must be an absolute path");
 	let sourceDescriptor: number;

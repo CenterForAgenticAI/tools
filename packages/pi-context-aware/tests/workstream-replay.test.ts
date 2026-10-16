@@ -12,6 +12,8 @@ import {
 	resolveWorkstreamInheritance,
 } from "../src/workstream/workstream-replay.js";
 import { WORKSTREAM_SCHEMA_VERSION, asPiSessionId, asWorkstreamId, type WorkstreamSnapshot } from "../src/workstream/workstream-schema.js";
+import { focusChain, focusEntry, historyTime, ordinaryMessage } from "./replay-history.js";
+import { randomFocusHistory, referenceReplay } from "./replay-reference.js";
 
 const now = "2026-07-17T00:00:00.000Z";
 function snapshot(revision: number, objective: string, eventId = `event-${revision}`, overrides: Partial<WorkstreamSnapshot> = {}): WorkstreamSnapshot {
@@ -317,20 +319,142 @@ test("fork/clone keeps workstream identity but isolates Pi session, while detach
 	assert.equal(detached.provenance?.inheritedWorkstreamId, source.workstreamId);
 });
 
-test("ordinary transcript entries do not count against the replay bound", () => {
+test("ordinary transcript entries never hide a later focus snapshot", () => {
 	const first = workstreamEntry(snapshot(1, "first"), { entryId: "entry-1", timestamp: now });
-	const filler = Array.from({ length: 150 }, (_, index) => ({ type: "message", id: `m-${index}` }));
-	const result = replayWorkstreamEntries([...filler, first], { maxEntries: 100 });
+	const filler = Array.from({ length: 20_000 }, (_, index) => ordinaryMessage(index));
+	const result = replayWorkstreamEntries([...filler, first]);
 	assert.equal(result.snapshot?.objective, "first");
+	assert.equal(result.rejected, 20_000);
 });
 
-test("legacy absence and bounded adversarial input remain neutral", () => {
+test("legacy absence and large non-focus input remain neutral", () => {
 	assert.equal(replayWorkstreamEntries([]).snapshot, null);
 	assert.equal(replayWorkstreamEntries([null, 1, "legacy", { type: "message", data: "summary" }]).snapshot, null);
 	const huge = Array.from({ length: 20_000 }, (_, index) => ({ type: "message", id: `legacy-${index}` }));
-	const result = replayWorkstreamEntries(huge, { maxEntries: 100 });
+	const result = replayWorkstreamEntries(huge);
 	assert.equal(result.snapshot, null);
 	assert.equal(result.rejected, 20_000);
+});
+
+test("a focus change after the 10,000th focus entry is the replayed state", () => {
+	const result = replayWorkstreamEntries(focusChain(10_050));
+	assert.equal(result.snapshot?.revision, 10_050);
+	assert.equal(result.snapshot?.objective, "objective revision 10050");
+	assert.equal(result.chainValid, true);
+	assert.equal(result.candidates.length, 10_050);
+	assert.equal(result.rejected, 0);
+});
+
+test("a legacy chain without predecessor IDs validates past the former boundary", () => {
+	const result = replayWorkstreamEntries(focusChain(10_050, { linked: false }));
+	assert.equal(result.snapshot?.revision, 10_050);
+	assert.equal(result.chainValid, true);
+});
+
+test("a long chain missing a predecessor keeps the last revision it can prove", () => {
+	const entries = focusChain(10_050);
+	entries.splice(10_019, 1); // remove revision 10,020
+	const result = replayWorkstreamEntries(entries);
+	assert.equal(result.snapshot?.revision, 10_019);
+	assert.equal(result.snapshot?.objective, "objective revision 10019");
+});
+
+test("a long chain without its root establishes no focus", () => {
+	const result = replayWorkstreamEntries(focusChain(12_000).slice(1));
+	assert.equal(result.snapshot, null);
+	assert.equal(result.authority, null);
+	assert.equal(result.chainValid, false);
+});
+
+test("a chain that names a missing predecessor does not reach its tail", () => {
+	const entries = focusChain(10_050);
+	const forged = focusEntry(10_051, "forged-tail", {
+		workstreamId: "ws-history",
+		piSessionId: "pi-history",
+		objective: "forged tail objective",
+		entryId: "forged-tail-entry",
+		timestamp: historyTime(20_000),
+		createdAt: historyTime(20_000),
+		previousEventId: "focus-missing",
+	});
+	const result = replayWorkstreamEntries([...entries, forged]);
+	assert.equal(result.snapshot?.revision, 10_050);
+	assert.equal(result.snapshot?.objective, "objective revision 10050");
+});
+
+/**
+ * Legacy entries name no predecessor, so replay chooses one: the best reachable
+ * entry of the previous revision created no later than the successor. Each
+ * candidate predecessor carries distinct provenance, and replay reports the
+ * nearest provenance on the winning lineage, which names the predecessor used.
+ */
+function legacyPredecessors(successorCreatedAt: string, options: { readonly unreachableLater?: boolean } = {}) {
+	const base = { workstreamId: "ws-history", piSessionId: "pi-history" } as const;
+	const root = focusEntry(1, "root", { ...base, objective: "root", entryId: "root-entry", timestamp: historyTime(1), createdAt: historyTime(10) });
+	const early = focusEntry(2, "early", {
+		...base, objective: "early", entryId: "early-entry", timestamp: historyTime(2), createdAt: historyTime(20),
+		provenance: { source: "host", host: "early" },
+	});
+	// Later in the transcript, so it wins when both predecessors are eligible.
+	const later = focusEntry(2, "later", {
+		...base, objective: "later", entryId: "later-entry", timestamp: historyTime(3),
+		createdAt: options.unreachableLater === true ? historyTime(5) : historyTime(40),
+		provenance: { source: "host", host: "later" },
+	});
+	const successor = focusEntry(3, "successor", { ...base, objective: "successor", entryId: "successor-entry", timestamp: historyTime(4), createdAt: successorCreatedAt });
+	return replayWorkstreamEntries([root, later, early, successor]);
+}
+
+test("a legacy successor follows the best predecessor created no later than itself", () => {
+	const bothEligible = legacyPredecessors(historyTime(50));
+	assert.equal(bothEligible.snapshot?.objective, "successor");
+	assert.equal(bothEligible.provenance?.host, "later");
+
+	const onlyEarly = legacyPredecessors(historyTime(30));
+	assert.equal(onlyEarly.snapshot?.objective, "successor");
+	assert.equal(onlyEarly.provenance?.host, "early");
+
+	// Equal creation times are eligible.
+	const sameInstant = legacyPredecessors(historyTime(40));
+	assert.equal(sameInstant.provenance?.host, "later");
+
+	const noneEligible = legacyPredecessors(historyTime(15));
+	assert.equal(noneEligible.snapshot?.revision, 2);
+	assert.equal(noneEligible.snapshot?.objective, "later");
+});
+
+test("a legacy successor never follows an unreachable predecessor that would compare higher", () => {
+	// "later" was created before the root, so no valid lineage reaches it.
+	const result = legacyPredecessors(historyTime(50), { unreachableLater: true });
+	assert.equal(result.snapshot?.objective, "successor");
+	assert.equal(result.provenance?.host, "early");
+});
+
+test("linked-lineage replay selects the same lineage as the pre-#148 replay on random histories", () => {
+	let established = 0;
+	let legacyChoices = 0;
+	let duplicates = 0;
+	let mutations = 0;
+	for (let seed = 1; seed <= 2_000; seed += 1) {
+		const entries = randomFocusHistory(seed);
+		const result = replayWorkstreamEntries(entries);
+		const expected = referenceReplay(entries);
+		assert.equal(result.snapshot?.eventId ?? null, expected.eventId, `seed ${seed}: selected snapshot`);
+		assert.deepEqual(result.provenance, expected.provenance, `seed ${seed}: inherited provenance`);
+		assert.deepEqual(result.mutation, expected.mutation, `seed ${seed}: mutation`);
+		assert.equal(result.candidates.length, expected.candidates, `seed ${seed}: candidates`);
+		assert.equal(result.rejected, expected.rejected, `seed ${seed}: rejected`);
+		assert.equal(result.duplicateEventIds, expected.duplicateEventIds, `seed ${seed}: duplicates`);
+		if (expected.eventId !== null) established += 1;
+		if (expected.duplicateEventIds > 0) duplicates += 1;
+		if (expected.mutation !== undefined) mutations += 1;
+		if (result.candidates.some((candidate) => candidate.snapshot.revision > 1 && candidate.previousEventId === undefined)) legacyChoices += 1;
+	}
+	// The generator must exercise both outcomes and legacy predecessor search.
+	assert.ok(established > 1_000 && established < 2_000, `established ${established}`);
+	assert.ok(legacyChoices > 1_000, `legacy ${legacyChoices}`);
+	assert.ok(duplicates > 500, `duplicates ${duplicates}`);
+	assert.ok(mutations > 200, `mutations ${mutations}`);
 });
 
 assert.equal(WORKSTREAM_SCHEMA_VERSION, 1);

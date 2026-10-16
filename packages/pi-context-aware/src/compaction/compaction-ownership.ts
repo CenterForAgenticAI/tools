@@ -1,7 +1,7 @@
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import * as path from "node:path";
 
-export type CompactionOwnershipState = "context-aware" | "pi-native" | "competing" | "none" | "deferred";
+export type CompactionOwnershipState = "context-aware" | "pi-native" | "competing" | "none" | "deferred" | "blocked";
 export type PiAutoCompactionSettingSource = "default" | "global" | "project";
 
 export type PiAutoCompactionSetting =
@@ -27,6 +27,8 @@ export interface CompactionOwnershipAssessment {
 	readonly contextAwareEnabled: boolean;
 	readonly piNativeEnabled: boolean;
 	readonly warning?: string;
+	/** Extension that cancels every compaction; set only in the `blocked` state. */
+	readonly blockedBy?: string;
 }
 
 type CompactionDeclaration =
@@ -113,7 +115,18 @@ export function assessCompactionOwnership(
 	contextAwareEnabled: boolean,
 	piNativeEnabled: boolean,
 	contextAwareSummarizerEnabled = true,
+	blockedBy?: string,
 ): CompactionOwnershipAssessment {
+	// No compaction can finish while another extension cancels them all, so no
+	// configuration of the two automatic owners matters and none warns.
+	if (blockedBy !== undefined) {
+		return {
+			state: "blocked",
+			contextAwareEnabled,
+			piNativeEnabled,
+			blockedBy,
+		};
+	}
 	if (!contextAwareSummarizerEnabled) {
 		return {
 			state: "deferred",

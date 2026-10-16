@@ -13,6 +13,9 @@ export const MAX_ADVISORY_ENTRY_BYTES = 8_192;
 /** Repeated pressure below this increase is coalesced into the latest entry. */
 export const WORKER_COMPACTION_MATERIAL_FRACTION_DELTA = 0.01;
 
+/** Longest `turnEntryId` kept; Pi entry ids are far shorter. */
+export const MAX_TURN_ENTRY_ID_CHARS = 128;
+
 /** Static worker guidance; producing an advisory must never start a model run. */
 export const WORKER_COMPACTION_INSTRUCTIONS =
 	"Preserve the worker's delegated brief without rewriting or reinterpreting it. Summarize completed work, the current in-flight tool state, and the immediate next action. Include exact file paths, commands, errors, test results, and commit state needed to continue. State whether the last tool call completed; if it did not, preserve its full intended arguments so it can be issued once without duplicating completed side effects.";
@@ -37,12 +40,19 @@ export interface WorkerCompactionAdvisoryV1 {
 	readonly instructions?: string;
 	/** Present only on `satisfied`: the advisory revision the compaction discharged. */
 	readonly satisfiedRevision?: number;
+	/**
+	 * The assistant entry whose turn end observed this pressure. A repeated turn
+	 * end for the same entry, which a pi-durable resume can produce, never appends
+	 * a second advisory. Additive: readers that predate it ignore it.
+	 */
+	readonly turnEntryId?: string;
 }
 
 interface WorkerCompactionBuildBase {
 	readonly revision: number;
 	readonly observedAt?: string | Date;
 	readonly usage?: WorkerCompactionUsageV1;
+	readonly turnEntryId?: string;
 }
 
 export type WorkerCompactionAdvisoryBuildInput =
@@ -66,6 +76,7 @@ export interface WorkerCompactionPressureObservation {
 	readonly reason: "threshold" | "generation-reserve" | "output-limit";
 	readonly usage?: WorkerCompactionUsageV1;
 	readonly observedAt?: string | Date;
+	readonly turnEntryId?: string;
 }
 
 export interface WorkerCompactionTurnPressure {
@@ -77,6 +88,7 @@ export interface WorkerCompactionTurnPressure {
 	readonly generationSafe?: boolean;
 	readonly usage?: WorkerCompactionUsageV1;
 	readonly observedAt?: string | Date;
+	readonly turnEntryId?: string;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -107,6 +119,11 @@ function isCanonicalUtcTimestamp(value: unknown): value is string {
 	}
 }
 
+/** A usable turn key, or undefined. A malformed key is dropped, never fatal. */
+function validTurnEntryId(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 && value.length <= MAX_TURN_ENTRY_ID_CHARS ? value : undefined;
+}
+
 function parseUsage(value: unknown): WorkerCompactionUsageV1 | undefined {
 	if (!isRecord(value)) return undefined;
 	if (typeof value.tokens !== "number" || !Number.isFinite(value.tokens)) return undefined;
@@ -132,6 +149,8 @@ function parseWorkerCompactionAdvisoryValue(value: unknown): WorkerCompactionAdv
 	if (value.usage !== undefined && usage === undefined) return undefined;
 	if (value.instructions !== undefined
 		&& (typeof value.instructions !== "string" || value.instructions.length > MAX_INSTRUCTION_CHARS)) return undefined;
+	const turnEntryId = validTurnEntryId(value.turnEntryId);
+	const turnKey = turnEntryId === undefined ? {} : { turnEntryId };
 
 	if (value.state === "satisfied") {
 		if (value.reason !== undefined || value.instructions !== undefined) return undefined;
@@ -143,6 +162,7 @@ function parseWorkerCompactionAdvisoryValue(value: unknown): WorkerCompactionAdv
 			observedAt: value.observedAt,
 			...(usage === undefined ? {} : { usage }),
 			satisfiedRevision: value.satisfiedRevision,
+			...turnKey,
 		};
 	}
 
@@ -157,6 +177,7 @@ function parseWorkerCompactionAdvisoryValue(value: unknown): WorkerCompactionAdv
 		...(usage === undefined ? {} : { usage }),
 		reason: value.reason,
 		instructions: value.instructions,
+		...turnKey,
 	};
 }
 
@@ -188,6 +209,7 @@ function fitInstructionsToPayload(
 	observedAt: string,
 ): WorkerCompactionAdvisoryV1 {
 	const bounded = input.instructions.slice(0, MAX_INSTRUCTION_CHARS);
+	const turnEntryId = validTurnEntryId(input.turnEntryId);
 	const candidate = (instructions: string): WorkerCompactionAdvisoryV1 => ({
 		schemaVersion: WORKER_COMPACTION_SCHEMA_VERSION,
 		state: input.state,
@@ -196,6 +218,7 @@ function fitInstructionsToPayload(
 		...(input.usage === undefined ? {} : { usage: input.usage }),
 		reason: input.reason,
 		instructions,
+		...(turnEntryId === undefined ? {} : { turnEntryId }),
 	});
 	if ((payloadBytes(candidate(bounded)) ?? Number.POSITIVE_INFINITY) <= MAX_ADVISORY_ENTRY_BYTES) {
 		return candidate(bounded);
@@ -223,6 +246,7 @@ export function buildWorkerCompactionAdvisory(input: WorkerCompactionAdvisoryBui
 			observedAt,
 			...(input.usage === undefined ? {} : { usage: input.usage }),
 			satisfiedRevision: input.satisfiedRevision,
+			...(validTurnEntryId(input.turnEntryId) === undefined ? {} : { turnEntryId: input.turnEntryId }),
 		}
 		: fitInstructionsToPayload(input, observedAt);
 	if (parseWorkerCompactionAdvisory(advisory) === undefined) {
@@ -284,7 +308,12 @@ export function appendWorkerCompactionPressure(
 	session: WorkerCompactionSessionEntries,
 	observation: WorkerCompactionPressureObservation,
 ): WorkerCompactionAdvisoryV1 | undefined {
-	const latest = latestWorkerCompactionAdvisory(session.getEntries());
+	const entries = session.getEntries();
+	// pi-durable runs turn-end hooks before it checkpoints the turn, so a resumed
+	// run can end the same turn again, sometimes measuring it higher (#171).
+	const turnEntryId = validTurnEntryId(observation.turnEntryId);
+	if (turnEntryId !== undefined && entries.some((entry) => advisoryFromEntry(entry)?.turnEntryId === turnEntryId)) return undefined;
+	const latest = latestWorkerCompactionAdvisory(entries);
 	if (shouldCoalesceWorkerCompactionPressure(latest, observation)) return undefined;
 	const advisory = buildWorkerCompactionAdvisory({
 		...observation,
@@ -315,6 +344,7 @@ export function appendWorkerCompactionForTurn(
 		...observation,
 		...(turn.usage === undefined ? {} : { usage: turn.usage }),
 		...(turn.observedAt === undefined ? {} : { observedAt: turn.observedAt }),
+		...(turn.turnEntryId === undefined ? {} : { turnEntryId: turn.turnEntryId }),
 	});
 }
 

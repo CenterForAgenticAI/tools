@@ -1,0 +1,1988 @@
+{
+  "repository": "https://github.com/ranxianglei/acp-kernel.git",
+  "commit": "5d7b5380df0aef87d9c96f2993dc8e2368dddb91",
+  "files": [
+    {
+      "file": "absorb.test.ts",
+      "upstreamSha256": "5b3da9760575cae159f295b1024e47846e3c2fc7b8d14cf08c489f49538fcdfe",
+      "sha256": "1b930a85b6e844e11106615388df6f38aecbf86afe49c7f807a433fdaf230a8d",
+      "changes": [
+        {
+          "from": "../src/absorb.js",
+          "to": "../../src/folds/kernel/absorb.js",
+          "count": 1
+        },
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/prune.js",
+          "to": "../../src/folds/kernel/prune.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "block-map.test.ts",
+      "upstreamSha256": "9cfa37fe4c02d05c6a310b77a837a95ac33d8ef3cc95959dc2d19163ccd16b79",
+      "sha256": "a1bd94d76b6b8044112c1f340cc87a1a4a54af8861c00115c62a89f7f9697cda",
+      "changes": [
+        {
+          "from": "../src/block-map.js",
+          "to": "../../src/folds/kernel/block-map.js",
+          "count": 1
+        },
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 2
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        },
+        {
+          "from": "../src/tokenize.js",
+          "to": "../../src/folds/kernel/tokenize.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "cache-report.test.ts",
+      "upstreamSha256": "58e65cd524ad611aad7010ca01f612b593b16ef711aab0d60701c61871ef86d3",
+      "sha256": "8e4ab375a3764b30df244f64251f3652284767b4f5b52d0b43f127363c5f906c",
+      "changes": [
+        {
+          "from": "../src/cache-report.js",
+          "to": "../../src/folds/kernel/cache-report.js",
+          "count": 1
+        },
+        {
+          "from": "../src/compress-tools.js",
+          "to": "../../src/folds/kernel/compress-tools.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "ccr.test.ts",
+      "upstreamSha256": "1f7e94b135f175a00c85a78a728fa37db63b5d48e306c76bea4fd6534587a6ed",
+      "sha256": "ca046b447935b999322ced3d2aee4e777c184da9776e1c981347a4531f404de3",
+      "changes": [
+        {
+          "from": "../src/content-store.js",
+          "to": "../../src/folds/kernel/content-store.js",
+          "count": 2
+        },
+        {
+          "from": "../src/ccr.js",
+          "to": "../../src/folds/kernel/ccr.js",
+          "count": 1
+        },
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/absorb.js",
+          "to": "../../src/folds/kernel/absorb.js",
+          "count": 2
+        },
+        {
+          "from": "../src/compress-tools.js",
+          "to": "../../src/folds/kernel/compress-tools.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "checkpoint-carrier.test.ts",
+      "upstreamSha256": "ced36d9e4bd92e203c6c8961b05377b0b8d6efab1ea4b6a59d864c0ce3f97bba",
+      "sha256": "e44dfc26a8a0c36fb6b7459bc6d9ac2a41515b7c80cc47826c36ec9f2f9e020b",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/prune.js",
+          "to": "../../src/folds/kernel/prune.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "compress-schema-contract.test.ts",
+      "upstreamSha256": "8da8651a814bcf61b42742817bf880eb852d6ce3724340ec8b07fb6b7ad75506",
+      "sha256": "bd4f47d14dc2c45d0cce59630dfa61d4880642e2fba1f6a509843df6a3845832",
+      "changes": [
+        {
+          "from": "../src/compress-tools.js",
+          "to": "../../src/folds/kernel/compress-tools.js",
+          "count": 1
+        },
+        {
+          "from": "../src/parse-compress-input.js",
+          "to": "../../src/folds/kernel/parse-compress-input.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "compress-tools.test.ts",
+      "upstreamSha256": "933c32ddde1985c3066a8c82612d5bbe8f367aed9de5476064252d3ee1798ff9",
+      "sha256": "ebbffe04db2d2e8bc6e81092725181db8f18734d33286d686917821093d915fb",
+      "changes": [
+        {
+          "from": "../src/compress-tools.js",
+          "to": "../../src/folds/kernel/compress-tools.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "compress.test.ts",
+      "upstreamSha256": "3e77e391b93b3c4a2aef2f923f72a3e3d65db13141d98880819ffe531396edb2",
+      "sha256": "3fd23a52e4bced4ffe36ece34da8fee1eab38aef9722e6ad4a8b33c8613700cf",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/boundaries.js",
+          "to": "../../src/folds/kernel/boundaries.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/prune.js",
+          "to": "../../src/folds/kernel/prune.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "crush.test.ts",
+      "upstreamSha256": "57d16ea1ff29b66ff837d2e1360deb31766d5d5c637be65cbfef2bc37de54622",
+      "sha256": "0be3cf3599ff4006205d28c092abca0bc818a45fb304aa969bd9bcf5a4266149",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/absorb.js",
+          "to": "../../src/folds/kernel/absorb.js",
+          "count": 1
+        },
+        {
+          "from": "../src/pipeline.js",
+          "to": "../../src/folds/kernel/pipeline.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        },
+        {
+          "from": "../src/crush.js",
+          "to": "../../src/folds/kernel/crush.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "decompress-report.test.ts",
+      "upstreamSha256": "a3fdce0d5157427a934ebe676477d8be323992e3fa15177db7713bb7d90df9c6",
+      "sha256": "875625665a45c5d4b3736a0bef7274f02cd963d756e1aead5a02a6a054c17d23",
+      "changes": [
+        {
+          "from": "../src/decompress.js",
+          "to": "../../src/folds/kernel/decompress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/report.js",
+          "to": "../../src/folds/kernel/report.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/tokenize.js",
+          "to": "../../src/folds/kernel/tokenize.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "doc-cache.test.ts",
+      "upstreamSha256": "8dc3c12335ecad0c87bb6fabab46f6793b151eb2e9e77fdcf2505a726f3f15d9",
+      "sha256": "a0c4cc58d0ccd67425bce58bd0cfb5c1fc94e4bbedd8c20e851d390955b95177",
+      "changes": [
+        {
+          "from": "../src/index.js",
+          "to": "../../src/folds/kernel/index.js",
+          "count": 1
+        },
+        {
+          "from": "../src/search/tokenizer.js",
+          "to": "../../src/folds/kernel/search/tokenizer.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "effective-gate-chars.test.ts",
+      "upstreamSha256": "6397e827c36aa4abc7b5dd68b638c917f3363f97bea95e20d046cedf01778937",
+      "sha256": "663474e3f87c48244465e1b0bce84d910075d930bc67657a33a8a29cda436e5d",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 2
+        },
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "fixtures/prompt-function-default.txt",
+      "upstreamSha256": "9e8d1f0613e26b1b5a618f622857cf73a8f8e540f637b6abff834f60885f6858",
+      "sha256": "9e8d1f0613e26b1b5a618f622857cf73a8f8e540f637b6abff834f60885f6858",
+      "changes": []
+    },
+    {
+      "file": "fixtures/prompt-hybrid-default.txt",
+      "upstreamSha256": "97b647f6c1d80cb339413e826a9fe264c816315fb49e8871858622ceab50cfa0",
+      "sha256": "97b647f6c1d80cb339413e826a9fe264c816315fb49e8871858622ceab50cfa0",
+      "changes": []
+    },
+    {
+      "file": "fixtures/prompt-text-default.txt",
+      "upstreamSha256": "eac18f6a8ee2b93330c0e8d7920f33795f899d46b156488561c584e373c76f54",
+      "sha256": "eac18f6a8ee2b93330c0e8d7920f33795f899d46b156488561c584e373c76f54",
+      "changes": []
+    },
+    {
+      "file": "handoff.test.ts",
+      "upstreamSha256": "c86dec503d6a69a0549f0294f5d01c73140752b1f4abe0a6e4ed3869201588eb",
+      "sha256": "cdddf0794587230ae2acc8d757bb0aa475c233a2893a38a280444c68c487db6e",
+      "changes": [
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/handoff.js",
+          "to": "../../src/folds/kernel/handoff.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "hide-consumed-stub.test.ts",
+      "upstreamSha256": "43b4dbb8f27d3fa72d3c85bd5d5f673061891541f3b837f8ce4ac0aca011d296",
+      "sha256": "9161e88648761a8df4fe20abc465bcd999cf0182fe194d9038a9dc73039d6555",
+      "changes": [
+        {
+          "from": "../src/hide-consumed.js",
+          "to": "../../src/folds/kernel/hide-consumed.js",
+          "count": 1
+        },
+        {
+          "from": "../src/render-refs.js",
+          "to": "../../src/folds/kernel/render-refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "hide-merge-rebuild.test.ts",
+      "upstreamSha256": "57ffd0f08fbb766984c1114a6349a044eaba93a88a9aeb96d92b5824f41b0b01",
+      "sha256": "25b3c25dd09263238f56c0eaf7317e68f84bddfb168fcd5344938a2764ed4bd6",
+      "changes": [
+        {
+          "from": "../src/hide-consumed.js",
+          "to": "../../src/folds/kernel/hide-consumed.js",
+          "count": 1
+        },
+        {
+          "from": "../src/rebuild.js",
+          "to": "../../src/folds/kernel/rebuild.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "issue1476-reid.test.ts",
+      "upstreamSha256": "a1cfcea0eda75d6f946f1b3ee79d6c5873c6351975ccfd0724c22dd824c45e65",
+      "sha256": "b9e8df4de752cd002bf69b61dce0bad201c47eb0767ac8b53b909e7abaa05aa4",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/instance-reid.js",
+          "to": "../../src/folds/kernel/instance-reid.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "issue684-turn-integrity.test.ts",
+      "upstreamSha256": "e107ab33b5a1e593d00b16583e4e3cb488689d632622504caaf58ae3ccedaa41",
+      "sha256": "1682bcfc178d7dc21721468d31d04d7e776ccb82d69413c08aef56bb96ef594d",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/turn-integrity.js",
+          "to": "../../src/folds/kernel/turn-integrity.js",
+          "count": 1
+        },
+        {
+          "from": "../src/reasoning-pairs.js",
+          "to": "../../src/folds/kernel/reasoning-pairs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "nudge-pressure-benefit.test.ts",
+      "upstreamSha256": "935c9ee3a7565752f30f85b0a31c0fbd94edbe3ebf10c6cb3886efb49ec7813a",
+      "sha256": "6ef0f04ccda2a2ab47e1ed7e7ede11f98c0c0f14a31cf1e8461a15e3efd372e8",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "nudge-sections.test.ts",
+      "upstreamSha256": "558354037937227a7b7aec323d919c75cd6a4813ac6229442ffe56f796d2aa9f",
+      "sha256": "a753a00efefb7b87a568175b0390b1ea9453b46cdb4f8434ab0c56e915e60191",
+      "changes": [
+        {
+          "from": "../src/prompts.js",
+          "to": "../../src/folds/kernel/prompts.js",
+          "count": 1
+        },
+        {
+          "from": "../src/nudge-text.js",
+          "to": "../../src/folds/kernel/nudge-text.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "nudge-text.test.ts",
+      "upstreamSha256": "2baec3541be1d7b58e325ac6f367bf00707863c3dcb2dc2430690563f9f427ca",
+      "sha256": "e95884625318caa2ac15fc36210702c1eeac3ac4aaf3d52a9925d578321092f2",
+      "changes": [
+        {
+          "from": "../src/nudge-text.js",
+          "to": "../../src/folds/kernel/nudge-text.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "nudge.test.ts",
+      "upstreamSha256": "b11489f6332baa4a9580f0a3092975426dadee90080adbbe03712195bd7da9c6",
+      "sha256": "618d9a1207f9628ca5e3ee342f38303917739ba208be52d3b0f5bba68be323dc",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "open-objectives.test.ts",
+      "upstreamSha256": "387cac624992276c5d75f10c9b5c8f938ba8cf6be5cc9428716465bf0d89eecf",
+      "sha256": "a8d2e25b505c48cb6a6f88a2b9f6a0049275877adc52b62df65436c800287c92",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/decompress.js",
+          "to": "../../src/folds/kernel/decompress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/nudge-text.js",
+          "to": "../../src/folds/kernel/nudge-text.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "orphan-endpoint-snap.test.ts",
+      "upstreamSha256": "2df74ac50f9a121f3ba6a0eeb564cc068e162366d0fbcd49f2eda7d39a24cd46",
+      "sha256": "e2b4dfca2102ba08bb31309495af46a8b472aa2f5198ef95664f813c2869da04",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/boundaries.js",
+          "to": "../../src/folds/kernel/boundaries.js",
+          "count": 1
+        },
+        {
+          "from": "../src/hide-consumed.js",
+          "to": "../../src/folds/kernel/hide-consumed.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "orphan-fixes.test.ts",
+      "upstreamSha256": "16fdc84e649c3a6072250303e9e72fc39d70fdb2a0421ccbcd3ecc2fab635191",
+      "sha256": "3e9bb5711f2179da9c0cff0b341801f8a9163e0fb704391d237686eb1d296e40",
+      "changes": [
+        {
+          "from": "../src/hide-consumed.js",
+          "to": "../../src/folds/kernel/hide-consumed.js",
+          "count": 1
+        },
+        {
+          "from": "../src/prune.js",
+          "to": "../../src/folds/kernel/prune.js",
+          "count": 1
+        },
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "output-steering.test.ts",
+      "upstreamSha256": "6ef841f0d8fcc57d81048ec93b3ae76035ac3ed1cbcee892bedd5ef6200eb981",
+      "sha256": "30481b60209c686d5045f8e2157a3ebd7cf0d260b547acd3d824428fa105dd8f",
+      "changes": [
+        {
+          "from": "../src/output-steering.js",
+          "to": "../../src/folds/kernel/output-steering.js",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "file": "packs.test.ts",
+      "upstreamSha256": "99a459368314a07a3b7f960049b62357ce4101c77568cde63b5751fcbc1d0a32",
+      "sha256": "e0c9b56de319d6c6c0f5f63740a0b5fb4f3eea04a34891ab4906c592bbafe926",
+      "changes": [
+        {
+          "from": "../src/index.js",
+          "to": "../../src/folds/kernel/index.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "parse-compress-input.test.ts",
+      "upstreamSha256": "60f46a87806bed05816b1839a26777897f66c06a12362af44c6159a6cad1289c",
+      "sha256": "18705f6ff7e4affc71830bc59402aae16bc66c7ac7b32db5d07784985af49de8",
+      "changes": [
+        {
+          "from": "../src/parse-compress-input.js",
+          "to": "../../src/folds/kernel/parse-compress-input.js",
+          "count": 1
+        },
+        {
+          "from": "../src/rebuild.js",
+          "to": "../../src/folds/kernel/rebuild.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "pipeline.test.ts",
+      "upstreamSha256": "19c74b39f2e20eb14c1a9fe39178f53f93e3c53901505fd737563cadd2d8be03",
+      "sha256": "a94343d7335cb252b7a45565952e1d3cca9653f5977094d5ccfaf4fd1794b30a",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/render-refs.js",
+          "to": "../../src/folds/kernel/render-refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/pipeline.js",
+          "to": "../../src/folds/kernel/pipeline.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "prompts.test.ts",
+      "upstreamSha256": "925999652241ce184a6ec27f86bac5071efdc4104012cc4c32c34c1ea0569a6f",
+      "sha256": "9e5eeb856c75eede1d0b794dcdf5835c0d930f9fd203dbaf5e497534879716ae",
+      "changes": [
+        {
+          "from": "../src/prompts.js",
+          "to": "../../src/folds/kernel/prompts.js",
+          "count": 1
+        },
+        {
+          "from": "../src/nudge-text.js",
+          "to": "../../src/folds/kernel/nudge-text.js",
+          "count": 1
+        },
+        {
+          "from": "../src/compression-rules.js",
+          "to": "../../src/folds/kernel/compression-rules.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "protect-recent.test.ts",
+      "upstreamSha256": "5d7caf71570f738ab352ab161669d10e93767f41288cbaca2fd7ff873ce213ad",
+      "sha256": "aa927dcb56c647a58eb14a584d401dc787dad53f018bba7097f4f286418b02d8",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/protected.js",
+          "to": "../../src/folds/kernel/protected.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        },
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 5
+        }
+      ]
+    },
+    {
+      "file": "protected-content.test.ts",
+      "upstreamSha256": "c43bb74914067026d3f6dfa2baec5c467fb3bc16f10d4671b6f789a9b4ce9665",
+      "sha256": "98e94becd8776951e7db62bff9b6c7828029d35c7bfff987ecc1ce30a71171dc",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "protected-latest.test.ts",
+      "upstreamSha256": "e35470b78dcc19488761189542c8be4eae26c51d1bf478223c6aea39a560d1f2",
+      "sha256": "1a5fd7a513e4b139003f4f07e16ec8b8532860013fd0eb0c2e47f7d429a28a26",
+      "changes": [
+        {
+          "from": "../src/index.js",
+          "to": "../../src/folds/kernel/index.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/protected.js",
+          "to": "../../src/folds/kernel/protected.js",
+          "count": 1
+        },
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 1
+        },
+        {
+          "from": "../src/absorb.js",
+          "to": "../../src/folds/kernel/absorb.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "range-coverage.test.ts",
+      "upstreamSha256": "9c38ddb80e41663d790a740a699f912e3bf73d132ca7bb41861024c0ba75baea",
+      "sha256": "f95e27e89ed7a477c0f564be636ba2dbbba374fc6ec73de318966cb573ee2b5e",
+      "changes": [
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 1
+        },
+        {
+          "from": "../src/nudge-text.js",
+          "to": "../../src/folds/kernel/nudge-text.js",
+          "count": 1
+        },
+        {
+          "from": "../src/boundaries.js",
+          "to": "../../src/folds/kernel/boundaries.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "ranges-consistency.test.ts",
+      "upstreamSha256": "a08dec1bf71ad67450385127de0df5baaccf98e7af99bcf64f0ff4588a4c14f3",
+      "sha256": "d06789fd9ffb2e1792a7789c62189b0b807d0330c0dac92d4a5168a79b7db441",
+      "changes": [
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 1
+        },
+        {
+          "from": "../src/report.js",
+          "to": "../../src/folds/kernel/report.js",
+          "count": 2
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/tokenize.js",
+          "to": "../../src/folds/kernel/tokenize.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "reasoning-pairs.test.ts",
+      "upstreamSha256": "d3207252157e525e26be4dc70b0fe7214466c6baeaf6a3dde668a078455bf059",
+      "sha256": "57f5f9c042b68c921060344751cd3223a65a664a7ba0656c09ff011a6d3e8bd8",
+      "changes": [
+        {
+          "from": "../src/reasoning-pairs.js",
+          "to": "../../src/folds/kernel/reasoning-pairs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        },
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 2
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/prune.js",
+          "to": "../../src/folds/kernel/prune.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "recommend-merge.test.ts",
+      "upstreamSha256": "ee09f5aa215b0faa4f618209f915e6fbdc6ceaa95cbbf895d2c40e0c0e56b593",
+      "sha256": "c5e9f13e4d87c5f7b73cc0804f6685da9fb6ad1bb0068c80e9e8e5549fe1680e",
+      "changes": [
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "recommend-range-integrity.test.ts",
+      "upstreamSha256": "6ff0e44016a83af63a85d71874e5fe3f6226f32bb64b6f1bd14b4c0e0fbcb637",
+      "sha256": "0fa4699bf089e83141162db5395c0ddfe35ab1c58dfb5bcd6a09b535af16f9a3",
+      "changes": [
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 1
+        },
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "recommend.test.ts",
+      "upstreamSha256": "54e092950abf41dad2493f82f4a238026ac3887e4b54b33cabf58a10f6d4761d",
+      "sha256": "5fc5bb589cd8b367dd3050d97834019c55f2411db753dc727790dfe91954ec96",
+      "changes": [
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 1
+        },
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        },
+        {
+          "from": "../src/tokenize.js",
+          "to": "../../src/folds/kernel/tokenize.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "refold.test.ts",
+      "upstreamSha256": "432b67eb1e7d4ed0f5bf86f2b4beb985017af965d3ca780a1994fe51a47ed70a",
+      "sha256": "179f291207995e7a5e8e83e18cb19e4dbb4c717c854990722462b8f54c797d83",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/decompress.js",
+          "to": "../../src/folds/kernel/decompress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "refs.test.ts",
+      "upstreamSha256": "630420bf782974392ced520d4a0b2fcb3f0b5ba9355404e1ee4fe8c6b5a36b6c",
+      "sha256": "a3618bf1734b3daf13d9ba110b7e2f95fe89eb16d8220abfcf888efd328699cf",
+      "changes": [
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "regression-bili-470.test.ts",
+      "upstreamSha256": "21455b80a58aa89d8d3b344cefa38d3f6be6d5be696f1d8062229cf913326227",
+      "sha256": "16ff04091c1f193b39d7473eb54b7960155fec8695f5c69acaba00f4416cec5e",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/prune.js",
+          "to": "../../src/folds/kernel/prune.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "regression-bugfixes.test.ts",
+      "upstreamSha256": "dbdc5bf506f8841b9f6a27f31ff5f17c722e207cd81653c128510b3c75848fc4",
+      "sha256": "5c0b782408e17af51bdd3836cc430fe7e41997c46c620149e4f1fd557c7a584d",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/render-refs.js",
+          "to": "../../src/folds/kernel/render-refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/pipeline.js",
+          "to": "../../src/folds/kernel/pipeline.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "regression-empty-rewrap.test.ts",
+      "upstreamSha256": "64dee2a5befeb586ef001bab64a03e438217c04d277aa3afa3ab47e44e4ae78c",
+      "sha256": "fb342e636b524aec958ca92b0cb069fdeb05e3eae9fbbfc207dd5d883376e446",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/prune.js",
+          "to": "../../src/folds/kernel/prune.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "regression-features.test.ts",
+      "upstreamSha256": "9d6fb9d0a441edd0ec0c3c715c779b7dd4eb37f6aecb9c62699bcd5a71b99cae",
+      "sha256": "d93228244e32f16ef33a2ed097831e1644dc7eab090c70dad3b9a0590fba98e3",
+      "changes": [
+        {
+          "from": "../src/index.js",
+          "to": "../../src/folds/kernel/index.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "regression-promote-after-prune.test.ts",
+      "upstreamSha256": "10a8cf15a4e3e71251daef69fb9253a11b658c727c0c0471812e85cfa0aeec7c",
+      "sha256": "1ddad493912b99f9a3855b9fd69667959bad493dcacab331c05b95369b147a84",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/prune.js",
+          "to": "../../src/folds/kernel/prune.js",
+          "count": 1
+        },
+        {
+          "from": "../src/sync.js",
+          "to": "../../src/folds/kernel/sync.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "report-accounting.test.ts",
+      "upstreamSha256": "e347964f5c7378a4c487014758232dbe3ba44b60eae37640fa128ff4b5d08ae9",
+      "sha256": "22039abed1db7e47677d9d8347a2079ef1700436c7f682b2e1420fe136985228",
+      "changes": [
+        {
+          "from": "../src/report.js",
+          "to": "../../src/folds/kernel/report.js",
+          "count": 1
+        },
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/tokenize.js",
+          "to": "../../src/folds/kernel/tokenize.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "report-tool-accounting.test.ts",
+      "upstreamSha256": "de6ff6265e598c9f125b7f188e1798fc8a310063048ec5e2465c12041a8ebb48",
+      "sha256": "9972dece810ffb267f1880e93b99670e5587f138502aafa68281c9faf5c4f565",
+      "changes": [
+        {
+          "from": "../src/report.js",
+          "to": "../../src/folds/kernel/report.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/tokenize.js",
+          "to": "../../src/folds/kernel/tokenize.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "report-truncation.test.ts",
+      "upstreamSha256": "b8dd6818d60765cc8c73eb4355f6de4c078774f9012d5bb7cee6fa5032112f2e",
+      "sha256": "14f8f0e85d05231542230fe69dba42369f11f629aeef71ba1169ba0be9124a2e",
+      "changes": [
+        {
+          "from": "../src/report.js",
+          "to": "../../src/folds/kernel/report.js",
+          "count": 1
+        },
+        {
+          "from": "../src/nudge-text.js",
+          "to": "../../src/folds/kernel/nudge-text.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/tokenize.js",
+          "to": "../../src/folds/kernel/tokenize.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "segment.test.ts",
+      "upstreamSha256": "ae673413e673526a7740fbfc967f2df1d316720bc3857a375301b20bec67012b",
+      "sha256": "0cc083e90c4677366a66d4a9456c6d15f06513f622c89ebfeceebd351102c4a8",
+      "changes": [
+        {
+          "from": "../src/segment.js",
+          "to": "../../src/folds/kernel/segment.js",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "file": "state-prune.test.ts",
+      "upstreamSha256": "259cebb10a53db4e037fe2d375299f90ae821f799c7a80ecf54178b86763b42f",
+      "sha256": "6a965a7ef9d3c914a6a1b519b2df875ed41a0b8e12331775791ac5dec0c4bb87",
+      "changes": [
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/prune.js",
+          "to": "../../src/folds/kernel/prune.js",
+          "count": 1
+        },
+        {
+          "from": "../src/index.js",
+          "to": "../../src/folds/kernel/index.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "status-surface-meta.test.ts",
+      "upstreamSha256": "ffeb8044433ae9e27bbbb603232c39eab20fe5f3e46f4907b235b7db264d381e",
+      "sha256": "e533be3ac4dab4acd9aa778c04337279a1430ebe26256d81f191bf3da5bc6e65",
+      "changes": [
+        {
+          "from": "../src/report.js",
+          "to": "../../src/folds/kernel/report.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/tokenize.js",
+          "to": "../../src/folds/kernel/tokenize.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "surface-config.test.ts",
+      "upstreamSha256": "bbafd946de4ffe2048748a0c17439567bc3bd59bec1a94bea2c7472069821daf",
+      "sha256": "b263eeffac376df3e6097887693f60b40d59db8d4e9adfe517d244fb5beee8a8",
+      "changes": [
+        {
+          "from": "../src/surface-config.js",
+          "to": "../../src/folds/kernel/surface-config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/compress-tools.js",
+          "to": "../../src/folds/kernel/compress-tools.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "sync-config.test.ts",
+      "upstreamSha256": "8d1ae53c3c14b413a283882bd3d65ad3fc86de3e8cfc185fe3cc64be1e61829b",
+      "sha256": "fde51db9d395d2827fa0d45757f4f805051fc945f3ddaaeee9529c538e66ef70",
+      "changes": [
+        {
+          "from": "../src/sync.js",
+          "to": "../../src/folds/kernel/sync.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "terminal-escape.test.ts",
+      "upstreamSha256": "f549a2dfeb8e9c2da7cf48973845b4b3c13e3b7e99e3dd08641cf59dfb9ad986",
+      "sha256": "52a3368ade97f5f798bbc4e603b3f003a85eff39997b79a69520f38636ddf8cf",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/truncate-tools.js",
+          "to": "../../src/folds/kernel/truncate-tools.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "thinking-tokens.test.ts",
+      "upstreamSha256": "0c9546cb5b3be203751d667d5911a0155ea76e1e8f4b42714518ac1282af0744",
+      "sha256": "caabcd96dfe827f547258f01b35f07027e6a57de5108dec3134fbfb432f47811",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/tokenize.js",
+          "to": "../../src/folds/kernel/tokenize.js",
+          "count": 1
+        },
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 1
+        },
+        {
+          "from": "../src/render-refs.js",
+          "to": "../../src/folds/kernel/render-refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "tier-scale-separation.test.ts",
+      "upstreamSha256": "f617820ee2d269794d318a9c22b2574b834bfca595c2d338fb5833a5d34c52e0",
+      "sha256": "95aa402b34cb6764ac1f8436f8afb0cea3feaa2f1542ad8aceb73db545b27e21",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "token-snapshot.test.ts",
+      "upstreamSha256": "c95c34128bef298d8344aa69d2229227d2f9435577406cf665436c4c28d7568a",
+      "sha256": "88f037555f16916a6e31b17901aa09195fea7df8b24361ba636b9260f830affa",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/sync.js",
+          "to": "../../src/folds/kernel/sync.js",
+          "count": 1
+        },
+        {
+          "from": "../src/render-refs.js",
+          "to": "../../src/folds/kernel/render-refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/pipeline.js",
+          "to": "../../src/folds/kernel/pipeline.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "tokenizer.test.ts",
+      "upstreamSha256": "5e9978dfc6713a97546935a4b6233220993b05c7dc5f6f54c6506678f722ba1b",
+      "sha256": "86892a3c73da567b2e398bfb0a6229cc83dc74b5b5a05ef4c3cbe58b5a1dc361",
+      "changes": [
+        {
+          "from": "../src/tokenize.js",
+          "to": "../../src/folds/kernel/tokenize.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "tool-pair-integrity.test.ts",
+      "upstreamSha256": "a07c4b6d06ab26c78d6aaf88af44719dea256f61135ebe2b7f400817dffbb3ad",
+      "sha256": "a8f144c6c2c525b1d1db504d903a688419cdc3929d7a4748850af5c16d966404",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/prune.js",
+          "to": "../../src/folds/kernel/prune.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "tool-pairs.test.ts",
+      "upstreamSha256": "6216897e9fd2c90980733f83f80b30ec1530f9aec5b6cb6429d397eed949344d",
+      "sha256": "e919d423e512b83366c717441592a8429dd4388374594b940d2d17e150e83b2f",
+      "changes": [
+        {
+          "from": "../src/tool-pairs.js",
+          "to": "../../src/folds/kernel/tool-pairs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        },
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "transform-channel.test.ts",
+      "upstreamSha256": "bed0c69542c201bef41121037e25e658573a053e4a95844357677064330b9445",
+      "sha256": "4319c0b5cd7210a7269b996c5e96f5ee3818f55dc717e0cb70cad249f6d656ce",
+      "changes": [
+        {
+          "from": "../src/transform-channel.js",
+          "to": "../../src/folds/kernel/transform-channel.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "truncate-keep-filter.test.ts",
+      "upstreamSha256": "6ae7a96954e21db52817856a8cfe81dff27b5a342b6575eca1b24aa90ae82a5b",
+      "sha256": "397e132190bd41b19353d7c2a534e0178bb904a99fafba018c19433a74dc39a9",
+      "changes": [
+        {
+          "from": "../src/truncate-tools.js",
+          "to": "../../src/folds/kernel/truncate-tools.js",
+          "count": 1
+        },
+        {
+          "from": "../src/filter/index.js",
+          "to": "../../src/folds/kernel/filter/index.js",
+          "count": 1
+        },
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "validation.test.ts",
+      "upstreamSha256": "d4a1e0774fd9c9556182797d1ef62d2c34dac4d2fa90ce5530383a1a2efb0637",
+      "sha256": "1839f575efa0a14716ad6258a35ca74a7a4e8ef9bddd84fab26de3ddf94c56a4",
+      "changes": [
+        {
+          "from": "../src/compress.js",
+          "to": "../../src/folds/kernel/compress.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/refs.js",
+          "to": "../../src/folds/kernel/refs.js",
+          "count": 1
+        },
+        {
+          "from": "../src/config.js",
+          "to": "../../src/folds/kernel/config.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "viable.test.ts",
+      "upstreamSha256": "c14a848e96f516a82590dbb559b276ec0cb0173f39b7452d46d26e4d3dd5ffda",
+      "sha256": "5a4507c2a2bae7e59e1ae267b8f8f85398909ed2d7dcd131df43a8aa9c3612d4",
+      "changes": [
+        {
+          "from": "../src/viable.js",
+          "to": "../../src/folds/kernel/viable.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "wire-schema-gemini.test.ts",
+      "upstreamSha256": "fc633b782df17abf95716b64ce9481304652d1816ca5d0f9f185c3ca6249b6a2",
+      "sha256": "07de79d6bf30bb71220ae4de2a54caa6c0dfec6ca0a5c22ef4a208c8a32ab937",
+      "changes": [
+        {
+          "from": "../src/compress-tools.js",
+          "to": "../../src/folds/kernel/compress-tools.js",
+          "count": 1
+        },
+        {
+          "from": "../src/parse-compress-input.js",
+          "to": "../../src/folds/kernel/parse-compress-input.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "wire-schema-top-level.test.ts",
+      "upstreamSha256": "e0482ec9fbd6c98615846d574625a3e395f4f15899bfbeaa133b32c44615c6ed",
+      "sha256": "aff86e8be7056bc770038a1de0bd2b16af388660f93a1f785bdab4dd7484d145",
+      "changes": [
+        {
+          "from": "../src/compress-tools.js",
+          "to": "../../src/folds/kernel/compress-tools.js",
+          "count": 1
+        }
+      ]
+    }
+  ],
+  "excluded": [
+    {
+      "file": "compress-detect.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/compress-detect.js, wire/bili-message.js"
+    },
+    {
+      "file": "image-compress.test.ts",
+      "reason": "Imports uncopied entrypoint modules: persist/state-merge.js"
+    },
+    {
+      "file": "media-payload.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/openai.js"
+    },
+    {
+      "file": "openai-system-hoist.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/openai.js, wire/mirror.js"
+    },
+    {
+      "file": "panel.test.ts",
+      "reason": "Imports uncopied entrypoint modules: panel/index.js"
+    },
+    {
+      "file": "persist.test.ts",
+      "reason": "Imports uncopied entrypoint modules: persist/store.js, persist/state-merge.js"
+    },
+    {
+      "file": "rules.test.ts",
+      "reason": "Imports uncopied entrypoint modules: persist/state-merge.js"
+    },
+    {
+      "file": "search.test.ts",
+      "reason": "Imports uncopied entrypoint modules: search/algorithms/semantic.js"
+    },
+    {
+      "file": "truncate-surrogates.test.ts",
+      "reason": "Imports uncopied entrypoint modules: panel/topic.js"
+    },
+    {
+      "file": "wire-bili-message-roundtrip.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/anthropic.js, wire/openai.js, wire/responses.js"
+    },
+    {
+      "file": "wire-conversation-signal.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/anthropic.js, wire/openai.js, wire/util.js"
+    },
+    {
+      "file": "wire-demoted-thinking.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/demoted-thinking.js, wire/openai.js, wire/responses.js"
+    },
+    {
+      "file": "wire-formats.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/formats.js"
+    },
+    {
+      "file": "wire-google.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/google.js, wire/formats.js, wire/strip-images.js"
+    },
+    {
+      "file": "wire-mirror.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/mirror.js, wire/openai.js, wire/anthropic.js, wire/responses.js"
+    },
+    {
+      "file": "wire-proxy-message-id.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/anthropic.js, wire/openai.js, wire/responses.js"
+    },
+    {
+      "file": "wire-reasoning-echo.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/openai.js"
+    },
+    {
+      "file": "wire-strip-images.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/strip-images.js, wire/anthropic.js"
+    },
+    {
+      "file": "wire-subagent-namespace.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/responses.js"
+    },
+    {
+      "file": "wire-tool-result-toolname.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/anthropic.js, wire/openai.js, wire/responses.js, wire/message-id.js"
+    }
+  ]
+}

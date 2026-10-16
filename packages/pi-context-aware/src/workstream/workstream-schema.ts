@@ -192,11 +192,11 @@ function positiveInteger(value: unknown): value is number {
 	return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
-const REF_KINDS: readonly WorkstreamRef["kind"][] = [
+export const REF_KINDS: readonly WorkstreamRef["kind"][] = [
 	"gitlab-mr", "github-issue", "graft-spec", "branch", "commit", "path", "url", "other",
 ];
 const ACTIVITY_KINDS: readonly ActivityKind[] = ["progress", "decision", "blocker", "handoff", "diagnostic-gap"];
-const WORKSTREAM_STATUSES: readonly WorkstreamStatus[] = ["active", "paused", "completed", "detached"];
+export const WORKSTREAM_STATUSES: readonly WorkstreamStatus[] = ["active", "paused", "completed", "detached"];
 const GOAL_STATUSES: readonly WorkstreamGoal["status"][] = ["pending", "active", "blocked", "done"];
 const MUTATION_KINDS: readonly WorkstreamMutationKind[] = ["objective", "goal", "ref", "boundary", "status", "detach", "pinned-block"];
 const MUTATION_ACTORS: readonly WorkstreamMutationActor[] = ["user", "agent", "seed", "tool", "peer", "related-session"];

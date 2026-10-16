@@ -36,6 +36,22 @@ function layerAt(inputs: readonly ConfigLayerInput[], path: string): ConfigLayer
 	return resolveConfigLayers(inputs).byPath.get(path)?.layer;
 }
 
+test("first-user settings resolve per leaf through global, project and session, rejecting invalid modes and limits", () => {
+	const resolved = resolveConfigLayers([
+		readConfigLayer({ folds: { firstUserMessage: "fold", firstUserMessageMaxTokens: 12_000 } }, "global"),
+		readConfigLayer({ folds: { firstUserMessage: "keep-under-tokens" } }, "project"),
+		...readPolicyEntryLayers([policyEntry("session", { "folds.firstUserMessageMaxTokens": 100 })]),
+	]);
+	assert.deepEqual(resolved.config.folds, { firstUserMessage: "keep-under-tokens", firstUserMessageMaxTokens: 100 });
+	assert.equal(resolved.byPath.get("folds.firstUserMessage")?.layer, "project");
+	assert.equal(resolved.byPath.get("folds.firstUserMessageMaxTokens")?.layer, "session");
+	assert.deepEqual(resolveConfigLayers([]).config.folds, { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000 });
+	for (const limit of [0, -1, 1.5, "8000", Infinity]) {
+		assert.deepEqual(readConfigLayer({ folds: { firstUserMessage: "other", firstUserMessageMaxTokens: limit } }, "project").rejected,
+			["folds.firstUserMessage", "folds.firstUserMessageMaxTokens"]);
+	}
+});
+
 // --- precedence -------------------------------------------------------------
 
 test("precedence runs defaults → global → project → CLI → session → host policy", () => {
@@ -48,6 +64,7 @@ test("an empty stack resolves entirely from built-in defaults", () => {
 	assert.equal(resolved.config.summarizer?.enabled, true);
 	assert.equal(resolved.config.contextCache?.scope, DEFAULT_CONTEXT_CACHE_CONFIG.scope);
 	assert.equal(resolved.config.contextCache?.readThrough, true);
+	assert.equal(resolved.config.modes?.suggestTool, true);
 	assert.equal(resolved.config.proactiveCompaction?.preparationStallTimeoutMs, DEFAULT_PROACTIVE_COMPACTION_CONFIG.preparationStallTimeoutMs);
 	assert.ok(resolved.entries.every((entry) => entry.layer === "default"));
 });
@@ -61,6 +78,22 @@ test("each layer beats the one below it", () => {
 	];
 	assert.equal(valueAt(stack, "seedMode"), "auto-gen");
 	assert.equal(layerAt(stack, "seedMode"), "session");
+});
+
+test("mode suggestion tool follows global, project, and CLI leaf precedence", () => {
+	const stack = [
+		readConfigLayer({ modes: { suggestTool: false } }, "global"),
+		readConfigLayer({ modes: { suggestTool: true } }, "project"),
+		configLayerFromValues("cli", [["modes.suggestTool", false]]),
+	];
+	const resolved = resolveConfigLayers(stack);
+	assert.equal(resolved.config.modes?.suggestTool, false);
+	assert.equal(resolved.byPath.get("modes.suggestTool")?.layer, "cli");
+	assert.equal(readConfigLayer({ modes: { suggestTool: "yes" } }, "project").rejected[0], "modes.suggestTool");
+	// keepRecent 0 would strip the image the user just attached, so it is not a value.
+	assert.deepEqual(readConfigLayer({ imageStripping: { keepRecent: 0 } }, "project").rejected, ["imageStripping.keepRecent"]);
+	assert.equal(readConfigLayer({ imageStripping: { enabled: true, keepRecent: 3 } }, "project").values.get("imageStripping.keepRecent"), 3);
+	assert.equal(resolveConfigLayers([]).config.imageStripping?.enabled, false);
 });
 
 test("summarizer opt-out resolves per leaf through every configuration layer", () => {

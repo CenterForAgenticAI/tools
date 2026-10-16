@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { Type, type Static } from "typebox";
 import { frameCacheReference } from "../seed/seed-authority.js";
 import { redactText } from "../workstream/workstream-safety.js";
+import { erasedIdsForCacheDirectory } from "./context-cache.js";
 
 /** Public recall controls. Unknown properties are intentionally rejected. */
 export const recallSchema = Type.Object({
@@ -16,6 +17,7 @@ export type RecallRequest = Static<typeof recallSchema>;
 
 /** The only session fields the extractor needs. Transcript text is evidence. */
 export interface RecallSession {
+	readonly id?: string;
 	readonly path: string;
 	readonly cwd?: string;
 	readonly allMessagesText?: string;
@@ -28,6 +30,7 @@ export interface RecallCachePool {
 }
 
 export interface RecallSources {
+	readonly erasedSessionIds?: ReadonlySet<string>;
 	readonly cachePools: readonly RecallCachePool[];
 	readonly sessions: readonly RecallSession[];
 	readonly currentSessionPath?: string | null;
@@ -186,6 +189,7 @@ function readCacheEntries(pools: readonly RecallCachePool[]): {
 } {
 	const byFile = new Map<string, CacheEntry>();
 	for (const pool of pools) {
+		const erased = erasedIdsForCacheDirectory(pool.cacheDir);
 		const poolPath = safePath(pool.cacheDir);
 		if (!poolPath || !isRegularFile(path.join(poolPath, "_manifest.json"))) continue;
 		let parsed: unknown;
@@ -200,7 +204,8 @@ function readCacheEntries(pools: readonly RecallCachePool[]): {
 		for (const [file, rawEntry] of Object.entries(files)) {
 			if (!/^[\w][\w.-]{0,98}\.[a-z]{1,10}$/iu.test(file) || file === "_manifest.json" || file.includes("..")) continue;
 			if (byFile.has(file)) continue;
-			const entry = rawEntry && typeof rawEntry === "object" ? rawEntry as { updated?: unknown } : undefined;
+			const entry = rawEntry && typeof rawEntry === "object" ? rawEntry as { updated?: unknown; createdBy?: string; updatedBy?: string } : undefined;
+			if (erased.has(entry?.createdBy ?? "") || erased.has(entry?.updatedBy ?? "")) continue;
 			const sourcePath = path.resolve(poolPath, file);
 			const resolvedSource = safePath(sourcePath);
 			if (!resolvedSource || !isWithin(poolPath, resolvedSource) || !isRegularFile(resolvedSource)) continue;
@@ -322,6 +327,7 @@ export function answerRecall(request: RecallRequest, sources: RecallSources): Re
 
 	let scannedSessions = 0;
 	for (const session of sessions) {
+		if (session.id && sources.erasedSessionIds?.has(session.id)) continue;
 		const sessionPath = safePath(session.path);
 		if (!sessionPath || !isRegularFile(sessionPath)) continue;
 		scannedSessions++;

@@ -51,7 +51,11 @@ Revisions are positive and monotonic per session.
 The v1 payload allows unknown additive fields. Malformed entries are ignored.
 `instructions` is at most 4,000 characters, and the whole JSON payload is at
 most 8,192 bytes. Repeated same-state pressure is coalesced until the usage
-fraction rises by at least one percentage point. These entries remain readable
+fraction rises by at least one percentage point. An `advised` or `required`
+entry may carry `turnEntryId`, the id of the assistant entry whose turn end
+observed the pressure. Context-aware writes at most one advisory per
+`turnEntryId`, so a turn end that pi-durable repeats after a resume adds
+nothing. Readers may ignore the field. These entries remain readable
 when the worker runs detached or does not share a `pi.events` instance with its
 host.
 
@@ -270,6 +274,157 @@ Events are ephemeral and process-local. Correlate them by `requestId` and `runId
 - `cancelHandoff(runId)` cancels a queued request and emits `cancelled`. Once `ctx.compact()` is running, Pi exposes no operation-scoped cancellation handle, so cancellation returns `too-late` rather than calling broad `ctx.abort()`.
 - Session shutdown cancels queued service handoffs, aborts in-progress preparation, unregisters discovery, and marks an already-running service handoff failed because Pi cannot transfer its operation handle into the replacement runtime. Late callbacks from that stale runtime are suppressed and cannot send the old seed.
 - Asynchronous compaction failures emit a terminal `failed` lifecycle event and retain the existing context-aware recovery behavior while the runtime remains active.
+
+## Session modes
+
+`ContextAwareServiceV1.modes` is an additive capability. Check it with `supportsContextAwareModesV1`; older protocol-v1 producers remain valid without it.
+
+A mode is owned by an unforgeable handle, not by the display-only `owner` string. Keep the returned handle in the defining extension and use it for transitions:
+
+```ts
+const service = discoverContextAwareServiceV1(pi.events, "my-extension");
+if (supportsContextAwareModesV1(service)) {
+	const result = service.modes.defineMode({
+		id: "review",
+		owner: "my-extension",
+		transition: "Review mode is active.",
+		blockedTools: ["bash"],
+		guard: (toolName, input) => toolName === "edit" && input.path === "protected.txt"
+			? { block: true, reason: "protected path" }
+			: undefined,
+		commandAllowed: (name) => name === "review-status",
+	});
+	if (result.status === "ok") await result.handle.enter();
+}
+```
+
+Definitions copy only the named fields, enforce bounds, and retain callbacks only in process memory. Unknown fields are not persisted or included in transition messages. A duplicate id is refused. `handle.commandAllowed(name)` is advisory only: it reports whether the handle is the effective available mode and never intercepts commands.
+
+Each accepted enter or exit appends one `context-aware/mode@1` state entry and sends one `context-aware/mode-transition@1` custom message with `triggerTurn: false`. State entries contain only ids, instance ids, owner labels, `suggestedBy`, nesting, timestamps, and a random `transitionId` that the message's `details` repeat. They contain no definition, transition text, callback, or caller-owned field. The system prompt and active tool list are unchanged.
+
+The runtime permits one outer mode and one nested mode. The inner mode replaces the outer tool rules; exiting it restores the outer transition. `/mode` reports the effective mode and `/mode exit` always leaves the innermost mode. The active mode is shown in the qualified footer status `caair.context-aware/mode`.
+
+Modes replay from the active session branch after resume, fork, replacement, and tree navigation. A replayed mode is unavailable until its owner defines the same id and owner label again; redefinition re-arms it without adding a transition. An orphan does not block tools and can always be cleared with `/mode exit`.
+
+Each enter gets a random `instanceId`, shown on the snapshot and its `outer`. Use it, not `enteredAt`, to tell one enter from another: `enteredAt` has millisecond precision, so an exit and re-enter can share it. A nested mode keeps the outer `instanceId`, and replay keeps the persisted one. An entry written before `instanceId` existed gets a stable `legacy-` id, derived from the session entry id of the first state entry of that enter on the branch, so every replay gives the same value; such an entry with no session entry id is refused. Replay also refuses a state entry that reuses an `instanceId` that ended earlier on the branch, gives one `instanceId` to a different enter, or puts one `instanceId` on both `current` and `outer`, and falls back to the last accepted entry, as it does for a malformed field. Transition text is recovered only from the message whose `details.transitionId` matches the accepted state entry, so the message of a refused entry is never resent, and a message Pi delivers at the end of a turn, after later state entries, is still found. For an entry written before `transitionId` existed, replay reads messages without one between that entry and the next state entry. Check `supportsContextAwareModeInstanceIdsV1(service)` to learn, with no mode active, that the producer sets `instanceId`; older producers omit it. Compaction resends the active transition once through the existing successful-compaction owner.
+
+Model suggestions use the built-in `suggest_mode { mode, action, reason }` tool, or the API form `handle.enter({ suggestedBy: "model", confirm: true })`. Confirmation uses `ctx.ui.confirm` when UI is available, then the process-local confirmer installed with `modes.setSuggestionConfirmer`. Declines, missing confirmation, missing confirmers, and stale asynchronous confirmations leave state, entries, and messages unchanged. Set `modes.suggestTool` to `false`, or use `--context-aware-modes-suggest-tool=off`, to hide the model suggestion declaration.
+
+A mode guard runs once in the extension-lifetime `tool_call` handler. It covers foreground calls and nested `pi.*` calls because Fabric emits the same preflight event. Declarative blocks and throwing guards fail closed; unavailable orphan definitions do not block. Guard reasons are bounded and thrown error contents are not exposed.
+
+### Tool policies
+
+`blockedTools` names the tools a mode refuses, so a tool nobody listed still runs. A mode that must not change files cannot name every tool that writes. Give it a `toolPolicy` instead: it lists the tools that may run, and every other tool is refused (fail closed).
+
+Check `supportsContextAwareModeToolPoliciesV1(service)` before you rely on a policy. A runtime without the `modes.toolPolicies` flag ignores `toolPolicy`, so the mode would block nothing beyond `blockedTools`.
+
+```ts
+let revising = false;
+if (supportsContextAwareModeToolPoliciesV1(service)) {
+	const result = service.modes.defineMode({
+		id: "review",
+		owner: "my-extension",
+		transition: "Review mode is active. Source files are read-only.",
+		blockedTools: [],
+		toolPolicy: {
+			allowedTools: ["read", "grep", "find", "ls", "bash", "suggest_mode"],
+			readOnlyShell: true,
+			lifted: () => revising,
+		},
+	});
+}
+```
+
+- `allowedTools`: at most 64 names, trimmed, each non-empty and at most 128 characters, like `blockedTools`. An empty list refuses every tool, including `suggest_mode`; `/mode exit` is a command and still works.
+- `readOnlyShell`: when `true`, `bash` runs only if its `command` passes the read-only shell check below, even when `allowedTools` lists `bash`. When `false` or absent, `bash` follows `allowedTools` like any other tool. It never admits `bash` that `allowedTools` omits.
+- `lifted`: called at most once per tool call. While it returns `true` the policy does nothing for that call. A throw or any value other than `true` counts as not lifted. Use it to let the owner run a write step, such as a revise run, without leaving the mode.
+
+An invalid policy (a non-array `allowedTools`, too many or invalid names, a non-boolean `readOnlyShell`, or a non-function `lifted`) refuses the definition with `INVALID_REQUEST`. The runtime copies only these three fields into its own definition and never keeps the caller's object, so changing the object after `defineMode` changes nothing.
+
+Each tool call is checked in this order: `blockedTools`, then the policy, then `guard`. A tool in `blockedTools` is refused even if `allowedTools` lists it. The guard sees only calls the policy let through, and it still runs while the policy is lifted. A refusal reason is fixed text naming the tool and the mode; it never repeats the command or other input. As with `blockedTools`, a nested mode's policy replaces the outer one, exiting restores it, and an unavailable orphan mode enforces nothing until its owner defines it again.
+
+#### What the policy sees
+
+The policy sees every tool call Pi emits a `tool_call` event for: foreground calls, calls a `fabric_exec` program makes through Pi tools, and captured extension tools, because Fabric emits a `tool_call` preflight for each of them. It does not see work a Fabric provider does without a Pi tool call, such as a child agent started with `agents.run`, or anything a process started earlier keeps doing. List `fabric_exec` in `allowedTools` only if those paths are acceptable for the mode.
+
+#### The read-only shell check
+
+The check is a narrow allow-list, not a sandbox. It accepts one simple command and refuses anything it does not understand:
+
+- The command is a string of at most 1,000 characters on one line. It may contain only ASCII letters, digits, spaces, tabs and `% + , - . / : = @ ^ _`. Every other character is refused, so there is no `;`, `&`, `|`, redirection, `$`, backquote, parenthesis, brace, backslash, `!`, glob character, `~`, `#`, quote, control character or non-ASCII text. Words are split on spaces and tabs only.
+- The first word is one of `git`, `rg`, `fd`, `ls`, `cat`, `head`, `tail`, `wc`, `pwd`, `stat`, `file`, with no path, `env` or variable assignment before it.
+- Each program has a short list of options. Any other word that starts with `-` is refused, wherever it appears, including after `--`. Words that do not start with `-` (paths, patterns, revisions) are allowed, except after `git branch`. Options must be written exactly as listed: no long-option abbreviations and, except for `ls`, no clusters such as `-ni`.
+- An option that takes a value accepts it attached (`-n5`) or as the next word (`-n 5`), except `git diff -U`, which takes it attached only. A count is digits only. Any other value must not start with `-`.
+
+| Command | Allowed options |
+| --- | --- |
+| `git` (before the subcommand) | `--no-pager` |
+| `git status` | `-s`, `--short`, `-b`, `--branch`, `--porcelain` |
+| `git diff` | `--stat`, `--name-only`, `--name-status`, `--cached`, `--staged`, `-U<count>`, `--` |
+| `git log` | `--oneline`, `-n <count>`, `--max-count=<count>`, `--stat`, `--name-only`, `--name-status`, `-p`, `--graph`, `--decorate`, `--` |
+| `git show` | `--stat`, `--name-only`, `--name-status`, `--oneline`, `-p`, `--` |
+| `git blame` | `-L <range>`, `-w`, `--` |
+| `git rev-parse` | `--abbrev-ref`, `--short`, `--show-toplevel`, `--verify` |
+| `git ls-files` | `-m`, `-o`, `--others`, `--exclude-standard`, `--cached` |
+| `git branch` | `--list`, `-a`, `-r`, `-v`, `--show-current`, and nothing else |
+| `git grep` | `-n`, `-i`, `-l`, `-w`, `-e <pattern>`, `--` |
+| `rg` | `-n`, `-i`, `-S`, `-w`, `-l`, `-c`, `-F`, `-e <pattern>`, `-t <type>`, `-A <count>`, `-B <count>`, `-C <count>`, `--hidden`, `--no-ignore`, `--` |
+| `fd` | `-t f`, `-t d`, `-t l`, `-e <ext>`, `-d <count>`, `-H`, `-I`, `--` |
+| `file` | `-b`, `-L` |
+| `ls` | `-l`, `-a`, `-A`, `-h`, `-1`, `-R`, or a cluster of only these letters such as `-la` |
+| `cat` | `-n` |
+| `head`, `tail` | `-n <count>`, `-c <count>` |
+| `wc` | `-l`, `-w`, `-c` |
+| `stat`, `pwd` | none |
+
+So `git log --format=...`, `--pretty`, `--show-signature` (which run gpg), `file -S`, `-z` (which run a decompressor), `file -p` (which changes a file's times), `fd -l`, `-x`, `-X` (which run other programs), `rg --pre`, `git diff --output` and `tail -f` are all refused. The lists are deliberately short; a useful option that is not listed is refused too.
+
+The check sees only the command text. It cannot see:
+
+- configuration that makes an allowed program run another one or change its behaviour: git's `core.pager`, `pager.<command>`, `diff.external`, textconv and diff drivers named in `.gitattributes`, `core.fsmonitor`, `log.showSignature` (which runs gpg for `git log` and `git show`), `format.pretty`, or an rg config file named by `RIPGREP_CONFIG_PATH`;
+- environment variables such as `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `PAGER`, `GIT_DIR` and other `GIT_*` variables, or `RIPGREP_CONFIG_PATH`;
+- small writes an allowed program makes on its own, such as `git status` refreshing `.git/index`;
+- which files a command reads: paths are not confined to the project, so `cat /etc/passwd` passes;
+- programs that block or print without end, such as `cat /dev/zero`.
+
+A mode that must also guard against these should not allow `bash`.
+
+## Context policy
+
+`ContextAwareServiceV1.policy` is an additive, read-only capability. Check it with `supportsContextAwarePolicyV1`; older protocol-v1 producers remain valid without it.
+
+```ts
+import {
+	CONTEXT_AWARE_POLICY_CHANGED_EVENT,
+	discoverContextAwareServiceV1,
+	supportsContextAwarePolicyV1,
+	type ContextAwarePolicyChangedEventV1,
+} from "@centerforagenticai/pi-context-aware/context-service";
+
+const service = discoverContextAwareServiceV1(pi.events, "my-extension");
+if (supportsContextAwarePolicyV1(service)) {
+	const policy = service.policy.current();
+	// policy.value === "summaries"; policy.source is the layer it came from.
+	// policy.ladder holds the thresholds; policy.bands holds the WARN and URGENT edges.
+}
+
+pi.events.on(CONTEXT_AWARE_POLICY_CHANGED_EVENT, (data) => {
+	const event = data as ContextAwarePolicyChangedEventV1;
+	// event.reason is "command", "branch" or "session-entry"; event.previous and event.current are snapshots.
+});
+```
+
+`policy.current()` reads the current branch each time it is called. It returns:
+
+- `value`: the context policy. This release has one value, `summaries`.
+- `source`: the layer that supplied the value (`default`, `global`, `project`, `session`, or `host`).
+- `ladder`: the pressure-ladder thresholds `foldNudgeStartFraction`, `foldNudgeEndFraction`, `seededCompactionFraction`, and `recoverableHideFraction`, with each one's layer in `ladderSources`.
+- `bands`: `warnFraction` and `urgentFraction`, the edges the telemetry bands use. `contextAwarePressureBandEdgesV1(ladder)` is the same mapping as a function.
+- `diagnostic`: present when an unsupported value was ignored or the ladder fell back to its defaults.
+
+`context-aware:policy:v1:changed` fires when the resolved policy differs from the last one this session saw: after `/context-policy` records a value (`command`), after `/tree` moves to a branch with a different policy (`branch`), and at the next turn end after another writer appended a policy entry (`session-entry`). Starting or resuming a session does not fire it; call `policy.current()` instead.
+
+The capability cannot change the policy, and readers may ignore it. The policy is not a mode: `/mode` and the modes capability never change it. See [`contextPolicy`](configuration.md#contextpolicy) for how a user sets it.
 
 ## What is not an integration API
 

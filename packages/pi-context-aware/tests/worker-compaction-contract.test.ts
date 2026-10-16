@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
 	MAX_ADVISORY_ENTRY_BYTES,
 	MAX_INSTRUCTION_CHARS,
+	MAX_TURN_ENTRY_ID_CHARS,
 	WORKER_COMPACTION_CHANNEL,
 	WORKER_COMPACTION_INSTRUCTIONS,
 	appendWorkerCompactionPressure,
@@ -284,4 +285,34 @@ test("a worker compaction appends satisfied for the latest outstanding revision"
 	});
 	assert.equal(appendWorkerCompactionSatisfied(session, observedAt), undefined);
 	assert.deepEqual(latestWorkerCompactionAdvisory(entries), satisfied);
+});
+
+test("a repeated turn end for the same assistant entry appends no second advisory (#171)", () => {
+	const { session, entries } = createSession();
+	const pressure = (fraction: number, turnEntryId: string) => appendWorkerCompactionPressure(session, {
+		state: "advised",
+		reason: "threshold",
+		usage: { tokens: Math.round(fraction * 100_000), contextWindow: 100_000, fraction },
+		observedAt,
+		turnEntryId,
+	});
+
+	assert.equal(pressure(0.8, "assistant-1")?.turnEntryId, "assistant-1");
+	// A resumed run can measure the replayed turn higher. That rise alone would
+	// append, so only the turn key keeps a pi-durable replay from writing twice.
+	assert.equal(pressure(0.82, "assistant-1"), undefined);
+	assert.equal(advisories(entries).length, 1);
+
+	// The same rise on a later turn is new pressure and still appends.
+	assert.equal(pressure(0.82, "assistant-2")?.revision, 2);
+	assert.deepEqual(advisories(entries).map((advisory) => advisory.turnEntryId), ["assistant-1", "assistant-2"]);
+});
+
+test("a malformed turn key is dropped without rejecting the advisory", () => {
+	assert.equal(parseWorkerCompactionAdvisory(required({ turnEntryId: "assistant-1" }))?.turnEntryId, "assistant-1");
+	for (const turnEntryId of ["", 7, "x".repeat(MAX_TURN_ENTRY_ID_CHARS + 1)]) {
+		const parsed = parseWorkerCompactionAdvisory(required({ turnEntryId }));
+		assert.ok(parsed, "a malformed turn key must not make the advisory unreadable");
+		assert.equal("turnEntryId" in parsed, false);
+	}
 });

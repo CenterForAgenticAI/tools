@@ -116,7 +116,8 @@ const CREATORS = [
  */
 const SHARED_TMP_WRITE = new RegExp(`(?:${CREATORS.join("|")})\\s*\\([^;]{0,200}?["'\`]/tmp`, "g");
 
-const SKIP_DIRS = new Set(["node_modules", ".git", ".worktrees", ".test-dist", "dist", "coverage"]);
+// .bun-cache holds installed third-party packages when CI keeps Bun's cache in the project.
+const SKIP_DIRS = new Set([".bun-cache", "node_modules", ".git", ".worktrees", ".test-dist", "dist", "coverage"]);
 
 // This file names the pattern it bans, so scanning it would always match. Keyed
 // on the full path, not the basename, so a same-named file elsewhere is scanned.

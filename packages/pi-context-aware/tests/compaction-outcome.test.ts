@@ -353,6 +353,27 @@ test("decideOwedCompactionReattempt: an expired refusal cooldown drops the marke
 	);
 });
 
+test("decideOwedCompactionReattempt: an unmeasured size keeps the marker and its cooldown (#165)", () => {
+	assert.equal(
+		decideOwedCompactionReattempt({ owedByRefusal: true, refusalCooldownStillCurrent: true, contextStillOverThreshold: "unknown", withinCooldown: true }),
+		"none",
+		"an unknown size is no evidence that the session recovered",
+	);
+});
+
+test("decideOwedCompactionReattempt: a stale marker is dropped even while the size is unmeasured", () => {
+	assert.equal(
+		decideOwedCompactionReattempt({ owedByRefusal: true, refusalCooldownStillCurrent: true, contextStillOverThreshold: "unknown", withinCooldown: false }),
+		"clear-owed",
+		"a lapsed refusal cooldown leaves the ordinary threshold path in charge",
+	);
+	assert.equal(
+		decideOwedCompactionReattempt({ owedByRefusal: true, refusalCooldownStillCurrent: false, contextStillOverThreshold: "unknown", withinCooldown: true }),
+		"clear-owed",
+		"a genuine-failure cooldown that replaced the refusal cooldown is left alone",
+	);
+});
+
 test("decideOwedCompactionReattempt: a genuine-failure cooldown that replaced the refusal cooldown is never cleared", () => {
 	// A different cooldown is now in effect (a real provider/transport failure set
 	// it), so the stale refusal marker must be dropped without touching it.

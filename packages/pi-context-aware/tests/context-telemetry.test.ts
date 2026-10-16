@@ -28,16 +28,30 @@ test("includes gate-broad-work action in WARN telemetry", () => {
 });
 
 test("URGENT telemetry stops naming compaction when compaction is unavailable", () => {
-	const telemetry = buildContextTelemetry({ fraction: 0.82, headroom: 49_000 }, { compactionAvailable: false });
+	const telemetry = buildContextTelemetry({ fraction: 0.92, headroom: 16_000 }, { compactionAvailable: false });
 
-	assert.match(telemetry, /band="URGENT" usage-percent="82" approximate-headroom="49k" action="finish-atomic-work"/);
+	assert.match(telemetry, /band="URGENT" usage-percent="92" approximate-headroom="16k" action="finish-atomic-work"/);
 	assert.doesNotMatch(telemetry, /compact/);
-	assert.match(buildContextTelemetry({ fraction: 0.82, headroom: 49_000 }, { compactionAvailable: true }), /action="compact-before-tool"/);
+	assert.match(buildContextTelemetry({ fraction: 0.92, headroom: 16_000 }, { compactionAvailable: true }), /action="compact-before-tool"/);
+});
+
+test("URGENT telemetry names the replacement tool when compaction is unavailable", () => {
+	const telemetry = buildContextTelemetry(
+		{ fraction: 0.92, headroom: 16_000 },
+		{ compactionAvailable: false, replacementTool: "compress" },
+	);
+
+	assert.match(telemetry, /action="compress-before-tool"/);
+	assert.match(
+		buildContextTelemetry({ fraction: 0.92, headroom: 16_000 }, { compactionAvailable: true, replacementTool: "compress" }),
+		/action="compact-before-tool"/,
+		"compaction stays the URGENT action while it is available",
+	);
 });
 
 test("includes compact-before-tool action in URGENT telemetry", () => {
-	const telemetry = buildContextTelemetry({ fraction: 0.82, headroom: 49_000 });
+	const telemetry = buildContextTelemetry({ fraction: 0.92, headroom: 16_000 });
 
-	assert.match(telemetry, /<pressure band="URGENT" usage-percent="82" approximate-headroom="49k" action="compact-before-tool" \/>/);
+	assert.match(telemetry, /<pressure band="URGENT" usage-percent="92" approximate-headroom="16k" action="compact-before-tool" \/>/);
 	assert.match(telemetry, /Continue the current agent loop without acknowledging this telemetry/);
 });

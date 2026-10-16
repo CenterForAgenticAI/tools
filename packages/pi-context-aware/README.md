@@ -12,6 +12,7 @@ Context-aware helps long Pi sessions keep their purpose through compaction. It t
 - Preserves a prior-transcript reference and exposes bounded prior-session search.
 - Keeps optional durable focus, session tasks, and scoped context-cache documents across compaction.
 - Repairs orphaned tool results before provider requests leave the process.
+- Erases closed sessions through a user-only command with a durable erasure ledger.
 - Offers a typed protocol-v1 service for other Pi extensions.
 
 The detailed behavior, recovery rules, and examples are in [commands and concepts](docs/commands-and-concepts.md).
@@ -34,9 +35,9 @@ Install the public package with Pi:
 pi install npm:@centerforagenticai/pi-context-aware
 ```
 
-Restart Pi or run `/reload`. The package declares Pi peer dependencies as `*`; its deterministic compatibility gate currently pins and tests Pi `1.0.0`. It needs Node `>=22.19.0`.
+Restart Pi or run `/reload`. The package declares Pi peer dependencies as `*`; its deterministic compatibility gate tests the supported minimum, Pi `1.0.3`, and the development pin. It needs Node `>=22.19.0`.
 
-For a local checkout, add its absolute path to the `packages` array in `~/.pi/agent/settings.json`, run `npm run build`, then restart Pi or run `/reload`. The manifest loads `./dist/index.js`.
+For a local checkout, add its absolute path to the `packages` array in `~/.pi/agent/settings.json`, run `npm run build`, then restart Pi or run `/reload`. The manifest loads `./dist/extension.js`, which the build bundles into one file.
 
 For seeded automatic handoffs, let context-aware own automatic compaction and turn off Pi's native automatic threshold checks:
 
@@ -48,20 +49,23 @@ For seeded automatic handoffs, let context-aware own automatic compaction and tu
 
 Manual `/compact`, `/compact-then`, and `compact_session` remain available. See [configuration](docs/configuration.md) for ownership warnings and the complete settings.
 
+When `billion-context-pi` is loaded, it cancels every compaction. Context-aware detects it at session start, stops offering `compact_session`, turns proactive compaction off, and tells the agent to use `compress` instead. See [compaction blocked by another extension](docs/commands-and-concepts.md#compaction-blocked-by-another-extension). `/fold-parity` reports read-only shadow comparisons of its `compress` calls, including nested calls, and progress toward the 500-call cut-over gate. See [fold parity](docs/fold-parity.md).
+
 ## Surface
 
 | Kind | Name | Purpose |
 | --- | --- | --- |
-| Tool | `compact_session` | Compact at a clean phase boundary and continue from a self-contained seed. Available when `summarizer.enabled` is `true`. |
+| Tool | `compact_session` | Compact at a clean phase boundary and continue from a self-contained seed. Offered when `summarizer.enabled` is `true` and no loaded extension cancels every compaction. |
 | Tool | `session_focus` | Read or update one optional durable objective. |
 | Tool | `session_tasks` | Maintain a one-level checklist that survives compaction. |
 | Tool | `search_prior_sessions` | Search bounded transcript snippets from earlier sessions or compacted-away current history. |
 | Tool | `session_recall` | Search the context cache and session history together. |
 | Tool | `session_compaction_history` | Report current-branch compaction counts and boundary identifiers. |
-| Command | `/compact-then [seed] [--model provider/id]` | Run the seeded handoff flow. Available when `summarizer.enabled` is `true`. |
+| Command | `/compact-then [seed] [--model provider/id]` | Run the seeded handoff flow. Available when `summarizer.enabled` is `true`; refuses with the reason while another extension cancels every compaction. |
 | Commands | `/context-status`, `/context-aware-*` | Inspect pressure and configure seed, model, ambiguity, and proactive behavior. |
 | Commands | `/focus`, `/sessions`, `/tasks`, `/checkin` | Inspect durable workstream state, task state, and session health. |
 | Commands | `/context-cache-*` | Inspect and manage scoped context-cache documents. |
+| Command | `/session-erase <session-id>` | Permanently erase a closed session, with fork/cache confirmation and an erasure receipt. |
 | Export | `@centerforagenticai/pi-context-aware/context-service` | Discover the typed protocol-v1 service over `pi.events`. |
 
 Every command, parameter, and example is in [commands and concepts](docs/commands-and-concepts.md), [configuration](docs/configuration.md), and [session tasks](docs/session-tasks.md). The service contract is in [context-service.md](docs/context-service.md).
@@ -79,7 +83,10 @@ Settings come from built-in defaults, `~/.pi/agent/context-aware.json`, trusted 
 | `compactionModel` | `null` | Use the active model unless a summary model is named. |
 | `overflowFallbackModel` | `null` | Keep overflow recovery on the primary model unless another model is named. |
 | `summarizer.enabled` | `true` | Own the compaction summary hook and register handoff surfaces. |
+| `compactionClaim.enabled` | `false` | Claim compaction from pi-fabric so this extension writes the summary. Off until `billion-context-pi` leaves the profile. |
+| `compactionClaim.fabricFallback` | `true` | While the claim is held, use pi-fabric's deterministic summary when the model summary fails. |
 | `proactiveCompaction.enabled` | `true` | Prepare a handoff before the context limit; threshold defaults to `0.78`. |
+| `imageStripping.enabled` | `false` | Send only the newest `imageStripping.keepRecent` (default `5`) image-bearing messages with their images; older images become text placeholders. |
 | `contextCache.enabled` | `true` | Surface scoped cache documents; the default scope is `"worktree"`. |
 | `restartNotice.enabled` | `true` | Remind the agent to re-check volatile state after time away. |
 | `workstream.enabled` | `true` | Enable durable focus and bounded session projections. |
@@ -98,7 +105,7 @@ At `turn_end` and `agent_settled`, it may prepare proactive compaction, continue
 The source is maintained in a private repository and published as release snapshots; contributions are welcome as pull requests on [GitHub](https://github.com/CenterForAgenticAI/tools), which maintainers carry into the source repository.
 
 ```sh
-npm install
+bun install
 npm test
 ```
 ## Documentation
@@ -116,3 +123,5 @@ npm test
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The fold engine in `src/folds/kernel` is a copy of [acp-kernel](https://github.com/ranxianglei/acp-kernel), used under its MIT license with an attribution term. The package ships its license and source commit in `dist/folds/kernel/PROVENANCE.md`.

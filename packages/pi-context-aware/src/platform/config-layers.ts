@@ -26,6 +26,14 @@ import {
 	DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS,
 	normalizeGenerationOutputReserve,
 } from "../compaction/generation-budget.js";
+import {
+	DEFAULT_CONTEXT_POLICY,
+	DEFAULT_PRESSURE_LADDER,
+	parseContextPolicyValue,
+	parsePressureLadderFraction,
+	type ContextPolicyValue,
+	type PressureLadderConfig,
+} from "../policy/context-policy.js";
 import { DEFAULT_RESTART_NOTICE_MIN_AWAY_MS } from "../session/restart-notice.js";
 
 // ---------------------------------------------------------------------------
@@ -97,6 +105,19 @@ export interface SummarizerConfig {
 	enabled: boolean;
 }
 
+/**
+ * Claim compaction from Fabric through `pi-fabric:compaction-owner:v1`.
+ *
+ * Off by default: before the cut-over, billion-context-pi stays the only live
+ * context manager and this extension makes no claim. `fabricFallback` chooses
+ * what a failed model summary does while the claim is held: use Fabric's
+ * deterministic summary (true), or return no result so Pi's summarizer runs.
+ */
+export interface CompactionClaimConfig {
+	enabled: boolean;
+	fabricFallback: boolean;
+}
+
 export interface ProactiveCompactionConfig {
 	enabled: boolean;
 	thresholdFraction: number;
@@ -139,7 +160,32 @@ export interface BusyProbeConfig {
 	unattributableStaleMs: number;
 }
 
+export interface ModesConfig {
+	suggestTool: boolean;
+}
+
+/**
+ * Drop old images from each provider request (issue #163).
+ *
+ * Off by default. The session file keeps every original, so this changes only
+ * what the model is sent. While another extension manages context (today
+ * billion-context-pi), stripping stays inert and says so once.
+ */
+export interface ImageStrippingConfig {
+	enabled: boolean;
+	/** How many of the newest image-bearing messages keep their images. */
+	keepRecent: number;
+}
+
+export type FirstUserMessageMode = "keep" | "fold" | "keep-under-tokens";
+export interface FoldsConfig {
+	firstUserMessage: FirstUserMessageMode;
+	firstUserMessageMaxTokens: number;
+}
+export const DEFAULT_FOLDS_CONFIG: FoldsConfig = { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000 };
+
 export interface Config {
+	folds?: FoldsConfig;
 	seedMode: SeedMode;
 	sessionRole: SessionRole;
 	compactionModel: string | null;
@@ -148,12 +194,19 @@ export interface Config {
 	ambiguityMode: AmbiguityMode;
 	seedAuthorityGuard: SeedAuthorityGuardMode;
 	summarizer?: SummarizerConfig;
+	compactionClaim?: CompactionClaimConfig;
 	sessionNaming?: SessionNamingConfig;
 	proactiveCompaction?: ProactiveCompactionConfig;
 	contextCache?: ContextCacheConfig;
 	restartNotice?: RestartNoticeConfig;
 	workstream?: WorkstreamConfig;
 	busyProbe?: BusyProbeConfig;
+	modes?: ModesConfig;
+	imageStripping?: ImageStrippingConfig;
+	/** How the session keeps its history. Read from the current branch. */
+	contextPolicy?: ContextPolicyValue;
+	/** Pressure thresholds of the context policy; the telemetry bands derive from them. */
+	pressureLadder?: PressureLadderConfig;
 }
 
 export const DEFAULT_CONTEXT_CACHE_CONFIG: ContextCacheConfig = {
@@ -172,6 +225,11 @@ export const DEFAULT_RESTART_NOTICE_CONFIG: Required<RestartNoticeConfig> = {
 
 export const DEFAULT_SUMMARIZER_CONFIG: SummarizerConfig = {
 	enabled: true,
+};
+
+export const DEFAULT_COMPACTION_CLAIM_CONFIG: CompactionClaimConfig = {
+	enabled: false,
+	fabricFallback: true,
 };
 
 export const DEFAULT_PROACTIVE_COMPACTION_CONFIG: ProactiveCompactionConfig = {
@@ -202,6 +260,15 @@ export const DEFAULT_BUSY_PROBE_CONFIG: BusyProbeConfig = {
 	unattributableStaleMs: 60 * 60 * 1000,
 };
 
+export const DEFAULT_MODES_CONFIG: ModesConfig = {
+	suggestTool: true,
+};
+
+export const DEFAULT_IMAGE_STRIPPING_CONFIG: ImageStrippingConfig = {
+	enabled: false,
+	keepRecent: 5,
+};
+
 export const DEFAULT_SESSION_NAMING_CONFIG: SessionNamingConfig = {
 	scope: "all",
 	attempts: 3,
@@ -222,12 +289,18 @@ export const DEFAULT_CONFIG: Config = {
 	// A refused handoff must not be able to freeze a session that has to compact.
 	seedAuthorityGuard: "warn",
 	summarizer: DEFAULT_SUMMARIZER_CONFIG,
+	compactionClaim: DEFAULT_COMPACTION_CLAIM_CONFIG,
 	sessionNaming: DEFAULT_SESSION_NAMING_CONFIG,
 	proactiveCompaction: DEFAULT_PROACTIVE_COMPACTION_CONFIG,
 	contextCache: DEFAULT_CONTEXT_CACHE_CONFIG,
 	restartNotice: DEFAULT_RESTART_NOTICE_CONFIG,
 	workstream: DEFAULT_WORKSTREAM_CONFIG,
 	busyProbe: DEFAULT_BUSY_PROBE_CONFIG,
+	modes: DEFAULT_MODES_CONFIG,
+	imageStripping: DEFAULT_IMAGE_STRIPPING_CONFIG,
+	contextPolicy: DEFAULT_CONTEXT_POLICY,
+	pressureLadder: DEFAULT_PRESSURE_LADDER,
+	folds: DEFAULT_FOLDS_CONFIG,
 };
 
 // ---------------------------------------------------------------------------
@@ -316,6 +389,8 @@ export function normalizeProactiveThreshold(value: unknown): number | undefined 
 }
 
 export const CONFIG_LEAVES: readonly LeafDescriptor[] = [
+	{ path: "folds.firstUserMessage", parse: oneOf(["keep", "fold", "keep-under-tokens"]), fallback: DEFAULT_FOLDS_CONFIG.firstUserMessage },
+	{ path: "folds.firstUserMessageMaxTokens", parse: positiveInteger(1), fallback: DEFAULT_FOLDS_CONFIG.firstUserMessageMaxTokens },
 	{ path: "seedMode", parse: oneOf(["auto-gen", "user-approve"]), fallback: DEFAULT_CONFIG.seedMode },
 	{ path: "sessionRole", parse: oneOf(["foreground", "worker"]), fallback: DEFAULT_CONFIG.sessionRole },
 	{ path: "compactionModel", parse: nullableString, fallback: DEFAULT_CONFIG.compactionModel },
@@ -324,6 +399,8 @@ export const CONFIG_LEAVES: readonly LeafDescriptor[] = [
 	{ path: "ambiguityMode", parse: oneOf(["inherit", "ask", "cautious-proceed", "always-proceed"]), fallback: DEFAULT_CONFIG.ambiguityMode },
 	{ path: "seedAuthorityGuard", parse: oneOf(["enforce", "warn", "off"]), fallback: DEFAULT_CONFIG.seedAuthorityGuard },
 	{ path: "summarizer.enabled", parse: bool, fallback: DEFAULT_SUMMARIZER_CONFIG.enabled },
+	{ path: "compactionClaim.enabled", parse: bool, fallback: DEFAULT_COMPACTION_CLAIM_CONFIG.enabled },
+	{ path: "compactionClaim.fabricFallback", parse: bool, fallback: DEFAULT_COMPACTION_CLAIM_CONFIG.fabricFallback },
 
 	{ path: "proactiveCompaction.enabled", parse: bool, fallback: DEFAULT_PROACTIVE_COMPACTION_CONFIG.enabled },
 	{ path: "proactiveCompaction.thresholdFraction", parse: normalizeProactiveThreshold, fallback: DEFAULT_PROACTIVE_COMPACTION_CONFIG.thresholdFraction },
@@ -369,6 +446,16 @@ export const CONFIG_LEAVES: readonly LeafDescriptor[] = [
 	{ path: "workstream.activityToCmux", parse: bool, fallback: DEFAULT_WORKSTREAM_CONFIG.activityToCmux },
 	{ path: "busyProbe.override", parse: oneOf(["auto", "idle", "busy"]), fallback: DEFAULT_BUSY_PROBE_CONFIG.override },
 	{ path: "busyProbe.unattributableStaleMs", parse: positiveInteger(1), fallback: DEFAULT_BUSY_PROBE_CONFIG.unattributableStaleMs },
+	{ path: "modes.suggestTool", parse: bool, fallback: DEFAULT_MODES_CONFIG.suggestTool },
+	{ path: "imageStripping.enabled", parse: bool, fallback: DEFAULT_IMAGE_STRIPPING_CONFIG.enabled },
+	// At least 1: with 0 the image the user just attached would be stripped too.
+	{ path: "imageStripping.keepRecent", parse: positiveInteger(1), fallback: DEFAULT_IMAGE_STRIPPING_CONFIG.keepRecent },
+
+	{ path: "contextPolicy", parse: parseContextPolicyValue, fallback: DEFAULT_CONTEXT_POLICY },
+	{ path: "pressureLadder.foldNudgeStartFraction", parse: parsePressureLadderFraction, fallback: DEFAULT_PRESSURE_LADDER.foldNudgeStartFraction },
+	{ path: "pressureLadder.foldNudgeEndFraction", parse: parsePressureLadderFraction, fallback: DEFAULT_PRESSURE_LADDER.foldNudgeEndFraction },
+	{ path: "pressureLadder.seededCompactionFraction", parse: parsePressureLadderFraction, fallback: DEFAULT_PRESSURE_LADDER.seededCompactionFraction },
+	{ path: "pressureLadder.recoverableHideFraction", parse: parsePressureLadderFraction, fallback: DEFAULT_PRESSURE_LADDER.recoverableHideFraction },
 
 	{ path: "sessionNaming.scope", parse: oneOf(["all", "interactive", "off"]), fallback: DEFAULT_SESSION_NAMING_CONFIG.scope },
 	{ path: "sessionNaming.attempts", parse: positiveInteger(1), fallback: DEFAULT_SESSION_NAMING_CONFIG.attempts },

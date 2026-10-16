@@ -10,6 +10,7 @@ export type { ContextAwareSessionCompactionV1 } from "./compaction/compaction-hi
 export const CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION = 1 as const;
 export const CONTEXT_AWARE_SERVICE_DISCOVERY_EVENT = "context-aware:service:v1:discover";
 export const CONTEXT_AWARE_HANDOFF_STATE_EVENT = "context-aware:service:v1:handoff-state";
+export const CONTEXT_AWARE_POLICY_CHANGED_EVENT = "context-aware:policy:v1:changed";
 
 export const CONTEXT_AWARE_HANDOFF_DEFAULT_MAX_SEED_CHARACTERS = 12_000;
 export const CONTEXT_AWARE_HANDOFF_DEFAULT_MAX_SUMMARY_FOCUS_CHARACTERS = 8_000;
@@ -209,6 +210,8 @@ export interface ContextAwareSnapshotSourceV1 {
 	};
 	proactiveCompaction?: ContextAwareProactiveCompactionLifecycleV1;
 	effectiveMode: ContextAwareEffectiveModeV1;
+	/** Telemetry band edges from the session's pressure ladder. Defaults to the default ladder. */
+	pressureBands?: ContextAwarePressureBandEdgesV1;
 }
 
 export interface ContextAwareHandoffBoundsV1 {
@@ -327,15 +330,218 @@ export type ContextAwareHandoffLifecycleEventV1 =
 			provenance: ContextAwareHandoffProvenanceV1;
 	  };
 
+export type ContextAwareModeRefusalCodeV1 =
+	| "INVALID_REQUEST"
+	| "DUPLICATE_ID"
+	| "OWNER_MISMATCH"
+	| "NOT_FOUND"
+	| "INACTIVE_HANDLE"
+	| "WRONG_EFFECTIVE_HANDLE"
+	| "ALREADY_ACTIVE"
+	| "NESTING_LIMIT"
+	| "UNAVAILABLE"
+	| "STALE_RUNTIME"
+	| "CONFIRMATION_REQUIRED"
+	| "CONFIRMATION_DECLINED"
+	| "STATE_CHANGED";
+
+export type ContextAwareModeResultV1 =
+	| { status: "ok" }
+	| { status: "refused"; code: ContextAwareModeRefusalCodeV1; message: string };
+
+export interface ContextAwareModeGuardResultV1 {
+	block: boolean;
+	reason?: string;
+}
+
+export interface ContextAwareModeToolPolicyV1 {
+	/** Tools that may run while the policy applies. Every other tool is refused. At most 64 names. */
+	allowedTools: readonly string[];
+	/**
+	 * When true, `bash` is refused unless its `command` passes the runtime's read-only
+	 * shell check, even if `allowedTools` lists `bash`. When false or absent, `bash`
+	 * follows `allowedTools` like any other tool.
+	 */
+	readOnlyShell?: boolean;
+	/** When it returns true the policy does not apply to this call. A throw or a non-boolean counts as false. */
+	lifted?: () => boolean;
+}
+
+export interface ContextAwareModeDefinitionV1 {
+	id: string;
+	/** Display metadata only. It is never an authorization credential. */
+	owner: string;
+	transition: string;
+	blockedTools: readonly string[];
+	guard?: (toolName: string, input: Record<string, unknown>) => ContextAwareModeGuardResultV1 | undefined;
+	/** Advisory only; this callback never intercepts command execution. */
+	commandAllowed?: (name: string) => boolean;
+	/** Allow-list of tools for this mode. Check `supportsContextAwareModeToolPoliciesV1` first; older runtimes ignore it. */
+	toolPolicy?: ContextAwareModeToolPolicyV1;
+}
+
+export interface ContextAwareModeSuggestionV1 {
+	suggestedBy: "model";
+	/** Model suggestions must opt in to confirmation explicitly. */
+	confirm?: true;
+}
+
+export interface ContextAwareModeSnapshotV1 {
+	readonly id: string;
+	readonly owner: string;
+	/**
+	 * Unique per enter, so two enters of one mode never share it even within one
+	 * millisecond. Present when `ContextAwareModesV1.instanceIds` is true; older
+	 * producers omit it. A mode restored from an entry written before this field
+	 * existed gets a stable id derived from the session branch.
+	 */
+	readonly instanceId?: string;
+	readonly available: boolean;
+	readonly suggestedBy?: "model";
+	readonly enteredAt: string;
+	readonly updatedAt: string;
+	readonly outer?: ContextAwareModeSnapshotV1;
+}
+
+export interface ContextAwareModeHandleV1 {
+	readonly enter: (suggestion?: ContextAwareModeSuggestionV1) => Promise<ContextAwareModeResultV1>;
+	readonly exit: () => ContextAwareModeResultV1;
+	readonly commandAllowed: (name: string) => boolean;
+}
+
+export type ContextAwareModeDefinitionResultV1 =
+	| { status: "ok"; handle: ContextAwareModeHandleV1 }
+	| { status: "refused"; code: ContextAwareModeRefusalCodeV1; message: string };
+
+export type ContextAwareModeConfirmerV1 = (request: {
+	mode: string;
+	action: "enter" | "exit";
+	reason?: string;
+}) => Promise<boolean>;
+
+export interface ContextAwareModesV1 {
+	/** True when every snapshot carries `instanceId`. Lets a client check support before any mode is active. */
+	readonly instanceIds?: true;
+	/** True when the runtime enforces `ContextAwareModeDefinitionV1.toolPolicy`. */
+	readonly toolPolicies?: true;
+	defineMode(definition: ContextAwareModeDefinitionV1): ContextAwareModeDefinitionResultV1;
+	current(): ContextAwareModeSnapshotV1 | null;
+	setSuggestionConfirmer(confirmer: ContextAwareModeConfirmerV1 | undefined): void;
+}
+
+/** The values `contextPolicy` accepts in this release. */
+export const CONTEXT_AWARE_CONTEXT_POLICY_VALUES_V1 = Object.freeze(["summaries"] as const);
+export type ContextAwareContextPolicyValueV1 = (typeof CONTEXT_AWARE_CONTEXT_POLICY_VALUES_V1)[number];
+
+/** The configuration layer a policy value came from. */
+export type ContextAwarePolicySourceV1 = ContextAwareProactiveCompactionLeafSourceV1;
+
+/** Context-usage fractions of the pressure ladder, lowest step first. */
+export interface ContextAwarePressureLadderV1 {
+	/** Fold nudges begin. The WARN telemetry band starts here. */
+	readonly foldNudgeStartFraction: number;
+	/** Fold nudges end. */
+	readonly foldNudgeEndFraction: number;
+	/** Seeded compaction runs. The URGENT telemetry band starts here. */
+	readonly seededCompactionFraction: number;
+	/** Oldest entries are hidden recoverably, only when compaction cannot run. */
+	readonly recoverableHideFraction: number;
+}
+
+/** Starting defaults of the pressure ladder. */
+export const CONTEXT_AWARE_DEFAULT_PRESSURE_LADDER_V1: ContextAwarePressureLadderV1 = Object.freeze({
+	foldNudgeStartFraction: 0.45,
+	foldNudgeEndFraction: 0.75,
+	seededCompactionFraction: 0.9,
+	recoverableHideFraction: 0.95,
+});
+
+/** Where the WARN and URGENT telemetry bands begin. */
+export interface ContextAwarePressureBandEdgesV1 {
+	readonly warnFraction: number;
+	readonly urgentFraction: number;
+}
+
+/** The one mapping from ladder steps to telemetry bands. */
+export function contextAwarePressureBandEdgesV1(
+	ladder: ContextAwarePressureLadderV1 = CONTEXT_AWARE_DEFAULT_PRESSURE_LADDER_V1,
+): ContextAwarePressureBandEdgesV1 {
+	return { warnFraction: ladder.foldNudgeStartFraction, urgentFraction: ladder.seededCompactionFraction };
+}
+
+export type ContextAwarePressureLadderSourcesV1 = {
+	readonly [K in keyof ContextAwarePressureLadderV1]: ContextAwarePolicySourceV1;
+};
+
+export interface ContextAwarePolicySnapshotV1 {
+	readonly protocolVersion: typeof CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION;
+	readonly value: ContextAwareContextPolicyValueV1;
+	/** The layer that supplied `value`. */
+	readonly source: ContextAwarePolicySourceV1;
+	readonly ladder: ContextAwarePressureLadderV1;
+	/** The layer that supplied each ladder threshold. */
+	readonly ladderSources: ContextAwarePressureLadderSourcesV1;
+	readonly bands: ContextAwarePressureBandEdgesV1;
+	/** Present when an invalid value was ignored or the ladder fell back to defaults. */
+	readonly diagnostic?: string;
+}
+
+/** Read-only view of the session's context policy on the current branch. */
+export interface ContextAwarePolicyV1 {
+	current(): ContextAwarePolicySnapshotV1;
+}
+
+/** Payload of `context-aware:policy:v1:changed`. */
+export interface ContextAwarePolicyChangedEventV1 {
+	readonly protocolVersion: typeof CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION;
+	/**
+	 * `command` after `/context-policy`; `branch` after tree navigation moved
+	 * the branch; `session-entry` when a policy entry appended by someone else,
+	 * such as a host, changed it. That last case is seen at the next turn end.
+	 */
+	readonly reason: "command" | "branch" | "session-entry";
+	readonly sessionId: string;
+	readonly at: string;
+	readonly previous: ContextAwarePolicySnapshotV1 | null;
+	readonly current: ContextAwarePolicySnapshotV1;
+}
+
 export interface ContextAwareServiceV1 {
 	readonly protocolVersion: typeof CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION;
 	getSnapshot(): ContextAwareSnapshotV1;
 	promoteArtifact?(request: ContextAwareArtifactPromotionRequestV1): ContextAwareArtifactPromotionResultV1;
+	modes?: ContextAwareModesV1;
+	/** Added compatibly in protocol v1. Older producers may omit it. */
+	policy?: ContextAwarePolicyV1;
 	requestHandoff(
 		request: ContextAwareHandoffRequestV1,
 		options?: { signal?: AbortSignal },
 	): Promise<ContextAwareHandoffResultV1>;
 	cancelHandoff(runId: string): ContextAwareHandoffCancelResultV1;
+}
+
+/** Return true when the producer exposes the additive modes capability. */
+export function supportsContextAwareModesV1(service: ContextAwareServiceV1 | undefined): service is ContextAwareServiceV1 & Required<Pick<ContextAwareServiceV1, "modes">> {
+	return typeof service?.modes?.defineMode === "function"
+		&& typeof service.modes.current === "function"
+		&& typeof service.modes.setSuggestionConfirmer === "function";
+}
+
+/** Return true when the modes capability gives every snapshot an `instanceId`. */
+export function supportsContextAwareModeInstanceIdsV1(service: ContextAwareServiceV1 | undefined): boolean {
+	return supportsContextAwareModesV1(service) && service.modes.instanceIds === true;
+}
+
+/** Return true when the modes capability enforces a mode's `toolPolicy`. */
+export function supportsContextAwareModeToolPoliciesV1(service: ContextAwareServiceV1 | undefined): boolean {
+	return supportsContextAwareModesV1(service) && service.modes.toolPolicies === true;
+}
+
+/** Return true when the producer exposes the additive read-only context policy capability. */
+export function supportsContextAwarePolicyV1(
+	service: ContextAwareServiceV1 | undefined,
+): service is ContextAwareServiceV1 & Required<Pick<ContextAwareServiceV1, "policy">> {
+	return typeof service?.policy?.current === "function";
 }
 
 /** Return true when a discovered producer implements the additive promotion capability. */
@@ -361,6 +567,7 @@ export type ContextAwareHandoffValidationResultV1 =
 
 function pressureSnapshot(
 	pressure: ContextAwareSnapshotSourceV1["pressure"],
+	bands: ContextAwarePressureBandEdgesV1 = contextAwarePressureBandEdgesV1(),
 ): ContextAwarePressureSnapshotV1 {
 	if (
 		!pressure ||
@@ -381,7 +588,7 @@ function pressureSnapshot(
 	}
 
 	const fraction = pressure.tokens / pressure.contextWindow;
-	const band: ContextPressureBand = fraction >= 0.8 ? "URGENT" : fraction >= 0.6 ? "WARN" : "OK";
+	const band: ContextPressureBand = fraction >= bands.urgentFraction ? "URGENT" : fraction >= bands.warnFraction ? "WARN" : "OK";
 	return {
 		available: true,
 		tokens: pressure.tokens,
@@ -429,7 +636,7 @@ export function buildContextAwareSnapshotV1(source: ContextAwareSnapshotSourceV1
 	return {
 		protocolVersion: CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION,
 		capturedAt: source.capturedAt ?? new Date().toISOString(),
-		pressure: pressureSnapshot(source.pressure),
+		pressure: pressureSnapshot(source.pressure, source.pressureBands),
 		session: {
 			current,
 			lineage,

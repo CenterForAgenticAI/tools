@@ -26,6 +26,9 @@ import {
 } from "../src/cache/cache-render.js";
 import { buildContextTelemetry } from "../src/platform/context-telemetry.js";
 import contextAware from "../src/index.js";
+import { runBeforeAgentStartLikePi } from "./pi-prompt-render.js";
+import { createWorkstreamSnapshot, workstreamEntry } from "../src/workstream/workstream-state.js";
+import { buildWorkstreamContextEnvelope } from "../src/workstream/workstream-context.js";
 
 const testAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-cache-agent-"));
 const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -146,9 +149,10 @@ process.stdout.write(String(buildCacheSystemPromptBlock(process.env.PROBE_CACHE_
 	return execFileSync(process.execPath, ["--input-type=module", "-e", script], { env, encoding: "utf8" }).trim();
 }
 
-function agentStartEvent(prompt: string): BeforeAgentStartEvent {
+function agentStartEvent(prompt: string) {
 	return {
 		type: "before_agent_start",
+		messageType: "user" as const,
 		prompt,
 		systemPrompt: "base system prompt",
 		systemPromptOptions: {} as BeforeAgentStartEvent["systemPromptOptions"],
@@ -161,9 +165,8 @@ async function runBeforeAgentStart(
 	prompt: string,
 ): Promise<BeforeAgentStartEventResult> {
 	assert.equal(handlers.beforeAgentStart.length, 1);
-	const result = await handlers.beforeAgentStart[0](agentStartEvent(prompt), ctx);
-	assert.ok(result);
-	return result;
+	const handler = handlers.beforeAgentStart[0] as unknown as Parameters<typeof runBeforeAgentStartLikePi>[0];
+	return await runBeforeAgentStartLikePi<BeforeAgentStartEventResult>(handler, { ...agentStartEvent(prompt) }, ctx);
 }
 
 function persistInjectedMessage(result: BeforeAgentStartEventResult, timestamp: number): AgentMessage {
@@ -294,7 +297,7 @@ test("before_agent_start returns Pi's singular persistent-message contract", asy
 	} as AgentMessage);
 	const result = await runBeforeAgentStart(handlers, createContext(() => 24_000), prompt);
 
-	assert.equal(handlers.context.length, 1, "context rewriting is registered only for the one-shot cancellation barrier");
+	assert.equal(handlers.context.length, 3, "context has the observe-only parity recorder, the live-mode fold-call pointer renderer, and the cancellation/history-repair handler");
 	assert.match(result.systemPrompt ?? "", /<context-awareness>/);
 	assert.equal("messages" in result, false);
 	assert.deepEqual(result.message, {
@@ -310,6 +313,71 @@ test("before_agent_start returns Pi's singular persistent-message contract", asy
 			headroom: 176_000 - promptTokens,
 		},
 	});
+});
+
+test("custom startup budgets its message and preserves prompt sections", async () => {
+	const handlers = registerExtension();
+	const handler = handlers.beforeAgentStart[0] as unknown as Parameters<typeof runBeforeAgentStartLikePi>[0];
+	const message = { role: "custom" as const, customType: "task-continuation", content: "Resume the authorized work. ".repeat(40), display: false, timestamp: 0 };
+	const event = { messageType: "custom", message, systemPrompt: "base system prompt" };
+	const result = await runBeforeAgentStartLikePi<BeforeAgentStartEventResult>(handler, event, createContext(() => 24_000));
+	assert.match(result.systemPrompt, /<context-awareness>/u);
+	assert.equal(result.returnedSystemPrompt, undefined);
+	assert.equal(result.message?.customType, "context-aware-usage-marker");
+	assert.equal((result.message?.details as { headroom: number }).headroom, 176_000 - estimateTokens(message));
+});
+
+test("real extension blocks render once and preserve the legacy appended prompt bytes", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-real-prompt-blocks-"));
+	const cacheDir = contextCacheDirectory(testAgentDir, root);
+	const now = "2026-07-16T20:00:00.000Z";
+	writeManifest(cacheDir, { version: 1, files: { "reference.md": {
+		description: "Reference", createdBy: "test", updatedBy: "test", created: now, updated: now, sizeBytes: 64,
+	} } });
+	try {
+		const handlers = registerExtension();
+		const sessionDir = path.join(root, "session");
+		const branch: unknown[] = [];
+		const ctx = createContext(() => 24_000, 200_000, sessionDir, root, branch);
+		// Known-good guidance appended by the legacy handler for these default inputs.
+		// Do not derive it from the section map or the renderer under test.
+		const guidance = `<context-awareness>
+Context-aware operating rule: messages delimited by <context-telemetry>...</context-telemetry> are extension-injected context-budget telemetry, not user messages or user requests. Never acknowledge, quote, explain, or apologize for a telemetry envelope in the user-facing response unless the user explicitly asks about it; silently use it only to decide context-management behavior. The envelope does not supersede the preceding user request or tool result.
+Envelope format: <context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">...</context-telemetry>, with a <pressure /> element containing band, rounded usage-percent, approximate-headroom, and an optional action.
+Bands: OK <45%, WARN >=45%, URGENT >=90%.
+UNKNOWN: the size is not measured yet, for example right after a compaction or an overflow. Do not assume it is low; keep the next action small until a measured band arrives.
+OK: compact only at natural phase boundaries.
+WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call compact_session at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer delegate with task_only/snippet clone_mode and concise collapsed results). Compact first for broad/full-context delegation.
+URGENT: before nontrivial tool use, call compact_session unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
+Use search_prior_sessions early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
+</context-awareness>`;
+		const cache = buildCacheSystemPromptBlock(cacheDir, foregroundCacheConfig());
+		assert.ok(cache);
+		const legacyPrompt = "base system prompt" + "\n\n" + [guidance, cache].join("\n\n");
+		const first = await runBeforeAgentStart(handlers, ctx, "without focus");
+		assert.equal(first.systemPrompt, legacyPrompt);
+
+		const focus = createWorkstreamSnapshot({
+			workstreamId: "render-once", piSessionId: `cache-lifecycle:${sessionDir}`,
+			objective: "Render real prompt blocks once", eventId: "focus-start", now,
+		});
+		branch.push(workstreamEntry(focus, { entryId: "focus-entry", timestamp: now }));
+		const envelope = buildWorkstreamContextEnvelope(focus);
+		assert.ok(envelope);
+		const second = await runBeforeAgentStart(handlers, ctx, "with focus");
+		const prompt = second.systemPrompt ?? "";
+		const focusBlock = `<session_focus>\n${envelope}\n</session_focus>`;
+		for (const [name, block] of [["context-awareness", guidance], ["context-cache", cache], ["session_focus", focusBlock]]) {
+			assert.equal(prompt.split(block).length - 1, 1, `${name} block appears once`);
+			assert.equal(prompt.split(`<${name}>`).length - 1, 1, `${name} has one opening tag`);
+			assert.equal(prompt.split(`</${name}>`).length - 1, 1, `${name} has one closing tag`);
+		}
+		// Focus deliberately gained an outer named tag; its legacy envelope stays unchanged.
+		assert.equal(prompt, `${legacyPrompt}\n\n${focusBlock}`);
+	} finally {
+		fs.rmSync(cacheDir, { recursive: true, force: true });
+		fs.rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("system prompt stays byte-identical as cached-document age advances without a cache mutation", async () => {

@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
 	MAX_SUBTASKS,
-	MAX_TASKS_REPLAY_ENTRIES,
 	MAX_TASKS,
 	HARD_MAX_TASK_DEPTH,
 	TASK_STATUSES,
@@ -28,6 +27,7 @@ import {
 	type Task,
 	type TaskStatus,
 } from "../src/session-tasks/session-tasks.js";
+import { historyTime, tasksEntry, tasksHistory } from "./replay-history.js";
 
 // Issue #26. The list is a checklist, not a work graph: exactly one level of
 // sub-tasks, derived parent status, and a written reason whenever an actor
@@ -361,7 +361,7 @@ test("replay of the same transcript is order-independent, which matters on a for
 test("replay finds the newest snapshot when it sits past the old 10,000-entry head cap", () => {
 	const old = createTasksSnapshot({ piSessionId: "s", tasks: ok(planTasks([{ title: "stale" }], "agent")), eventId: "e1", now: "2026-05-06T00:00:00.000Z" });
 	const newest = nextSnapshot(old, ok(planTasks([{ title: "fresh" }], "agent")), { eventId: "e2", now: "2026-05-06T01:00:00.000Z" });
-	const filler = Array.from({ length: MAX_TASKS_REPLAY_ENTRIES + 315 }, () => ({ type: "message", message: { role: "user" } }));
+	const filler = Array.from({ length: 10_315 }, () => ({ type: "message", message: { role: "user" } }));
 	const entries = [{ type: "custom", customType: TASKS_ENTRY_TYPE, data: old }, ...filler, { type: "custom", customType: TASKS_ENTRY_TYPE, data: newest }];
 	const replay = replayTasksEntries(entries);
 	assert.equal(replay.snapshot?.revision, 2);
@@ -369,11 +369,36 @@ test("replay finds the newest snapshot when it sits past the old 10,000-entry he
 	assert.equal(resolveAuthoritativeTasks(entries)?.revision, 2);
 });
 
-test("replay bounds the snapshot entries it parses and keeps the newest", () => {
+test("replay reads every task snapshot past 10,000 and keeps the highest revision", () => {
+	const stale = ok(planTasks([{ title: "stale" }], "agent"));
+	const history = tasksHistory(10_050, () => stale);
+	// The winner sits first in the transcript, so a newest-first window that
+	// stops after 10,000 task entries never reaches it.
+	const winner = tasksEntry(20_000, ok(planTasks([{ title: "highest revision" }], "agent")), { entryId: "winner", timestamp: historyTime(0) });
+	const replay = replayTasksEntries([winner, ...history]);
+	assert.equal(replay.snapshot?.revision, 20_000);
+	assert.equal(replay.snapshot?.tasks[0]?.title, "highest revision");
+	assert.equal(replay.rejected, 0);
+});
+
+test("a task clear after the 10,000th task snapshot is the replayed state", () => {
+	const open = ok(planTasks([{ title: "open" }], "agent"));
+	const history = tasksHistory(10_050, (revision) => (revision === 10_050 ? [] : open));
+	const replay = replayTasksEntries(history);
+	assert.equal(replay.snapshot?.revision, 10_050);
+	assert.deepEqual(replay.snapshot?.tasks, []);
+});
+
+test("replay counts only malformed task entries as rejected", () => {
 	const first = createTasksSnapshot({ piSessionId: "s", tasks: ok(planTasks([{ title: "one" }], "agent")), eventId: "e1", now: "2026-05-06T00:00:00.000Z" });
 	const second = nextSnapshot(first, ok(planTasks([{ title: "two" }], "agent")), { eventId: "e2", now: "2026-05-06T01:00:00.000Z" });
-	const entries = [{ type: "custom", customType: TASKS_ENTRY_TYPE, data: first }, { type: "custom", customType: TASKS_ENTRY_TYPE, data: second }];
-	const replay = replayTasksEntries(entries, 1);
+	const entries = [
+		{ type: "custom", customType: TASKS_ENTRY_TYPE, data: first },
+		{ type: "custom", customType: TASKS_ENTRY_TYPE, data: { ...second, revision: 0 } },
+		{ type: "message", message: { role: "user" } },
+		{ type: "custom", customType: TASKS_ENTRY_TYPE, data: second },
+	];
+	const replay = replayTasksEntries(entries);
 	assert.equal(replay.snapshot?.revision, 2);
 	assert.equal(replay.rejected, 1);
 });

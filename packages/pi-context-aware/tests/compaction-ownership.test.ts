@@ -144,3 +144,19 @@ test("a non-boolean Pi compaction setting is unknown rather than coerced", () =>
 		fs.rmSync(fixture.root, { recursive: true, force: true });
 	}
 });
+
+test("an extension that cancels every compaction blocks ownership for every configuration", () => {
+	for (const [contextAware, piNative, summarizer] of [
+		[true, true, true],
+		[true, false, true],
+		[false, true, true],
+		[false, false, false],
+	] as const) {
+		const assessment = assessCompactionOwnership(contextAware, piNative, summarizer, "billion-context-pi");
+		assert.equal(assessment.state, "blocked");
+		assert.equal(assessment.blockedBy, "billion-context-pi");
+		assert.equal(assessment.warning, undefined, "no owner configuration can matter while every compaction is cancelled");
+	}
+	assert.equal(assessCompactionOwnership(true, true, true).state, "competing");
+	assert.equal(assessCompactionOwnership(true, true, true).blockedBy, undefined);
+});

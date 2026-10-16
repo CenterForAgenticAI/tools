@@ -95,6 +95,10 @@ test("session_focus names the valid actions and the objective field for invented
 	}
 	assert.throws(() => piValidate(tool, { action: "start", purpose: "ship it" }), /session_focus start requires the field objective.*The field purpose is not recognised/u);
 	assert.throws(() => prepareSessionFocusArguments({}), /no action is not valid/u);
+	assert.throws(
+		() => prepareSessionFocusArguments({ action: "edit", status: "completed" }),
+		/edit requires the field objective.*\{"action":"status","status":"completed"\}/u,
+	);
 });
 
 test("session_focus names the missing field for status, boundary and ref", async () => {
@@ -104,6 +108,7 @@ test("session_focus names the missing field for status, boundary and ref", async
 	assert.throws(() => piValidate(tool, { action: "boundary" }), /session_focus boundary requires the field boundary/u);
 	assert.throws(() => piValidate(tool, { action: "ref" }), /session_focus ref requires the field ref with kind and value/u);
 	assert.throws(() => piValidate(tool, { action: "ref", refKind: "branch" }), /session_focus ref requires the field ref/u);
+	assert.throws(() => piValidate(tool, { action: "ref", refKind: "branch", refValue: null }), /session_focus ref requires the field ref/u);
 	assert.throws(() => piValidate(tool, { action: "boundary", remove: true }), /session_focus boundary requires the field boundary/u);
 	assert.throws(() => piValidate(tool, { action: "status", status: null }), /session_focus status requires the field status/u);
 	assert.throws(() => piValidate(tool, { action: "boundary", boundary: null }), /session_focus boundary requires the field boundary/u);
@@ -117,6 +122,83 @@ test("present focus fields are left to schema validation, and complete calls pas
 	assert.deepEqual(piValidate(tool, { action: "status", status: "paused" }), { action: "status", status: "paused" });
 	assert.deepEqual(piValidate(tool, { action: "boundary", boundary: "no force-push" }), { action: "boundary", boundary: "no force-push" });
 	assert.deepEqual(piValidate(tool, { action: "ref", refKind: "branch", refValue: "fix/x" }), { action: "ref", refKind: "branch", refValue: "fix/x" });
+});
+
+test("session_focus drops a null flat ref kind on get", async () => {
+	const input = { action: "get", refKind: null };
+	assert.deepEqual(prepareSessionFocusArguments(input), { action: "get" });
+	const tool = (await registeredTools()).get("session_focus");
+	assert.ok(tool);
+	assert.deepEqual(piValidate(tool, input), { action: "get" });
+});
+
+test("session_focus drops a null flat ref value on get", async () => {
+	const input = { action: "get", refValue: null };
+	assert.deepEqual(prepareSessionFocusArguments(input), { action: "get" });
+	const tool = (await registeredTools()).get("session_focus");
+	assert.ok(tool);
+	assert.deepEqual(piValidate(tool, input), { action: "get" });
+});
+
+test("session_focus drops null flat ref fields on start", async () => {
+	const input = { action: "start", objective: "x", refKind: null, refValue: null };
+	assert.deepEqual(prepareSessionFocusArguments(input), { action: "start", objective: "x" });
+	const tool = (await registeredTools()).get("session_focus");
+	assert.ok(tool);
+	assert.deepEqual(piValidate(tool, input), { action: "start", objective: "x" });
+});
+
+test("session_focus drops null flat ref fields alongside a nested ref", async () => {
+	const input = { action: "ref", ref: { kind: "branch", value: "x" }, refKind: null, refValue: null };
+	assert.deepEqual(prepareSessionFocusArguments(input), { action: "ref", ref: { kind: "branch", value: "x" } });
+	const tool = (await registeredTools()).get("session_focus");
+	assert.ok(tool);
+	assert.deepEqual(piValidate(tool, input), { action: "ref", ref: { kind: "branch", value: "x" } });
+});
+
+test("session_focus converts numeric and boolean flat ref values like nested values", async () => {
+	const tool = (await registeredTools()).get("session_focus");
+	assert.ok(tool);
+	for (const [value, expected] of [[12345, "12345"], [true, "true"], [false, "false"], [0, "0"]] as const) {
+		assert.deepEqual(piValidate(tool, { action: "ref", refKind: "branch", refValue: value }), { action: "ref", refKind: "branch", refValue: expected });
+		assert.deepEqual(piValidate(tool, { action: "ref", ref: { kind: "branch", value } }), { action: "ref", ref: { kind: "branch", value: expected } });
+	}
+});
+
+test("session_focus rejects a non-string flat ref kind", async () => {
+	const tool = (await registeredTools()).get("session_focus");
+	assert.ok(tool);
+	assert.throws(() => piValidate(tool, { action: "ref", refKind: 12345, refValue: "x" }), /refKind must be a string/u);
+});
+
+test("session_focus rejects object and array flat ref values with a type error", async () => {
+	const tool = (await registeredTools()).get("session_focus");
+	assert.ok(tool);
+	for (const refValue of [{ value: "x" }, ["x"]]) {
+		assert.throws(() => piValidate(tool, { action: "ref", refKind: "branch", refValue }), /refValue must be a string/u);
+	}
+});
+
+test("session_focus validates every flat ref field even when a nested ref is present", async () => {
+	const tool = (await registeredTools()).get("session_focus");
+	assert.ok(tool);
+	const ref = { kind: "branch", value: "x" };
+	assert.throws(() => piValidate(tool, { action: "ref", ref, refKind: "evil" }), /ref kind "evil" is not valid.*Valid kinds:/u);
+	assert.throws(() => piValidate(tool, { action: "ref", ref, refKind: 12345 }), /refKind must be a string/u);
+	assert.throws(() => piValidate(tool, { action: "ref", ref, refKind: {} }), /refKind must be a string/u);
+	for (const refValue of [{ value: "x" }, ["x"]]) {
+		assert.throws(() => piValidate(tool, { action: "ref", ref, refValue }), /refValue must be a string/u);
+	}
+	assert.throws(() => piValidate(tool, { action: "ref", ref, refValue: "x".repeat(513) }), /refValue must be at most 512 characters/u);
+	assert.deepEqual(piValidate(tool, { action: "ref", ref, refKind: "branch", refValue: 12345 }), { action: "ref", ref, refKind: "branch", refValue: "12345" });
+});
+
+test("session_focus accepts the flat ref value length limit and rejects longer values", async () => {
+	const tool = (await registeredTools()).get("session_focus");
+	assert.ok(tool);
+	const refValue = "x".repeat(512);
+	assert.deepEqual(piValidate(tool, { action: "ref", refKind: "branch", refValue }), { action: "ref", refKind: "branch", refValue });
+	assert.throws(() => piValidate(tool, { action: "ref", refKind: "branch", refValue: "x".repeat(513) }), /refValue must be at most 512 characters/u);
 });
 
 test("a list string over the size cap is not parsed", () => {

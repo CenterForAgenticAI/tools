@@ -87,7 +87,7 @@ The second line appears only when a list exists.
 
 ### Automatic continuation
 
-At Pi's `agent_settled` boundary, a foreground session with `pending` or `active` work may receive up to two extension-generated turns for the current task-list revision. The first asks the agent to reconcile completed work, record each status change with `session_tasks`, and continue. If the agent settles without changing the list, one final corrective turn tells the agent—not the user—to update the list, keep working, or mark the task blocked and ask one precise question. A further unchanged settle stops quietly and records only a debug diagnostic. Finished and blocked-only lists stay silent. New user input resets the bound.
+At Pi's `agent_settled` boundary, a foreground session with `pending` or `active` work may receive up to two extension-generated turns for the current task-list revision. The first asks the agent to reconcile completed work, record each status change with `session_tasks`, and continue. If the agent settles without changing the list, one final corrective turn tells the agent—not the user—to update the list, keep working, or mark the task blocked and ask one precise question. A further unchanged settle stops quietly and records only a debug diagnostic. Finished and blocked-only lists stay silent. New user input resets the bound. The bound is read back from the reminders already delivered in the session, so a restart, or a pi-durable resume that settles the same run again, continues the bound instead of starting it over.
 
 Worker sessions never self-prompt; their supervisor owns the next instruction. The continuation is stored as extension-generated state with machine-readable provenance, not as user-authored text.
 

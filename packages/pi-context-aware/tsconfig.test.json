@@ -8,5 +8,6 @@
     "inlineSources": true,
     "types": []
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "tests/**/*.d.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "tests/**/*.d.ts"],
+  "exclude": ["tests/acp-kernel/**"]
 }

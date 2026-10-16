@@ -255,9 +255,17 @@ async function contextHook() {
 	};
 	const extension = await import("../.test-dist/src/index.js");
 	extension.default(api);
-	const handler = events.get("context")?.[0];
-	assert.ok(handler, "the extension must register a context hook");
-	return handler;
+	const handlers = events.get("context");
+	assert.ok(handlers?.length, "the extension must register a context hook");
+	return async (event, ctx) => {
+		let result;
+		let current = event;
+		for (const handler of handlers) {
+			const next = await handler(current, ctx);
+			if (next !== undefined) { result = next; current = { ...current, ...next }; }
+		}
+		return result;
+	};
 }
 
 function fakeContext(home, notifications) {

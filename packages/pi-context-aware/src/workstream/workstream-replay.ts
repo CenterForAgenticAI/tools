@@ -18,13 +18,6 @@ import {
 	type WorkstreamSnapshot,
 } from "./workstream-schema.js";
 
-export const MAX_REPLAY_ENTRIES = 10_000;
-
-export interface ReplayOptions {
-	/** Optional cap protects startup from adversarially large transcript arrays. */
-	readonly maxEntries?: number;
-}
-
 export interface ReplayCandidate {
 	readonly snapshot: WorkstreamSnapshot;
 	readonly entryId: string;
@@ -71,18 +64,26 @@ function candidateTie(a: ReplayCandidate, b: ReplayCandidate): number {
 	return a.timestamp.localeCompare(b.timestamp);
 }
 
-interface ReplayLineage {
-	readonly candidates: readonly ReplayCandidate[];
-	readonly terminal: ReplayCandidate;
+/**
+ * A reachable snapshot and the predecessor its best lineage runs through. The
+ * lineage itself is never copied: replay walks these links once, from the
+ * winning terminal only.
+ */
+interface LineageNode {
+	readonly candidate: ReplayCandidate;
+	readonly predecessor: LineageNode | null;
 }
 
-function compareLineages(a: ReplayLineage, b: ReplayLineage): number {
-	if (a.terminal.snapshot.revision !== b.terminal.snapshot.revision) {
-		return a.terminal.snapshot.revision - b.terminal.snapshot.revision;
-	}
-	if (a.terminal.timestamp !== b.terminal.timestamp) return a.terminal.timestamp.localeCompare(b.terminal.timestamp);
-	if (a.terminal.index !== b.terminal.index) return a.terminal.index - b.terminal.index;
-	return candidateTie(a.terminal, b.terminal);
+/**
+ * Orders lineages by their terminal snapshot alone. The prefix of a lineage
+ * never affects the order, so the best lineage through a snapshot is the best
+ * lineage through its best eligible predecessor.
+ */
+function compareTerminals(a: ReplayCandidate, b: ReplayCandidate): number {
+	if (a.snapshot.revision !== b.snapshot.revision) return a.snapshot.revision - b.snapshot.revision;
+	if (a.timestamp !== b.timestamp) return a.timestamp.localeCompare(b.timestamp);
+	if (a.index !== b.index) return a.index - b.index;
+	return candidateTie(a, b);
 }
 
 function canFollow(candidate: ReplayCandidate, previous: ReplayCandidate): boolean {
@@ -92,75 +93,121 @@ function canFollow(candidate: ReplayCandidate, previous: ReplayCandidate): boole
 	return Date.parse(candidate.snapshot.createdAt) >= Date.parse(previous.snapshot.createdAt);
 }
 
-/** Find every reachable terminal and retain the best complete lineage for each. */
-function validLineages(candidates: readonly ReplayCandidate[]): readonly ReplayLineage[] {
+function isRoot(candidate: ReplayCandidate): boolean {
+	return candidate.snapshot.revision === 1
+		&& (candidate.priorRevision === undefined || candidate.priorRevision === 0)
+		&& candidate.previousEventId === undefined;
+}
+
+/**
+ * The reachable snapshots of one revision, ordered by creation time, with the
+ * best terminal among each prefix. A legacy successor that names no predecessor
+ * may follow any of them created no later than itself, so a binary search for
+ * that bound finds its best predecessor.
+ */
+interface ReachableRevision {
+	readonly createdAt: readonly number[];
+	readonly bestUpTo: readonly LineageNode[];
+}
+
+function reachableRevision(nodes: readonly LineageNode[]): ReachableRevision {
+	const sorted = nodes
+		.map((node) => ({ node, createdAt: Date.parse(node.candidate.snapshot.createdAt) }))
+		.sort((a, b) => a.createdAt - b.createdAt);
+	const createdAt: number[] = [];
+	const bestUpTo: LineageNode[] = [];
+	let best: LineageNode | null = null;
+	for (const entry of sorted) {
+		if (best === null || compareTerminals(entry.node.candidate, best.candidate) > 0) best = entry.node;
+		createdAt.push(entry.createdAt);
+		bestUpTo.push(best);
+	}
+	return { createdAt, bestUpTo };
+}
+
+/** The best reachable snapshot of the revision created at or before `limit`. */
+function bestCreatedBy(revision: ReachableRevision, limit: number): LineageNode | null {
+	let low = 0;
+	let high = revision.createdAt.length;
+	while (low < high) {
+		const middle = (low + high) >>> 1;
+		if ((revision.createdAt[middle] ?? Number.POSITIVE_INFINITY) <= limit) low = middle + 1;
+		else high = middle;
+	}
+	return low === 0 ? null : revision.bestUpTo[low - 1] ?? null;
+}
+
+/**
+ * The best lineage of one workstream: a complete revision chain from a root,
+ * each link satisfying {@link canFollow}, ending at the highest terminal under
+ * {@link compareTerminals}. Each snapshot keeps one link to the predecessor of
+ * its best lineage. A snapshot that names its predecessor costs one lookup; a
+ * legacy snapshot that does not costs a binary search, so replay is
+ * O(n log n) in the stream's snapshots.
+ */
+function bestStreamLineage(candidates: readonly ReplayCandidate[]): LineageNode | null {
 	const byRevision = new Map<number, ReplayCandidate[]>();
-	const byEventId = new Map<string, ReplayCandidate>();
 	for (const candidate of candidates) {
 		const revision = byRevision.get(candidate.snapshot.revision) ?? [];
 		revision.push(candidate);
 		byRevision.set(candidate.snapshot.revision, revision);
-		byEventId.set(candidate.snapshot.eventId, candidate);
 	}
-	const paths = new Map<string, ReplayLineage>();
-	const revisions = [...byRevision.keys()].sort((a, b) => a - b);
-	for (const revision of revisions) {
-		for (const candidate of byRevision.get(revision) ?? []) {
-			if (revision === 1) {
-				if ((candidate.priorRevision === undefined || candidate.priorRevision === 0) && candidate.previousEventId === undefined) {
-					paths.set(candidate.snapshot.eventId, { candidates: [candidate], terminal: candidate });
-				}
-				continue;
-			}
-			let best: ReplayLineage | null = null;
-			const predecessors = candidate.previousEventId === undefined
-				? byRevision.get(revision - 1) ?? []
-				: [byEventId.get(candidate.previousEventId)].filter((value): value is ReplayCandidate => value !== undefined);
-			for (const predecessor of predecessors) {
-				const predecessorLineage = paths.get(predecessor.snapshot.eventId);
-				if (!predecessorLineage || predecessor.snapshot.workstreamId !== candidate.snapshot.workstreamId || !canFollow(candidate, predecessor)) continue;
-				if (!best || compareLineages(predecessorLineage, best) > 0) best = predecessorLineage;
-			}
-			if (best) paths.set(candidate.snapshot.eventId, { candidates: [...best.candidates, candidate], terminal: candidate });
+	let reachable: LineageNode[] = (byRevision.get(1) ?? []).filter(isRoot).map((candidate) => ({ candidate, predecessor: null }));
+	let best: LineageNode | null = null;
+	for (let revision = 1; reachable.length > 0; revision += 1) {
+		for (const node of reachable) {
+			if (best === null || compareTerminals(node.candidate, best.candidate) > 0) best = node;
 		}
+		const successors = byRevision.get(revision + 1) ?? [];
+		if (successors.length === 0) break;
+		const byEventId = new Map(reachable.map((node) => [node.candidate.snapshot.eventId, node]));
+		let legacy: ReachableRevision | null = null;
+		const next: LineageNode[] = [];
+		for (const candidate of successors) {
+			let predecessor: LineageNode | null;
+			if (candidate.previousEventId !== undefined) {
+				predecessor = byEventId.get(candidate.previousEventId) ?? null;
+			} else {
+				legacy ??= reachableRevision(reachable);
+				predecessor = bestCreatedBy(legacy, Date.parse(candidate.snapshot.createdAt));
+			}
+			if (predecessor !== null && canFollow(candidate, predecessor.candidate)) next.push({ candidate, predecessor });
+		}
+		reachable = next;
 	}
-	return [...paths.values()];
+	return best;
 }
 
-function compareStreamLineages(a: ReplayLineage, b: ReplayLineage): number {
-	const updatedAt = Date.parse(a.terminal.snapshot.updatedAt) - Date.parse(b.terminal.snapshot.updatedAt);
+function compareStreamLineages(a: LineageNode, b: LineageNode): number {
+	const updatedAt = Date.parse(a.candidate.snapshot.updatedAt) - Date.parse(b.candidate.snapshot.updatedAt);
 	if (updatedAt !== 0) return updatedAt;
 	// Equal snapshot timestamps are resolved by validated transcript chronology,
 	// not by the old stream's revision count.
-	const transcriptTimestamp = a.terminal.timestamp.localeCompare(b.terminal.timestamp);
+	const transcriptTimestamp = a.candidate.timestamp.localeCompare(b.candidate.timestamp);
 	if (transcriptTimestamp !== 0) return transcriptTimestamp;
-	if (a.terminal.index !== b.terminal.index) return a.terminal.index - b.terminal.index;
-	return compareLineages(a, b);
+	if (a.candidate.index !== b.candidate.index) return a.candidate.index - b.candidate.index;
+	return compareTerminals(a.candidate, b.candidate);
 }
 
-function latestValidChain(candidates: readonly ReplayCandidate[]): ReplayLineage | null {
+function latestValidChain(candidates: readonly ReplayCandidate[]): LineageNode | null {
 	const byWorkstream = new Map<string, ReplayCandidate[]>();
 	for (const candidate of candidates) {
 		const stream = byWorkstream.get(candidate.snapshot.workstreamId) ?? [];
 		stream.push(candidate);
 		byWorkstream.set(candidate.snapshot.workstreamId, stream);
 	}
-	let latest: ReplayLineage | null = null;
+	let latest: LineageNode | null = null;
 	for (const stream of byWorkstream.values()) {
-		const streamLineages = validLineages(stream);
-		const streamLatest = streamLineages.reduce<ReplayLineage | null>((best, lineage) => (
-			best === null || compareLineages(lineage, best) > 0 ? lineage : best
-		), null);
+		const streamLatest = bestStreamLineage(stream);
 		if (streamLatest !== null && (latest === null || compareStreamLineages(streamLatest, latest) > 0)) latest = streamLatest;
 	}
 	return latest;
 }
 
-function inheritedProvenance(lineage: ReplayLineage | null): WorkstreamProvenance | undefined {
-	if (!lineage) return undefined;
-	for (let index = lineage.candidates.length - 1; index >= 0; index -= 1) {
-		const provenance = lineage.candidates[index]?.snapshot.provenance;
-		if (provenance !== undefined) return provenance;
+/** The provenance nearest the terminal, walking the winning lineage once. */
+function inheritedProvenance(lineage: LineageNode | null): WorkstreamProvenance | undefined {
+	for (let node = lineage; node !== null; node = node.predecessor) {
+		if (node.candidate.snapshot.provenance !== undefined) return node.candidate.snapshot.provenance;
 	}
 	return undefined;
 }
@@ -169,20 +216,20 @@ function inheritedProvenance(lineage: ReplayLineage | null): WorkstreamProvenanc
  * Replay only complete, supported custom entries. No projection or fallback
  * argument is accepted here, so summaries/cache/registry/activity/peer/
  * terminal metadata can never establish authority.
+ *
+ * Every supplied entry is read. A partial read could return an older focus as
+ * current, so replay has no entry limit; the caller bounds the input by
+ * supplying only the selected branch.
  */
-export function replayWorkstreamEntries(entries: readonly unknown[], options: ReplayOptions = {}): ReplayResult {
+export function replayWorkstreamEntries(entries: readonly unknown[]): ReplayResult {
 	if (!Array.isArray(entries)) return { snapshot: null, authority: null, candidates: [], rejected: 0, duplicateEventIds: 0, chainValid: false };
-	const maxEntries = options.maxEntries ?? MAX_REPLAY_ENTRIES;
-	// The bound applies to workstream entries, not to the whole transcript: a long
-	// session holds far more ordinary entries than the bound, and counting those
-	// would drop workstream snapshots written after the cut.
 	const workstreamEntries = entries.filter((entry) => record(entry) && entry.type === "custom" && entry.customType === WORKSTREAM_ENTRY_TYPE);
-	const boundedEntries = workstreamEntries.slice(0, Math.max(0, Math.min(maxEntries, MAX_REPLAY_ENTRIES)));
 	const byEventId = new Map<string, ReplayCandidate>();
-	let rejected = Math.max(0, entries.length - boundedEntries.length);
+	// Every supplied entry that is not a valid focus snapshot counts as rejected.
+	let rejected = entries.length - workstreamEntries.length;
 	let duplicateEventIds = 0;
-	for (let index = 0; index < boundedEntries.length; index += 1) {
-		const entry = boundedEntries[index];
+	for (let index = 0; index < workstreamEntries.length; index += 1) {
+		const entry = workstreamEntries[index];
 		const details = parseTranscriptWorkstreamEntryDetails(entry);
 		if (!details) {
 			rejected += 1;
@@ -206,9 +253,9 @@ export function replayWorkstreamEntries(entries: readonly unknown[], options: Re
 	}
 	const candidates = [...byEventId.values()].sort(candidateTie);
 	const lineage = latestValidChain(candidates);
-	const snapshot = lineage?.terminal.snapshot ?? null;
+	const snapshot = lineage?.candidate.snapshot ?? null;
 	const provenance = inheritedProvenance(lineage);
-	const mutation = lineage?.terminal.mutation;
+	const mutation = lineage?.candidate.mutation;
 	return {
 		snapshot,
 		authority: snapshot === null ? null : "transcript",

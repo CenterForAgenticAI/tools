@@ -118,7 +118,7 @@ Use this at clean boundaries, not mid-edit or mid-debug.
 ### 5. Use fully autonomous handoff mode when appropriate
 
 ```text
-/context-aware-mode autonomous
+/context-aware-seed-mode autonomous
 ```
 
 This sets:
@@ -137,9 +137,11 @@ Autonomous mode is useful for unattended agents that should self-compact and con
 
 By default, proactive compaction is enabled at **78%** context usage with a **16,384-token output allowance plus 2,048 tokens of protocol overhead**. After every completed provider turn—including `toolUse`, `length`, and error turns—context-aware estimates the newly appended tool results and other trailing context. The `turn_end` handler records the trigger, arms the cancellation drain, and returns without awaiting seed generation. After Pi emits `agent_settled`, context-aware restores the exact active-tool set and launches seed preparation in the background only while `ctx.isIdle()` is true. It compacts before the next model call when either the percentage threshold is crossed or remaining headroom is below the generation reserve. The output allowance is capped at the active model's advertised `maxTokens` when that limit is smaller.
 
-This closes the same-turn gap where a large tool result could leave only a few thousand tokens for the automatic follow-up response. Repeated pressure while preparation is pending or generating is coalesced into that attempt; a later active run is drained without starting a duplicate model call. A competing Pi threshold/overflow compaction is cancelled while preparation owns the seeded handoff, so the same pressure event cannot produce an unseeded compaction followed by a duplicate. Seed generation plus rewriting uses a first-output grace period and a resettable stall timeout, with an absolute five-minute preparation ceiling. A provider that ignores cancellation may finish its detached request later, but it cannot hold `turn_end`, `agent_settled`, shutdown, or a replacement session open, and its late result cannot queue work. The reserve check takes priority when selecting the trigger, but generation-reserve and threshold triggers share the proactive cooldown. A queued attempt starts the guard, and completion resets its full duration; when before/after usage confirms that compaction did not reduce context, context-aware warns instead of immediately re-arming the drain. If Pi has not made post-compaction usage measurable yet, context-aware records a pending measurement, keeps the cooldown active, and checks the first later assistant result before warning. If model-generated seed preparation is unavailable at that safety boundary, context-aware records the failure, falls back to a deterministic recovery seed, and still starts compaction instead of allowing the under-budget normal turn.
+This closes the same-turn gap where a large tool result could leave only a few thousand tokens for the automatic follow-up response. Repeated pressure while preparation is pending or generating is coalesced into that attempt; a later active run is drained without starting a duplicate model call. A competing Pi threshold/overflow compaction is cancelled while preparation owns the seeded handoff, so the same pressure event cannot produce an unseeded compaction followed by a duplicate. Seed generation plus rewriting uses a first-output grace period and a resettable stall timeout, with an absolute five-minute preparation ceiling. A provider that ignores cancellation may finish its detached request later, but it cannot hold `turn_end`, `agent_settled`, shutdown, or a replacement session open, and its late result cannot queue work. The reserve check takes priority when selecting the trigger, but generation-reserve and threshold triggers share the proactive cooldown. A queued attempt starts the guard, and completion resets its full duration; when before/after usage confirms that compaction did not reduce context, context-aware warns instead of immediately re-arming the drain. If Pi has not made post-compaction usage measurable yet, context-aware records a pending measurement, keeps the cooldown active, and checks the first later assistant result before warning. A reply that ended in an error or was aborted is skipped, because its usage is partial; the measurement stays pending until a valid reply (or Pi's own measured size) arrives. If model-generated seed preparation is unavailable at that safety boundary, context-aware records the failure, falls back to a deterministic recovery seed, and still starts compaction instead of allowing the under-budget normal turn.
 
 If a provider nevertheless returns `stopReason: "length"` while usable headroom is below the reserve, context-aware replaces the prose of the finalized incomplete assistant message before persistence and starts the same compact+handoff recovery. The truncated tool call and the `length` stop reason are both kept, because Pi answers a length-stopped call with an error result of its own rather than executing possibly truncated arguments: erasing the call would leave that result with no tool call to belong to, which is the failure behind issues #10 and #56. That recovery is guarded to one attempt per interrupted run: a second length stop remains visible and does not start an infinite compaction loop. Ordinary length-limited responses with adequate context headroom are left unchanged because compaction would not repair a model's independent output cap.
+
+When Pi has not measured the context size (for example right after a compaction), context-aware does not read it as 0% used and does not estimate it. A new threshold or reserve check waits until Pi reports a measured size. An owed compaction left by a refused commit stays owed while its own cooldown is still running; once that cooldown has expired or another cooldown has replaced it, the marker is discarded. Waiting does not recover an overflow: while the size is unknown, recovery depends on Pi's native automatic compaction settings, so with Pi's automatic compaction off nothing compacts the session until the size is measured or you compact it yourself. See [When Pi has not measured the context size](configuration.md#when-pi-has-not-measured-the-context-size) for the full behavior.
 
 Configure it with:
 
@@ -186,6 +188,7 @@ At `session_start`, context-aware reads Pi's public `SettingsManager` with the a
 | on | on | on | competing automatic compaction owners |
 | on | off | off | no automatic compaction owner |
 | off | inactive (configured value retained) | either | none — deferred to another compactor |
+| any | inactive | either | none — blocked by an extension that cancels every compaction |
 
 Warnings are emitted once per observed unsafe state rather than on every status check. `/context-aware-proactive status` and `/context-status` show the owner plus the startup source of Pi's setting. When `summarizer.enabled` is `false`, ownership status is `deferred to another compactor`; context-aware does not guess which registered extension will claim the hook. If the global or trusted-project Pi settings file cannot be parsed or read, status reports the owner as unknown instead of guessing and no ownership warning is emitted.
 
@@ -199,6 +202,23 @@ To let another extension own both automatic triggering and summarization while r
 ```
 
 The configured proactive value is retained, but its effective state is inactive while `summarizer.enabled` is `false`. Context-aware does not initiate threshold, generation-reserve, or output-limit compactions for another compactor, and it suppresses any prepared automatic handoff if ownership changes before delivery.
+
+### Compaction blocked by another extension
+
+`billion-context-pi` returns `{ "cancel": true }` from Pi's `session_before_compact` hook for every compaction, so no compaction can finish while it is loaded. Context-aware detects it at `session_start` by its tool pair: `compress` and `acp_status`, registered from the same extension. It does not report a block when `billion-context-pi` stands down: when `BILLION_CONTEXT_NATIVE` or `BILLION_CONTEXT_PROXY` is set, or when the active model's base URL routes through its `/bili/` proxy.
+
+While the block lasts:
+
+- `compact_session` stays registered with `hidden` exposure. Pi does not declare it to the model, and code-mode executors do not list it. A call that still arrives fails with the reason.
+- `/compact-then` and the context service's handoff request fail with the reason instead of starting a compaction.
+- Proactive compaction is inactive, and `/context-status` reports `Automatic compaction owner: blocked by billion-context-pi, which cancels every compaction`.
+- The context-awareness guidance and the `URGENT` telemetry action name `compress` instead of compaction.
+
+The tool list is read once per session start. To restore compaction, remove `billion-context-pi` from the profile's packages and reload Pi.
+
+### Compaction claimed from pi-fabric
+
+With `compactionClaim.enabled` set, context-aware claims compaction from pi-fabric through the `pi-fabric:compaction-owner:v1` channel, so that it writes the summary and pi-fabric's own compactor stands down. The claim is off by default: while `billion-context-pi` is in the profile it stays the only live context manager. See [`compactionClaim`](configuration.md#compactionclaim) for what the claim carries, how a failed model summary falls back, and when the claim is withdrawn. Without pi-fabric loaded, nobody answers the claim and compaction is unchanged.
 
 ## Model dispatch decisions
 
@@ -233,6 +253,8 @@ Current behavior splits this into two pieces:
 1. a stable `<context-awareness>` system prompt block that explains how to interpret context-pressure telemetry;
 2. a hidden, self-describing custom message persisted once when the outer user turn starts.
 
+The system prompt text is set as named Pi prompt sections, one per block: `context-awareness`, `durable-focus-guidance`, `context-cache`, `session_focus` (the active focus envelope), and `compaction_history`. Pi sends a changed section as an update, so a focus edit changes only `session_focus` and the other sections stay byte-identical. Task state and pressure telemetry change every turn, so they stay in the hidden message rather than in a section. When another extension has already replaced the whole prompt, context-aware appends the same blocks to that prompt instead.
+
 Envelope format:
 
 ```xml
@@ -242,15 +264,18 @@ Envelope format:
 </context-telemetry>
 ```
 
-The `action` attribute is omitted in the `OK` band, is `gate-broad-work` in `WARN`, and is `compact-before-tool` in `URGENT`. Usage percentage and headroom are intentionally rounded.
+The `action` attribute is omitted in the `OK` band, is `gate-broad-work` in `WARN`, and is `compact-before-tool` in `URGENT`. When compaction is unavailable, the `URGENT` action is `compress-before-tool` if an extension that cancels every compaction supplies `compress`, and `finish-atomic-work` otherwise. Usage percentage and headroom are intentionally rounded.
 
 Pi currently converts extension custom messages to an LLM-facing `user` role. The envelope is therefore deliberately self-describing: it identifies `pi-extension:context-aware` as its source, states that it is not user input, and tells the model to continue the preceding request or tool loop without acknowledgement. Its snapshot includes the newly submitted user prompt, then remains byte-identical while tool results and later model calls append after it. A new envelope is appended only when the next user turn starts.
+
+The band edges come from the context policy's pressure ladder: `WARN` starts at the first fold nudge (45% by default) and `URGENT` at seeded compaction (90% by default). See [`pressureLadder`](configuration.md#pressureladder) for the full mapping.
 
 Interpretation is intentionally graduated:
 
 - `OK`: compact only at natural phase boundaries.
 - `WARN`: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, the agent should either compact at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context. For delegated work, prefer `delegate` with `task_only` or `snippet` `clone_mode`, explicit scope/stop rules, and concise collapsed results. Compact first for broad or full-context delegation.
 - `URGENT`: compact before nontrivial tool use unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
+- `UNKNOWN`: Pi has not measured the context size yet, for example right after a compaction or an overflow. The envelope reports `usage-percent="unknown"` instead of a number nobody measured, and the agent keeps the next action small until a measured band arrives. The marker entry's `details` are then `{ band: "UNKNOWN", percent: null, headroom: null }`. The footer, `/context-status`, compaction notices, the `compact_session` receipt (`tokens_before: null`), the check-in prompt, and the context service (`band: "UNKNOWN"`) also report the size as unknown.
 
 ### Raw seed vs expanded seed
 
@@ -419,6 +444,64 @@ The prompt's compaction projection contains only the current-branch count; compa
 
 Call the bounded cache-and-session lookup tool as `session_recall`. It replaces the former `recall` call name. There is no `recall` alias because another plugin may own that name. Existing session history is not rewritten, so recorded calls keep their original text; new calls must use `session_recall`.
 
+### `/session-erase <session-id>`
+
+Permanently erase one closed session from the current profile:
+
+```text
+/session-erase <session-id>
+```
+
+CAUTION: Close all other Pi sessions before erasing a session. Deletion is direct, not trash, and cannot be undone.
+Reload context-aware in every Pi process before erasure. Older processes and hosts without this extension do not publish open-session leases.
+The command refuses the current session, live leases, and live registry projections, even when those sessions are idle.
+It is a user command only. There is no model tool or unattended `--yes` option.
+
+The command lists all known descendant forks and asks whether to include them.
+It also asks about context-cache documents created or updated by the selected sessions, because those documents can be shared.
+A final confirmation precedes deletion. Declined forks and documents appear under `Untouched` in the receipt.
+Declined documents remain on disk but disappear from recall and automatic cache listings.
+Untracked cache files, including anonymous staging leftovers, cannot be attributed to one session.
+They stay untouched and appear in the receipt. Review these files separately before the fold-engine cut-over.
+
+Erasure removes the transcript, its `.acp.json` side file, registry projections and crash debris, parity diagnostics, and SQLite discovery rows.
+Live registry locks also refuse erasure. Dead locks, reclaim directories, and temporary projections disappear with their session.
+Focus, tasks, naming, telemetry, compaction summaries, native folds, and originals stored in the transcript disappear with it.
+The command commits session ids to `<configuredAgentDir>/context-aware.sqlite` before deletion and checkpoints the SQLite WAL afterward.
+The `erased_sessions` table contains session ids only, without text or hashes. SQLite uses `secure_delete=ON`.
+Persisted ACP import and historical backfill must use `importAcpSideFileFromProfile`, not the pure shadow-preview importer.
+Recall, search, cache migration, cache writers, registry indexers, and parity readers skip erased ids, including restored copies in profile stores.
+Parity appends acquire a ledger-checked lease for the full write, so erasure and persistence cannot both win.
+Erased targets cancel session switches and forks. A refused startup lease requests shutdown. This extension blocks its commands, tools, transcript writes, naming, fold drafts, nudges, continuations, and ordinary input.
+
+For turns that another extension starts, it requests abort at `agent_start` and blocks all tool calls. Pi can still persist the trigger message and an assistant abort/error entry. Shutdown is a host request, not a persistence lock.
+
+Pi can rewrite migrations, repair a missing newline, or append missing thinking metadata before `session_start`. Migration rewrites can restore the loaded private transcript.
+
+A cancellable SDK opening handshake is still necessary before any session file load/write. The SDK must hold opening protection through activation.
+
+About one second after session start, and at once on refused-session start and shutdown, context-aware checks whether an erased id's transcript, `.acp.json` side file, or parity record returned. A warning lists each detected path. It deletes nothing automatically. The check reads only each transcript's first line, and it is skipped when the ledger has no erased ids.
+
+A returned file can be a backup you restored on purpose. Close the refused session. Run `/session-erase <session-id>` from another session to delete the returned data, with the normal consent dialogs.
+
+The command accepts ids already in the ledger, even if only a side file or parity record remains. Side-only restores use Pi's filename convention or the refused session's known path for identification.
+
+The id-only ledger cannot identify a renamed side file without its transcript.
+The database is the shared profile database for future fold and historical-backfill rows.
+Node `22.19.0` supports `node:sqlite` without a flag, but emits an experimental-feature warning.
+
+The receipt lists `Erased`, `Failed`, and `Untouched` data. Any deletion or checkpoint failure produces an `incomplete` receipt.
+The ledger remains after a partial failure so that import cannot restore erased content.
+Fabric's memory index is **not erased** until Fabric supports deletion.
+External copies, backups, exported task plans, other extensions' stores, and the shared debug log remain untouched.
+The command only deletes files inside this profile. It refuses redirected store directories or unsafe files.
+On platforms without directory-descriptor paths, deletion fails closed and the receipt reports the failure.
+
+About one second after session start, missing-source detection runs in the background. Startup does not wait for it. It never deletes session data.
+Pi writes a transcript with a session's first user or assistant message, so a session closed before its first prompt leaves a discovery row and no file. context-aware records that first message just before Pi writes the file. When no live process holds a missing session, no message was recorded for it, its transcript was never seen on disk, and it left no `.acp.json` side file, parity record, registry entry, or cache document, the sweep drops the row silently and notes the count in `context-aware-debug.log`.
+Any other missing transcript is reported once, and its discovery row is kept. This includes sources recorded by earlier versions, which kept no write history. A missing path can mean an unmounted disk or a moved directory, not intentional deletion. Transcripts that one sweep finds missing share one notice. If a transcript comes back and later goes missing again, it is reported again.
+To erase the unavailable session's profile stores, name its id with `/session-erase <session-id>` and confirm through the same fork, cache, and final consent dialogs. Moved copies are not searched for or deleted.
+
 ### Context cache management
 
 The context cache stores curated, scoped reference documents that survive compaction and future sessions. By default, files live under `~/.pi/agent/context-cache/<sha256(scopePath).slice(0,32)>/`, where `scopePath` is the current Git worktree root. The `contextCache.scope` setting can select the session directory, repository common Git directory, or absolute current directory instead. Each pool has an `_manifest.json` tracking descriptions and metadata; unrelated worktrees do not share a pool.
@@ -458,7 +541,9 @@ The default context cache TTL is **7 days** (`168` hours). Files older than the 
 Inspect current state with:
 
 ```text
-/context-aware-mode status
+/context-aware-seed-mode status
+/context-policy status
+/fold-parity
 /context-aware-seed-rewrite status
 /context-aware-ambiguity status
 /context-aware-model status
@@ -468,4 +553,6 @@ Inspect current state with:
 ```
 
 `/context-status` also reports context usage, available headroom, and the automatic-compaction owner resolved at startup.
+
+`/fold-parity` reports shadow fold comparisons while billion-context-pi is loaded: the count toward 500 under the current engine fingerprint and unexplained differences. It writes diagnostics outside the session and registers no tool. See [fold parity](fold-parity.md).
 

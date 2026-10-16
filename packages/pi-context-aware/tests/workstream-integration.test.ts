@@ -9,6 +9,7 @@ import { createLauncherHandoff } from "../src/seed/launcher-handoff.js";
 import { replayWorkstreamEntries } from "../src/workstream/workstream-replay.js";
 import { createWorkstreamSnapshot, workstreamEntry } from "../src/workstream/workstream-state.js";
 import type { ActivityComplete } from "../src/workstream/workstream-activity.js";
+import { piPromptHandler } from "./pi-prompt-render.js";
 
 interface Harness {
   readonly api: ExtensionAPI;
@@ -32,7 +33,7 @@ function makeHarness(): Harness {
     getFlag() { return undefined; },
     on(name: string, handler: (event: Record<string, unknown>, ctx: ExtensionContext) => unknown) {
       const current = events.get(name) ?? [];
-      current.push(handler);
+      current.push(name === "before_agent_start" ? piPromptHandler(handler) : handler);
       events.set(name, current);
     },
     registerCommand(name: string, definition: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) {
@@ -96,9 +97,20 @@ function contextFor(root: string, harness: Harness, sessionId: string, entries: 
 }
 
 function firstHandler(harness: Harness, name: string): (event: Record<string, unknown>, ctx: ExtensionContext) => unknown {
-  const handler = harness.events.get(name)?.[0];
-  assert.ok(handler, `expected ${name} lifecycle registration`);
-  return handler;
+  const handlers = harness.events.get(name);
+  assert.ok(handlers?.[0], `expected ${name} lifecycle registration`);
+  return async (event, ctx) => {
+    let result: unknown;
+    let current = event;
+    for (const handler of handlers) {
+      const next = await handler(current, ctx);
+      if (next !== undefined) {
+        result = next;
+        if (typeof next === "object" && next !== null) current = { ...current, ...next };
+      }
+    }
+    return result;
+  };
 }
 
 test("final integration registers and executes durable workstream lifecycle and user seams", async () => {
@@ -140,6 +152,12 @@ test("final integration registers and executes durable workstream lifecycle and 
     entries.push({ type: "commit", id: "commit-1", summary: "wire lifecycle" });
     await firstHandler(harness, "agent_settled")({}, ctx);
     assert.ok(harness.entries.some((entry) => typeof entry === "object" && entry !== null && (entry as { customType?: string }).customType === "context-aware.activity.v1"), "settled lifecycle must invoke bounded activity projection");
+    const activityEntries = () => harness.entries.filter((entry) => typeof entry === "object" && entry !== null && (entry as { customType?: string }).customType === "context-aware.activity.v1").length;
+    assert.equal(activityEntries(), 1);
+    // pi-durable can settle the same run again after a resume. Nothing new
+    // happened, so nothing new is recorded (#171).
+    await firstHandler(harness, "agent_settled")({}, ctx);
+    assert.equal(activityEntries(), 1, "a repeated settle must not record the same run twice");
 
     const sessionsCommand = harness.commands.get("sessions");
     assert.ok(sessionsCommand);

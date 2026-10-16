@@ -103,15 +103,36 @@ async function cleanup() {
 /**
  * The environment a test run inherits.
  *
- * PI_CODING_AGENT_DIR points Pi at a real agent profile. A run started from
- * inside a Pi session (an agent running `npm test`) inherits it, and code that
- * resolves its config directory from it then reads the operator's live
- * context-aware.json instead of the fixture the test set up through HOME. That
- * made four tests fail only inside an agent session. Tests that need the
- * variable set it themselves, so dropping the inherited value is safe.
+ * A run started from inside a Pi session (an agent running `npm test`) inherits
+ * whatever that session set for its children, and the extension reads several
+ * of those settings at run time:
+ *
+ * - PI_CODING_AGENT_DIR points Pi at a real agent profile, so code resolving its
+ *   config directory read the operator's live context-aware.json instead of the
+ *   fixture the test set up through HOME. Four tests failed only inside an
+ *   agent session.
+ * - PI_FABRIC_* is what a Fabric worker hands every child. With
+ *   PI_FABRIC_TOOL_ALLOWLIST inherited, the extension hid the task tool and one
+ *   session-tasks test failed only inside a Fabric reviewer.
+ * - PI_DELEGATE_* carries a delegated run's lineage, which the task tool uses
+ *   to find the run's subtree.
+ * - PI_CONTEXT_AWARE_* are this extension's own overrides, such as the busy
+ *   probe and the autobuild switch.
+ * - BILLION_CONTEXT_* makes compaction stand down for billion-context-pi.
+ * - CMUX_BIN sends workstream status to a real cmux.
+ *
+ * Tests that need one of these set it themselves, so dropping the inherited
+ * value is safe. tests/with-temp-root-env.test.mjs fails when `src/` reads an
+ * environment variable that still reaches the run unchanged.
  */
-const childEnv = { ...process.env };
-delete childEnv.PI_CODING_AGENT_DIR;
+const HOST_SESSION_ENV_PREFIXES = ["PI_FABRIC_", "PI_DELEGATE_", "PI_CONTEXT_AWARE_", "BILLION_CONTEXT_"];
+const HOST_SESSION_ENV_NAMES = new Set(["PI_CODING_AGENT_DIR", "CMUX_BIN"]);
+
+function fromHostSession(name) {
+	return HOST_SESSION_ENV_NAMES.has(name) || HOST_SESSION_ENV_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+const childEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !fromHostSession(name)));
 
 /**
  * HOME is the other route to the operator's profile: Pi resolves its agent

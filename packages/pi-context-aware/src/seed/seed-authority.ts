@@ -156,6 +156,21 @@ export type SeedAuthorityRejectionReason =
 	| "objective-switch"
 	| "side-effect-authority-change";
 
+// A record, not a list, so adding a reason to the union fails to compile here.
+const SEED_AUTHORITY_REJECTION_REASONS: Readonly<Record<SeedAuthorityRejectionReason, true>> = {
+	"cache-origin": true,
+	"cache-material-originated-term": true,
+	"project-switch": true,
+	"mutation-authority-escalation": true,
+	"objective-switch": true,
+	"side-effect-authority-change": true,
+};
+
+/** Narrow a reason read back from a session entry. */
+export function isSeedAuthorityRejectionReason(value: unknown): value is SeedAuthorityRejectionReason {
+	return typeof value === "string" && Object.hasOwn(SEED_AUTHORITY_REJECTION_REASONS, value);
+}
+
 export interface SeedAuthorityTrigger {
 	readonly reason: SeedAuthorityRejectionReason;
 	readonly values: readonly string[];
