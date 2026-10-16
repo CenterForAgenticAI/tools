@@ -1,0 +1,67 @@
+{
+  "version": "0.1.0",
+  "description": "Named, isolated Pi profiles: create, switch and check profile directories, with a colour badge in the Pi status bar.",
+  "keywords": [
+    "pi-package"
+  ],
+  "type": "module",
+  "bin": {
+    "pi-profile": "./bin/pi-profile.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "src",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
+    "lint": "eslint . --cache --cache-location node_modules/.cache/eslint/",
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "test:coverage": "c8 node --test \"tests/**/*.test.ts\"",
+    "test:public": "npm test && npm run smoke:package",
+    "scan:public-references": "node scripts/public-reference-scan.ts",
+    "smoke:package": "node scripts/smoke-package.mjs",
+    "proof": "cd model && bend PROOF.bend --check-only",
+    "check": "npm run lint && npm run typecheck && npm run test:coverage && npm run build && npm run smoke:package",
+    "hooks:install": "node scripts/install-hooks.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "name": "@centerforagenticai/pi-profile",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/pi-profile"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/pi-profile#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.0.0",
+    "c8": "^11.0.0",
+    "eslint": "^10.7.0",
+    "globals": "^16.0.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.87.1"
+  }
+}
