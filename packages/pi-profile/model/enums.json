@@ -1,0 +1,30 @@
+{
+  "enums": [
+    {
+      "name": "AuthMode",
+      "cases": [
+        { "ctor": "Shared", "key": "shared" },
+        { "ctor": "Separate", "key": "separate" },
+        { "ctor": "Pooled", "key": "pooled" }
+      ]
+    },
+    {
+      "name": "ReplicaKind",
+      "cases": [
+        { "ctor": "LocalReplica", "key": "local" },
+        { "ctor": "SshReplica", "key": "ssh" },
+        { "ctor": "S3Replica", "key": "s3" }
+      ]
+    },
+    {
+      "name": "PathClass",
+      "cases": [
+        { "ctor": "ConfigPath", "key": "config" },
+        { "ctor": "StatePath", "key": "state" },
+        { "ctor": "SecretPath", "key": "secret" },
+        { "ctor": "SessionsPath", "key": "sessions" },
+        { "ctor": "UnknownPath", "key": "unknown" }
+      ]
+    }
+  ]
+}
