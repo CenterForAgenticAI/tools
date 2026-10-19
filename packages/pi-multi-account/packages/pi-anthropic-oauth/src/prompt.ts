@@ -1,5 +1,23 @@
+import type { CacheControlEphemeral } from "@anthropic-ai/sdk/resources/messages.js";
+import type { CacheRetention, ProviderEnv } from "@earendil-works/pi-ai";
+import { randomUUID } from "node:crypto";
+import { getClaudeCodeVersion } from "./version.js";
+
 const CLAUDE_CODE_IDENTITY =
-  "You are Claude Code, Anthropic's official CLI for Claude.";
+  "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+
+/**
+ * Anthropic's OAuth classifier rejects premium-model requests that do not
+ * open with a Claude Code billing-header system block. The `cch` and
+ * `cc_prompt_id` keys must be present, but their values are not validated,
+ * and the block must not carry `cache_control`.
+ */
+export function buildClaudeCodeBillingBlock(): MessageContentBlock {
+  return {
+    type: "text",
+    text: `x-anthropic-billing-header: cc_version=${getClaudeCodeVersion()}; cc_entrypoint=cli; cch=00000; cc_prompt_id=${randomUUID()}`,
+  };
+}
 const PI_REMOVAL_ANCHORS = [
   "pi-coding-agent",
   "@earendil-works/pi-coding-agent",
@@ -43,26 +61,44 @@ export function sanitizeSurrogates(text: string): string {
   );
 }
 
+export function resolveCacheRetention(
+  cacheRetention: CacheRetention | undefined,
+  env?: ProviderEnv,
+): CacheRetention {
+  if (cacheRetention) return cacheRetention;
+  const envValue = env?.PI_CACHE_RETENTION ?? process.env.PI_CACHE_RETENTION;
+  return envValue === "long" ? "long" : "short";
+}
+
+export function cacheControlFor(
+  cacheRetention: CacheRetention,
+): CacheControlEphemeral | undefined {
+  if (cacheRetention === "none") return undefined;
+  if (cacheRetention === "long") return { type: "ephemeral", ttl: "1h" };
+  return { type: "ephemeral" };
+}
+
 export function buildAnthropicSystemPrompt(
   systemPrompt: string | undefined,
   isOAuth: boolean,
+  cacheRetention: CacheRetention = "short",
 ): MessageContentBlock[] | undefined {
   const blocks: MessageContentBlock[] = [];
 
   if (isOAuth) {
-    blocks.push({
-      type: "text",
-      text: CLAUDE_CODE_IDENTITY,
-      cache_control: { type: "ephemeral" },
-    });
+    blocks.push(buildClaudeCodeBillingBlock());
+    blocks.push({ type: "text", text: CLAUDE_CODE_IDENTITY });
   }
 
-  const sanitized = systemPrompt ? sanitizeSystemText(systemPrompt) : "";
+  const sanitized = systemPrompt
+    ? sanitizeSystemText(sanitizeSurrogates(systemPrompt))
+    : "";
   if (sanitized) {
+    const cacheControl = cacheControlFor(cacheRetention);
     blocks.push({
       type: "text",
       text: sanitized,
-      cache_control: { type: "ephemeral" },
+      ...(cacheControl && { cache_control: cacheControl }),
     });
   }
 
@@ -80,10 +116,11 @@ export function sanitizeSystemText(
     return !PI_REMOVAL_ANCHORS.some((anchor) => paragraph.includes(anchor));
   });
 
-  return filtered
-    .join("\n\n")
-    .replace(resolvePiRewritePattern(env), "Claude Code")
-    .trim();
+  const filteredText = filtered.join("\n\n");
+  const rewritePattern = resolvePiRewritePattern(env);
+  rejectZeroLengthMatches(rewritePattern, filteredText);
+
+  return filteredText.replace(rewritePattern, "Claude Code").trim();
 }
 
 function resolvePiRewritePattern(env: NodeJS.ProcessEnv): RegExp {
@@ -109,12 +146,30 @@ function compileCustomPiRewritePattern(value: string | undefined): RegExp {
 
   const parsed = parseRegexLiteral(pattern) ?? { source: pattern, flags: "" };
   const flags = parsed.flags.includes("g") ? parsed.flags : `${parsed.flags}g`;
+  let compiled: RegExp;
   try {
-    return new RegExp(parsed.source, flags);
+    compiled = new RegExp(parsed.source, flags);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Invalid ${PI_REWRITE_PATTERN_ENV}: ${message}`);
   }
+
+  rejectZeroLengthMatches(compiled, "");
+  return compiled;
+}
+
+function rejectZeroLengthMatches(pattern: RegExp, text: string): void {
+  pattern.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match[0].length === 0) {
+      pattern.lastIndex = 0;
+      throw new Error(
+        `Invalid ${PI_REWRITE_PATTERN_ENV}: the pattern can match without consuming text. Use (?!) to disable rewriting.`,
+      );
+    }
+  }
+  pattern.lastIndex = 0;
 }
 
 function parseRegexLiteral(value: string): { source: string; flags: string } | undefined {

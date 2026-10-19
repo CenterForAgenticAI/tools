@@ -19,6 +19,8 @@ All files live below `$PI_CODING_AGENT_DIR/pi-multi-account/` or the equivalent
 | `cost-period-digest.ndjson` | 64 MiB | Immutable closed-period project/account/model rollups. |
 | `api-pricing.json` | 1,000,000 bytes | Cached public pricing data. |
 | `openrouter-budget.json` | 64 KiB, 512 projects | Per-project UTC-day worst-case OpenRouter reservations; inactive entries expire after seven days. |
+| `session-account-groups.json` | records used in the last 14 days, plus override records | Version 1 map from session id to its `group use` override and cached effective group; no paths. |
+| `session-account-groups.last-used.json` | one entry per store record | Last-used wall-clock milliseconds per session id. Each locked store write prunes records unused for more than 14 days, except override records. |
 | `declaration-notice.json` | 1 KiB | UTC-day and stale/not-installed condition for the throttled startup warning. |
 
 History expiry is append-driven. The first append to each store on a new UTC day

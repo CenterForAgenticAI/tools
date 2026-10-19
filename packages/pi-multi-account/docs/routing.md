@@ -73,6 +73,64 @@ Any miss leaves Pi's own fallback in place. The outcome is recorded as the
 `session.startup-default` diagnostic. A resumed session keeps restoring its own
 last model from its `model_change` entries.
 
+## Selecting a provider outside the account group
+
+The extension never replaces a model that the operator or a caller selected
+because the active account group excludes its provider. A group confines the
+extension's automatic routing: `unified`, failover, recovery, parking,
+preflight, and the metered OpenRouter rung.
+
+In an operator session, a model selected with `/model`, or restored from an
+earlier session, from a known provider outside the group runs as selected. No
+notice is shown. A turn that fails on that provider is not routed to another
+account, because automatic routing stays inside the group. `/multi-account group
+status` says so in its last line. A listed member that is unavailable, a virtual
+model, and a direct OpenRouter selection stay blocked.
+
+A delegate child keeps its inherited confinement, because its dispatcher chose
+its model. An in-process worker, a durable child (`PI_DELEGATE_CHILD`), a child
+with `PI_DELEGATE_LINEAGE_*` fields, and a Fabric subagent (`PI_FABRIC_DEPTH`
+above 0) are delegates. When a delegate's selected provider is outside the group,
+ordinary input is refused before dispatch:
+
+- the `input` handler returns `handled`, so no request is sent;
+- the active model stays as it was; the extension does not call `setModel`; and
+- a warning notice names the selected model, the active group and its source,
+  and an in-group model key to select instead.
+
+The suggested key comes from the same account selection that routing uses. The
+extension computes it, but it does not select it. It is at most one physical key,
+such as `openai-codex/<id>`. If `unified` lists the same `<id>` and an account in
+the group serves that exact `<id>`, the notice also names `unified/<id>`. If no
+account in the group can serve the request now, the notice says so. It tells the
+operator to run `/multi-account group status` and select an allowed model with
+`/model`.
+
+Each refusal records the warning diagnostic
+`routing.account-group-direct-blocked`. Its fields are `providerId` and
+`suggestion`, which is `physical`, `physical+unified`, or `none`.
+
+The metered OpenRouter bridge is the extension's own choice, not a caller's
+selection. When `group use` retires an active bridge, the next input returns
+to the in-group account that routing chooses for the bridge's origin, before
+dispatch. This records the info diagnostic
+`routing.account-group-bridge-return` with the field `providerId`. If no
+account in the group can serve the origin now, the input is refused as above.
+
+In a delegate child, a custom-message run that bypasses the `input` event is
+aborted at `agent_start`. In an operator session it dispatches unchanged. A
+selected virtual model, a selected OpenRouter model, and an invalid policy
+configuration stay blocked in every session and keep their own notices. In-group
+selections and `unified/<id>` are not affected.
+
+Pi print mode (`pi -p` and `--mode json`) binds no extension UI, so Pi discards
+the notice and the refused prompt ends without an assistant message. The
+extension therefore also writes the same notice as one stderr line, and only in
+a print-mode process. It reads the process mode with Pi's own argument parser,
+as Pi does. An in-process delegate session never writes this line. RPC mode
+sends the notice as an `extension_ui_request` with `method: "notify"`, and it
+reports the prompt with `disposition: "handled"`.
+
 ## Delegate account-group confinement
 
 In-process and durable delegate children inherit the parent's complete cached
@@ -88,6 +146,13 @@ cache, blocks physical requests. It never permits fallback to child-cwd policy.
 or rewriting it. Explicit operator `group use` and `group reset` remain available
 and resolve this session's own policy after startup; they are not agent-tool
 actions. Delegate resume applies parent inheritance again.
+
+A child's inherited write also refreshes the parent's last-used time. The store
+prunes a record unused for more than 14 days unless it holds an override, so a
+parent that stays idle that long can lose its record while it is still open. A
+child it then starts is blocked until the parent runs `/multi-account reload`;
+only children started after the reload inherit again.
+See [account groups](commands.md) for the retention rules.
 
 ## Unified logical model provider
 
@@ -168,7 +233,9 @@ continuation. The rules are fixed:
   `context_length_exceeded (provider_error)`, so the host still compacts. Every
   overflow footer, setup-shaped or not, names a closed sub-reason
   (`input-tokens`, `request-bytes`, `media-limit`, or `unknown`) taken only from
-  structured provider facts; see [diagnostic retention](diagnostic-retention.md).
+  structured provider facts. A `request-bytes` or `media-limit` footer also
+  names closed buckets of the sent size and image count, measured after image
+  stripping; see [diagnostic retention](diagnostic-retention.md).
 - A route served through `tierModelMap` under a different API model ID is one
   attempt with no in-call recovery.
 - Routed Codex calls are pinned to SSE and may recover. A Google Antigravity

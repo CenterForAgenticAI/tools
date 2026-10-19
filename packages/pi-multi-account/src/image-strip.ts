@@ -66,6 +66,22 @@ function hasImage(message: unknown): boolean {
 	return isRecord(message) && Array.isArray(message.content) && message.content.some(isImageBlock);
 }
 
+/**
+* Number of image blocks in the context's messages, by the rule the stripper
+* uses. Undefined when the context has no message list.
+*/
+export function countImageBlocks(context: unknown): number | undefined {
+	if (!isRecord(context) || !Array.isArray(context.messages)) return undefined;
+	let count = 0;
+	for (const message of context.messages as readonly unknown[]) {
+		if (!isRecord(message) || !Array.isArray(message.content)) continue;
+		for (const block of message.content as readonly unknown[]) {
+			if (isImageBlock(block)) count += 1;
+		}
+	}
+	return count;
+}
+
 /** Replaces each run of adjacent image blocks with one placeholder text block. */
 function withoutImages(content: readonly unknown[]): unknown[] {
 	const next: unknown[] = [];

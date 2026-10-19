@@ -21,6 +21,12 @@ import {
 import { acquireMachineLease } from "./machine-lease.js";
 
 const STORE_VERSION = 1;
+const LAST_USED_VERSION = 1;
+/**
+ * A record unused for longer than this is pruned by the next locked write,
+ * unless it holds a manual override (issue 187).
+ */
+const SESSION_RETENTION_MS = 14 * 24 * 60 * 60 * 1_000;
 const STORE_LEASE_TTL_MS = 5_000;
 const MAX_SESSION_ID_LENGTH = 256;
 /**
@@ -48,6 +54,11 @@ export interface SessionAccountGroupStoreOptions {
 	 * wall-clock step cannot stretch the blocking wait.
 	 */
 	readonly now?: () => number;
+	/**
+	 * Test seam for the wall clock that ages records for retention. It is
+	 * separate from `now`, which only bounds the lease wait.
+	 */
+	readonly wallNow?: () => number;
 }
 
 export interface ResolveAndCacheAccountGroupInput {
@@ -64,6 +75,15 @@ interface StoredSessionGroupRecord {
 interface SessionGroupState {
 	version: typeof STORE_VERSION;
 	sessions: Record<string, StoredSessionGroupRecord>;
+}
+
+/**
+ * The last-used sidecar. The main store keeps its closed v1 shape so an older
+ * running build still reads it; only this file carries wall-clock times.
+ */
+interface LastUsedState {
+	version: typeof LAST_USED_VERSION;
+	lastUsedMs: Record<string, number>;
 }
 
 export class SessionAccountGroupStoreError extends Error {
@@ -94,13 +114,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isSessionId(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= MAX_SESSION_ID_LENGTH &&
+		!/[\u0000-\u001f\u007f]/u.test(value)
+	);
+}
+
 function assertSessionId(value: unknown): asserts value is string {
-	if (
-		typeof value !== "string" ||
-		value.length === 0 ||
-		value.length > MAX_SESSION_ID_LENGTH ||
-		/[\u0000-\u001f\u007f]/u.test(value)
-	) {
+	if (!isSessionId(value)) {
 		throw new SessionAccountGroupStoreError(
 			`session id must contain 1 through ${MAX_SESSION_ID_LENGTH} non-control characters.`,
 		);
@@ -202,6 +226,70 @@ function readState(storePath: string): SessionGroupState {
 	return state;
 }
 
+function emptyLastUsed(): Record<string, number> {
+	return Object.create(null) as Record<string, number>;
+}
+
+/**
+ * Read the sidecar without ever throwing. A missing, unreadable, corrupt, or
+ * wrong-version file reads as empty, so every record counts as used now: a lost
+ * sidecar only delays pruning and never blocks routing.
+ */
+function readLastUsed(path: string): Record<string, number> {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		return emptyLastUsed();
+	}
+	if (
+		!isRecord(parsed) ||
+		parsed["version"] !== LAST_USED_VERSION ||
+		!isRecord(parsed["lastUsedMs"]) ||
+		Object.keys(parsed).some((key) => key !== "version" && key !== "lastUsedMs")
+	) {
+		return emptyLastUsed();
+	}
+	const lastUsed = emptyLastUsed();
+	for (const [sessionId, value] of Object.entries(parsed["lastUsedMs"])) {
+		if (!isSessionId(sessionId) || !Number.isSafeInteger(value) || (value as number) < 0) {
+			return emptyLastUsed();
+		}
+		lastUsed[sessionId] = value as number;
+	}
+	return lastUsed;
+}
+
+/**
+ * Stamp the touched sessions with `nowMs`, then keep each record that holds a
+ * manual override or was used within the retention window. A record with no
+ * entry, or an entry in the future (the wall clock stepped back), counts as
+ * used now. Entries for sessions absent from the store are dropped.
+ */
+function retainRecentSessions(
+	state: SessionGroupState,
+	recorded: Record<string, number>,
+	touched: readonly string[],
+	nowMs: number,
+): { state: SessionGroupState; lastUsed: LastUsedState } {
+	for (const sessionId of touched) recorded[sessionId] = nowMs;
+	const kept = emptyState();
+	const lastUsedMs = emptyLastUsed();
+	for (const [sessionId, record] of Object.entries(state.sessions)) {
+		const entry = recorded[sessionId];
+		const usedAtMs = entry === undefined || entry > nowMs ? nowMs : entry;
+		if (
+			record.manualOverrideGroupId === undefined &&
+			nowMs - usedAtMs > SESSION_RETENTION_MS
+		) {
+			continue;
+		}
+		kept.sessions[sessionId] = record;
+		lastUsedMs[sessionId] = usedAtMs;
+	}
+	return { state: kept, lastUsed: { version: LAST_USED_VERSION, lastUsedMs } };
+}
+
 function fsyncDirectory(directory: string): void {
 	const descriptor = openSync(directory, "r");
 	try {
@@ -211,23 +299,24 @@ function fsyncDirectory(directory: string): void {
 	}
 }
 
-function writeState(storePath: string, state: SessionGroupState): void {
-	const directory = dirname(storePath);
+/** Write a complete owner-only file through temp file, fsync, and rename. */
+function writeJsonAtomic(path: string, value: SessionGroupState | LastUsedState): void {
+	const directory = dirname(path);
 	mkdirSync(directory, { recursive: true, mode: 0o700 });
 	chmodSync(directory, 0o700);
-	const temporaryPath = `${storePath}.${process.pid}.${randomUUID()}.tmp`;
+	const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
 	let descriptor: number | undefined;
 	try {
 		descriptor = openSync(temporaryPath, "wx", 0o600);
-		writeFileSync(descriptor, `${JSON.stringify(state, null, 2)}\n`, {
+		writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, {
 			encoding: "utf8",
 		});
 		fsyncSync(descriptor);
 		closeSync(descriptor);
 		descriptor = undefined;
 		chmodSync(temporaryPath, 0o600);
-		renameSync(temporaryPath, storePath);
-		chmodSync(storePath, 0o600);
+		renameSync(temporaryPath, path);
+		chmodSync(path, 0o600);
 		fsyncDirectory(directory);
 	} catch (error) {
 		if (descriptor !== undefined) closeSync(descriptor);
@@ -238,18 +327,22 @@ function writeState(storePath: string, state: SessionGroupState): void {
 
 export class SessionAccountGroupStore {
 	readonly #storePath: string;
+	readonly #lastUsedPath: string;
 	readonly #lockPath: string;
 	readonly #leaseWaitMs: number;
 	readonly #sleep: (ms: number) => void;
 	readonly #now: () => number;
+	readonly #wallNow: () => number;
 
 	constructor(options: SessionAccountGroupStoreOptions) {
 		this.#storePath = options.storePath;
+		this.#lastUsedPath = `${options.storePath.replace(/\.json$/u, "")}.last-used.json`;
 		this.#lockPath = options.lockPath ?? `${options.storePath}.lock`;
 		const leaseWaitMs = options.leaseWaitMs ?? DEFAULT_LEASE_WAIT_MS;
 		this.#leaseWaitMs = Number.isFinite(leaseWaitMs) && leaseWaitMs > 0 ? leaseWaitMs : 0;
 		this.#sleep = options.sleep ?? sleepSync;
 		this.#now = options.now ?? monotonicNow;
+		this.#wallNow = options.wallNow ?? Date.now;
 	}
 
 	readOverride(sessionId: string): string | undefined {
@@ -270,6 +363,7 @@ export class SessionAccountGroupStore {
 		}
 		this.#update((state) => {
 			state.sessions[sessionId] = { manualOverrideGroupId: groupId };
+			return [sessionId];
 		});
 	}
 
@@ -277,6 +371,7 @@ export class SessionAccountGroupStore {
 		const sessionId = sessionIdFrom(sessionManager);
 		this.#update((state) => {
 			delete state.sessions[sessionId];
+			return [];
 		});
 	}
 
@@ -284,18 +379,22 @@ export class SessionAccountGroupStore {
 	 * Persist an inherited effective result under the child's own session id in
 	 * one locked write, without consulting the child's cwd or default policy. An
 	 * inherited session override stays a manual override for the next hop; every
-	 * other source replaces any record the child had.
+	 * other source replaces any record the child had. The same write refreshes
+	 * the parent's last-used time, because its record is what children inherit.
 	 */
 	cacheInheritedResolution(
 		sessionManager: SessionIdSource,
 		resolution: EffectiveAccountGroupResolution,
+		parentSessionId: string,
 	): EffectiveAccountGroupResolution {
 		const sessionId = sessionIdFrom(sessionManager);
+		assertSessionId(parentSessionId);
 		const effective = copyResolution(resolution);
 		this.#update((state) => {
 			state.sessions[sessionId] = effective.source === "session-override"
 				? { effective, manualOverrideGroupId: effective.groupId }
 				: { effective };
+			return [sessionId, parentSessionId];
 		});
 		return copyResolution(effective);
 	}
@@ -318,6 +417,7 @@ export class SessionAccountGroupStore {
 				record.manualOverrideGroupId = manualOverrideGroupId;
 			}
 			state.sessions[sessionId] = record;
+			return [sessionId];
 		});
 		if (resolved === undefined) {
 			throw new SessionAccountGroupStoreError("effective resolution was not written.");
@@ -344,12 +444,37 @@ export class SessionAccountGroupStore {
 		}
 	}
 
-	#update(mutator: (state: SessionGroupState) => void): void {
+	/**
+	 * One locked read-modify-write of both files. The mutator returns the
+	 * sessions it used; touching happens before pruning, so a touched record is
+	 * never pruned. A touched session without a record, such as a pruned
+	 * parent, gets no entry.
+	 *
+	 * The sidecar is renamed first. A failure or crash after that rename leaves
+	 * the old main file next to a sidecar that only makes records look more
+	 * recent, so it can delay pruning but never prune a record in use. If the
+	 * sidecar cannot be written, the main file is written without pruning,
+	 * because pruning is only safe once the new last-used times are durable.
+	 */
+	#update(mutator: (state: SessionGroupState) => readonly string[]): void {
 		const lease = this.#acquireLease();
 		try {
 			const state = readState(this.#storePath);
-			mutator(state);
-			writeState(this.#storePath, state);
+			const recorded = readLastUsed(this.#lastUsedPath);
+			const touched = mutator(state);
+			const retained = retainRecentSessions(
+				state,
+				recorded,
+				touched,
+				Math.floor(this.#wallNow()),
+			);
+			let lastUsedDurable = true;
+			try {
+				writeJsonAtomic(this.#lastUsedPath, retained.lastUsed);
+			} catch {
+				lastUsedDurable = false;
+			}
+			writeJsonAtomic(this.#storePath, lastUsedDurable ? retained.state : state);
 		} finally {
 			lease.release();
 		}

@@ -1,6 +1,7 @@
 import type { AntigravityModelConfig } from "./models.js";
 import { ThinkingEffort } from "../types/enums.js";
 import type { AntigravityRouting, ModelInfoRaw } from "../types/types.js";
+import { isRecord } from "../utils/util.js";
 
 export type AntigravityCatalog = {
   models: AntigravityModelConfig[];
@@ -17,6 +18,8 @@ type RuntimeGroup = {
   /** Catalog capability: true/false when advertised, undefined when omitted. */
   supportsThinking?: boolean;
   supportsImages?: boolean;
+  contextWindow?: number;
+  maxOutputTokens?: number;
 };
 
 const THINKING_SUFFIXES: Array<{ suffix: string; level: ThinkingLevel }> = [
@@ -39,12 +42,6 @@ const DISPLAY_LEVELS: Array<{ pattern: RegExp; level: ThinkingLevel }> = [
   { pattern: /\(\s*low\s*\)/i, level: ThinkingEffort.Low },
 ];
 
-/** Known backend aliases whose runtime IDs do not share a thinking suffix with the public family. */
-const RUNTIME_ALIASES: Record<string, { publicId: string; level: ThinkingLevel }> = {
-  "gemini-3-flash-agent": { publicId: "gemini-3.5-flash", level: ThinkingEffort.High },
-  "gemini-pro-agent": { publicId: "gemini-3.1-pro", level: ThinkingEffort.High },
-};
-
 const PI_LEVELS = [
   ThinkingEffort.Off,
   ThinkingEffort.Minimal,
@@ -57,12 +54,11 @@ const PI_LEVELS = [
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
-export function isSelectableRuntimeModelId(id: string): boolean {
-  if (!/^(gemini-|claude-|gpt-oss-)/i.test(id) || /\s/.test(id) || /^MODEL_/i.test(id)) {
-    return false;
-  }
+export function isSelectableRuntimeModelId(id: string, info?: ModelInfoRaw): boolean {
+  if (!/^[a-z0-9][a-z0-9_.-]*$/i.test(id) || /^MODEL_/i.test(id)) return false;
   if (/^(chat_|tab_)/i.test(id)) return false;
-  if (/image/i.test(id)) return false;
+  if (/image/i.test(id) || /image/i.test(modelDisplayName(info) ?? "")) return false;
+  if (info?.isInternal === true || info?.apiProvider === "API_PROVIDER_INTERNAL") return false;
   return true;
 }
 
@@ -74,67 +70,82 @@ export function resolvedCatalog(
   return current;
 }
 
+export function extractRecommendedModelIds(agentModelSorts: unknown): Set<string> | undefined {
+  if (!Array.isArray(agentModelSorts) || agentModelSorts.length === 0) return undefined;
+  const ids = new Set<string>();
+  for (const sort of agentModelSorts) {
+    if (!isRecord(sort)) continue;
+    const groups = Array.isArray(sort.groups) ? sort.groups : [];
+    for (const group of groups) {
+      if (!isRecord(group) || !Array.isArray(group.modelIds)) continue;
+      for (const id of group.modelIds) {
+        if (typeof id === "string" && id) ids.add(id);
+      }
+    }
+  }
+  return ids.size > 0 ? ids : undefined;
+}
+
 export function buildAntigravityCatalog(
   rawModels: Record<string, ModelInfoRaw>,
   fallback: AntigravityCatalog,
+  agentModelSorts?: unknown,
 ): AntigravityCatalog {
-  const groups = new Map<string, RuntimeGroup>();
+  const recommendedIds = extractRecommendedModelIds(agentModelSorts);
 
-  for (const [runtimeId, info] of Object.entries(rawModels)) {
-    if (!isSelectableRuntimeModelId(runtimeId)) continue;
-    if (info?.isInternal) continue;
+  function collectGroups(filterIds?: Set<string>): Map<string, RuntimeGroup> {
+    const collected = new Map<string, RuntimeGroup>();
 
-    const displayName = modelDisplayName(info);
-    if (runtimeId.endsWith("-tiered")) {
-      const baseId = runtimeId.slice(0, -"-tiered".length);
-      const group = ensureGroup(groups, baseId);
+    for (const [runtimeId, info] of Object.entries(rawModels)) {
+      if (!isSelectableRuntimeModelId(runtimeId, info)) continue;
+      if (info?.isInternal) continue;
+      if (filterIds && !filterIds.has(runtimeId)) continue;
+
+      const displayName = modelDisplayName(info);
+      if (runtimeId.endsWith("-tiered")) {
+        const baseId = runtimeId.slice(0, -"-tiered".length);
+        const group = ensureGroup(collected, baseId);
+        absorbMetadata(group, info, displayName);
+        if (!group.unsuffixed) group.unsuffixed = runtimeId;
+        continue;
+      }
+
+      const suffix = parseThinkingSuffix(runtimeId);
+      const publicId = suffix?.baseId ?? runtimeId;
+      const group = ensureGroup(collected, publicId);
       absorbMetadata(group, info, displayName);
-      if (!group.unsuffixed) group.unsuffixed = runtimeId;
-      continue;
+
+      const level = levelFromDisplayName(displayName) ?? suffix?.level;
+      if (level) group.variants[level] = runtimeId;
+      else group.unsuffixed = runtimeId;
     }
 
-    const alias = RUNTIME_ALIASES[runtimeId];
-    const suffix = alias ? undefined : parseThinkingSuffix(runtimeId);
-    const publicId = alias?.publicId ?? suffix?.baseId ?? runtimeId;
-    const group = ensureGroup(groups, publicId);
-    absorbMetadata(group, info, displayName);
-
-    const level = alias?.level ?? levelFromDisplayName(displayName) ?? suffix?.level;
-    if (level) group.variants[level] = runtimeId;
-    else group.unsuffixed = runtimeId;
+    mergeAgentSingletons(collected);
+    return collected;
   }
 
-  mergeAgentSingletons(groups);
+  let groups = collectGroups(recommendedIds);
+  if (groups.size === 0 && recommendedIds) {
+    groups = collectGroups();
+  }
 
-  if (groups.size === 0) return fallback;
+  if (groups.size === 0) throw new Error("Antigravity catalog contains no supported chat models");
 
   const models: AntigravityModelConfig[] = [];
   const routing: Record<string, AntigravityRouting> = {};
 
   for (const group of groups.values()) {
-    const fallbackModel = fallback.models.find((model) => model.id === group.publicId);
-    const fallbackRouting = fallback.routing[group.publicId];
-    if (fallbackModel && fallbackRouting) {
-      models.push(fallbackModel);
-      routing[group.publicId] = fallbackRouting;
-      continue;
-    }
-
     const synthesized = synthesizeModel(group, fallback.models);
     models.push(synthesized.model);
     routing[group.publicId] = synthesized.routing;
   }
 
-  for (const fallbackModel of fallback.models) {
-    if (routing[fallbackModel.id]) continue;
-    const fallbackRouting = fallback.routing[fallbackModel.id];
-    if (!fallbackRouting) continue;
-    models.push(fallbackModel);
-    routing[fallbackModel.id] = fallbackRouting;
-  }
-
   models.sort(comparePublicModels);
   return { models, routing };
+}
+
+function positiveTokenLimit(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function ensureGroup(groups: Map<string, RuntimeGroup>, publicId: string): RuntimeGroup {
@@ -155,20 +166,34 @@ function absorbMetadata(
   displayName: string | undefined,
 ): void {
   if (displayName) group.displayNames.push(displayName);
+  // A public model can route to any variant. Advertise the smallest supplied
+  // limit so every route remains within the server's advertised capabilities.
+  const contextWindow = positiveTokenLimit(info?.maxTokens);
+  const maxOutputTokens = positiveTokenLimit(info?.maxOutputTokens);
+  if (contextWindow !== undefined) {
+    group.contextWindow = Math.min(group.contextWindow ?? contextWindow, contextWindow);
+  }
+  if (maxOutputTokens !== undefined) {
+    group.maxOutputTokens = Math.min(group.maxOutputTokens ?? maxOutputTokens, maxOutputTokens);
+  }
   if (info?.supportsThinking === true) group.supportsThinking = true;
   else if (info?.supportsThinking === false && group.supportsThinking !== true) {
     group.supportsThinking = false;
   }
-  if (info?.supportsImages === true) group.supportsImages = true;
-  if (info?.supportsImages === false && group.supportsImages === undefined) {
-    group.supportsImages = false;
+  if (info?.supportsImages === false) group.supportsImages = false;
+  else if (info?.supportsImages === true && group.supportsImages === undefined) {
+    group.supportsImages = true;
   }
 }
 
 function mergeAgentSingletons(groups: Map<string, RuntimeGroup>): void {
   for (const [publicId, group] of [...groups.entries()]) {
-    if (!publicId.endsWith("-agent")) continue;
-    if (Object.keys(group.variants).length > 0) continue;
+    if (!publicId.endsWith("-agent") || group.supportsThinking === false) continue;
+    const runtimeIds = [group.unsuffixed, ...Object.values(group.variants)].filter(
+      (id): id is string => id !== undefined,
+    );
+    if (runtimeIds.length !== 1) continue;
+    const [runtimeId] = runtimeIds;
     const family = displayFamily(group.displayNames[0]);
     if (!family) continue;
     const target = [...groups.values()].find(
@@ -176,10 +201,23 @@ function mergeAgentSingletons(groups: Map<string, RuntimeGroup>): void {
         candidate.publicId !== publicId &&
         candidate.displayNames.some((name) => displayFamily(name) === family),
     );
-    if (!target || !group.unsuffixed) continue;
-    const level = levelFromDisplayName(group.displayNames[0]) ?? ThinkingEffort.High;
-    target.variants[level] = group.unsuffixed;
-    absorbMetadata(target, { supportsThinking: group.supportsThinking }, group.displayNames[0]);
+    if (!target) continue;
+    const level =
+      (Object.keys(group.variants) as ThinkingLevel[]).find(
+        (candidate) => group.variants[candidate] === runtimeId,
+      ) ?? levelFromDisplayName(group.displayNames[0]);
+    if (!level || target.variants[level]) continue;
+    target.variants[level] = runtimeId;
+    absorbMetadata(
+      target,
+      {
+        supportsThinking: group.supportsThinking,
+        supportsImages: group.supportsImages,
+        maxTokens: group.contextWindow,
+        maxOutputTokens: group.maxOutputTokens,
+      },
+      group.displayNames[0],
+    );
     groups.delete(publicId);
   }
 }
@@ -229,9 +267,11 @@ function synthesizeModel(
   const routing = routingFromVariants(group.publicId, group.variants, group.unsuffixed);
   const supportsImages = group.supportsImages ?? template?.input.includes("image") ?? true;
   const reasoning =
-    advertisedLevels.size > 0 ||
-    group.supportsThinking === true ||
-    (group.supportsThinking === undefined && Boolean(template?.reasoning));
+    group.supportsThinking === false
+      ? false
+      : advertisedLevels.size > 0 ||
+        group.supportsThinking === true ||
+        (group.supportsThinking === undefined && Boolean(template?.reasoning));
   return {
     model: {
       id: group.publicId,
@@ -240,19 +280,19 @@ function synthesizeModel(
       thinkingLevelMap: reasoning ? thinkingLevelMapFromLevels(advertisedLevels) : undefined,
       input: supportsImages ? ["text", "image"] : ["text"],
       cost: template?.cost ?? ZERO_COST,
-      contextWindow: template?.contextWindow ?? 128000,
-      maxTokens: template?.maxTokens ?? 8192,
+      contextWindow: group.contextWindow ?? template?.contextWindow ?? 128000,
+      maxTokens: group.maxOutputTokens ?? template?.maxTokens ?? 8192,
     },
     routing,
   };
 }
 
 function advertisedThinkingLevels(group: RuntimeGroup): Set<string> {
+  // An explicit denial overrides levels inferred from display names or suffixes.
+  if (group.supportsThinking === false) return new Set();
   const levels = new Set(Object.keys(group.variants));
   if (levels.size > 0) return levels;
-  // Explicit false from the catalog must not grow a fake High control.
-  if (group.supportsThinking === false) return levels;
-  if (group.supportsThinking === true || group.unsuffixed) {
+  if (group.supportsThinking === true) {
     levels.add(ThinkingEffort.High);
   }
   return levels;
@@ -329,7 +369,6 @@ function thinkingLevelMapFromLevels(
   for (const level of PI_LEVELS) {
     map[level] = levels.has(level) ? level : null;
   }
-  if (levels.size === 0) map.high = "high";
   return map;
 }
 

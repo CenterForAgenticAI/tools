@@ -6,14 +6,7 @@ import type {
   ThinkingContent,
   ToolCall,
 } from "@earendil-works/pi-ai";
-import type {
-  AntigravityRequestType,
-  AntigravityUserAgent,
-  GeminiRole,
-  GeminiToolCallingMode,
-  ThinkingEffort,
-  ToolChoice,
-} from "./enums.js";
+import type { GeminiRole, GeminiToolCallingMode, ThinkingEffort, ToolChoice } from "./enums.js";
 
 // OAuth & Auth Types
 export type AntigravityOAuthCredentials = OAuthCredentials & {
@@ -52,7 +45,7 @@ export const ANTIGRAVITY_API = "antigravity-api" as const;
 export type AntigravityApi = typeof ANTIGRAVITY_API;
 
 export type AntigravityStreamOptions = Omit<SimpleStreamOptions, "toolChoice"> & {
-  toolChoice?: ToolChoice | `${ToolChoice}`;
+  toolChoice?: ToolChoice;
 };
 
 export type GeminiTextPart = { text: string; thoughtSignature?: string };
@@ -116,7 +109,7 @@ export type GeminiGenerationConfig = {
 export type GeminiRequestBody = {
   contents: GeminiContent[];
   systemInstruction: {
-    role: GeminiRole.User;
+    role: "user";
     parts: GeminiTextPart[];
   };
   generationConfig?: GeminiGenerationConfig;
@@ -130,8 +123,8 @@ export type AntigravityGenerateRequest = {
   project: string;
   model: string;
   request: GeminiRequestBody;
-  requestType: AntigravityRequestType.Agent;
-  userAgent: AntigravityUserAgent.Antigravity;
+  requestType: "agent";
+  userAgent: "antigravity";
   requestId: string;
 };
 
@@ -165,7 +158,7 @@ export type StreamResponseData = {
 };
 
 export type StreamChunk = StreamResponseData & {
-  error?: { message?: string };
+  error?: { message?: string; code?: number };
   response?: StreamResponseData;
 };
 
@@ -229,6 +222,7 @@ export type AccountUsage = {
   quotaSummaryError?: string;
   models: ModelQuotaRow[];
   defaultAgentModelId?: string;
+  agentModelSorts?: unknown;
   fetchedAt: number;
 };
 
@@ -258,6 +252,8 @@ export type QuotaSummaryRaw = {
 };
 
 export type ModelInfoRaw = {
+  maxTokens?: unknown;
+  maxOutputTokens?: unknown;
   isInternal?: unknown;
   displayName?: unknown;
   label?: unknown;
@@ -274,10 +270,20 @@ export type ModelInfoRaw = {
   };
 };
 
+export type AgentModelSortGroup = {
+  modelIds?: unknown;
+};
+
+export type AgentModelSort = {
+  displayName?: unknown;
+  groups?: AgentModelSortGroup[];
+};
+
 export type AvailableModelsRaw = {
   models?: Record<string, ModelInfoRaw>;
   defaultAgentModelId?: unknown;
   defaultAgentModel?: unknown;
+  agentModelSorts?: AgentModelSort[];
 };
 
 export type TierRaw = {

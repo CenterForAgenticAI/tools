@@ -1,6 +1,6 @@
 {
   "name": "pi-anthropic-oauth",
-  "version": "0.2.5-intel.1",
+  "version": "0.3.2-intel.1",
   "description": "Claude Pro/Max OAuth extension for Pi",
   "type": "module",
   "license": "MIT",
@@ -40,15 +40,15 @@
     ]
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.52.0"
+    "@anthropic-ai/sdk": "^0.124.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.80.8",
-    "@earendil-works/pi-coding-agent": ">=0.80.8"
+    "@earendil-works/pi-ai": ">=0.86.0",
+    "@earendil-works/pi-coding-agent": ">=0.86.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": ">=0.84.4",
-    "@earendil-works/pi-coding-agent": ">=0.84.4",
+    "@earendil-works/pi-ai": ">=1.1.0",
+    "@earendil-works/pi-coding-agent": ">=1.1.0",
     "typescript": "^5.9.3"
   }
 }

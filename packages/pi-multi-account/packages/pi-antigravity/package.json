@@ -1,6 +1,6 @@
 {
   "name": "pi-antigravity",
-  "version": "0.7.2-intel.1",
+  "version": "0.11.0-intel.1",
   "description": "Personal Antigravity / Cloud Code Assist provider for Pi Coding Agent",
   "author": "Rahul Arya",
   "license": "MIT",
@@ -25,13 +25,15 @@
   "files": [
     "LICENSE",
     "README.md",
-    "UPSTREAM.json",
     "src",
     "tsconfig.json",
     "UPSTREAM.md",
     "SOURCE_MANIFEST.sha256"
   ],
-  "packageManager": "bun@1.4.0",
+  "packageManager": "yarn@4.18.0+sha512.fcb8716fe7cd0eece141ffc18b92193a9df9204c1ba83189c288835223fc0bbe64af473bab0d5e9927a7daeb5caf2bb07eb2787cc9338ca040ea125f2a1f2f7e",
+  "engines": {
+    "node": ">=22.15.0"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
     "prepare": "npm run build",
@@ -40,38 +42,43 @@
     "lint:fix": "eslint src --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "security-check": "bun scripts/security-check.ts",
-    "test": "bun scripts/test-model-routing.ts && bun scripts/test-model-discovery.ts && bun scripts/test-usage-formatter.ts && bun scripts/test-stream-sse.ts && bun scripts/test-stream-header-deadline.ts && bun scripts/test-http-proxy.ts && bun scripts/test-image-gen.ts && bun run test:stream-primary-error && bun run test:usage-abort && bun run test:context-projection",
-    "test:stream-primary-error": "bun scripts/test-stream-primary-error.ts",
-    "test:usage-abort": "bun scripts/test-usage-abort.ts",
-    "smoke:tools": "bun scripts/smoke-tool-schema.ts",
-    "smoke:models": "bun scripts/smoke-all-models.mjs",
-    "check": "bun run typecheck && bun run lint && bun run format:check && bun run security-check && bun run test",
-    "test:context-projection": "bun scripts/test-context-projection.ts",
-    "test:context-projection:normalized": "bun scripts/test-context-projection.ts normalized"
+    "security-check": "node scripts/run-ts.mjs scripts/security-check.ts",
+    "test": "node scripts/run-ts.mjs scripts/test-sanitize-text.ts && node scripts/run-ts.mjs scripts/test-model-routing.ts && node scripts/run-ts.mjs scripts/test-model-discovery.ts && node scripts/run-ts.mjs scripts/test-usage-formatter.ts && node scripts/run-ts.mjs scripts/test-stream-sse.ts && node scripts/run-ts.mjs scripts/test-stream-header-deadline.ts && node scripts/run-ts.mjs scripts/test-http-proxy.ts && node scripts/run-ts.mjs scripts/test-oauth-fetch.ts && node scripts/run-ts.mjs scripts/test-image-gen.ts && node scripts/run-ts.mjs scripts/test-native-images.ts && node scripts/run-ts.mjs scripts/test-transcript-context.ts && node scripts/run-ts.mjs scripts/test-accounts.ts && node scripts/run-ts.mjs scripts/test-search.ts && node scripts/run-ts.mjs scripts/test-search-citations.ts && node scripts/run-ts.mjs scripts/test-extra-tools-toggle.ts && node scripts/run-ts.mjs scripts/test-provider-registration.ts && npm run test:stream-primary-error && npm run test:usage-abort && npm run test:context-projection && npm run test:no-linked-account-failover",
+    "smoke:tools": "node scripts/run-ts.mjs scripts/smoke-tool-schema.ts",
+    "smoke:models": "node scripts/run-ts.mjs scripts/smoke-all-models.mjs",
+    "audit": "yarn npm audit --environment production --recursive && yarn npm audit --severity high --all --recursive",
+    "check": "yarn typecheck && yarn lint && yarn format:check && yarn security-check && yarn test && yarn audit",
+    "test:stream-primary-error": "node scripts/run-ts.mjs scripts/test-stream-primary-error.ts",
+    "test:usage-abort": "node scripts/run-ts.mjs scripts/test-usage-abort.ts",
+    "test:context-projection": "node scripts/run-ts.mjs scripts/test-context-projection.ts",
+    "test:context-projection:normalized": "node scripts/run-ts.mjs scripts/test-context-projection.ts normalized",
+    "test:no-linked-account-failover": "node scripts/run-ts.mjs scripts/test-no-linked-account-failover.ts"
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./src/index.ts",
+      "./src/features/google-search.ts",
+      "./src/features/generate-image.ts"
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.80.0",
-    "@earendil-works/pi-coding-agent": ">=0.80.0"
+    "@earendil-works/pi-ai": ">=0.86.0",
+    "@earendil-works/pi-coding-agent": ">=0.86.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": ">=0.84.2",
+    "@earendil-works/pi-ai": ">=1.1.0",
+    "@earendil-works/pi-coding-agent": ">=1.1.0",
     "@eslint/js": "^10.0.1",
-    "@types/node": "^26.1.1",
-    "eslint": "^10.7.0",
+    "@types/node": "^26.6.2",
+    "eslint": "^10.11.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.7.0",
     "pi-ai-087": "npm:@earendil-works/pi-ai@>=0.87.1",
-    "prettier": "^3.9.5",
+    "prettier": "^3.9.8",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.64.0"
   },
   "dependencies": {
-    "undici": "^8.10.0"
+    "undici": "^8.11.2"
   }
 }

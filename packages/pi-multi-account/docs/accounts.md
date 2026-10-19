@@ -43,9 +43,9 @@ untouched; the extension never opens, moves, rewrites, or deletes them.
 
 Authenticate each slot through Pi's public `/login` flow. The extension delegates
 Anthropic OAuth lifecycle and ordinary requests to the in-tree
-`pi-anthropic-oauth@0.2.5-intel.1` workspace, vendored byte-for-byte from the
-reviewed fork commit `a52b62a05b0990ba3e2b1fa47d794b5f686435a5` before the
-recorded workspace-only additions. For live models whose metadata requires
+`pi-anthropic-oauth@0.3.2-intel.1` workspace, built from public upstream release
+`0.3.2` (commit `736fbaf432c4011fef5e563933649ee73de293c6`) plus the recorded
+local patch series. For live models whose metadata requires
 adaptive thinking, a selected reasoning level uses the extension-owned adapter.
 Before either stream runs, the selector reconstructs Pi transcript system text
 and active tools in the legacy context form consumed by the vendored code. The
@@ -59,18 +59,21 @@ installation is required. Codex aliases use Pi's native OAuth surface and
 ### Google Antigravity
 
 `google-antigravity` resolves from the in-tree
-`pi-antigravity@0.7.2-intel.1` workspace. Its public baseline is
-`Rahularya01/pi-antigravity` release `v0.7.2`; the recorded local patch series
-reconstructs the reviewed fork commit
-`254a08d73ff8d21c3d84583587a87c0dc7ebad12`. The series projects current Pi
-transcript system and tool changes before request
-conversion, avoiding the observed `MALFORMED_FUNCTION_CALL` failure. This
+`pi-antigravity@0.11.0-intel.1` workspace. Its baseline is the public
+`Rahularya01/pi-antigravity` release `v0.11.0`; no private fork is used. The
+recorded local patch series preserves primary response errors, bounds usage
+cancellation, and removes upstream's automatic switching between linked
+accounts: each `google-antigravity` slot is its own account with its own
+credential, and one request never moves to another account on its own. Upstream
+0.11.0 projects current Pi transcript system and tool changes before request
+conversion itself (the earlier local patch for the observed
+`MALFORMED_FUNCTION_CALL` failure is retired; its test is kept). This
 repository imports only the five reviewed public barrels (`src/auth`,
 `src/client`, `src/models`, `src/stream`, `src/usage`) and never invokes the
-vendored root factory. The root factory's base `antigravity` provider, commands,
-image tool, and optional connection prewarm are therefore unreachable through
-this extension. See [`NOTICE`](../NOTICE) for upstream attribution and the summary
-of local changes.
+vendored root factory. The root factory's base `antigravity` provider, its
+commands (including `/antigravity.accounts`), and the search and image tools are
+therefore unreachable through this extension. See [`NOTICE`](../NOTICE) for
+upstream attribution and the summary of local changes.
 
 The current catalog has eight models: `gemini-3.8-flash`, `gemini-3.7-flash`,
 `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.1-pro`, `claude-opus-4-6`,
@@ -80,7 +83,7 @@ registers the next free numbered slot the same way as the other families, and
 session. A changed stored credential (new expiry) clears a terminal login-required mark at the next rediscover or turn without restarting Pi.
 
 Usage fetching honors an `AbortSignal` end to end: `UsageFetcher` forwards it
-through to the pinned fork's `fetchAccountUsage(apiKey?, { signal })`, and a
+through to the vendored package's `fetchAccountUsage(apiKey?, { signal })`, and a
 bounded per-attempt deadline aborts the raw call and awaits its real
 settlement — never just the deadline — before releasing the shared machine
 usage lease. A lease handed off to a background drain is kept renewed at the

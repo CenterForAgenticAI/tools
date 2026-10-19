@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { redactSecrets } from "../utils/security.js";
+import { redactSecrets, stripValidationUrls } from "../utils/security.js";
 
 export type DiagnosticsSnapshot = {
   status?: number;
@@ -60,7 +60,8 @@ export function setLastEndpoint(endpoint: string | undefined): void {
   currentBag().endpoint = endpoint;
 }
 export function setLastError(error: string | undefined): void {
-  currentBag().error = error === undefined ? undefined : redactSecrets(error).slice(0, 800);
+  currentBag().error =
+    error === undefined ? undefined : stripValidationUrls(redactSecrets(error)).slice(0, 800);
 }
 export function setLastProjectId(projectId: string | undefined): void {
   currentBag().projectId = projectId;

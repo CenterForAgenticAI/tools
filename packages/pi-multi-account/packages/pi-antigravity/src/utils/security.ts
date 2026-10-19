@@ -1,4 +1,4 @@
-import { antigravityEnv } from "./util.js";
+import { antigravityEnv, isRecord } from "./util.js";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const ALLOWED_API_HOST_SUFFIXES = [".googleapis.com", ".sandbox.googleapis.com"];
@@ -53,6 +53,52 @@ export function redactSecrets(text: string): string {
     .replace(
       /("?(?:access_token|refresh_token|id_token|token|client_secret|code_verifier|authorization)"?\s*[:=]\s*)[^\s&,}]+/gi,
       "$1[redacted]",
+    );
+}
+
+const VALIDATION_URL_HOST = "accounts.google.com";
+
+/** Accept only the Google account-verification host, never an arbitrary redirect. */
+export function safeValidationUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2048 || /\s/.test(value))
+    return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "https:" || url.username || url.password) return undefined;
+  if (url.hostname !== VALIDATION_URL_HOST) return undefined;
+  return url.toString();
+}
+
+/** Pull `validation_url` from a 403 body before message slicing can drop it. */
+export function extractValidationUrl(text: string): string | undefined {
+  try {
+    const parsed = JSON.parse(text) as { error?: { details?: unknown } };
+    const details = parsed.error?.details;
+    if (Array.isArray(details)) {
+      for (const detail of details) {
+        if (!isRecord(detail) || !isRecord(detail.metadata)) continue;
+        const safe = safeValidationUrl(detail.metadata.validation_url);
+        if (safe) return safe;
+      }
+    }
+  } catch {
+    // not JSON
+  }
+  const match = text.match(/https:\/\/accounts\.google\.com\/[^\s"'<>\\]+/);
+  return match ? safeValidationUrl(match[0].replace(/[),.;]+$/, "")) : undefined;
+}
+
+/** Keep session-bearing verification links out of doctor output and stored diagnostics. */
+export function stripValidationUrls(text: string): string {
+  return text
+    .replace(/https:\/\/accounts\.google\.com\/[^\s"'<>\\]+/g, "[redacted-validation-url]")
+    .replace(
+      / Open this link in a browser signed in to the same Google account to verify: \[redacted-validation-url\]/g,
+      "",
     );
 }
 

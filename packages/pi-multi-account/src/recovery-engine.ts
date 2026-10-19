@@ -345,11 +345,11 @@ const GAP_COST: RecoveryCostCoverage = Object.freeze({ coverage: "gap" });
  * charged send and the call makes at most two sends. Both Anthropic
  * paths honour that zero: the adaptive adapter
  * (`src/anthropic-adaptive-stream.ts`) and the vendored pinned stream
- * (`packages/pi-anthropic-oauth/src/stream.ts`, local patch 0004) forward a
+ * (`packages/pi-anthropic-oauth/src/stream.ts`, local patch 0003) forward a
  * finite non-negative integer `maxRetries` into `client.messages.create`.
  *
  * A Codex non-SSE (auto/WebSocket) invocation has an unknown internal send
- * count: pinned pi-ai 0.84.4 may reconnect or fall back to SSE inside one
+ * count: locked pi-ai 1.1.0 may reconnect or fall back to SSE inside one
  * invocation. The engine therefore never uses such an invocation for the
  * recovery send, but it cannot control the internal count of a non-SSE initial
  * invocation. Consumers, including the production cutover, must not claim the
@@ -404,9 +404,9 @@ function sendReservationFor(
 	options: RecoveryBoundStreamOptions,
 ): RecoverySendReservation {
 	if (candidate.family === "openai-codex" && options.transport !== "sse") {
-		// Pinned pi-ai 0.84.4 can resend `response.create` once for
+		// Locked pi-ai 1.1.0 can resend `response.create` once for
 		// previous_response_not_found, once for a connection-limit error, then fall
-		// back to one SSE send (`dist/api/openai-codex-responses.js:214-245`), so one
+		// back to one SSE send (`dist/api/openai-codex-responses.js:216-243`), so one
 		// invocation may make up to four sends. The supported terminal carries no
 		// trustworthy complete count, so this invocation can never authorize a send.
 		// Recovery cannot bound the internal sends of an initial non-SSE invocation
@@ -447,13 +447,13 @@ function chargedSendExposureFor(
 /**
  * Content-free terminal error text for an exhausted or terminated recovery.
  *
- * Host retries count toward the same two-send cap. Pinned pi-coding-agent 0.84.4
- * `AgentSession._isRetryableError` (`dist/core/agent-session.js:2241-2246`)
+ * Host retries count toward the same two-send cap. Locked pi-coding-agent 1.1.0
+ * `AgentSession._isRetryableError` (`dist/core/agent-session.js:2978-2983`)
  * restarts the turn when `isRetryableAssistantError` from
  * `@earendil-works/pi-ai/compat` matches the final `errorMessage`
- * (`pi-ai/dist/utils/retry.js:166-173`, patterns at `:4-77`), and its overflow
- * path compact-and-retries when `isContextOverflow` matches
- * (`agent-session.js:1652-1690`, `pi-ai/dist/utils/overflow.js:130-156`). A
+ * (`pi-ai/dist/utils/retry.js:188`), and its overflow path compact-and-retries
+ * when `isContextOverflow` matches (`agent-session.js:2371`,
+ * `pi-ai/dist/utils/overflow.js:132`). A
  * production caller must surface this message, never a provider's own text, so
  * neither host path can add a third send. The named `HOST-RETRY-BOUNDARY`
  * regression checks both classifiers directly.

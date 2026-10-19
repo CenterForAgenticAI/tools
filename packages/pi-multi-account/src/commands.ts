@@ -302,6 +302,11 @@ export interface AccountGroupCommandMemberStatus extends Pick<AccountGroupMember
 export interface AccountGroupCommandStatus {
 	readonly resolution: EffectiveAccountGroupResolution;
 	readonly members?: readonly AccountGroupCommandMemberStatus[];
+	/**
+	 * True when this session is the operator's own: an explicit /model choice
+	 * outside the group still dispatches; only automatic routing is confined.
+	 */
+	readonly explicitSelectionOutsideGroup?: boolean;
 }
 
 export interface AccountGroupCommandSurface {
@@ -1368,6 +1373,11 @@ export class MultiAccountCommandController {
 		for (const member of status.members ?? []) {
 			lines.push(
 				`- ${member.providerId}: ${member.eligible ? "eligible" : "blocked"} (${member.reason})`,
+			);
+		}
+		if (status.members !== undefined && status.explicitSelectionOutsideGroup === true) {
+			lines.push(
+				"Automatic routing stays inside this group. A model you select with /model from an excluded provider still runs as selected.",
 			);
 		}
 		return lines.join("\n");

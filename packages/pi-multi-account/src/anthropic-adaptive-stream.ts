@@ -303,7 +303,7 @@ export function streamAnthropicAdaptive(
             thinkingLevelMap?: Record<string, string | null>;
           }).thinkingLevelMap?.[options.reasoning];
           params.thinking = { type: "adaptive" } as never;
-          (params as MessageCreateParamsStreaming & {
+          (params as Omit<MessageCreateParamsStreaming, "output_config"> & {
             output_config?: { effort: string };
           }).output_config = {
             effort:

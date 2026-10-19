@@ -5,6 +5,15 @@ export function antigravityEnv(name: string): string | undefined {
   return process.env[`ANTIGRAVITY_${name}`] || process.env[`NOAGY_${name}`];
 }
 
+/**
+ * Whether a model-facing extra tool (`google_search`, `generate_image`) is registered.
+ * `ANTIGRAVITY_NO_EXTRA_TOOLS=1` disables both; `ANTIGRAVITY_NO_SEARCH_TOOL=1` and
+ * `ANTIGRAVITY_NO_IMAGE_TOOL=1` disable one, e.g. to avoid clashing with another search provider.
+ */
+export function isExtraToolEnabled(tool: "SEARCH" | "IMAGE"): boolean {
+  return antigravityEnv("NO_EXTRA_TOOLS") !== "1" && antigravityEnv(`NO_${tool}_TOOL`) !== "1";
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -14,7 +23,15 @@ export function asString(value: unknown): string | undefined {
 }
 
 export function sanitizeText(text: unknown): string {
-  return String(text ?? "").replace(/[\uD800-\uDFFF]/g, "\uFFFD");
+  const str = String(text ?? "");
+  const toWellFormed = (str as unknown as { toWellFormed?: () => string }).toWellFormed;
+  if (typeof toWellFormed === "function") {
+    return toWellFormed.call(str);
+  }
+  return str.replace(
+    /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF]))|(?:(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/g,
+    "\uFFFD",
+  );
 }
 
 export function escapeHtml(text: string): string {
@@ -52,17 +69,66 @@ export type AntigravityEnvelopeOptions = {
   userTurnIndex?: number;
   trajectoryId?: string;
   conversationId?: string;
+  sessionId?: string;
+  lastExecutionId?: string;
 };
 
-const sessionTrajectoryMap = new Map<string, { conversationId: string; trajectoryId: string }>();
+/** Signed int64 session ID: deterministic for nonempty seeds, random otherwise. */
+export function toInt64SessionId(seed?: string): string {
+  if (seed?.trim()) {
+    const s = seed.trim();
+    if (/^-?\d+$/.test(s)) {
+      const value = BigInt(s);
+      if (value >= -(1n << 63n) && value <= (1n << 63n) - 1n) return s;
+    }
+    const hash = createHash("sha256").update(`antigravity:session:${s}`).digest();
+    return String(new DataView(hash.buffer, hash.byteOffset, 8).getBigInt64(0, true));
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return String(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true));
+}
 
-/** Stable conversationId and trajectoryId within a multi-turn conversation session. */
-export function resolveSessionTrajectory(context?: {
-  messages?: Array<{ role?: string; timestamp?: number; content?: unknown }>;
-}): { conversationId: string; trajectoryId: string } {
+const sessionTrajectoryMap = new Map<
+  string,
+  { conversationId: string; trajectoryId: string; sessionId: string }
+>();
+
+/**
+ * Resolve deterministic IDs from an explicit session ID or the first message's seed.
+ * The fallback uses role, timestamp, and a 64-character content prefix: separate or
+ * forked histories can alias, and compaction can change the seed. No cache behavior is guaranteed.
+ */
+export function resolveSessionTrajectory(
+  context?: {
+    messages?: Array<{ role?: string; timestamp?: number; content?: unknown }>;
+  },
+  sessionId?: string,
+): { conversationId: string; trajectoryId: string; sessionId: string } {
+  if (sessionId?.trim()) {
+    const seed = `session:${sessionId.trim()}`;
+    let entry = sessionTrajectoryMap.get(seed);
+    if (!entry) {
+      entry = {
+        conversationId: stableUuid(`antigravity:conv:${seed}`),
+        trajectoryId: stableUuid(`antigravity:traj:${seed}`),
+        sessionId: toInt64SessionId(sessionId),
+      };
+      sessionTrajectoryMap.set(seed, entry);
+      if (sessionTrajectoryMap.size > 64) {
+        const oldestKey = sessionTrajectoryMap.keys().next().value;
+        if (oldestKey !== undefined) sessionTrajectoryMap.delete(oldestKey);
+      }
+    }
+    return entry;
+  }
+
   const firstMsg = context?.messages?.[0];
   if (!firstMsg) {
-    return { conversationId: crypto.randomUUID(), trajectoryId: crypto.randomUUID() };
+    return {
+      conversationId: crypto.randomUUID(),
+      trajectoryId: crypto.randomUUID(),
+      sessionId: toInt64SessionId(),
+    };
   }
   const contentSeed =
     typeof firstMsg.content === "string"
@@ -76,6 +142,7 @@ export function resolveSessionTrajectory(context?: {
     entry = {
       conversationId: stableUuid(`antigravity:conv:${seed}`),
       trajectoryId: stableUuid(`antigravity:traj:${seed}`),
+      sessionId: toInt64SessionId(seed),
     };
     sessionTrajectoryMap.set(seed, entry);
     if (sessionTrajectoryMap.size > 64) {
@@ -90,6 +157,10 @@ export function clearSessionTrajectoryMap(): void {
   sessionTrajectoryMap.clear();
 }
 
+/**
+ * Build request metadata and model labels from legacy Claude flags or envelope options.
+ * Supplied IDs are forwarded; absent IDs are generated. Execution labels appear after step 1.
+ */
 export function antigravityRequestEnvelope(
   wireModelId: string,
   optionsOrIsClaude: boolean | AntigravityEnvelopeOptions = false,
@@ -104,8 +175,7 @@ export function antigravityRequestEnvelope(
   const requestIndex = options.requestIndex ?? options.userTurnIndex ?? Math.max(0, step - 1);
   const agentId = options.conversationId || crypto.randomUUID();
   const trajectoryId = options.trajectoryId || crypto.randomUUID();
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  const sessionId = String(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true));
+  const sessionId = options.sessionId || toInt64SessionId();
 
   const claudeLabel = isClaude ? "true" : "false";
   const nonGeminiLabel = isNonGemini ? "true" : "false";
@@ -122,6 +192,13 @@ export function antigravityRequestEnvelope(
   const modelEnum = getModelEnum(wireModelId);
   if (modelEnum) {
     labels.model_enum = modelEnum;
+  }
+
+  // Pure agy CLI wire alignment: last_execution_id is the execution ID of the previous turn.
+  // It is only present on subsequent turns (step > 1), never on the initial turn (step <= 1).
+  if (step > 1) {
+    labels.last_execution_id =
+      options.lastExecutionId || stableUuid(`antigravity:exec:${trajectoryId}:${step - 1}`);
   }
 
   return {

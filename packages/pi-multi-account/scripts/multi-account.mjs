@@ -2,7 +2,8 @@
 // The published `multi-account` bin entry.
 //
 // This package ships raw TypeScript (see `package.json`'s `"exports":
-// "./src/index.ts"`); it is never compiled to `dist/*.js`. Every module under
+// "./src/index.ts"`). Only the Pi extension entry is bundled, into
+// `dist/index.js`; this launcher still runs the sources. Every module under
 // `src/` uses NodeNext-style relative specifiers -- `import "./config.js"` --
 // that point at a ".ts" sibling, exactly as `tsc -p tsconfig.json` requires.
 // The Pi coding-agent host and Vitest both already know how to resolve that;

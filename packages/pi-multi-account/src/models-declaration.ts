@@ -12,6 +12,9 @@ import type {
 	Model,
 	ModelCost,
 	ModelCostTier,
+	ModelImageInputLimits,
+	ModelImageResizeOptions,
+	ModelInputLimits,
 	ModelThinkingLevel,
 	OpenAIResponsesCompat,
 	ThinkingLevelMap,
@@ -61,6 +64,7 @@ export interface ModelDeclarationRow {
 	contextWindow: number;
 	maxTokens: number;
 	samplingParams?: Partial<Record<SamplingParamKey, number>>;
+	inputLimits?: ModelInputLimits;
 	compat?: LogicalCompat;
 }
 
@@ -111,6 +115,14 @@ const MODEL_FIELD_DISPOSITION = {
 	contextWindow: "copy",
 	maxTokens: "copy",
 	samplingParams: "copy",
+	inputLimits: "copy",
+	// Enables the host cache warmer, whose replays are not account-sticky yet
+	// (internal issue #206).
+	promptCache: "exclude",
+	// Read only by the openai-completions, openai-responses, and Azure APIs.
+	samplingParamsByThinkingLevel: "exclude",
+	// Every built-in model is "chat", the default.
+	type: "exclude",
 	headers: "exclude",
 	compat: "copy",
 } as const satisfies PiFieldDisposition<
@@ -128,6 +140,13 @@ const ANTHROPIC_COMPAT_DISPOSITION = {
 	allowEmptySignature: "copy",
 	supportsStrictTools: "copy",
 	allowedFallbackModels: "exclude",
+	// Our Anthropic transport folds mid-conversation system messages, tool
+	// changes, and effort into the top-level request
+	// (internal issue #203), so these must not be advertised yet.
+	sessionAffinityFormat: "exclude",
+	supportsMidConvoEffort: "exclude",
+	supportsMidConvoSystemMessages: "exclude",
+	supportsMidConvoToolChanges: "exclude",
 } as const satisfies PiFieldDisposition<
 	AnthropicMessagesCompat,
 	"copy" | "exclude"
@@ -142,7 +161,19 @@ const CODEX_COMPAT_DISPOSITION = {
 	supportsAdditionalTools: "copy",
 	supportsToolSearch: "copy",
 	supportsExplicitPromptCacheMode: "copy",
-} as const satisfies PiFieldDisposition<OpenAIResponsesCompat, "copy">;
+	// The Codex transport reads this; dispatch passes the physical model as-is.
+	supportsMidConvoSystemMessages: "copy",
+	// Read only by the openai-responses API.
+	supportsMidConvoEffort: "exclude",
+	supportsMaxOutputTokens: "exclude",
+} as const satisfies PiFieldDisposition<OpenAIResponsesCompat, "copy" | "exclude">;
+
+/** Keys a disposition table copies. Excluded keys stay invalid in a projected row. */
+function copiedKeys(table: Readonly<Record<string, string>>): string[] {
+	return Object.entries(table)
+		.filter(([, disposition]) => disposition === "copy")
+		.map(([key]) => key);
+}
 
 const THINKING_LEVEL_DISPOSITION = {
 	off: "copy",
@@ -516,6 +547,104 @@ function projectSamplingParams(
 	return projected;
 }
 
+function isPositiveInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+const IMAGE_RESIZE_KEYS = new Set(["maxWidth", "maxHeight", "maxBytes", "jpegQuality"]);
+const IMAGE_LIMIT_KEYS = new Set(["resize", "maxPerMessage", "maxPerRequest"]);
+const INPUT_LIMIT_KEYS = new Set(["maxRequestBytes", "images"]);
+
+function capturedLimitObject(
+	value: unknown,
+	allowed: ReadonlySet<string>,
+	family: DeclaredFamily,
+	fieldPath: string,
+): CapturedOwnDataProperties {
+	if (!isPlainObject(value)) return rejectProjection(family, fieldPath);
+	const properties = assertOwnDataProperties(value, family, fieldPath);
+	exactCapturedKeys(properties, allowed, family, fieldPath);
+	return properties;
+}
+
+function optionalPositiveInteger(
+	properties: CapturedOwnDataProperties,
+	key: string,
+	family: DeclaredFamily,
+	fieldPath: string,
+	maximum = Number.MAX_SAFE_INTEGER,
+): number | undefined {
+	if (!properties.has(key)) return undefined;
+	const value = requiredCapturedValue(properties, key, family, `${fieldPath}.${key}`);
+	if (!isPositiveInteger(value) || value > maximum) {
+		return rejectProjection(family, `${fieldPath}.${key}`);
+	}
+	return value;
+}
+
+function projectImageResize(
+	value: unknown,
+	family: DeclaredFamily,
+): ModelImageResizeOptions {
+	const fieldPath = "inputLimits.images.resize";
+	const properties = capturedLimitObject(value, IMAGE_RESIZE_KEYS, family, fieldPath);
+	const projected: ModelImageResizeOptions = {};
+	const maxWidth = optionalPositiveInteger(properties, "maxWidth", family, fieldPath);
+	if (maxWidth !== undefined) projected.maxWidth = maxWidth;
+	const maxHeight = optionalPositiveInteger(properties, "maxHeight", family, fieldPath);
+	if (maxHeight !== undefined) projected.maxHeight = maxHeight;
+	const maxBytes = optionalPositiveInteger(properties, "maxBytes", family, fieldPath);
+	if (maxBytes !== undefined) projected.maxBytes = maxBytes;
+	const jpegQuality = optionalPositiveInteger(properties, "jpegQuality", family, fieldPath, 100);
+	if (jpegQuality !== undefined) projected.jpegQuality = jpegQuality;
+	return projected;
+}
+
+function projectImageLimits(value: unknown, family: DeclaredFamily): ModelImageInputLimits {
+	const fieldPath = "inputLimits.images";
+	const properties = capturedLimitObject(value, IMAGE_LIMIT_KEYS, family, fieldPath);
+	const projected: ModelImageInputLimits = {};
+	if (properties.has("resize")) {
+		projected.resize = projectImageResize(
+			requiredCapturedValue(properties, "resize", family, `${fieldPath}.resize`),
+			family,
+		);
+	}
+	const maxPerMessage = optionalPositiveInteger(properties, "maxPerMessage", family, fieldPath);
+	if (maxPerMessage !== undefined) projected.maxPerMessage = maxPerMessage;
+	const maxPerRequest = optionalPositiveInteger(properties, "maxPerRequest", family, fieldPath);
+	if (maxPerRequest !== undefined) projected.maxPerRequest = maxPerRequest;
+	return projected;
+}
+
+/**
+ * Copy Pi's request-size and image limits through the bounds of
+ * `ModelInputLimitsSchema`. The host reads them from the routed row, so a
+ * unified row without them would skip image resizing and count limits.
+ */
+function projectInputLimits(
+	value: unknown,
+	family: DeclaredFamily,
+): ModelInputLimits | undefined {
+	if (value === undefined) return undefined;
+	const properties = capturedLimitObject(value, INPUT_LIMIT_KEYS, family, "inputLimits");
+	const projected: ModelInputLimits = {};
+	const maxRequestBytes = optionalPositiveInteger(
+		properties,
+		"maxRequestBytes",
+		family,
+		"inputLimits",
+	);
+	if (maxRequestBytes !== undefined) projected.maxRequestBytes = maxRequestBytes;
+	if (properties.has("images")) {
+		projected.images = projectImageLimits(
+			requiredCapturedValue(properties, "images", family, "inputLimits.images"),
+			family,
+		);
+	}
+	return projected;
+}
+
 function projectOptionalCompatBoolean(
 	value: unknown,
 	family: DeclaredFamily,
@@ -601,6 +730,12 @@ function projectCodexCompat(
 		"openai-codex",
 	);
 	if (promptCache !== undefined) projected.supportsExplicitPromptCacheMode = promptCache;
+	const midConvoSystem = optionalCompatBoolean(
+		properties,
+		"supportsMidConvoSystemMessages",
+		"openai-codex",
+	);
+	if (midConvoSystem !== undefined) projected.supportsMidConvoSystemMessages = midConvoSystem;
 	return projected;
 }
 
@@ -727,6 +862,8 @@ export function projectManagedLogicalModel(
 		family,
 	);
 	if (samplingParams !== undefined) projected.samplingParams = samplingParams;
+	const inputLimits = projectInputLimits(optionalCapturedValue(raw, "inputLimits"), family);
+	if (inputLimits !== undefined) projected.inputLimits = inputLimits;
 	const compat = projectCompat(optionalCapturedValue(raw, "compat"), family);
 	if (compat !== undefined) projected.compat = compat;
 	projected.api = LOGICAL_PROVIDER_ID;
@@ -746,19 +883,16 @@ const PROJECTED_ROW_KEYS = new Set([
 	"contextWindow",
 	"maxTokens",
 	"samplingParams",
+	"inputLimits",
 	"compat",
 ]);
+const ANTHROPIC_COPIED_COMPAT_KEYS = new Set(copiedKeys(ANTHROPIC_COMPAT_DISPOSITION));
+const CODEX_COPIED_COMPAT_KEYS = new Set(copiedKeys(CODEX_COMPAT_DISPOSITION));
 const ANTHROPIC_ONLY_COMPAT_KEYS = new Set(
-	Object.keys(ANTHROPIC_COMPAT_DISPOSITION).filter(
-		(key) =>
-			key !== "allowedFallbackModels" &&
-			!Object.hasOwn(CODEX_COMPAT_DISPOSITION, key),
-	),
+	[...ANTHROPIC_COPIED_COMPAT_KEYS].filter((key) => !CODEX_COPIED_COMPAT_KEYS.has(key)),
 );
 const CODEX_ONLY_COMPAT_KEYS = new Set(
-	Object.keys(CODEX_COMPAT_DISPOSITION).filter(
-		(key) => !Object.hasOwn(ANTHROPIC_COMPAT_DISPOSITION, key),
-	),
+	[...CODEX_COPIED_COMPAT_KEYS].filter((key) => !ANTHROPIC_COPIED_COMPAT_KEYS.has(key)),
 );
 
 function inferProjectedFamily(
@@ -835,9 +969,9 @@ function assertOwnDataProperties(
 function compatAllowedKeys(family: DeclaredFamily): ReadonlySet<string> {
 	switch (family) {
 		case "anthropic":
-			return new Set(Object.keys(ANTHROPIC_COMPAT_DISPOSITION));
+			return ANTHROPIC_COPIED_COMPAT_KEYS;
 		case "openai-codex":
-			return new Set(Object.keys(CODEX_COMPAT_DISPOSITION));
+			return CODEX_COPIED_COMPAT_KEYS;
 		case "google-antigravity":
 			return new Set();
 	}
@@ -891,6 +1025,7 @@ function validateProjectedManagedModel(
 		"maxTokens",
 	);
 	projectSamplingParams(optionalCapturedValue(properties, "samplingParams"), family);
+	projectInputLimits(optionalCapturedValue(properties, "inputLimits"), family);
 	if (compat?.has("allowedFallbackModels")) {
 		return rejectProjection(family, "compat.allowedFallbackModels");
 	}
@@ -945,6 +1080,15 @@ function freezeProjectedManagedModel(row: ModelDeclarationRow): void {
 	}
 	Object.freeze(cost);
 	freezeIfObject(optionalCapturedValue(properties, "samplingParams"));
+	const inputLimits = optionalCapturedValue(properties, "inputLimits");
+	if (isPlainObject(inputLimits)) {
+		const images = inputLimits.images;
+		if (isPlainObject(images)) {
+			freezeIfObject(images.resize);
+			Object.freeze(images);
+		}
+		Object.freeze(inputLimits);
+	}
 	freezeIfObject(optionalCapturedValue(properties, "compat"));
 	Object.freeze(row);
 }

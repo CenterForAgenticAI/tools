@@ -68,6 +68,14 @@ import { LOGICAL_PROVIDER_ID } from "./models-declaration.js";
 import { forceCodexSseOptions } from "./codex-adapter.js";
 import { readImageStripPolicy, stripOldImages, type ImageStripPolicy } from "./image-strip.js";
 import {
+	isImageCountBucket,
+	isRequestBytesBucket,
+	measureSentContext,
+	type ImageCountBucket,
+	type OverflowSizeBuckets,
+	type RequestBytesBucket,
+} from "./overflow-size.js";
+import {
 	buildBoundedRecoveryFinalErrorMessage,
 	createRecoveryEngine,
 	isRecoveryStartEvent,
@@ -203,6 +211,12 @@ export interface LogicalFailureEvidence {
 	readonly category: FailureCategory | "context-overflow" | "host-stale-install";
 	/** Which limit a `context-overflow` hit, from structured provider facts only. */
 	readonly overflowReason?: ContextOverflowReason;
+	/**
+	 * Closed buckets of the context a `context-overflow` attempt sent, present
+	 * when it was measured. Never an exact size, count or content.
+	 */
+	readonly requestBytes?: RequestBytesBucket;
+	readonly imageCount?: ImageCountBucket;
 	/** Physical invocations, not the unknown inner send count of Antigravity. */
 	readonly attemptCount: number;
 	/** Present when a physical attempt opened. */
@@ -216,11 +230,13 @@ export interface LogicalFailureEvidence {
 export function logicalFailureDiagnosticFields(
 	evidence: LogicalFailureEvidence,
 ): Readonly<Record<string, string | number>> {
-	const { providerId, category, overflowReason, attemptCount, shape } = evidence;
+	const { providerId, category, overflowReason, requestBytes, imageCount, attemptCount, shape } = evidence;
 	return {
 		...(providerId === undefined ? {} : { providerId }),
 		category,
 		...(overflowReason !== undefined && OVERFLOW_REASON_SET.has(overflowReason) ? { overflowReason } : {}),
+		...(isRequestBytesBucket(requestBytes) ? { requestBytes } : {}),
+		...(isImageCountBucket(imageCount) ? { imageCount } : {}),
 		attemptCount,
 		...(shape === undefined
 			? {}
@@ -1329,6 +1345,7 @@ export function createLogicalProvider(
 		box.hostMissingDependency = fault.missingDependency;
 		box.overflow = false;
 		box.overflowReason = undefined;
+		box.overflowSize = undefined;
 		box.preStartRetryable = false;
 		try {
 			deps.onDiagnostic?.(
@@ -1371,10 +1388,12 @@ export function createLogicalProvider(
 	/**
 	 * Record whether an attempt overflowed and, from structured facts only,
 	 * which limit it hit. Only the closed sub-reason is kept, never the source.
+	 * An overflow also measures the context the attempt sent, into closed buckets.
 	 */
 	const noteOverflow = (box: AttemptRecordBox, overflow: boolean, source: unknown): void => {
 		box.overflow = overflow;
 		box.overflowReason = overflow ? contextOverflowReason(source) : undefined;
+		box.overflowSize = overflow ? measureSentContext(box.sentContext) : undefined;
 	};
 
 	const retrySafetyFor = (box: AttemptRecordBox): RecoveryRetrySafety => {
@@ -1427,6 +1446,13 @@ export function createLogicalProvider(
 		overflow: boolean;
 		/** The closed overflow sub-reason, set with `overflow`. */
 		overflowReason?: ContextOverflowReason | undefined;
+		/**
+		 * The context this attempt dispatched, held only until the attempt ends so
+		 * an overflow can be measured. It is read, never changed.
+		 */
+		sentContext?: unknown;
+		/** Closed size buckets of `sentContext`, set with `overflow`. */
+		overflowSize?: OverflowSizeBuckets | undefined;
 		/**
 		 * A non-terminal event other than `start` reached the engine; nothing
 		 * after it is resent. The provider's `start` only reports that response
@@ -1812,6 +1838,7 @@ export function createLogicalProvider(
 		const releaseAbortSources = (): void => {
 			if (released) return;
 			released = true;
+			box.sentContext = undefined;
 			request.signal.removeEventListener("abort", settle);
 			for (const signal of abortSources) signal.removeEventListener("abort", abortPhysical);
 		};
@@ -1866,6 +1893,7 @@ export function createLogicalProvider(
 			account.providerId === account.family
 				? input.context
 				: stripOldImages(input.context, readImageStripPolicy(() => deps.imageStripping));
+		box.sentContext = physicalContext;
 		const open = async (): Promise<AsyncIterable<unknown>> => {
 			try {
 				return await deps.dispatch({
@@ -2052,7 +2080,13 @@ export function createLogicalProvider(
 		const attemptCount = box?.ordinal ?? 0;
 		const shape = box === undefined ? undefined : failureShape(box, stop);
 		const overflowReason = category === "context-overflow" ? box?.overflowReason ?? "unknown" : undefined;
-		const evidence = `[${providerId === undefined ? "" : `physical provider: ${providerId}; `}cause: ${VISIBLE_FAILURE_CAUSES[category]}; ${overflowReason === undefined ? "" : `overflow: ${overflowReason}; `}attempts: ${attemptCount}]`;
+		const size = category === "context-overflow" ? box?.overflowSize : undefined;
+		// The footer names the size only for the two limits it explains; the
+		// evidence and diagnostic keep it for every measured overflow.
+		const sizeFooter = size !== undefined && (overflowReason === "request-bytes" || overflowReason === "media-limit")
+			? `bytes: ${size.requestBytes}; images: ${size.imageCount}; `
+			: "";
+		const evidence = `[${providerId === undefined ? "" : `physical provider: ${providerId}; `}cause: ${VISIBLE_FAILURE_CAUSES[category]}; ${overflowReason === undefined ? "" : `overflow: ${overflowReason}; `}${sizeFooter}attempts: ${attemptCount}]`;
 		return {
 			...syntheticErrorMessage(
 				modelId,
@@ -2066,6 +2100,7 @@ export function createLogicalProvider(
 				...(providerId === undefined ? {} : { providerId }),
 				category,
 				...(overflowReason === undefined ? {} : { overflowReason }),
+				...(size === undefined ? {} : { requestBytes: size.requestBytes, imageCount: size.imageCount }),
 				attemptCount,
 				...(shape === undefined ? {} : { shape }),
 			}),

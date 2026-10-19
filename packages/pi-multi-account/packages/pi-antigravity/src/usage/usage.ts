@@ -16,6 +16,7 @@ import {
 import { isRecord } from "../utils/util.js";
 import { safeError } from "../utils/security.js";
 import { antigravityFetch } from "../utils/http.js";
+import { extractRecommendedModelIds } from "../models/grouping.js";
 import type {
   AccountUsage,
   ApiErrorBody,
@@ -149,10 +150,12 @@ function parseQuotaSummary(data: unknown): { groups: QuotaGroup[]; description?:
 function parseModels(data: unknown): {
   models: ModelQuotaRow[];
   defaultAgentModelId?: string;
+  agentModelSorts?: unknown;
 } {
   const raw = (isRecord(data) ? data : {}) as AvailableModelsRaw;
   const modelsObj = raw.models && isRecord(raw.models) ? raw.models : {};
   const models: ModelQuotaRow[] = [];
+  const recommendedIds = extractRecommendedModelIds(raw.agentModelSorts);
   for (const [modelId, info] of Object.entries(modelsObj)) {
     if (!info || !isRecord(info)) continue;
     if (info.isInternal || String(modelId).startsWith("chat_")) continue;
@@ -177,7 +180,7 @@ function parseModels(data: unknown): {
             : undefined,
       supportsThinking: !!info.supportsThinking,
       supportsImages: !!info.supportsImages,
-      recommended: !!info.recommended,
+      recommended: !!info.recommended || (recommendedIds?.has(modelId) ?? false),
     });
   }
   models.sort((a, b) => a.modelId.localeCompare(b.modelId));
@@ -187,6 +190,7 @@ function parseModels(data: unknown): {
       raw.defaultAgentModelId || raw.defaultAgentModel
         ? String(raw.defaultAgentModelId || raw.defaultAgentModel)
         : undefined,
+    agentModelSorts: raw.agentModelSorts,
   };
 }
 
@@ -305,7 +309,7 @@ export async function fetchAccountUsage(
   const { groups, description } = summary
     ? parseQuotaSummary(summary.data)
     : { groups: [], description: undefined };
-  const { models, defaultAgentModelId } = parseModels(available.data);
+  const { models, defaultAgentModelId, agentModelSorts } = parseModels(available.data);
 
   const assistData = (isRecord(assistResult?.data) ? assistResult.data : {}) as LoadCodeAssistRaw;
   const productTier = parseTier(assistData.currentTier);
@@ -330,6 +334,7 @@ export async function fetchAccountUsage(
     quotaSummaryError,
     models,
     defaultAgentModelId,
+    agentModelSorts,
     fetchedAt: Date.now(),
   };
 }
@@ -376,9 +381,12 @@ export function formatModelsList(usage: AccountUsage, opts?: { all?: boolean }):
   if (usage.defaultAgentModelId) lines.push(`defaultAgentModel=${usage.defaultAgentModelId}`);
   lines.push("");
 
+  const recommendedIds = extractRecommendedModelIds(usage.agentModelSorts);
   const rows = opts?.all
     ? usage.models
-    : usage.models.filter((m) => !/tab_|chat_/i.test(m.modelId));
+    : recommendedIds && recommendedIds.size > 0
+      ? usage.models.filter((m) => recommendedIds.has(m.modelId))
+      : usage.models.filter((m) => !/tab_|chat_/i.test(m.modelId));
 
   if (!rows.length) {
     lines.push("No models returned.");

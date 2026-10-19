@@ -54,6 +54,38 @@ burst of delegate workers, queue for that store and wait up to two seconds. If t
 store stays busy past that, the request fails with `store-busy`. That failure is
 transient. A request made at least two seconds later reads the store again.
 
+The store keeps a record only while it is in use. Every locked write to the
+store also prunes it, in the same rewrite: a record unused for more than 14 days
+is removed, unless it holds a `group use` override. Override records are never
+pruned. A record is used each time a write stores it: when its session resolves
+its group (at startup, on `/multi-account reload`, and after `group use` or
+`group reset`), and when a delegate child inherits from it. Reads never prune,
+and there is no command for pruning.
+
+Last-used times live in a separate owner-only file,
+`session-account-groups.last-used.json`, next to the store. It maps each session
+id to a wall-clock time in milliseconds and stores nothing else. The store itself
+keeps its version 1 shape, so a Pi process that still runs an older build keeps
+reading it. Both files are written under the store's lease, each one complete
+through a temporary file and a rename. The time file is renamed first, so an
+interrupted write can only make a record look more recent.
+
+A record with no last-used time counts as used at the first write that sees it,
+and is pruned only after 14 more days. This covers records written before this
+retention existed, records written by an older running build, and a missing
+time file. A corrupt, unreadable, or wrong-version time file is treated as
+empty and rewritten; it never blocks routing and never causes `store-invalid`.
+If the time file cannot be written, the write still succeeds, without pruning.
+A last-used time in the future, after the wall clock steps back, counts as now.
+
+A delegate child inherits its group from the parent's record. A parent session
+that stays idle for more than 14 days can lose its record to pruning while it is
+still open. A child that it then starts is blocked with
+`delegate-resolution-unavailable` or `driver-resolution-unavailable`. Run
+`/multi-account reload` in the parent to record it again; children started after
+that inherit normally. A child that was already blocked stays blocked until it
+reloads or restarts.
+
 A `resolution-failed` failure means the session's group could not be read safely.
 Managed routing stays blocked. The error, the direct-provider notice, and
 `group status` name one of four causes, and its diagnostic records the same
@@ -65,6 +97,10 @@ Managed routing stays blocked. The error, the direct-provider notice, and
 | `store-invalid` | The store's contents, or this session's id, failed validation. | Move `session-account-groups.json` aside, then run `/multi-account reload` in each blocked session. |
 | `policy` | Two `accountGroupCwdDefaults` keys resolve to the same directory but name different groups. | Correct `accountGroupCwdDefaults` in the global config, then run `/multi-account reload`. |
 | `unknown` | Any other error. | Run `/multi-account reload`. If it fails again, check `/multi-account log` and restart Pi. |
+
+Move `session-account-groups.last-used.json` aside together with the store. Both
+choices are safe: a time file kept without its store loses its entries at the
+next write, and a store without a time file only delays pruning by 14 days.
 
 Moving the store aside discards every session's saved `group use` choice and
 cached group. Sessions fall back to their cwd or global default on their next
@@ -83,6 +119,10 @@ block. Status does not select a model or change group policy. Group membership d
 not give this extension ownership of a custom provider's refresh, usage, cost,
 unified routing, parking, or recovery. Listing `openrouter` leaves the current
 named-group metered block intact.
+In an operator session, status ends with a line saying that automatic routing
+stays inside the group and that a model selected with `/model` from an excluded
+provider still runs as selected. Delegate children do not show it, because they
+stay confined.
 
 At startup and resume, in-process and durable delegate children inherit the parent's
 complete cached effective result. The child's cwd does not replace it. Status keeps

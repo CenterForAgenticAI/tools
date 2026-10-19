@@ -5,12 +5,15 @@ import {
   type AssistantMessage,
   type AssistantMessageEventStream,
   calculateCost,
-  type Context,
+  collapseSystemMessages,
   createAssistantMessageEventStream,
+  getCurrentSystemPrompt,
+  getCurrentTools,
+  type JsonObject,
   type Model,
   type SimpleStreamOptions,
   type StopReason,
-  type ToolCall,
+  type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { isClaudeOAuthAccessToken, USER_AGENT } from "./auth.js";
 import {
@@ -19,8 +22,7 @@ import {
   fromClaudeCodeToolName,
   type IndexedBlock,
 } from "./convert.js";
-import { projectContext } from "./context.js";
-import { buildAnthropicSystemPrompt } from "./prompt.js";
+import { buildAnthropicSystemPrompt, resolveCacheRetention } from "./prompt.js";
 import {
   createTransportActivityFetch,
   transportActivityListener,
@@ -38,6 +40,26 @@ const REQUIRED_BETAS = [
   "interleaved-thinking-2025-05-14",
 ] as const;
 
+const LEGACY_THINKING_MODEL =
+  /^claude-(?:opus|sonnet|haiku)-4-[0-5](?:-|$)|^claude-[0-3][-.]/;
+const MIN_THINKING_BUDGET = 1024;
+const EFFORT_BY_REASONING: Record<string, string> = {
+  minimal: "low",
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  max: "max",
+};
+
+export function usesAdaptiveThinking(model: Model<Api>): boolean {
+  const forced = (
+    model.compat as { forceAdaptiveThinking?: boolean } | undefined
+  )?.forceAdaptiveThinking;
+  if (typeof forced === "boolean") return forced;
+  return !LEGACY_THINKING_MODEL.test(model.id.toLowerCase().replace(/\./g, "-"));
+}
+
 function mapStopReason(reason: string | null | undefined): StopReason {
   switch (reason) {
     case "end_turn":
@@ -51,6 +73,57 @@ function mapStopReason(reason: string | null | undefined): StopReason {
     default:
       return "error";
   }
+}
+
+type MessageDeltaUsage = {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  output_tokens_details?: { thinking_tokens?: number | null };
+};
+
+export function applyMessageDelta(
+  output: AssistantMessage,
+  model: Model<Api>,
+  stopReason: string | null | undefined,
+  usage: MessageDeltaUsage | undefined,
+  stopDetails?: { explanation?: string | null } | null,
+): void {
+  if (stopReason != null) {
+    output.stopReason = mapStopReason(stopReason);
+    if (output.stopReason === "error") {
+      // Structured stops are answers, not account failures or host retry evidence.
+      // Keep these fixed strings in sync with the root host-final-stop-message.ts.
+      const code = stopReason === "refusal" ? "refusal" : "unknown_stop";
+      Object.defineProperty(output, "code", {
+        value: code, enumerable: true, configurable: true, writable: true,
+      });
+      output.errorMessage = code === "refusal"
+        ? "The model refused to complete the request"
+        : "Provider stopped with an unrecognized stop reason";
+    }
+  }
+
+  if (usage) {
+    if (usage.input_tokens != null) output.usage.input = usage.input_tokens;
+    if (usage.output_tokens != null) output.usage.output = usage.output_tokens;
+    if (usage.cache_read_input_tokens != null) {
+      output.usage.cacheRead = usage.cache_read_input_tokens;
+    }
+    if (usage.cache_creation_input_tokens != null) {
+      output.usage.cacheWrite = usage.cache_creation_input_tokens;
+    }
+    const thinkingTokens = usage.output_tokens_details?.thinking_tokens;
+    if (thinkingTokens != null) output.usage.reasoning = thinkingTokens;
+  }
+
+  output.usage.totalTokens =
+    output.usage.input +
+    output.usage.output +
+    output.usage.cacheRead +
+    output.usage.cacheWrite;
+  calculateCost(model, output.usage);
 }
 
 function headersToRecord(headers: Headers): Record<string, string> {
@@ -100,10 +173,18 @@ function makeDefaultHeaders(
 
 export function streamAnthropicOAuth(
   model: Model<Api>,
-  context: Context,
+  context: TranscriptContext,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
+
+  // Anthropic has no mid-conversation system messages: fold system-message
+  // patches into the leading system message, then read the current prompt and
+  // tool declarations from the transcript (pi >= 0.86 no longer provides
+  // context.systemPrompt / context.tools).
+  const transcript = collapseSystemMessages(context);
+  const tools = getCurrentTools(transcript.messages);
+  const systemPrompt = getCurrentSystemPrompt(transcript.messages);
 
   void (async () => {
     const output: AssistantMessage = {
@@ -154,30 +235,28 @@ export function streamAnthropicOAuth(
 
       const maxTokens =
         options?.maxTokens || Math.floor(model.maxTokens / 3);
-      const projectedContext = projectContext(context);
+      const cacheRetention = resolveCacheRetention(
+        options?.cacheRetention,
+        options?.env,
+      );
 
       const params: MessageCreateParamsStreaming = {
         model: model.id,
         messages: convertPiMessagesToAnthropic(
-          projectedContext.messages,
+          transcript.messages,
           isOAuth,
           model,
+          cacheRetention,
         ),
         max_tokens: maxTokens,
         stream: true,
       };
 
-      const system = buildAnthropicSystemPrompt(
-        projectedContext.systemPrompt,
-        isOAuth,
-      );
+      const system = buildAnthropicSystemPrompt(systemPrompt, isOAuth, cacheRetention);
       if (system) params.system = system as never;
-      if (projectedContext.tools.length) {
-        params.tools = convertPiToolsToAnthropic(
-          projectedContext.tools,
-          isOAuth,
-        );
-      }
+      if (tools.length)
+        params.tools = convertPiToolsToAnthropic(tools, isOAuth);
+
       if (options?.reasoning && model.reasoning && maxTokens > 1) {
         const defaultBudgets: Record<string, number> = {
           minimal: 1024,
@@ -192,39 +271,22 @@ export function streamAnthropicOAuth(
           ];
         const requestedBudget =
           customBudget ?? defaultBudgets[options.reasoning] ?? 10240;
-        const display = "summarized";
-        const forceAdaptive = (
-          model.compat as { forceAdaptiveThinking?: boolean } | undefined
-        )?.forceAdaptiveThinking;
-        const id = model.id.toLowerCase().replace(/\./g, "-");
-        const adaptive =
-          forceAdaptive === true ||
-          (forceAdaptive !== false &&
-            (/claude-(?:opus|sonnet|haiku|fable|mythos)-5(?:-|$)/.test(id) ||
-              /claude-(?:opus|sonnet|haiku|fable|mythos)-4-(?:[6-9]|\d{2,})(?:-|$)/.test(
-                id,
-              )));
-
-        if (adaptive) {
+        if (usesAdaptiveThinking(model)) {
           const mapped = model.thinkingLevelMap?.[options.reasoning];
           const effort =
             typeof mapped === "string"
               ? mapped
-              : options.reasoning === "minimal" || options.reasoning === "low"
-                ? "low"
-                : options.reasoning === "medium"
-                  ? "medium"
-                  : options.reasoning === "high"
-                    ? "high"
-                    : "high";
-          params.thinking = { type: "adaptive", display } as never;
+              : (EFFORT_BY_REASONING[options.reasoning] ?? "high");
+          params.thinking = {
+            type: "adaptive",
+            display: "summarized",
+          } as never;
           Object.assign(params, { output_config: { effort } });
         } else {
-          params.thinking = {
-            type: "enabled",
-            budget_tokens: Math.min(requestedBudget, maxTokens - 1),
-            display,
-          } as never;
+          const budget = Math.min(requestedBudget, maxTokens - 1);
+          if (budget >= MIN_THINKING_BUDGET) {
+            params.thinking = { type: "enabled", budget_tokens: budget };
+          }
         }
       }
 
@@ -266,213 +328,203 @@ export function streamAnthropicOAuth(
 
       const blocks = output.content as IndexedBlock[];
 
-      for await (const event of anthropicStream) {
-        if (event.type === "message_start") {
-          output.usage.input = event.message.usage.input_tokens || 0;
-          output.usage.output = event.message.usage.output_tokens || 0;
-          output.usage.cacheRead =
-            (event.message.usage as { cache_read_input_tokens?: number })
-              .cache_read_input_tokens || 0;
-          output.usage.cacheWrite =
-            (event.message.usage as { cache_creation_input_tokens?: number })
-              .cache_creation_input_tokens || 0;
-          output.usage.totalTokens =
-            output.usage.input +
-            output.usage.output +
-            output.usage.cacheRead +
-            output.usage.cacheWrite;
-          calculateCost(model, output.usage);
-          continue;
-        }
+      let lastEvent = "";
+      try {
+        for await (const event of anthropicStream) {
+          lastEvent = event.type;
 
-        if (event.type === "content_block_start") {
-          if (event.content_block.type === "text") {
-            output.content.push({
-              type: "text",
-              text: "",
-              index: event.index,
-            } as IndexedBlock);
-            stream.push({
-              type: "text_start",
-              contentIndex: output.content.length - 1,
-              partial: output,
-            });
-          } else if (event.content_block.type === "thinking") {
-            output.content.push({
-              type: "thinking",
-              thinking: "",
-              thinkingSignature: "",
-              index: event.index,
-            } as IndexedBlock);
-            stream.push({
-              type: "thinking_start",
-              contentIndex: output.content.length - 1,
-              partial: output,
-            });
-          } else if (event.content_block.type === "redacted_thinking") {
-            output.content.push({
-              type: "thinking",
-              thinking: "[Reasoning redacted]",
-              thinkingSignature: event.content_block.data,
-              redacted: true,
-              index: event.index,
-            } as IndexedBlock);
-            stream.push({
-              type: "thinking_start",
-              contentIndex: output.content.length - 1,
-              partial: output,
-            });
-          } else if (event.content_block.type === "tool_use") {
-            output.content.push({
-              type: "toolCall",
-              id: event.content_block.id,
-              name: isOAuth
-                ? fromClaudeCodeToolName(
-                    event.content_block.name,
-                    projectedContext.tools,
-                  )
-                : event.content_block.name,
-              arguments: {},
-              partialJson: "",
-              index: event.index,
-            } as IndexedBlock);
-            stream.push({
-              type: "toolcall_start",
-              contentIndex: output.content.length - 1,
-              partial: output,
-            });
+          if (event.type === "message_start") {
+            output.usage.input = event.message.usage.input_tokens || 0;
+            output.usage.output = event.message.usage.output_tokens || 0;
+            output.usage.cacheRead =
+              (event.message.usage as { cache_read_input_tokens?: number })
+                .cache_read_input_tokens || 0;
+            output.usage.cacheWrite =
+              (event.message.usage as { cache_creation_input_tokens?: number })
+                .cache_creation_input_tokens || 0;
+            output.usage.totalTokens =
+              output.usage.input +
+              output.usage.output +
+              output.usage.cacheRead +
+              output.usage.cacheWrite;
+            calculateCost(model, output.usage);
+            continue;
           }
-          continue;
-        }
 
-        if (event.type === "content_block_delta") {
-          const contentIndex = blocks.findIndex(
-            (block) => block.index === event.index,
-          );
-          const block = blocks[contentIndex];
-          if (!block) continue;
-
-          if (event.delta.type === "text_delta" && block.type === "text") {
-            block.text += event.delta.text;
-            stream.push({
-              type: "text_delta",
-              contentIndex,
-              delta: event.delta.text,
-              partial: output,
-            });
-          } else if (
-            event.delta.type === "thinking_delta" &&
-            block.type === "thinking"
-          ) {
-            block.thinking += event.delta.thinking;
-            stream.push({
-              type: "thinking_delta",
-              contentIndex,
-              delta: event.delta.thinking,
-              partial: output,
-            });
-          } else if (
-            event.delta.type === "signature_delta" &&
-            block.type === "thinking"
-          ) {
-            block.thinkingSignature =
-              (block.thinkingSignature || "") + event.delta.signature;
-          } else if (
-            event.delta.type === "input_json_delta" &&
-            block.type === "toolCall"
-          ) {
-            block.partialJson += event.delta.partial_json;
-            try {
-              block.arguments = JSON.parse(
-                block.partialJson,
-              ) as ToolCall["arguments"];
-            } catch {}
-            stream.push({
-              type: "toolcall_delta",
-              contentIndex,
-              delta: event.delta.partial_json,
-              partial: output,
-            });
-          }
-          continue;
-        }
-
-        if (event.type === "content_block_stop") {
-          const contentIndex = blocks.findIndex(
-            (block) => block.index === event.index,
-          );
-          const block = blocks[contentIndex];
-          if (!block) continue;
-
-          delete (block as { index?: number }).index;
-          if (block.type === "text") {
-            stream.push({
-              type: "text_end",
-              contentIndex,
-              content: block.text,
-              partial: output,
-            });
-          } else if (block.type === "thinking") {
-            stream.push({
-              type: "thinking_end",
-              contentIndex,
-              content: block.thinking,
-              partial: output,
-            });
-          } else if (block.type === "toolCall") {
-            try {
-              block.arguments = JSON.parse(
-                block.partialJson,
-              ) as ToolCall["arguments"];
-            } catch {}
-            delete (block as { partialJson?: string }).partialJson;
-            stream.push({
-              type: "toolcall_end",
-              contentIndex,
-              toolCall: block,
-              partial: output,
-            });
-          }
-          continue;
-        }
-
-        if (event.type === "message_delta") {
-          output.stopReason = mapStopReason(event.delta.stop_reason);
-          output.usage.input =
-            (event.usage as { input_tokens?: number }).input_tokens ||
-            output.usage.input;
-          output.usage.output =
-            (event.usage as { output_tokens?: number }).output_tokens ||
-            output.usage.output;
-          output.usage.cacheRead =
-            (event.usage as { cache_read_input_tokens?: number })
-              .cache_read_input_tokens || 0;
-          output.usage.cacheWrite =
-            (event.usage as { cache_creation_input_tokens?: number })
-              .cache_creation_input_tokens || 0;
-          const thinkingTokens = (
-            event.usage as {
-              output_tokens_details?: { thinking_tokens?: number };
+          if (event.type === "content_block_start") {
+            if (event.content_block.type === "text") {
+              output.content.push({
+                type: "text",
+                text: "",
+                index: event.index,
+              } as IndexedBlock);
+              stream.push({
+                type: "text_start",
+                contentIndex: output.content.length - 1,
+                partial: output,
+              });
+            } else if (event.content_block.type === "thinking") {
+              output.content.push({
+                type: "thinking",
+                thinking: "",
+                thinkingSignature: "",
+                index: event.index,
+              } as IndexedBlock);
+              stream.push({
+                type: "thinking_start",
+                contentIndex: output.content.length - 1,
+                partial: output,
+              });
+            } else if (event.content_block.type === "redacted_thinking") {
+              output.content.push({
+                type: "thinking",
+                thinking: "[Reasoning redacted]",
+                thinkingSignature: event.content_block.data,
+                redacted: true,
+                index: event.index,
+              } as IndexedBlock);
+              stream.push({
+                type: "thinking_start",
+                contentIndex: output.content.length - 1,
+                partial: output,
+              });
+            } else if (event.content_block.type === "tool_use") {
+              output.content.push({
+                type: "toolCall",
+                id: event.content_block.id,
+                name: isOAuth
+                  ? fromClaudeCodeToolName(
+                      event.content_block.name,
+                      tools,
+                    )
+                  : event.content_block.name,
+                arguments: {},
+                partialJson: "",
+                index: event.index,
+              } as IndexedBlock);
+              stream.push({
+                type: "toolcall_start",
+                contentIndex: output.content.length - 1,
+                partial: output,
+              });
             }
-          ).output_tokens_details?.thinking_tokens;
-          if (thinkingTokens != null) {
-            output.usage.reasoning = thinkingTokens;
+            continue;
           }
-          output.usage.totalTokens =
-            output.usage.input +
-            output.usage.output +
-            output.usage.cacheRead +
-            output.usage.cacheWrite;
-          calculateCost(model, output.usage);
+
+          if (event.type === "content_block_delta") {
+            const contentIndex = blocks.findIndex(
+              (block) => block.index === event.index,
+            );
+            const block = blocks[contentIndex];
+            if (!block) continue;
+
+            if (event.delta.type === "text_delta" && block.type === "text") {
+              block.text += event.delta.text;
+              stream.push({
+                type: "text_delta",
+                contentIndex,
+                delta: event.delta.text,
+                partial: output,
+              });
+            } else if (
+              event.delta.type === "thinking_delta" &&
+              block.type === "thinking"
+            ) {
+              block.thinking += event.delta.thinking;
+              stream.push({
+                type: "thinking_delta",
+                contentIndex,
+                delta: event.delta.thinking,
+                partial: output,
+              });
+            } else if (
+              event.delta.type === "signature_delta" &&
+              block.type === "thinking"
+            ) {
+              block.thinkingSignature =
+                (block.thinkingSignature || "") + event.delta.signature;
+            } else if (
+              event.delta.type === "input_json_delta" &&
+              block.type === "toolCall"
+            ) {
+              block.partialJson += event.delta.partial_json;
+              try {
+                block.arguments = JSON.parse(block.partialJson) as JsonObject;
+              } catch {}
+              stream.push({
+                type: "toolcall_delta",
+                contentIndex,
+                delta: event.delta.partial_json,
+                partial: output,
+              });
+            }
+            continue;
+          }
+
+          if (event.type === "content_block_stop") {
+            const contentIndex = blocks.findIndex(
+              (block) => block.index === event.index,
+            );
+            const block = blocks[contentIndex];
+            if (!block) continue;
+
+            delete (block as { index?: number }).index;
+            if (block.type === "text") {
+              stream.push({
+                type: "text_end",
+                contentIndex,
+                content: block.text,
+                partial: output,
+              });
+            } else if (block.type === "thinking") {
+              stream.push({
+                type: "thinking_end",
+                contentIndex,
+                content: block.thinking,
+                partial: output,
+              });
+            } else if (block.type === "toolCall") {
+              try {
+                block.arguments = JSON.parse(block.partialJson) as JsonObject;
+              } catch {}
+              delete (block as { partialJson?: string }).partialJson;
+              stream.push({
+                type: "toolcall_end",
+                contentIndex,
+                toolCall: block,
+                partial: output,
+              });
+            }
+            continue;
+          }
+
+          if (event.type === "message_delta") {
+            applyMessageDelta(
+              output,
+              model,
+              event.delta.stop_reason,
+              event.usage as MessageDeltaUsage | undefined,
+              (event.delta as { stop_details?: { explanation?: string | null } | null })
+                .stop_details,
+            );
+          }
         }
+      } catch (error) {
+        // Bun can throw while closing the body after message_stop (#37).
+        if (lastEvent !== "message_stop") throw error;
       }
 
       if (options?.signal?.aborted) throw new Error("Request aborted");
-      stream.push({
-        type: "done",
-        reason: output.stopReason as "stop" | "length" | "toolUse",
-        message: output,
-      });
+      if (output.stopReason === "error") {
+        output.errorMessage ??= "Unrecognized stop reason from the API.";
+        stream.push({ type: "error", reason: "error", error: output });
+      } else {
+        stream.push({
+          type: "done",
+          reason: output.stopReason as "stop" | "length" | "toolUse",
+          message: output,
+        });
+      }
       stream.end();
     } catch (error) {
       for (const block of output.content as Array<{
@@ -482,9 +534,18 @@ export function streamAnthropicOAuth(
         delete block.index;
         delete block.partialJson;
       }
+      // A structured stop already answered: a later transport exception (an SSE
+      // error event or a body failure before message_stop) keeps the code and
+      // fixed text, so terminal text can never become retry or routing evidence.
+      const code = (output as { code?: unknown }).code;
+      const structuredStop =
+        output.stopReason === "error" &&
+        (code === "refusal" || code === "unknown_stop");
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-      output.errorMessage =
-        error instanceof Error ? error.message : String(error);
+      if (!structuredStop) {
+        output.errorMessage =
+          error instanceof Error ? error.message : String(error);
+      }
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();
     }

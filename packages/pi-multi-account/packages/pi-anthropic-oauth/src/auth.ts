@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import type {
   OAuthCredentials,
   OAuthLoginCallbacks,
 } from "@earendil-works/pi-ai";
+import { makeClaudeCodeUserAgent } from "./version.js";
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
@@ -16,26 +18,98 @@ const SCOPES = [
   "user:mcp_servers",
   "user:file_upload",
 ].join(" ");
-const CLAUDE_CODE_VERSION_ENV = "PI_ANTHROPIC_OAUTH_CLAUDE_CODE_VERSION";
-const DEFAULT_CLAUDE_CODE_VERSION = "2.1.280";
 const USER_AGENT = makeClaudeCodeUserAgent();
 const CALLBACK_PORT = 53692;
 const CALLBACK_HOST = "127.0.0.1";
 const LOCAL_CALLBACK_TIMEOUT = 5 * 60 * 1000;
 const MAX_TOKEN_RETRIES = 2;
 const INITIAL_RETRY_DELAY_MS = 5000;
+const MAX_RETRY_DELAY_MS = 30_000;
+const MANUAL_SETTLE_GRACE_MS = 10_000;
+const LOCAL_REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/callback`;
+// A transient refresh failure must never move `expires` past the stored
+// credential's real expiry. Pi persists whatever refresh returns and asks for a
+// refresh on every request in the last five minutes before expiry, so a moving
+// expiry was renewed for as long as an outage lasted. Keep the original expiry
+// and, for a short cooldown, answer from the stored credential instead of
+// calling the token endpoint again. Once the real expiry passes, throw.
+// The cooldown bounds refresh invocations, not HTTP attempts: each process
+// makes at most one refresh invocation per refresh token per cooldown window,
+// and that invocation may still make up to MAX_TOKEN_RETRIES + 1 HTTP attempts
+// through fetchWithRetry (for repeated 503s: at 0, 5, and 15 seconds).
+const TRANSIENT_REFRESH_COOLDOWN_MS = 30_000;
+// Keyed by a SHA-256 fingerprint of the refresh token; process memory only.
+const transientRefreshCooldowns = new Map<string, number>();
 
 export { USER_AGENT };
 
-export function makeClaudeCodeUserAgent(
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  const version =
-    env[CLAUDE_CODE_VERSION_ENV]?.trim() || DEFAULT_CLAUDE_CODE_VERSION;
-  return `claude-code/${version}`;
+// Token-endpoint failures carry fixed text only. A response body can hold OAuth
+// error details such as `error_description`, and an underlying exception can
+// hold arbitrary text. Pi wraps a refresh failure in a ModelsError whose message
+// appends this message, and the assistant errorMessage built from it is kept in
+// session history.
+class TokenHttpError extends Error {
+  constructor(
+    label: string,
+    readonly status: number,
+  ) {
+    super(`${label} failed: HTTP ${status}`);
+    this.name = "TokenHttpError";
+  }
 }
 
-type ParsedAuthInput = { code: string; state: string };
+// A bounded description of a token request failure. It never includes a
+// response body or an underlying exception message.
+function describeTokenFailure(error: unknown): string {
+  if (error instanceof TokenHttpError) return `HTTP ${error.status}`;
+  if (error instanceof TypeError) return "network error";
+  return "request error";
+}
+
+type TokenResponse = {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+};
+
+// A JSON parse error quotes the start of the body, so it is replaced as well.
+async function readTokenResponse(
+  response: Response,
+  label: string,
+): Promise<TokenResponse> {
+  try {
+    return (await response.json()) as TokenResponse;
+  } catch {
+    throw new Error(`${label} failed: invalid response`);
+  }
+}
+
+function isTransientTokenError(error: unknown): boolean {
+  if (error instanceof TokenHttpError) {
+    return error.status === 429 ||
+      (error.status >= 500 && error.status < 600);
+  }
+  return error instanceof TypeError;
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) {
+    return Math.min(Math.max(seconds, 0) * 1000, MAX_RETRY_DELAY_MS);
+  }
+
+  const at = Date.parse(value);
+  if (Number.isNaN(at)) return undefined;
+  return Math.min(Math.max(at - Date.now(), 0), MAX_RETRY_DELAY_MS);
+}
+
+type ParsedAuthInput = {
+  code: string;
+  state: string;
+  redirectUri?: string;
+};
 type LocalAuthorization = {
   redirectUri: string;
   waitForCallback: () => Promise<string | null>;
@@ -54,55 +128,68 @@ export async function loginAnthropic(
 
   let authInput: string | null = null;
   let redirectUri = REDIRECT_URI;
+  const initiatedRedirectUris = new Set<string>();
+
+  let localAuthorization: LocalAuthorization | null = null;
+  try {
+    localAuthorization = await createLocalAuthorization(state);
+  } catch {
+    // Failure to bind the callback server falls back to the paste flow.
+  }
 
   try {
-    const localAuthorization = await createLocalAuthorization(state);
-    redirectUri = localAuthorization.redirectUri;
+    if (localAuthorization) {
+      const local = localAuthorization;
+      redirectUri = local.redirectUri;
+      initiatedRedirectUris.add(redirectUri);
 
-    callbacks.onAuth({
-      url: makeAuthorizeUrl(challenge, state, redirectUri),
-      instructions:
-        "Complete login in your browser. If the browser is on another machine, paste the final redirect URL here.",
-    });
+      callbacks.onAuth({
+        url: makeAuthorizeUrl(challenge, state, redirectUri),
+        instructions:
+          "Complete login in your browser. If the browser is on another machine, paste the final redirect URL here.",
+      });
 
-    if (callbacks.onManualCodeInput) {
-      let manualInput: string | undefined;
-      let manualError: Error | undefined;
-      const manualPromise = callbacks
-        .onManualCodeInput()
-        .then((input) => {
-          manualInput = input;
-          localAuthorization.cancel();
-        })
-        .catch((err) => {
-          manualError =
-            err instanceof Error ? err : new Error(String(err));
-          localAuthorization.cancel();
-        });
+      if (callbacks.onManualCodeInput) {
+        let manualInput: string | undefined;
+        let manualError: Error | undefined;
+        const manualPromise = callbacks
+          .onManualCodeInput()
+          .then((input) => {
+            manualInput = input;
+            local.cancel();
+          })
+          .catch((err) => {
+            manualError =
+              err instanceof Error ? err : new Error(String(err));
+            local.cancel();
+          });
 
-      const callbackResult = await localAuthorization.waitForCallback();
+        const callbackResult = await local.waitForCallback();
 
-      if (manualError) throw manualError;
-
-      if (callbackResult) {
-        authInput = callbackResult;
-      } else if (manualInput) {
-        authInput = manualInput;
-      }
-
-      if (!authInput) {
-        await manualPromise;
         if (manualError) throw manualError;
-        if (manualInput) authInput = manualInput;
+
+        if (callbackResult) {
+          authInput = callbackResult;
+        } else if (manualInput) {
+          authInput = manualInput;
+        }
+
+        if (!authInput) {
+          await Promise.race([manualPromise, settleGrace()]);
+          if (manualError) throw manualError;
+          if (manualInput) authInput = manualInput;
+        }
+      } else {
+        authInput = await local.waitForCallback();
       }
-    } else {
-      authInput = await localAuthorization.waitForCallback();
     }
-  } catch {
+  } finally {
+    localAuthorization?.cancel();
   }
 
   if (!authInput) {
     redirectUri = REDIRECT_URI;
+    initiatedRedirectUris.add(redirectUri);
     callbacks.onAuth({
       url: makeAuthorizeUrl(challenge, state, redirectUri),
       instructions:
@@ -113,33 +200,38 @@ export async function loginAnthropic(
     });
   }
 
-  const parsed = parseAuthInput(authInput);
+  const parsed = parseAuthInput(authInput, initiatedRedirectUris);
   if (!parsed) throw new Error("Could not parse authorization callback input.");
   if (parsed.state !== state) throw new Error("OAuth state mismatch.");
 
-  const tokenResponse = await fetchWithRetry(
-    TOKEN_URL,
-    {
-      method: "POST",
-      headers: makeTokenHeaders(),
-      body: JSON.stringify({
-        grant_type: "authorization_code",
-        client_id: CLIENT_ID,
-        code: parsed.code,
-        state: parsed.state,
-        redirect_uri: redirectUri,
-        code_verifier: verifier,
-      }),
-      signal: callbacks.signal,
-    },
-    "Token exchange",
-  );
+  const exchangeRedirectUri = parsed.redirectUri ?? redirectUri;
 
-  const data = (await tokenResponse.json()) as {
-    access_token: string;
-    refresh_token: string;
-    expires_in: number;
-  };
+  let tokenResponse: Response;
+  try {
+    tokenResponse = await fetchWithRetry(
+      TOKEN_URL,
+      {
+        method: "POST",
+        headers: makeTokenHeaders(),
+        body: JSON.stringify({
+          grant_type: "authorization_code",
+          client_id: CLIENT_ID,
+          code: parsed.code,
+          state: parsed.state,
+          redirect_uri: exchangeRedirectUri,
+          code_verifier: verifier,
+        }),
+        signal: callbacks.signal,
+      },
+      "Token exchange",
+    );
+  } catch (error) {
+    // A cancelled login keeps the caller's own abort reason.
+    callbacks.signal?.throwIfAborted();
+    throw new Error(`Token exchange failed: ${describeTokenFailure(error)}`);
+  }
+
+  const data = await readTokenResponse(tokenResponse, "Token exchange");
 
   return {
     access: data.access_token,
@@ -148,9 +240,22 @@ export async function loginAnthropic(
   };
 }
 
+function refreshFingerprint(credentials: OAuthCredentials): string {
+  return createHash("sha256").update(String(credentials.refresh)).digest("hex");
+}
+
 export async function refreshAnthropicToken(
   credentials: OAuthCredentials,
 ): Promise<OAuthCredentials> {
+  const fingerprint = refreshFingerprint(credentials);
+  const now = Date.now();
+  for (const [key, until] of transientRefreshCooldowns) {
+    if (until <= now) transientRefreshCooldowns.delete(key);
+  }
+  if (credentials.expires > now && transientRefreshCooldowns.has(fingerprint)) {
+    return { ...credentials };
+  }
+
   let response: Response;
   try {
     response = await fetchWithRetry(
@@ -166,18 +271,20 @@ export async function refreshAnthropicToken(
       },
       "Token refresh",
     );
-  } catch {
-    if (credentials.expires > Date.now()) {
-      return { ...credentials, expires: Date.now() + 30_000 };
+  } catch (error) {
+    if (isTransientTokenError(error) && credentials.expires > Date.now()) {
+      transientRefreshCooldowns.set(
+        fingerprint,
+        Date.now() + TRANSIENT_REFRESH_COOLDOWN_MS,
+      );
+      return { ...credentials };
     }
-    throw new Error("Token refresh failed and token has expired.");
+    transientRefreshCooldowns.delete(fingerprint);
+    throw new Error(`Token refresh failed: ${describeTokenFailure(error)}`);
   }
 
-  const data = (await response.json()) as {
-    access_token: string;
-    refresh_token: string;
-    expires_in: number;
-  };
+  transientRefreshCooldowns.delete(fingerprint);
+  const data = await readTokenResponse(response, "Token refresh");
 
   return {
     access: data.access_token,
@@ -217,49 +324,34 @@ async function fetchWithRetry(
 
     if (response.ok) return response;
 
-    const bodyText = await response.text();
+    // Discard the body unread; it may carry OAuth error details.
+    await response.body?.cancel().catch(() => undefined);
+
+    const failure = new TokenHttpError(label, response.status);
 
     const shouldRetry = response.headers.get("x-should-retry");
-    if (shouldRetry === "false") {
-      throw new Error(`${label} failed: ${response.status} ${bodyText}`);
-    }
+    if (shouldRetry === "false") throw failure;
 
     if (
       attempt < MAX_TOKEN_RETRIES &&
-      (response.status === 429 || response.status >= 500)
+      (response.status === 429 ||
+        (response.status >= 500 && response.status < 600))
     ) {
-      const retryAfter = response.headers.get("retry-after");
-      const delayMs = retryAfter
-        ? Math.min(Number(retryAfter) * 1000, 30_000)
-        : INITIAL_RETRY_DELAY_MS * 2 ** attempt;
+      const delayMs =
+        parseRetryAfter(response.headers.get("retry-after")) ??
+        INITIAL_RETRY_DELAY_MS * 2 ** attempt;
 
       await new Promise((resolve) => setTimeout(resolve, delayMs));
-      lastError = new Error(
-        `${label} failed: ${response.status} ${bodyText}`,
-      );
+      lastError = failure;
       continue;
     }
 
-    throw new Error(`${label} failed: ${response.status} ${bodyText}`);
+    throw failure;
   }
 
   throw lastError ?? new Error(`${label} failed after retries`);
 }
 
-/**
- * Headers for the OAuth token endpoint (authorization-code exchange and
- * refresh). Deliberately sets no `user-agent` of its own.
- *
- * `USER_AGENT` identifies the API client and belongs on inference requests
- * only (`src/stream.ts`). Setting it here made Anthropic answer the token
- * endpoint with 429 `rate_limit_error`, which failed both login and every
- * credential refresh. Authentication is not inference: do not re-couple them.
- *
- * This does not mean the request reaches the wire with no user agent at all.
- * Node's `fetch` supplies its own default when the caller sets none, so the
- * endpoint still sees something generic. The point is that it must not see a
- * `claude-code/<version>` string identifying the inference client.
- */
 function makeTokenHeaders(): HeadersInit {
   return {
     "Content-Type": "application/json",
@@ -273,6 +365,7 @@ async function createLocalAuthorization(
 
   return new Promise((resolve, reject) => {
     let done = false;
+    let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let complete!: (value: string | null) => void;
     const wait = new Promise<string | null>((innerResolve) => {
@@ -291,10 +384,7 @@ async function createLocalAuthorization(
     };
 
     server.on("request", (req, res) => {
-      const url = new URL(
-        req.url ?? "/",
-        `http://${req.headers.host ?? "localhost"}`,
-      );
+      const url = new URL(req.url ?? "/", LOCAL_REDIRECT_URI);
 
       if (url.pathname !== "/callback") {
         res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
@@ -313,7 +403,6 @@ async function createLocalAuthorization(
       if (gotState !== state) {
         res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
         res.end("Invalid state");
-        finish(null);
         return;
       }
 
@@ -322,15 +411,25 @@ async function createLocalAuthorization(
         Connection: "close",
       });
       res.end(makeCallbackPage());
-      finish(url.toString());
+      finish(`${LOCAL_REDIRECT_URI}?${url.searchParams.toString()}`);
     });
 
-    server.once("error", reject);
+    server.on("error", (error) => {
+      if (!settled) {
+        settled = true;
+        finish(null);
+        reject(error);
+        return;
+      }
+      finish(null);
+    });
 
     server.listen(CALLBACK_PORT, CALLBACK_HOST, () => {
+      settled = true;
       timer = setTimeout(() => finish(null), LOCAL_CALLBACK_TIMEOUT);
+      timer.unref?.();
       resolve({
-        redirectUri: `http://localhost:${CALLBACK_PORT}/callback`,
+        redirectUri: LOCAL_REDIRECT_URI,
         waitForCallback: () => wait,
         cancel: () => finish(null),
       });
@@ -347,6 +446,10 @@ function makeCallbackPage(): string {
     <p>You can close this window and return to Pi.</p>
   </body>
 </html>`;
+}
+
+function settleGrace(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, MANUAL_SETTLE_GRACE_MS));
 }
 
 async function generatePKCE(): Promise<{
@@ -374,14 +477,21 @@ function toBase64Url(bytes: Uint8Array): string {
     .replace(/=+$/g, "");
 }
 
-function parseAuthInput(input: string): ParsedAuthInput | null {
+function parseAuthInput(
+  input: string,
+  initiatedRedirectUris: ReadonlySet<string>,
+): ParsedAuthInput | null {
   const text = input.trim();
 
   try {
     const url = new URL(text);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
-    if (code && state) return { code, state };
+    if (code && state) {
+      const redirectUri = `${url.origin}${url.pathname}`;
+      if (!initiatedRedirectUris.has(redirectUri)) return null;
+      return { code, state, redirectUri };
+    }
   } catch {}
 
   const split = text.split("#");

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   Api,
   Credential,
@@ -24,11 +25,14 @@ import {
 
 export const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
 export const ANTIGRAVITY_PERSIST_KEY = "pi-antigravity";
+export const CATALOG_SCHEMA_VERSION = 2;
 
 type PersistedAntigravityCatalog = {
   catalog: AntigravityCatalog;
   checkedAt: number;
   modelEnums: Record<string, string>;
+  schemaVersion: number;
+  credentialKey: string;
 };
 
 export function getCatalogRefreshIntervalMs(): number {
@@ -67,10 +71,10 @@ export async function discoverAntigravityModels(
   const available = await fetchAvailableModelsCatalog(creds.token, creds.projectId, signal);
   const models = available.data.models;
   if (!models || Object.keys(models).length === 0) {
-    return { models: [], routing: {} };
+    throw new Error("Antigravity returned an empty or unrecognized model catalog");
   }
   registerDiscoveredModelEnums(models);
-  return buildAntigravityCatalog(models, fallbackCatalog());
+  return buildAntigravityCatalog(models, fallbackCatalog(), available.data.agentModelSorts);
 }
 
 export async function refreshAntigravityModels(
@@ -83,9 +87,26 @@ export async function refreshAntigravityModels(
   const apiKey = apiKeyFromCredential(context.credential);
   if (!apiKey || context.signal.aborted) return current.models;
 
+  // A different account/project or pre-upgrade cache must not suppress a fresh
+  // discovery. Keep hydration above so offline startup still has usable models.
+  const credentialKey = createHash("sha256")
+    .update(
+      JSON.stringify([
+        context.credential?.type === "oauth" ? context.credential.refresh : apiKey,
+        parseApiKey(apiKey).projectId,
+      ]),
+    )
+    .digest("hex");
+  const stored: unknown = context.stored;
+  const persisted = isRecord(stored) ? stored[ANTIGRAVITY_PERSIST_KEY] : undefined;
+  const sameSource =
+    isRecord(persisted) &&
+    persisted.schemaVersion === CATALOG_SCHEMA_VERSION &&
+    persisted.credentialKey === credentialKey;
   const now = Date.now();
   if (
     !context.force &&
+    sameSource &&
     checkedAt > 0 &&
     now >= checkedAt &&
     now - checkedAt < getCatalogRefreshIntervalMs()
@@ -107,6 +128,8 @@ export async function refreshAntigravityModels(
             catalog: next,
             checkedAt: refreshedAt,
             modelEnums: snapshotDynamicModelEnums(),
+            schemaVersion: CATALOG_SCHEMA_VERSION,
+            credentialKey,
           } satisfies PersistedAntigravityCatalog,
         } as unknown as ModelsStoreEntry,
       });

@@ -1,42 +1,52 @@
-export enum ThinkingEffort {
-  Off = "off",
-  Minimal = "minimal",
-  Low = "low",
-  Medium = "medium",
-  High = "high",
-  Xhigh = "xhigh",
-}
+export const ThinkingEffort = {
+  Off: "off",
+  Minimal: "minimal",
+  Low: "low",
+  Medium: "medium",
+  High: "high",
+  Xhigh: "xhigh",
+} as const;
+export type ThinkingEffort = (typeof ThinkingEffort)[keyof typeof ThinkingEffort];
 
-export enum ToolChoice {
-  Auto = "auto",
-  None = "none",
-  Any = "any",
-  Required = "required",
-}
+export const ToolChoice = {
+  Auto: "auto",
+  None: "none",
+  Any: "any",
+  Required: "required",
+} as const;
+export type ToolChoice = (typeof ToolChoice)[keyof typeof ToolChoice];
 
-export enum GeminiToolCallingMode {
-  None = "NONE",
-  Any = "ANY",
-  Auto = "AUTO",
-  Validated = "VALIDATED",
-}
+export const GeminiToolCallingMode = {
+  None: "NONE",
+  Any: "ANY",
+  Auto: "AUTO",
+  Validated: "VALIDATED",
+} as const;
+export type GeminiToolCallingMode =
+  (typeof GeminiToolCallingMode)[keyof typeof GeminiToolCallingMode];
 
-export enum GeminiRole {
-  User = "user",
-  Model = "model",
-}
+export const GeminiRole = {
+  User: "user",
+  Model: "model",
+} as const;
+export type GeminiRole = (typeof GeminiRole)[keyof typeof GeminiRole];
 
-export enum AntigravityRequestType {
-  Agent = "agent",
-}
+export const AntigravityRequestType = {
+  Agent: "agent",
+  ImageGen: "image_gen",
+} as const;
+export type AntigravityRequestType =
+  (typeof AntigravityRequestType)[keyof typeof AntigravityRequestType];
 
-export enum AntigravityUserAgent {
-  Antigravity = "antigravity",
-}
+export const AntigravityUserAgent = {
+  Antigravity: "antigravity",
+} as const;
+export type AntigravityUserAgent = (typeof AntigravityUserAgent)[keyof typeof AntigravityUserAgent];
 
-export enum StopReason {
-  Stop = "stop",
-  Length = "length",
-  ToolUse = "toolUse",
-  Error = "error",
-}
+export const StopReason = {
+  Stop: "stop",
+  Length: "length",
+  ToolUse: "toolUse",
+  Error: "error",
+} as const;
+export type StopReason = (typeof StopReason)[keyof typeof StopReason];

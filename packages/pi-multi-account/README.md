@@ -1,6 +1,6 @@
 # @centerforagenticai/pi-multi-account
 
-**Kind:** extension · **Status:** experimental · **Pi:** 0.84.4 · **Node:** >=22.19
+**Kind:** extension · **Status:** experimental · **Pi:** >=0.86.0 · **Node:** >=22.19
 
 Concurrent Anthropic, OpenAI Codex, and Google Antigravity OAuth accounts for Pi, with bounded failover, usage and cost history, and an opt-in metered last resort.
 
@@ -28,7 +28,7 @@ Pi extensions run with your user permissions. Review the source before installat
 pi install npm:@centerforagenticai/pi-multi-account
 ```
 
-Restart Pi or run `/reload`, then authenticate each managed slot through Pi's `/login` flow. Run `/multi-account rediscover` after adding or changing credentials. The package requires Node.js `>=22.19` and is developed and verified against Pi `0.84.4`.
+Restart Pi or run `/reload`, then authenticate each managed slot through Pi's `/login` flow. Run `/multi-account rediscover` after adding or changing credentials. The package requires Node.js `>=22.19` and Pi `>=0.86.0`, and is developed and verified against Pi `1.3.0`.
 
 The package bundles reviewed Anthropic OAuth and Google Antigravity source under their original MIT licenses. It does not fetch the private fork package names at installation time. See [Accounts and provider integration](docs/accounts.md).
 
@@ -74,6 +74,11 @@ When `PI_CODING_AGENT_DIR` is unset, the root is `~/.pi/agent`. Missing configur
 Account groups may list exact configured Pi provider IDs, including built-in API
 and custom providers. Unknown, removed, or unavailable members stay inactive;
 other listed usable members can serve, with no fallback outside the group.
+Groups confine the extension's automatic routing. A model the operator selects
+with `/model` from a provider outside the group still runs as selected, and is
+never replaced. Delegate children keep the inherited confinement and are refused
+before dispatch. See
+[Selecting a provider outside the account group](docs/routing.md#selecting-a-provider-outside-the-account-group).
 Membership does not transfer credential or routing ownership to this extension.
 Under an active group, select physical models: host virtual models can choose
 other providers and are unsupported. Physical models on mixed providers still work.
@@ -98,9 +103,11 @@ Reactive routing starts only at `agent_settled`, after Pi's provider retry and c
 The source is maintained in a private repository and published as release snapshots; contributions are welcome as pull requests on [GitHub](https://github.com/CenterForAgenticAI/tools), which maintainers carry into the source repository.
 
 ```sh
-npm install
+bun install
 npm test
 ```
+
+Pi loads the bundled entry `dist/index.js`, not `src/`. `bun install` builds it. After a `git pull` in a checkout that Pi loads directly, run `bun install` again and restart Pi.
 
 ## Documentation
 

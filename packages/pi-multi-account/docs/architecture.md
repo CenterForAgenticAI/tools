@@ -20,7 +20,7 @@ The extension does not register `before_provider_request`. The captured in-tree
 Anthropic configuration still owns OAuth callbacks, headers, and ordinary
 requests. A narrow stateless selector sends adaptive requests to the
 MIT-licensed local adapter and leaves every other request on the vendored
-`0.2.5-intel.1` stream. Before invoking either stream, the selector reconstructs current Pi
+`0.3.2-intel.1` stream. Before invoking either stream, the selector reconstructs current Pi
 transcript system text and active tool declarations in the legacy context form
 that both implementations consume. The adaptive adapter imports the vendored
 prompt, message, and tool helpers and changes only adaptive-thinking fields.

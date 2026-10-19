@@ -11,7 +11,7 @@ import {
 } from "../diagnostics/diagnostics.js";
 import { assertSafeApiBaseUrl, safeError } from "../utils/security.js";
 import type { AntigravityApiKey, AvailableModelsRaw, DynamicModelInfo } from "../types/types.js";
-import { antigravityEnv, asString, escapeRegExp, isRecord } from "../utils/util.js";
+import { antigravityEnv, asString, isRecord } from "../utils/util.js";
 import { antigravityFetch } from "../utils/http.js";
 import { registerDiscoveredModelEnums, registerModelEnum } from "../models/models.js";
 
@@ -60,8 +60,10 @@ export function endpointCandidates(): string[] {
   return explicit ? [assertSafeApiBaseUrl(explicit)] : ENDPOINT_FALLBACKS;
 }
 
+// Catalog visibility is gated on this version. 1.2.4 hides Gemini 4 Argon;
+// 1.4.0 is aligned with the current official agy CLI release (#93, #94, #97).
 const DEFAULT_USER_AGENT =
-  "antigravity/cli/1.1.23 (aidev_client; os_type=linux; arch=amd64; cl=974125021; auth_method=consumer)";
+  "antigravity/cli/1.4.0 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)";
 
 /** Default User-Agent matching pure Antigravity CLI wire fingerprint. */
 export function defaultUserAgent(): string {
@@ -189,48 +191,15 @@ function summarizeModelCandidate(value: unknown): string {
   return JSON.stringify(out).slice(0, 1200);
 }
 
-/** Runtime ids look like gemini-*, claude-*, gpt-oss-*, never MODEL_PLACEHOLDER_* enums. */
+/** Runtime ids must not be internal placeholder enums, internal chats, or image endpoints. */
 export function isUsableRuntimeModelId(id: string): boolean {
-  return /^(gemini-|claude-|gpt-oss-)/i.test(id) && !/\s/.test(id) && !/^MODEL_/i.test(id);
-}
-
-function buildModelMatchRegex(requestedId: string): RegExp {
-  const req = requestedId.toLowerCase();
-  // Display names from fetchAvailableModels (keys are the real runtime ids):
-  //   gemini-3.8-flash-low       → "Gemini 3.8 Flash (Low)"
-  //   gemini-3.8-flash-medium    → "Gemini 3.8 Flash (Medium)"
-  //   gemini-3.8-flash-high      → "Gemini 3.8 Flash (High)"
-  //   gemini-3.7-flash-low       → "Gemini 3.7 Flash (Low)"
-  //   gemini-3.7-flash-medium    → "Gemini 3.7 Flash (Medium)"
-  //   gemini-3.7-flash-high      → "Gemini 3.7 Flash (High)"
-  //   gemini-3.6-flash-low       → "Gemini 3.6 Flash (Low)"
-  //   gemini-3.6-flash-medium    → "Gemini 3.6 Flash (Medium)"
-  //   gemini-3.6-flash-high      → "Gemini 3.6 Flash (High)"
-  //   gemini-3.5-flash-extra-low → "Gemini 3.5 Flash (Low)"
-  //   gemini-3.5-flash-low       → "Gemini 3.5 Flash (Medium)"
-  //   gemini-3-flash-agent       → "Gemini 3.5 Flash (High)"
-  if (req === "gemini-3.8-flash-low") return /gemini[- ]3\.8[- ]flash \(low\)/i;
-  if (req === "gemini-3.8-flash-medium") return /gemini[- ]3\.8[- ]flash \(medium\)/i;
-  if (req === "gemini-3.8-flash-high") return /gemini[- ]3\.8[- ]flash \(high\)/i;
-  if (req === "gemini-3.7-flash-low") return /gemini[- ]3\.7[- ]flash \(low\)/i;
-  if (req === "gemini-3.7-flash-medium") return /gemini[- ]3\.7[- ]flash \(medium\)/i;
-  if (req === "gemini-3.7-flash-high") return /gemini[- ]3\.7[- ]flash \(high\)/i;
-  if (req === "gemini-3.6-flash-low") return /gemini[- ]3\.6[- ]flash \(low\)/i;
-  if (req === "gemini-3.6-flash-medium") return /gemini[- ]3\.6[- ]flash \(medium\)/i;
-  if (req === "gemini-3.6-flash-high") return /gemini[- ]3\.6[- ]flash \(high\)/i;
-  if (req === "gemini-3.5-flash-extra-low") return /gemini[- ]3\.5[- ]flash \(low\)/i;
-  if (req === "gemini-3.5-flash-low" || req === "gemini-3.5-flash-medium")
-    return /gemini[- ]3\.5[- ]flash \(medium\)/i;
-  if (req === "gemini-3.5-flash-high" || req === "gemini-3-flash-agent")
-    return /gemini[- ]3\.5[- ]flash \(high\)/i;
-  if (req.includes("claude-opus-4-6")) return /claude.*opus.*4\.6/i;
-  if (req.includes("claude-sonnet-4-6")) return /claude.*sonnet.*4\.6/i;
-  if (req.includes("gpt-oss-120b")) return /gpt.*oss.*120b/i;
-  if (req === "gemini-3.1-pro-low") return /gemini[- ]3\.1[- ]pro \(low\)/i;
-  if (req === "gemini-3.1-pro-high" || req === "gemini-pro-agent")
-    return /gemini[- ]3\.1[- ]pro \(high\)/i;
-  const escaped = escapeRegExp(req).replace(/\\-/g, "[- ]");
-  return new RegExp(escaped, "i");
+  return (
+    /^[a-z0-9][a-z0-9_.-]*$/i.test(id) &&
+    !/\s/.test(id) &&
+    !/^MODEL_/i.test(id) &&
+    !/^(chat_|tab_)/i.test(id) &&
+    !/image/i.test(id)
+  );
 }
 
 function dynamicModelFromInfo(modelId: string, info: unknown): DynamicModelInfo {
@@ -256,23 +225,32 @@ function dynamicModelFromInfo(modelId: string, info: unknown): DynamicModelInfo 
  * Resolve a requested runtime model against fetchAvailableModels payload.
  * The real runtime ids are the keys of `data.models`; the nested `model` field is often
  * a MODEL_PLACEHOLDER_* enum that 404s on streamGenerateContent.
+ *
+ * Uses deterministic key lookup (exact or case-insensitive) and exact display name match.
+ * Zero regexes, zero prefix wildcards, zero fuzzy guessing.
  */
 function findDynamicModel(value: unknown, requestedId: string): DynamicModelInfo | undefined {
   if (!value) return undefined;
 
   if (isRecord(value) && isRecord(value.models)) {
     const modelsMap = value.models;
+    // 1. Direct exact key lookup
     if (isUsableRuntimeModelId(requestedId) && requestedId in modelsMap) {
       return dynamicModelFromInfo(requestedId, modelsMap[requestedId]);
     }
-
-    const targetRegex = buildModelMatchRegex(requestedId);
+    // 2. Case-insensitive exact key lookup
+    const lowerReq = requestedId.toLowerCase();
+    for (const [modelId, info] of Object.entries(modelsMap)) {
+      if (modelId.toLowerCase() === lowerReq && isUsableRuntimeModelId(modelId)) {
+        return dynamicModelFromInfo(modelId, info);
+      }
+    }
+    // 3. Exact display name lookup (for when a user references an exact model label)
     for (const [modelId, info] of Object.entries(modelsMap)) {
       if (!isUsableRuntimeModelId(modelId)) continue;
-      if (targetRegex.test(modelId)) return dynamicModelFromInfo(modelId, info);
       if (isRecord(info)) {
         const label = info.label ?? info.displayName ?? info.name;
-        if (typeof label === "string" && targetRegex.test(label)) {
+        if (typeof label === "string" && label.toLowerCase() === lowerReq) {
           return dynamicModelFromInfo(modelId, info);
         }
       }
@@ -280,10 +258,10 @@ function findDynamicModel(value: unknown, requestedId: string): DynamicModelInfo
     return undefined;
   }
 
-  const targetRegex = buildModelMatchRegex(requestedId);
-
   if (typeof value === "string") {
-    return targetRegex.test(value) && isUsableRuntimeModelId(value) ? { id: value } : undefined;
+    return value.toLowerCase() === requestedId.toLowerCase() && isUsableRuntimeModelId(value)
+      ? { id: value }
+      : undefined;
   }
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -431,11 +409,19 @@ export function mergeAvailableModelsResults(
   const mergedModels: Record<string, unknown> = {};
   let defaultAgentModelId: string | undefined;
   let defaultAgentModel: string | undefined;
+  let agentModelSorts: AvailableModelsRaw["agentModelSorts"];
   let lastEndpoint = "";
   let lastStatus = 0;
 
   for (const result of results) {
-    if (!result) continue;
+    if (
+      !result ||
+      !isRecord(result.data) ||
+      !isRecord(result.data.models) ||
+      Object.keys(result.data.models).length === 0 ||
+      !Object.values(result.data.models).every(isRecord)
+    )
+      continue;
     setLastEndpoint(result.endpoint);
     setLastStatus(result.status);
     lastEndpoint = result.endpoint;
@@ -451,10 +437,15 @@ export function mergeAvailableModelsResults(
     if (isRecord(data) && typeof data.defaultAgentModel === "string") {
       defaultAgentModel = data.defaultAgentModel;
     }
+    if (isRecord(data) && Array.isArray(data.agentModelSorts)) {
+      agentModelSorts = data.agentModelSorts as AvailableModelsRaw["agentModelSorts"];
+    }
   }
 
   if (!lastEndpoint) {
-    throw new Error(`/v1internal:fetchAvailableModels failed: no endpoint available`);
+    throw new Error(
+      `/v1internal:fetchAvailableModels failed: no endpoint returned a valid non-empty catalog`,
+    );
   }
 
   return {
@@ -464,6 +455,7 @@ export function mergeAvailableModelsResults(
       models: mergedModels as AvailableModelsRaw["models"],
       defaultAgentModelId,
       defaultAgentModel,
+      agentModelSorts,
     },
   };
 }

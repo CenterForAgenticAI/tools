@@ -10,11 +10,12 @@ pi-anthropic-oauth
 Copyright (c) 2026 Leo Henon
 Upstream: https://github.com/leohenon/pi-anthropic-oauth
 License: MIT (packages/pi-anthropic-oauth/LICENSE)
-Modified version: 0.2.5-intel.1
+Modified version: 0.3.2-intel.1
 
-The modified copy preserves the reviewed OAuth contract, raises the Claude Code
-minimum used for Opus 5.5, documents and tests token boundaries, and projects
-current Pi transcript context into requests.
+The modified copy forwards request-local retry limits, reports transport
+activity for every response chunk, sends error tool results as text only, and
+adds regression tests for the OAuth token boundary, the Claude Code version, and
+Pi transcript context.
 
 pi-antigravity
 --------------
@@ -22,8 +23,9 @@ pi-antigravity
 Copyright (c) 2026 Rahul Arya
 Upstream: https://github.com/Rahularya01/pi-antigravity
 License: MIT (packages/pi-antigravity/LICENSE)
-Modified version: 0.7.2-intel.1
+Modified version: 0.11.0-intel.1
 
 The modified copy preserves primary response errors, supports bounded usage
-cancellation, projects current Pi transcript context, and writes opt-in debug
-output under the operating system temporary directory.
+cancellation, writes opt-in debug output under the operating system temporary
+directory, types the model catalog for Pi 1.x, and never switches linked
+accounts inside one stream invocation.

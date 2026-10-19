@@ -253,8 +253,13 @@ blocks requests without falling back outside the group. Discovery, `/login`,
 `rediscover`, and operator repair remain available. A successful `reload` applies
 the new membership; failed reload keeps the last valid policy.
 
-Membership restricts direct ordinary and custom-message requests, including
-restored model selections and inherited delegate policy. It does not enroll a
+Membership confines the extension's automatic routing: `unified`, failover,
+recovery, parking, preflight, and the metered OpenRouter rung. In an operator
+session, a model selected with `/model` from a provider outside the group runs
+as selected. A delegate child keeps its inherited policy, so its out-of-group
+selection is refused, never replaced with an in-group model. Listed members still
+need live availability. See
+[Selecting a provider outside the account group](routing.md#selecting-a-provider-outside-the-account-group). It does not enroll a
 custom provider in extension-owned refresh, usage, cost, unified routing, parking,
 or recovery. Those candidate sets remain managed-only. `group status` shows
 availability and exclusion through credential-free public metadata.

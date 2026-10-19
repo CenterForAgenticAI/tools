@@ -3,7 +3,7 @@
 The public release snapshot contains the test surface supported for contributors. From the exported package directory, run:
 
 ```sh
-npm install
+bun install
 npm test
 ```
 

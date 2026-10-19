@@ -64,6 +64,7 @@ import {
 import { appendCostRecord } from "./cost-history.js";
 import { OpenRouterBudgetStore } from "./openrouter-budget.js";
 import {
+	isDelegateEnvironment,
 	OPENROUTER_PROVIDER_ID,
 	resolveOpenRouterEnvironmentPolicy,
 	worstCaseOpenRouterTurnUsd,
@@ -229,6 +230,7 @@ import {
 	type SharedUsageSnapshot,
 } from "./shared-usage.js";
 import { CredentialWarmer, type WarmCandidate } from "./warmer.js";
+import { writeHeadlessNotice } from "./headless-notice.js";
 import {
 	applySavedDefaultModel,
 	hasExplicitModelFlag,
@@ -1965,6 +1967,11 @@ export interface MultiAccountExtensionOptions {
 	 * still calls it, and a caller-supplied loader is responsible for its own.
 	 */
 	readonly loadAntigravityProviderConfig?: () => Promise<ProviderConfig>;
+	/**
+	 * Test seam for a refusal notice when the session binds no UI. The default
+	 * writes one stderr line, and only in a Pi print-mode process.
+	 */
+	readonly headlessNoticeWriter?: (text: string) => void;
 }
 
 /**
@@ -1991,6 +1998,8 @@ const DELEGATE_OWNED_API_SET_KEY = Symbol.for(
 const DELEGATE_WORKER_ORIGIN_ENTRY_TYPE = "delegate.worker-origin";
 const DELEGATE_DRIVER_CHILD_ENV = "PI_DELEGATE_CHILD";
 const DELEGATE_DRIVER_OWNER_SESSION_ENV = "PI_DELEGATE_OWNER_SESSION_ID";
+// Fabric marks each subagent process it spawns with a positive depth.
+const FABRIC_CHILD_DEPTH_ENV = "PI_FABRIC_DEPTH";
 
 interface AccountGroupSessionManager extends SessionIdSource {
 	getBranch(): readonly unknown[];
@@ -2192,6 +2201,8 @@ export const createMultiAccountExtension =
 		const openRouterEnvironment =
 			options.openRouterEnvironment ?? process.env;
 		const openRouterBudget = options.openRouterBudget ?? new OpenRouterBudgetStore();
+		const headlessNoticeWriter =
+			options.headlessNoticeWriter ?? writeHeadlessNotice;
 		const projectKey = options.projectKey ?? projectKeyForCwd();
 		let logicalRouteIndicator: LogicalRouteIndicator | undefined;
 		const usageFetcher = new UsageFetcher({
@@ -2566,6 +2577,24 @@ export const createMultiAccountExtension =
 			effectiveAccountGroupResolution = resolution;
 			return resolution;
 		};
+		/**
+		 * Show an input refusal. Print mode binds no extension UI and drops the
+		 * notice, so it also goes to the headless writer: one stderr line in a
+		 * print-mode process. A delegate-owned in-process session never writes
+		 * there, because it shares its parent's terminal.
+		 */
+		const notifyInputRefusal = (
+			inputContext: ExtensionContext,
+			text: string,
+		): void => {
+			inputContext.ui.notify(text, "warning");
+			if (inputContext.hasUI !== false || delegateOwnedSession) return;
+			try {
+				headlessNoticeWriter(text);
+			} catch {
+				// A failed stderr write never turns a refusal into a dispatch.
+			}
+		};
 		/** A blocked scope names its reason and recovery; a membership exclusion keeps its own text. */
 		const accountGroupBlockNotice = (fallback: string): string =>
 			accountGroupScopeBlocked && accountGroupBlockReason !== undefined
@@ -2650,7 +2679,11 @@ export const createMultiAccountExtension =
 						return;
 					}
 					rememberAccountGroupResolution(
-						sessionAccountGroups.cacheInheritedResolution(sessionManager, inherited),
+						sessionAccountGroups.cacheInheritedResolution(
+							sessionManager,
+							inherited,
+							parentSessionId,
+						),
 					);
 					return;
 				}
@@ -2677,7 +2710,11 @@ export const createMultiAccountExtension =
 						return;
 					}
 					rememberAccountGroupResolution(
-						sessionAccountGroups.cacheInheritedResolution(sessionManager, inherited),
+						sessionAccountGroups.cacheInheritedResolution(
+							sessionManager,
+							inherited,
+							delegateDriverOwnerSessionId,
+						),
 					);
 					return;
 				}
@@ -3271,6 +3308,7 @@ export const createMultiAccountExtension =
 			providerIds.delete(LOGICAL_PROVIDER_ID);
 			return {
 				resolution,
+				explicitSelectionOutsideGroup: operatorSession(),
 				members: [...providerIds].map((providerId) => {
 					const availability = accountGroupMemberAvailability(providerId, members, snapshot);
 					if (!availability.eligible) return availability;
@@ -3675,6 +3713,15 @@ export const createMultiAccountExtension =
 			return true;
 		};
 
+		// A foreground session the operator drives, as opposed to an in-process
+		// delegate worker, a durable or lineage-bearing delegate child, or a
+		// Fabric subagent process.
+		const operatorSession = (): boolean =>
+			!delegateOwnedSession &&
+			delegateDriverChildMarker === undefined &&
+			delegateDriverOwnerSessionId === undefined &&
+			!isDelegateEnvironment(process.env) &&
+			!(Number(process.env[FABRIC_CHILD_DEPTH_ENV] ?? "0") > 0);
 		const providerAllowedByActiveGroup = (
 			providerId: string,
 			inputContext: ExtensionContext,
@@ -3701,6 +3748,16 @@ export const createMultiAccountExtension =
 				providerId, members,
 				readAccountGroupRegistrySnapshot(inputContext.modelRegistry), modelId,
 			);
+			// Membership confines the extension's own automatic routing: unified,
+			// failover, recovery, parking, preflight, and the metered rung. An
+			// operator's explicit or restored /model choice of a known provider
+			// outside the group is the operator's decision and dispatches
+			// unchanged. A listed member still needs live availability, and a
+			// delegate keeps its inherited confinement because its dispatcher,
+			// not the operator, chose that model.
+			if (availability.reason === "excluded by active group" && operatorSession()) {
+				return true;
+			}
 			if (!availability.eligible) return false;
 			// Membership never enrolls custom providers in extension-owned routing.
 			if (classifyProviderId({ providerId, credentialType: "unknown" }) === null) return true;
@@ -3745,13 +3802,125 @@ export const createMultiAccountExtension =
 				...(requestedModelId === undefined ? {} : { requestedModelId }),
 			};
 		};
+		/**
+		 * The in-group physical model that routing would choose for this origin.
+		 * Uses the same recovery selection and model choice as routing, then
+		 * stops: it never calls setModel or records an automatic destination.
+		 */
+		const accountGroupInGroupModel = (
+			activeProviderId: string,
+			requestedModelId: string | undefined,
+			inputContext: ExtensionContext,
+		):
+			| {
+					readonly origin: {
+						readonly providerId: string;
+						readonly family: AllowedFamily;
+						readonly requestedModelId?: string;
+					};
+					readonly physical: Model<Api>;
+			  }
+			| undefined => {
+			const origin = accountGroupOrigin(activeProviderId, requestedModelId);
+			if (origin === undefined) return undefined;
+			let physical: Model<Api> | undefined;
+			try {
+				const nowMs = Date.now();
+				const allowedAccounts = subscriptionOperatorAccounts(
+					context ?? inputContext,
+				);
+				const candidate = selectAvailableRecoveryAccount({
+					accounts: physicalAccountsForRouting(nowMs),
+					state,
+					config,
+					nowMs,
+					originFamily: origin.family,
+					...(origin.requestedModelId === undefined
+						? {}
+						: {
+								requestedModelId: origin.requestedModelId,
+								preferredModelId: origin.requestedModelId,
+							}),
+					modelSupport,
+				});
+				const destination = allowedAccounts.find(
+					(account) => account.providerId === candidate?.destination.providerId,
+				);
+				if (candidate !== undefined && destination !== undefined) {
+					physical = routeCandidateModel(
+						candidate,
+						destination,
+						context ?? inputContext,
+						origin.requestedModelId,
+						origin.family,
+						config.preferredModels,
+					);
+				}
+			} catch {
+				// A failed selection never authorizes an excluded provider.
+				physical = undefined;
+			}
+			if (physical === undefined || isAccountGroupVirtualModel(physical)) {
+				return undefined;
+			}
+			return { origin, physical };
+		};
+		/**
+		 * In-group model keys an operator may select instead of a refused one.
+		 * At most one physical key, plus `unified/<id>` when unified lists the
+		 * requested id and an in-group account serves that exact id.
+		 */
+		const accountGroupRefusalSuggestion = (
+			activeProviderId: string,
+			requestedModelId: string | undefined,
+			inputContext: ExtensionContext,
+		): readonly string[] => {
+			// A failed suggestion only weakens the notice; the input stays refused.
+			const target = accountGroupInGroupModel(
+				activeProviderId,
+				requestedModelId,
+				inputContext,
+			);
+			if (target === undefined) return [];
+			const { origin, physical } = target;
+			const keys = [`${physical.provider}/${physical.id}`];
+			if (
+				origin.requestedModelId !== undefined &&
+				physical.id === origin.requestedModelId &&
+				(logicalRoutingState?.status === "matched" ||
+					logicalRoutingState?.status === "mismatched")
+			) {
+				const logical = providerModels(
+					context ?? inputContext,
+					LOGICAL_PROVIDER_ID,
+				).find((model) => model.id === origin.requestedModelId);
+				if (logical !== undefined && !isAccountGroupVirtualModel(logical)) {
+					keys.push(`${LOGICAL_PROVIDER_ID}/${logical.id}`);
+				}
+			}
+			return keys;
+		};
+		const accountGroupRefusalNotice = (
+			selectedKey: string,
+			suggestedKeys: readonly string[],
+		): string => {
+			const resolution = effectiveAccountGroupResolution;
+			const group =
+				resolution === undefined || resolution.source === "unrestricted"
+					? "the active account group"
+					: `the active account group "${resolution.groupId}" (${resolution.source})`;
+			const head = `Multi-account refused this turn: ${selectedKey} is outside ${group}. The model was not changed.`;
+			return suggestedKeys.length === 0
+				? `${head} No model in this group can serve it now. Run /multi-account group status to see the allowed providers, then select one of their models with /model.`
+				: `${head} Select ${suggestedKeys.join(" or ")} with /model, then send again.`;
+		};
 		const guardAccountGroupInput = async (
 			inputContext: ExtensionContext,
 		): Promise<{ readonly action: "continue" | "handled" }> => {
 			const activeProviderId =
 				inputContext.model?.provider ?? currentModel?.provider;
 			if (policyConfigError !== undefined && activeProviderId === undefined) {
-				inputContext.ui.notify(policyConfigError, "warning");
+				notifyInputRefusal(inputContext, policyConfigError);
 				return { action: "handled" };
 			}
 			if (
@@ -3761,85 +3930,54 @@ export const createMultiAccountExtension =
 				return { action: "continue" };
 			}
 			if (policyConfigError !== undefined) {
-				inputContext.ui.notify(policyConfigError, "warning");
+				notifyInputRefusal(inputContext, policyConfigError);
 				return { action: "handled" };
 			}
 			if (isAccountGroupVirtualModel(inputContext.model ?? currentModel)) {
 				// Never reinterpret a virtual selection as a managed physical origin
 				// or replace it silently, even under a managed provider's name.
-				inputContext.ui.notify(
+				notifyInputRefusal(
+					inputContext,
 					"Multi-account blocked a virtual model under the active account group. Select a physical model allowed by the group.",
-					"warning",
 				);
 				return { action: "handled" };
 			}
-			const origin = accountGroupOrigin(
-				activeProviderId,
-				inputContext.model?.id ?? currentModel?.id,
-			);
-			let replacement: Model<Api> | undefined;
-			if (origin !== undefined) {
+			// An explicit selection outside the group is refused, never replaced:
+			// a silent swap changes the model identity a caller asked for (#177).
+			// The suggestion reuses the routing selection but never calls setModel.
+			const requestedModelId = inputContext.model?.id ?? currentModel?.id;
+			// The metered OpenRouter bridge is the extension's own automatic
+			// choice, not a caller's selection. Return it to an in-group account
+			// that serves its origin; refuse it only when none can serve now.
+			if (
+				activeProviderId === OPENROUTER_PROVIDER_ID &&
+				openRouterBridge !== undefined
+			) {
+				const target = accountGroupInGroupModel(
+					activeProviderId,
+					requestedModelId,
+					inputContext,
+				);
 				try {
-					const nowMs = Date.now();
-					const allowedAccounts = subscriptionOperatorAccounts(
-						context ?? inputContext,
-					);
-					const candidate = selectAvailableRecoveryAccount({
-						accounts: physicalAccountsForRouting(nowMs),
-						state,
-						config,
-						nowMs,
-						originFamily: origin.family,
-						...(origin.requestedModelId === undefined
-							? {}
-							: {
-									requestedModelId: origin.requestedModelId,
-									preferredModelId: origin.requestedModelId,
-								}),
-						modelSupport,
-					});
-					const destination = allowedAccounts.find(
-						(account) => account.providerId === candidate?.destination.providerId,
-					);
-					if (candidate !== undefined && destination !== undefined) {
-						replacement = routeCandidateModel(
-							candidate,
-							destination,
-							context ?? inputContext,
-							origin.requestedModelId,
-							origin.family,
-							config.preferredModels,
+					if (target !== undefined && (await setModel(target.physical))) {
+						recordAutomaticDestination(
+							{
+								providerId: target.origin.providerId,
+								family: target.origin.family,
+								...(target.origin.requestedModelId === undefined
+									? {}
+									: { requestedModelId: target.origin.requestedModelId }),
+								logical: false,
+							},
+							target.physical.provider,
 						);
-					}
-				} catch {
-					replacement = undefined;
-				}
-			}
-			if (replacement !== undefined && !isAccountGroupVirtualModel(replacement)) {
-				try {
-					if (await setModel(replacement)) {
-						if (origin !== undefined) {
-							recordAutomaticDestination(
-								{
-									providerId: origin.providerId,
-									family: origin.family,
-									...(origin.requestedModelId === undefined
-										? {}
-										: { requestedModelId: origin.requestedModelId }),
-									logical: false,
-								},
-								replacement.provider,
-							);
-						}
-						if (activeProviderId === OPENROUTER_PROVIDER_ID) {
-							openRouterBridge = undefined;
-							openRouterInputApproved = false;
-						}
+						openRouterBridge = undefined;
+						openRouterInputApproved = false;
 						diagnostics.record(
 							"info",
-							"routing.account-group-direct-switch",
-							"The active provider was outside the session account group and was replaced before dispatch.",
-							{ providerId: replacement.provider },
+							"routing.account-group-bridge-return",
+							"The metered OpenRouter bridge was outside the session account group and was returned to an in-group account before dispatch.",
+							{ providerId: target.physical.provider },
 						);
 						return { action: "continue" };
 					}
@@ -3847,15 +3985,35 @@ export const createMultiAccountExtension =
 					// Selection failure cannot authorize an excluded provider.
 				}
 			}
+			const suggestedKeys = accountGroupRefusalSuggestion(
+				activeProviderId,
+				requestedModelId,
+				inputContext,
+			);
 			diagnostics.record(
 				"warning",
 				"routing.account-group-direct-blocked",
-				"The active provider was outside the session account group and no allowed replacement could be selected; the input was blocked before dispatch.",
-				{ providerId: activeProviderId },
+				"The selected provider was outside the session account group; the input was refused before dispatch and the model was not changed.",
+				{
+					providerId: activeProviderId,
+					suggestion:
+						suggestedKeys.length === 0
+							? "none"
+							: suggestedKeys.length === 1
+								? "physical"
+								: "physical+unified",
+				},
 			);
-			inputContext.ui.notify(
-				accountGroupBlockNotice("Multi-account blocked a provider outside the active account group."),
-				"warning",
+			notifyInputRefusal(
+				inputContext,
+				accountGroupBlockNotice(
+					accountGroupRefusalNotice(
+						requestedModelId === undefined
+							? activeProviderId
+							: `${activeProviderId}/${requestedModelId}`,
+						suggestedKeys,
+					),
+				),
 			);
 			return { action: "handled" };
 		};
@@ -3882,9 +4040,9 @@ export const createMultiAccountExtension =
 					"warning",
 					"An account-group selection retired the metered OpenRouter bridge and its managed origin could not be restored; the input was blocked before provider dispatch.",
 				);
-				inputContext.ui.notify(
+				notifyInputRefusal(
+					inputContext,
 					"Multi-account blocked a retired OpenRouter turn. Run /multi-account status for recovery details.",
-					"warning",
 				);
 				return { action: "handled" };
 			}
@@ -3959,9 +4117,9 @@ export const createMultiAccountExtension =
 					"warning",
 					"OpenRouter fallback is no longer enabled and no managed origin could be restored; the input was blocked before provider dispatch.",
 				);
-				inputContext.ui.notify(
+				notifyInputRefusal(
+					inputContext,
 					"Multi-account blocked an unreserved OpenRouter turn. Run /multi-account status for recovery details.",
-					"warning",
 				);
 				return { action: "handled" };
 			}
@@ -4006,9 +4164,9 @@ export const createMultiAccountExtension =
 				"warning",
 				"The OpenRouter input could not reserve its conservative budget and no managed origin could be restored; the input was blocked before provider dispatch.",
 			);
-			inputContext.ui.notify(
+			notifyInputRefusal(
+				inputContext,
 				"Multi-account blocked an unreserved OpenRouter turn. Run /multi-account status for recovery details.",
-				"warning",
 			);
 			return { action: "handled" };
 		};
@@ -4566,9 +4724,9 @@ export const createMultiAccountExtension =
 			} catch (error) {
 				diagnostics.recordError("routing.account-group-input", error);
 				if (accountGroupScopeRestrictsRouting()) {
-					inputContext.ui.notify(
+					notifyInputRefusal(
+						inputContext,
 						"Multi-account blocked a turn because account-group preflight failed.",
-						"warning",
 					);
 					return { action: "handled" as const };
 				}
@@ -4582,9 +4740,9 @@ export const createMultiAccountExtension =
 						currentModel?.provider === OPENROUTER_PROVIDER_ID) &&
 					openRouterBridge !== undefined;
 				if (ownsActiveOpenRouter) {
-					inputContext.ui.notify(
+					notifyInputRefusal(
+						inputContext,
 						"Multi-account blocked an OpenRouter turn because its safety preflight failed. Run /multi-account status for recovery details.",
-						"warning",
 					);
 					return { action: "handled" as const };
 				}
