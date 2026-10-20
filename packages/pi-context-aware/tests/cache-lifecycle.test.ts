@@ -347,9 +347,9 @@ Envelope format: <context-telemetry source="pi-extension:context-aware" user-inp
 Bands: OK <45%, WARN >=45%, URGENT >=90%.
 UNKNOWN: the size is not measured yet, for example right after a compaction or an overflow. Do not assume it is low; keep the next action small until a measured band arrives.
 OK: compact only at natural phase boundaries.
-WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call compact_session at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer delegate with task_only/snippet clone_mode and concise collapsed results). Compact first for broad/full-context delegation.
+WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call compact_session at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.
 URGENT: before nontrivial tool use, call compact_session unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
-Use search_prior_sessions early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
+Use context_recall early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
 </context-awareness>`;
 		const cache = buildCacheSystemPromptBlock(cacheDir, foregroundCacheConfig());
 		assert.ok(cache);

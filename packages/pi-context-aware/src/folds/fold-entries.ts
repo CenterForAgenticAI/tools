@@ -56,6 +56,12 @@ export interface FoldRecord {
 	 * existed, and on imported folds.
 	 */
 	readonly requestId?: string;
+	/**
+	 * Id of the billion-context-pi compress call that made an imported fold. The engine keeps
+	 * that call visible, with its summaries cut to stubs, while the fold is active; calls of
+	 * absorbed folds are hidden (pi-context-aware#186). Absent on native folds.
+	 */
+	readonly compressCallId?: string;
 }
 
 /** Longest request id the engine stores or compares. */
@@ -175,6 +181,7 @@ export function readFoldRecord(data: unknown): FoldRecord | undefined {
 	if (compressedTokens === undefined || createdAt === undefined || origin === undefined) return undefined;
 	// A bad id is dropped, not fatal: the fold itself is still valid and must stay in effect.
 	const requestId = cleanRequestId(data.requestId);
+	const compressCallId = cleanRequestId(data.compressCallId);
 	return {
 		version: 1,
 		blockId,
@@ -190,6 +197,7 @@ export function readFoldRecord(data: unknown): FoldRecord | undefined {
 		createdAt,
 		origin,
 		...(requestId ? { requestId } : {}),
+		...(compressCallId ? { compressCallId } : {}),
 	};
 }
 

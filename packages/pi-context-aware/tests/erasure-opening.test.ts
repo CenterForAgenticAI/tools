@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -8,6 +8,11 @@ import extension from "../src/index.js";
 import { discoverContextAwareServiceV1 } from "../src/context-service.js";
 import { eraseSession } from "../src/erasure/session-erasure.js";
 import { paritySessionFile } from "../src/parity/records.js";
+
+// These tests refuse sessions on purpose. Without UI, a refusal sets process.exitCode = 1, which node:test reads as a failed file.
+let exitCodeBefore: typeof process.exitCode;
+beforeEach(() => { exitCodeBefore = process.exitCode; });
+afterEach(() => { process.exitCode = exitCodeBefore; });
 
 // Real SDK managers and extension dispatch; no model/network required. The second
 // runtime has loaded its manager, but has not registered its opening lease yet.

@@ -33,6 +33,8 @@ export interface RecallSources {
 	readonly erasedSessionIds?: ReadonlySet<string>;
 	readonly cachePools: readonly RecallCachePool[];
 	readonly sessions: readonly RecallSession[];
+	/** Stores this call searches and reports. Default: both. */
+	readonly stores?: readonly RecallCitation["store"][];
 	readonly currentSessionPath?: string | null;
 	readonly home?: string;
 	readonly cwd?: string;
@@ -266,9 +268,12 @@ function renderResult(
 		lines.push(line);
 		citations.push(citation);
 	}
+	const searched = details.stores.length === 1 && details.stores[0] === "context-cache"
+		? "context-cache documents"
+		: "either context-cache documents or prior-session transcripts";
 	const body = lines.length > 0
 		? [title(lines.length), ...lines].join("\n")
-		: "No matching evidence found in either context-cache documents or prior-session transcripts. No inference was made.";
+		: `No matching evidence found in ${searched}. No inference was made.`;
 	const framed = frameCacheReference(body);
 	return {
 		content: [{ type: "text", text: framed }],
@@ -285,7 +290,7 @@ export function answerRecall(request: RecallRequest, sources: RecallSources): Re
 		omitted_cache_documents: 0,
 		scanned_sessions: 0,
 		omitted_sessions: 0,
-		stores: ["context-cache", "prior-session"],
+		stores: sources.stores ? [...sources.stores] : ["context-cache", "prior-session"],
 		scope: {
 			all_projects: request.all_projects ?? false,
 			include_current: request.include_current ?? false,

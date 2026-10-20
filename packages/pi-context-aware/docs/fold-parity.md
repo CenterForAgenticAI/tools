@@ -166,14 +166,14 @@ The enumeration test requires exactly one row for every `DiffKind`.
 | `tier` | a | Both BlockEvidence ordered `tiers` arrays. |
 | `absorbed` | a | Both BlockEvidence `absorbed` id sets; capped evidence is inconclusive. |
 | `input-parse` | a | Compress `parseKind` other than `ok`, or `parseInvalidItems` greater than zero; missing parse evidence is inconclusive. |
-| `ref-unmapped` | a | Compress `refs` with absent or `BLOCKED` native mapping; missing or capped ref evidence is inconclusive. |
+| `ref-unmapped` | a | Compress `refs` with absent or `BLOCKED` native mapping; missing or capped ref evidence is inconclusive. A bare entry id from the side file maps to the entry's first native message as a start ref and to its last as an end ref. |
 | `import-unsupported` | b | Unsupported or unreadable side-file input is not retained; no valid import comparison exists. |
 | `import-skipped` | b | The import could not supply all prior folds; its raw source is not retained. |
-| `side-file-missing` | b | No independent side-file evidence was available. |
+| `side-file-missing` | b | No independent side-file evidence was available. With reason `session has no file` the call is not comparable and is left out of the count. |
 | `too-large` | b | Bounds prevent retaining complete comparison input. Request message-count limits are also recomputed from both `total` values. |
 | `recorder-error` | b | Failed or cancelled work cannot establish equality. Missing evidence, summary-array lengths and linked created/absorbed/active id contradictions also reconstruct this kind. |
 | `summaries` | a | Both ordered summary topic/body hashes and native expected-summary arrays, count and render. |
-| `content` | a | Both requests' non-summary role/text-hash multisets. |
+| `content` | a | Both requests' non-summary role/text-hash multisets. Role `custom` is read as `user`, and a `bashExecution` message without text content hashes as `$ <command>` and its output, the text billion-context-pi gives it. Role `bashExecution` is not read as `user`: billion-context-pi keeps the role, and Pi sends a user message with the same text to the provider as different text. |
 | `tool-calls` | a | Both requests' call-id/name/argument-hash multisets. |
 | `tool-results` | a | Both requests' result call-id/name/error/summary/topic/body-hash multisets. |
 | `tool-pairing` | a | Both requests' results without earlier calls and calls without results. |
@@ -186,9 +186,18 @@ The fingerprint is SHA-256 over sorted relative paths and contents of compiled
 `.js` files under `folds/`. The command displays its first 12 hex characters.
 The effective `folds.firstUserMessage` and `folds.firstUserMessageMaxTokens`
 values are hashed with that engine fingerprint. Their sources are not hashed.
-Only calls recorded under the current fingerprint count. The most recent 500
-calls determine readiness: at least 500 calls, no unexplained differences and
-no inconclusive calls, including their next-request evidence. An engine change
+Only calls recorded under the current fingerprint count. A call in a session
+without a session file is not comparable and does not count. Such sessions are
+in-memory: `SessionManager.inMemory` (pi-delegate workers), Fabric durable
+workers and `pi --no-session`. billion-context-pi writes no side file for
+them, so no record can ever supply the evidence. The recorder still writes the
+call's records, with `side-file-missing` and reason `session has no file`. The
+report leaves those calls out of the count and the 500-call window and shows
+how many it left out as `not comparable N (session has no file)`. A side
+file that is missing or unreadable for a session that has a file is still
+`side-file-missing` and inconclusive. The most recent 500 comparable calls
+determine readiness: at least 500 calls, no unexplained differences and no
+inconclusive calls, including their next-request evidence. An engine change
 resets the count. Recorder and register changes do not change the fingerprint.
 Records also carry a schema version (`v`, currently 5). Version 5 adds full
 coverage hashes, native created and active block ids, id-list cap flags, and

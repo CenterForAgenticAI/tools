@@ -1,5 +1,5 @@
 import { STUB_SUMMARY_CODE } from "../folds/stub-summary.js";
-import { compareNextRequest, expectedSummariesMatch } from "./compare.js";
+import { compareNextRequest, contentKeys, expectedSummariesMatch } from "./compare.js";
 import { isRequestHashes, refusalEvidence, type RefusalEvidence } from "./evidence.js";
 import type { CompressRecord, DiffKind, NextRequestRecord, ParityDiff, RefusalOutcome, RequestHashes } from "./records.js";
 
@@ -11,7 +11,6 @@ export interface ParityRegisterEntry {
 	/** `request` is the next-request record of the batch that holds `record`; it is set for the request's differences and, when exactly one request follows the call, for the call's own. */
 	readonly matches: (diff: ParityDiff, record: CompressRecord, request?: NextRequestRecord) => boolean;
 }
-const content = (request: RequestHashes) => request.messages.filter((message) => !message.summary).map((message) => `${message.role}:${message.hash}`).sort();
 const calls = (request: RequestHashes, compact: boolean) => request.messages.flatMap((message) => (message.toolCalls ?? []).map((call) => JSON.stringify([call.id, call.name, compact && call.name === "compress" ? call.compactedArgsHash ?? call.argsHash : call.argsHash]))).sort();
 const complete = (request: RequestHashes) => request.total === request.messages.length && !request.messages.some((message) => message.toolEvidence);
 
@@ -144,11 +143,11 @@ const KNOWN_REQUEST_DIFFERENCES: readonly ParityRegisterEntry[] = [
 			if (request.ours.messages[replacementIndex]?.role !== "user") return false;
 			const firstAssistant = request.ours.messages.findIndex((message) => message.role === "assistant");
 			if (firstAssistant >= 0 && replacementIndex >= firstAssistant) return false;
-			const theirs = content(request.bcp);
+			const theirs = contentKeys(request.bcp);
 			const index = theirs.indexOf(`user:${first.hash}`);
 			if (index < 0) return false;
 			theirs.splice(index, 1);
-			return JSON.stringify(content(request.ours)) === JSON.stringify(theirs);
+			return JSON.stringify(contentKeys(request.ours)) === JSON.stringify(theirs);
 		},
 	},
 ];

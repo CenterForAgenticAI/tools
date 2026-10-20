@@ -367,6 +367,34 @@ export interface ContextAwareModeToolPolicyV1 {
 	lifted?: () => boolean;
 }
 
+/**
+ * Theme tokens a mode may name as its indicator color. Each follows the user's
+ * Pi theme, so a token stays readable on light and dark terminals.
+ */
+export const CONTEXT_AWARE_MODE_COLOR_TOKENS_V1 = Object.freeze([
+	"accent",
+	"success",
+	"warning",
+	"error",
+	"muted",
+	"borderAccent",
+	"mdHeading",
+	"mdLink",
+	"toolTitle",
+	"bashMode",
+] as const);
+export type ContextAwareModeColorTokenV1 = (typeof CONTEXT_AWARE_MODE_COLOR_TOKENS_V1)[number];
+/** A theme token, or a fixed `#rrggbb` color that Pi maps to the terminal's color mode. */
+export type ContextAwareModeColorV1 = ContextAwareModeColorTokenV1 | `#${string}`;
+
+/** How the mode indicator shows a mode. Display only; it never changes what the mode allows. */
+export interface ContextAwareModeUiV1 {
+	/** Indicator color. Defaults to `accent`. */
+	color?: ContextAwareModeColorV1;
+	/** Indicator text, at most 32 printable characters. Defaults to the mode id. */
+	label?: string;
+}
+
 export interface ContextAwareModeDefinitionV1 {
 	id: string;
 	/** Display metadata only. It is never an authorization credential. */
@@ -378,6 +406,8 @@ export interface ContextAwareModeDefinitionV1 {
 	commandAllowed?: (name: string) => boolean;
 	/** Allow-list of tools for this mode. Check `supportsContextAwareModeToolPoliciesV1` first; older runtimes ignore it. */
 	toolPolicy?: ContextAwareModeToolPolicyV1;
+	/** Indicator color and label. Check `supportsContextAwareModeUiV1` first; older runtimes ignore it. */
+	ui?: ContextAwareModeUiV1;
 }
 
 export interface ContextAwareModeSuggestionV1 {
@@ -401,6 +431,8 @@ export interface ContextAwareModeSnapshotV1 {
 	readonly enteredAt: string;
 	readonly updatedAt: string;
 	readonly outer?: ContextAwareModeSnapshotV1;
+	/** The definition's indicator color and label. Present only while the mode is available and its definition set `ui`. */
+	readonly ui?: Readonly<ContextAwareModeUiV1>;
 }
 
 export interface ContextAwareModeHandleV1 {
@@ -424,6 +456,8 @@ export interface ContextAwareModesV1 {
 	readonly instanceIds?: true;
 	/** True when the runtime enforces `ContextAwareModeDefinitionV1.toolPolicy`. */
 	readonly toolPolicies?: true;
+	/** True when the runtime accepts `ContextAwareModeDefinitionV1.ui` and shows the mode indicator widget. */
+	readonly ui?: true;
 	defineMode(definition: ContextAwareModeDefinitionV1): ContextAwareModeDefinitionResultV1;
 	current(): ContextAwareModeSnapshotV1 | null;
 	setSuggestionConfirmer(confirmer: ContextAwareModeConfirmerV1 | undefined): void;
@@ -535,6 +569,11 @@ export function supportsContextAwareModeInstanceIdsV1(service: ContextAwareServi
 /** Return true when the modes capability enforces a mode's `toolPolicy`. */
 export function supportsContextAwareModeToolPoliciesV1(service: ContextAwareServiceV1 | undefined): boolean {
 	return supportsContextAwareModesV1(service) && service.modes.toolPolicies === true;
+}
+
+/** Return true when the modes capability accepts a mode's `ui` color and label. */
+export function supportsContextAwareModeUiV1(service: ContextAwareServiceV1 | undefined): boolean {
+	return supportsContextAwareModesV1(service) && service.modes.ui === true;
 }
 
 /** Return true when the producer exposes the additive read-only context policy capability. */

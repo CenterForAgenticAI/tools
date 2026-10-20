@@ -302,7 +302,7 @@ Definitions copy only the named fields, enforce bounds, and retain callbacks onl
 
 Each accepted enter or exit appends one `context-aware/mode@1` state entry and sends one `context-aware/mode-transition@1` custom message with `triggerTurn: false`. State entries contain only ids, instance ids, owner labels, `suggestedBy`, nesting, timestamps, and a random `transitionId` that the message's `details` repeat. They contain no definition, transition text, callback, or caller-owned field. The system prompt and active tool list are unchanged.
 
-The runtime permits one outer mode and one nested mode. The inner mode replaces the outer tool rules; exiting it restores the outer transition. `/mode` reports the effective mode and `/mode exit` always leaves the innermost mode. The active mode is shown in the qualified footer status `caair.context-aware/mode`.
+The runtime permits one outer mode and one nested mode. The inner mode replaces the outer tool rules; exiting it restores the outer transition. `/mode` reports the effective mode and `/mode exit` always leaves the innermost mode. The active mode is shown in the qualified footer status `caair.context-aware/mode` and in the indicator widget described in [Mode indicator](#mode-indicator).
 
 Modes replay from the active session branch after resume, fork, replacement, and tree navigation. A replayed mode is unavailable until its owner defines the same id and owner label again; redefinition re-arms it without adding a transition. An orphan does not block tools and can always be cleared with `/mode exit`.
 
@@ -311,6 +311,28 @@ Each enter gets a random `instanceId`, shown on the snapshot and its `outer`. Us
 Model suggestions use the built-in `suggest_mode { mode, action, reason }` tool, or the API form `handle.enter({ suggestedBy: "model", confirm: true })`. Confirmation uses `ctx.ui.confirm` when UI is available, then the process-local confirmer installed with `modes.setSuggestionConfirmer`. Declines, missing confirmation, missing confirmers, and stale asynchronous confirmations leave state, entries, and messages unchanged. Set `modes.suggestTool` to `false`, or use `--context-aware-modes-suggest-tool=off`, to hide the model suggestion declaration.
 
 A mode guard runs once in the extension-lifetime `tool_call` handler. It covers foreground calls and nested `pi.*` calls because Fabric emits the same preflight event. Declarative blocks and throwing guards fail closed; unavailable orphan definitions do not block. Guard reasons are bounded and thrown error contents are not exposed.
+
+### Mode indicator
+
+While a mode is active, the runtime draws a one-line widget below the editor under the key `caair.context-aware/mode-indicator`. It shows the effective mode as a solid chip in the mode's color, `← ◇ outer` when a mode is nested, the owner label, `[model-confirmed]` for a model-suggested enter, and a rule in the mode's color to the edge of the terminal. A replayed mode is drawn muted with `(unavailable)` until its owner defines it again. The widget clears when the last mode exits and at shutdown. The footer status stays as the short text form.
+
+Set the color and text with the optional `ui` field. Check `supportsContextAwareModeUiV1(service)` first; an older runtime ignores `ui`.
+
+```ts
+if (supportsContextAwareModeUiV1(service)) {
+	service.modes.defineMode({
+		id: "review",
+		owner: "my-extension",
+		transition: "Review mode is active.",
+		blockedTools: [],
+		ui: { color: "warning", label: "Review" },
+	});
+}
+```
+
+- `color` is a theme token from `CONTEXT_AWARE_MODE_COLOR_TOKENS_V1` (`accent`, `success`, `warning`, `error`, `muted`, `borderAccent`, `mdHeading`, `mdLink`, `toolTitle`, `bashMode`), or a fixed `#rrggbb` color. Tokens follow the user's theme; a fixed color is mapped to the terminal's color mode. The default is `accent`.
+- `label` replaces the mode id in the widget. It is 1 to 32 characters with no control, format, or line-separator characters. The footer status, `/mode`, and the transition message still use the id.
+- Any other `ui` value makes `defineMode` return `INVALID_REQUEST`. The runtime copies only `color` and `label`, keeps them in process memory, and shows them on the snapshot's `ui` while the mode is available. State entries never contain them.
 
 ### Tool policies
 

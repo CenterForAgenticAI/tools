@@ -369,15 +369,17 @@ test("R5 matching capped coverage preserves stored diagnostics in the union", ()
 
 test("R4 within-call absorption and later zero-created calls preserve a sound bound", () => {
 	const { input, call } = acceptedPreview();
+	// The second range contains b1 whole. A range that starts inside b1 is refused as already folded
+	// (pi-context-aware#184), so absorption needs a range around the fold.
 	const batchInput = { ...input, input: { content: [
 		{ startId: "m00002", endId: "m00004", summary: body },
-		{ startId: "m00002", endId: "m00006", summary: body },
+		{ startId: "m00001", endId: "m00006", summary: body },
 	] } };
 	const side = (blocks: unknown[]) => parseSideSnapshot(JSON.stringify({ schemaVersion: 1, blocks,
 		messageRefs: { byRef: input.before.ok ? input.before.byRef : {} } }));
 	const after = side([
 		{ blockId: "b1", runId: "r1", compressCallId: "c", tier: 1, active: false, summary: body, directBlockIds: [], effectiveMessageIds: input.branch.slice(1, 4).map((entry) => entry.id) },
-		{ blockId: "b2", runId: "r2", compressCallId: "c", tier: 1, active: true, summary: body, directBlockIds: ["b1"], effectiveMessageIds: input.branch.slice(1, 6).map((entry) => entry.id) },
+		{ blockId: "b2", runId: "r2", compressCallId: "c", tier: 1, active: true, summary: body, directBlockIds: ["b1"], effectiveMessageIds: input.branch.slice(0, 6).map((entry) => entry.id) },
 	]);
 	const comparison = compareCompressCall({ ...batchInput, after });
 	assert.equal(comparison.verdict, "match");

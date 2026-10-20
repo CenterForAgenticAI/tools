@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { SessionDatabase } from "../src/erasure/database.js";
+import { SessionDatabase, erasedSessionIds } from "../src/erasure/database.js";
 import { discoverProfileSessions, registerSessionErasure } from "../src/erasure/extension.js";
 import { paritySessionFile } from "../src/parity/records.js";
 
@@ -133,5 +133,78 @@ test("session_start reports a moved session directory and preserves every derive
 		assert.equal(fs.existsSync(projection), false);
 		assert.equal(fs.existsSync(side), false);
 		assert.equal(fs.existsSync(path.join(moved, "old.jsonl")), true);
+	} finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a refused start without UI reports the reason on stderr and fails the process", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "erasure-refused-headless-"));
+	const real = path.join(root, "real.sqlite");
+	fs.writeFileSync(real, "");
+	fs.symlinkSync(real, path.join(root, "context-aware.sqlite"));
+	const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<unknown>>();
+	const pi = { on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<unknown>) => handlers.set(name, handler), registerCommand: () => {} } as unknown as ExtensionAPI;
+	let shutdowns = 0;
+	const ctx = { hasUI: false, sessionManager: { getSessionId: () => "current", getSessionFile: () => null }, shutdown: () => { shutdowns++; } } as unknown as ExtensionContext;
+	const control = registerSessionErasure(pi, () => root, async () => {}, { registerStartup: false });
+	const written: string[] = [];
+	const write = process.stderr.write;
+	const exitCode = process.exitCode;
+	process.stderr.write = ((chunk: string | Uint8Array) => { written.push(String(chunk)); return true; }) as typeof process.stderr.write;
+	let observedExit: typeof process.exitCode;
+	try {
+		await control.start(ctx);
+		observedExit = process.exitCode;
+	} finally {
+		process.stderr.write = write;
+		process.exitCode = exitCode;
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+	assert.equal(control.isBlocked(), true);
+	assert.equal(shutdowns, 1);
+	assert.equal(observedExit, 1);
+	assert.match(written.join(""), /Session activation refused.*context-aware\.sqlite is a symbolic link/u);
+});
+
+test("a refused start with UI notifies the reason and leaves stderr and the exit code alone; a later start clears a headless failure", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "erasure-refused-ui-"));
+	const link = path.join(root, "context-aware.sqlite");
+	fs.writeFileSync(path.join(root, "real.sqlite"), "");
+	fs.symlinkSync(path.join(root, "real.sqlite"), link);
+	const pi = { on: () => {}, registerCommand: () => {} } as unknown as ExtensionAPI;
+	const notices: string[] = [];
+	const session = { getSessionId: () => "current", getSessionFile: () => null };
+	const ui = { hasUI: true, sessionManager: session, shutdown: () => {}, ui: { notify: (text: string) => notices.push(text) } } as unknown as ExtensionContext;
+	const headless = { hasUI: false, sessionManager: session, shutdown: () => {} } as unknown as ExtensionContext;
+	const control = registerSessionErasure(pi, () => root, async () => {}, { registerStartup: false });
+	const written: string[] = [];
+	const write = process.stderr.write;
+	const exitCode = process.exitCode;
+	process.stderr.write = ((chunk: string | Uint8Array) => { written.push(String(chunk)); return true; }) as typeof process.stderr.write;
+	const observed: (typeof process.exitCode)[] = [];
+	try {
+		process.exitCode = undefined;
+		await control.start(ui);
+		observed.push(process.exitCode);
+		await control.start(headless);
+		observed.push(process.exitCode);
+		fs.rmSync(link);
+		await control.start(headless);
+		observed.push(process.exitCode);
+	} finally {
+		process.stderr.write = write;
+		process.exitCode = exitCode;
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+	assert.match(notices[0]!, /context-aware\.sqlite is a symbolic link\). Shutdown requested\./u);
+	assert.equal(written.length, 1, "only the headless refusal writes to stderr");
+	assert.deepEqual(observed, [undefined, 1, undefined]);
+	assert.equal(control.isBlocked(), false);
+});
+
+test("erased-id reads refuse a dangling symlink instead of reporting nothing erased", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "erasure-dangling-"));
+	try {
+		fs.symlinkSync(path.join(root, "missing.sqlite"), path.join(root, "context-aware.sqlite"));
+		assert.throws(() => erasedSessionIds(root), /context-aware\.sqlite: is a symbolic link/u);
 	} finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

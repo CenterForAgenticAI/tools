@@ -105,7 +105,8 @@ test("keep refuses a message range whose only unfolded entry is the kept opening
 	applyFoldDrafts(manager, first.drafts);
 	const again = planQueuedFolds(manager, [request], 64_000, config, keep);
 	assert.equal(again.drafts.length, 0, "the same range again hides nothing new, so it is not refolded");
-	assert.match(again.dropped[0]?.errors[0] ?? "", /no new compressible messages/u);
+	// The end ref lies inside b1, so billion-context-pi's turn preparation has pruned it: already folded (pi-context-aware#184).
+	assert.match(again.dropped[0]?.errors[0] ?? "", /already compressed: blocked by b1/u);
 	const wider = planQueuedFolds(manager, [{ ...request, endRef: "m00006" }], 64_000, config, keep);
 	assert.deepEqual(wider.dropped, [], "a range with unfolded entries besides the opening still folds");
 	applyFoldDrafts(manager, wider.drafts);

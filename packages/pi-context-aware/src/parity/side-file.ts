@@ -35,9 +35,18 @@ export function parseSideSnapshot(text: string): SideSnapshot {
 	}
 }
 
+/**
+ * An in-memory session (`SessionManager.inMemory`, `pi --no-session`, delegated and durable
+ * workers) has no session file, so billion-context-pi writes no side file for it. Its calls are not
+ * comparable, rather than inconclusive: no later record can supply the missing evidence.
+ */
+const NO_SESSION_FILE = "session has no file";
+export function sessionHasNoFile(diff: ParityDiff): boolean {
+	return diff.kind === "side-file-missing" && diff.reason === NO_SESSION_FILE;
+}
 /** Read at most cap+1 bytes from one open inode, including if it grows mid-read. */
 export function snapshotSideFile(sessionFile: string | undefined): SideSnapshot {
-	if (!sessionFile) return { ok: false, diff: { kind: "side-file-missing", reason: "session has no file" } };
+	if (!sessionFile) return { ok: false, diff: { kind: "side-file-missing", reason: NO_SESSION_FILE } };
 	let fd: number | undefined;
 	try {
 		fd = openSync(`${sessionFile}.acp.json`, constants.O_RDONLY | constants.O_NONBLOCK);

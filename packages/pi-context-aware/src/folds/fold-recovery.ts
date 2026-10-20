@@ -12,8 +12,8 @@
  *
  * Nothing is read from tool-call arguments. The record is made by the engine
  * from the plan it accepted, so it holds the immutable session entry ids of the
- * range, the exact entries the fold would hide, and a digest of the source the
- * summary was written over. Message refs (`mNNNNN`) are not stored, because other
+ * range, the exact entries the fold would hide, a digest of the source the
+ * summary was written over, and the branch leaf the request was made on. Message refs (`mNNNNN`) are not stored, because other
  * tools number them differently and they shift when the branch changes. A
  * request the engine refused has no record, so it is never folded later.
  *
@@ -46,7 +46,10 @@
  *   must report that error to the model, not retry with another id.
  * - A fold is written only to the branch it was accepted on. After a tree
  *   navigation (`session_tree`) the queue is rebuilt from the records on the
- *   new branch; a request accepted on another branch is not carried over.
+ *   new branch; a request accepted on another branch is not carried over. At
+ *   the drain the branch must still hold the leaf the request was made on, and
+ *   for a recovered request its tool result too; entries appended after the
+ *   leaf on the same branch do not matter (pi-context-aware#176).
  *   Requests that were not written are listed by `FoldEngine.dropped` with a
  *   `code`: `entry-missing`, `coverage-changed`, `source-changed`,
  *   `branch-changed`, `refused`, `plan-failed` or `too-large`.
@@ -58,7 +61,7 @@ import { createHash } from "node:crypto";
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
-import { foldStateFromBranch, planFold, type BranchFoldState, type FoldPlan, type FoldRequest } from "./fold-adapter.js";
+import { foldStateFromBranch, planFold, summaryLimitOf, type BranchFoldState, type FoldPlan, type FoldRequest } from "./fold-adapter.js";
 import type { FoldsConfig } from "../platform/config-layers.js";
 import {
 	FOLD_ENTRY_TYPE,
@@ -92,6 +95,12 @@ export const MAX_RECOVERY_RECORDS_PER_SCAN = 256;
  * branch cannot legitimately name more entries than the branch holds.
  */
 export const MAX_RECOVERY_COVERED_IDS_PER_SCAN = 50_000;
+
+/** A summary limit as an optional field: present only for a finite number (pi-context-aware#183). */
+function limitField(value: unknown): { summaryMaxChars?: number } {
+	const summaryMaxChars = summaryLimitOf(value);
+	return summaryMaxChars === undefined ? {} : { summaryMaxChars };
+}
 
 /** Version of the serialisation the source digest is computed over. */
 export const SOURCE_DIGEST_VERSION = "context-aware.fold-source.v1";
@@ -160,6 +169,16 @@ export interface FoldRequestRecovery extends FoldSource {
 	readonly requestId: string;
 	readonly summary: string;
 	readonly topic?: string;
+	/** The request's summary limit, when it raised or lowered the engine's (pi-context-aware#183). */
+	readonly summaryMaxChars?: number;
+	/**
+	 * Branch leaf when the request was accepted (pi-context-aware#176). The drain
+	 * writes the fold only while the selected branch still holds this entry, as
+	 * for a live request. Absent in a record saved before the leaf was recorded,
+	 * and for a request accepted on an empty branch; such a record is checked
+	 * against its tool result only.
+	 */
+	readonly leafEntryId?: string;
 }
 
 /** A request read back from a saved record. Its refs are worked out when it is planned. */
@@ -300,6 +319,8 @@ export interface BuildRecoveryInput {
 	readonly requestId: string;
 	readonly request: FoldRequest;
 	readonly source: FoldSource;
+	/** Branch leaf when the request was accepted; `null` on an empty branch. */
+	readonly leafId: string | null;
 }
 
 /** The record for an accepted request. `undefined` when the id is not a valid request id. */
@@ -317,8 +338,10 @@ export function buildFoldRequestRecovery(input: BuildRecoveryInput): FoldRequest
 		sourceDigest: source.sourceDigest,
 		summary: input.request.summary,
 		...(input.request.topic ? { topic: input.request.topic } : {}),
+		...limitField(input.request.summaryMaxChars),
 		...(source.startBlockId ? { startBlockId: source.startBlockId } : {}),
 		...(source.endBlockId ? { endBlockId: source.endBlockId } : {}),
+		...(input.leafId !== null ? { leafEntryId: input.leafId } : {}),
 	};
 }
 
@@ -326,14 +349,18 @@ export function buildFoldRequestRecovery(input: BuildRecoveryInput): FoldRequest
  * Read one record. Strict: wrong kind, a bad id, a missing field, a digest
  * that is not 64 hex characters, an empty or repeated entry id, more entry ids
  * than MAX_RECOVERY_COVERED_IDS_PER_RECORD, or a range end that is not in the
- * covered entries all reject the whole record. Extra keys are ignored and not
- * copied. A record of the earlier version (no source digest) is not read.
+ * covered entries all reject the whole record, as does a leaf entry id that is
+ * present and not an entry id. Extra keys are ignored and not copied. A record
+ * of the earlier version (no source digest) is not read. A v2 record without a
+ * leaf entry id (saved before pi-context-aware#176) is read.
  */
 export function parseFoldRequestRecovery(value: unknown): FoldRequestRecovery | undefined {
 	try {
 		if (!isRecord(value) || value.kind !== FOLD_REQUEST_RECOVERY_KIND) return undefined;
 		if (!checkFoldRequestId(value.requestId).ok) return undefined;
-		const { requestId, startEntryId, endEntryId, summary, topic, sourceDigest } = value;
+		const { requestId, startEntryId, endEntryId, summary, topic, sourceDigest, summaryMaxChars, leafEntryId } = value;
+		if (summaryMaxChars !== undefined && summaryLimitOf(summaryMaxChars) === undefined) return undefined;
+		if (leafEntryId !== undefined && !isEntryId(leafEntryId)) return undefined;
 		if (!isEntryId(startEntryId) || !isEntryId(endEntryId) || !isNonEmptyString(summary)) return undefined;
 		if (typeof sourceDigest !== "string" || !SHA256_HEX.test(sourceDigest)) return undefined;
 		const { startRef, endRef } = value;
@@ -364,8 +391,10 @@ export function parseFoldRequestRecovery(value: unknown): FoldRequestRecovery | 
 			sourceDigest,
 			summary,
 			...(topic ? { topic } : {}),
+			...limitField(summaryMaxChars),
 			...(startBlockId ? { startBlockId: startBlockId as string } : {}),
 			...(endBlockId ? { endBlockId: endBlockId as string } : {}),
+			...(leafEntryId !== undefined ? { leafEntryId } : {}),
 		};
 	} catch {
 		return undefined;
@@ -586,12 +615,22 @@ export interface AcceptedFold {
 	readonly source: FoldSource;
 	readonly summary: string;
 	readonly topic?: string;
-	/** The entry that proves the branch: the saved tool result, or the leaf the request was accepted on. `null`: none to check. */
-	readonly anchorEntryId: string | null;
-	readonly anchorLabel: "tool result" | "branch leaf";
+	readonly summaryMaxChars?: number;
+	/**
+	 * Entries that prove the branch, each of which must be on the branch at the drain:
+	 * the leaf the request was accepted on, and for a recovered request the saved
+	 * tool result. Empty for a request accepted on an empty branch.
+	 */
+	readonly anchors: readonly FoldAnchor[];
 	/** Refs to name in a drop report when they differ from the entry or fold ids. */
 	readonly reportStartRef?: string;
 	readonly reportEndRef?: string;
+}
+
+/** An entry an accepted request was made on. */
+export interface FoldAnchor {
+	readonly entryId: string;
+	readonly label: "tool result" | "branch leaf";
 }
 
 /** The accepted form of a queued item; `undefined` for a request the engine did not accept. */
@@ -603,8 +642,13 @@ export function acceptedFoldOf(item: QueuedFold): AcceptedFold | undefined {
 			source: recovery,
 			summary: recovery.summary,
 			...(recovery.topic ? { topic: recovery.topic } : {}),
-			anchorEntryId: item.toolResultEntryId,
-			anchorLabel: "tool result",
+			...limitField(recovery.summaryMaxChars),
+			// The leaf comes first: a tool can change the selected branch before it returns,
+			// and then Pi saves its result, and the record in it, on the other branch.
+			anchors: [
+				...(recovery.leafEntryId !== undefined ? [{ entryId: recovery.leafEntryId, label: "branch leaf" as const }] : []),
+				{ entryId: item.toolResultEntryId, label: "tool result" },
+			],
 		};
 	}
 	if (!item.accepted) return undefined;
@@ -613,8 +657,8 @@ export function acceptedFoldOf(item: QueuedFold): AcceptedFold | undefined {
 		source: item.accepted.source,
 		summary: item.summary,
 		...(item.topic ? { topic: item.topic } : {}),
-		anchorEntryId: item.accepted.leafId,
-		anchorLabel: "branch leaf",
+		...limitField(item.summaryMaxChars),
+		anchors: item.accepted.leafId !== null ? [{ entryId: item.accepted.leafId, label: "branch leaf" }] : [],
 		reportStartRef: item.startRef,
 		reportEndRef: item.endRef,
 	};
@@ -638,7 +682,9 @@ export interface ReplanInput {
  * Plan an accepted request again against the branch as it is now, and write
  * nothing unless it is still the fold that was accepted:
  *
- * 1. the anchor entry (tool result or leaf) is on this branch, else `branch-changed`;
+ * 1. every anchor entry (the leaf the request was accepted on, and a recovered
+ *    request's tool result) is on this branch, else `branch-changed`. Entries
+ *    appended after the leaf on the same branch are normal turn growth;
  * 2. every recorded entry is still in the model context, else `entry-missing`;
  * 3. the planner accepts the range, else `refused`;
  * 4. the plan hides exactly the recorded entries, else `coverage-changed`;
@@ -652,11 +698,13 @@ export function replanAcceptedFold(input: ReplanInput): ReplannedFold {
 	const { source } = accepted;
 	const reportStart = accepted.reportStartRef ?? source.startBlockId ?? source.startEntryId;
 	const reportEnd = accepted.reportEndRef ?? source.endBlockId ?? source.endEntryId;
-	if (accepted.anchorEntryId !== null && !input.branch.some((entry) => entry.id === accepted.anchorEntryId)) {
+	const onBranch = new Set(input.branch.map((entry) => entry.id));
+	const offBranch = accepted.anchors.find((anchor) => !onBranch.has(anchor.entryId));
+	if (offBranch) {
 		return {
 			ok: false,
 			code: "branch-changed",
-			errors: [`branch-changed: the ${accepted.anchorLabel} entry ${accepted.anchorEntryId} this fold was accepted on is not on the current branch; it is not written to another branch.`],
+			errors: [`branch-changed: the ${offBranch.label} entry ${offBranch.entryId} this fold was accepted on is not on the current branch; it is not written to another branch.`],
 			startRef: reportStart,
 			endRef: reportEnd,
 		};
@@ -696,6 +744,7 @@ export function replanAcceptedFold(input: ReplanInput): ReplannedFold {
 		endRef,
 		summary: accepted.summary,
 		...(accepted.topic ? { topic: accepted.topic } : {}),
+		...limitField(accepted.summaryMaxChars),
 		branch: input.branch,
 		contextEntries: input.contextEntries,
 		modelContextLimit: input.modelContextLimit,
@@ -703,7 +752,19 @@ export function replanAcceptedFold(input: ReplanInput): ReplannedFold {
 		...(input.config ? { config: input.config } : {}),
 	});
 	const shown = { startRef: accepted.reportStartRef ?? startRef, endRef: accepted.reportEndRef ?? endRef };
-	if (!plan.ok) return { ok: false, code: "refused", errors: plan.errors.map((error) => `refused: ${error}`), ...shown };
+	if (!plan.ok) {
+		// A fold written after this request was accepted took part of its range. The engine refuses
+		// a range that ends inside an active fold (pi-context-aware#184); the cause is the changed coverage.
+		const recorded = new Set(source.coveredEntryIds);
+		const overlapping = state.active.filter((record) => {
+			const ids = coveredEntryIds(record);
+			return ids.some((id) => recorded.has(id)) && !ids.every((id) => recorded.has(id));
+		});
+		if (overlapping.length > 0) {
+			return { ok: false, code: "coverage-changed", errors: [`coverage-changed: fold ${overlapping.map((record) => record.blockId).join(", ")} now covers part of the ${recorded.size} entries this fold was accepted to hide; it is dropped instead of folding them twice.`], ...shown };
+		}
+		return { ok: false, code: "refused", errors: plan.errors.map((error) => `refused: ${error}`), ...shown };
+	}
 	const planned = plan.records.length === 1 ? coveredEntryIds(plan.records[0]!) : [];
 	const difference = compareFoldSources(source, planned, () => sourceDigestOf(state, input.branch, planned));
 	if (difference) return { ok: false, code: difference.code, errors: [difference.message], ...shown };

@@ -122,6 +122,39 @@ test("unmapped input refs and unknown imports are inconclusive, not successful c
 	assert.ok(unsupported.diffs.some((diff) => diff.kind === "import-unsupported"));
 });
 
+const UNKNOWN_REF = classifyBcpResult("\u25A3 ACP | 48.0K \u2192 48.0K tokens (~0 reclaimed, 0 blocks)\nErrors: range m99998..m99999: startId=\"m99998\" does not exist in this session (typo or wrong session) \u2014 run acp_status for current refs.", false);
+
+test("a ref both engines do not know is the same unknown-ref rejection, not an unmapped ref", () => {
+	const { input, side } = fixture();
+	const compared = compareCompressCall({ ...input, input: { content: [{ startId: "m99998", endId: "m99999", summary }] }, after: side(), observed: UNKNOWN_REF });
+	assert.deepEqual(compared.diffs, []);
+	assert.equal(compared.verdict, "match");
+	assert.deepEqual(compared.refs, [{ bcp: "m99998", ours: "m99998" }, { bcp: "m99999", ours: "m99999" }]);
+	assert.deepEqual(compared.oursOutcome, { type: "rejected", reasons: ["unknown-ref"] });
+	assert.deepEqual(compared.bcpOutcome, { type: "rejected", reasons: ["unknown-ref"] });
+});
+
+test("an unknown-ref rejection does not excuse a ref only billion-context-pi's side file lacks", () => {
+	const { input, ids, side, manager } = fixture();
+	// The native engine knows m00003; the side file does not map it.
+	const byRef = Object.fromEntries(ids.map((id, i) => [`m${String(i + 1).padStart(5, "0")}`, id]).filter(([ref]) => ref !== "m00003"));
+	const before = parseSideSnapshot(JSON.stringify({ schemaVersion: 1, blocks: [], messageRefs: { byRef } }));
+	const compared = compareCompressCall({ ...input, branch: manager.getBranch(), before, input: { content: [{ startId: "m00003", endId: "m00004", summary }] }, after: side(), observed: UNKNOWN_REF });
+	assert.equal(compared.verdict, "inconclusive");
+	assert.deepEqual(compared.diffs.filter((diff) => diff.kind === "ref-unmapped").map((diff) => diff.reason), ["unmapped ref m00003"]);
+});
+
+test("the next-request preview passes refs unknown to both engines only for an unknown-ref call", () => {
+	const { input, side } = fixture();
+	const call = { toolCallId: "call", input: { content: [{ startId: "m99998", endId: "m99999", summary }] }, before: side() };
+	const unmapped = (planned: ReturnType<typeof previewShadowCalls>) => planned.diffs.filter((diff) => diff.kind === "ref-unmapped").length;
+	assert.equal(unmapped(previewShadowCalls(input, [call])), 2);
+	const planned = previewShadowCalls(input, [{ ...call, bcpUnknownRef: true }]);
+	assert.equal(unmapped(planned), 0);
+	assert.deepEqual(planned.outcomes, [{ type: "rejected", reasons: ["unknown-ref"] }]);
+	assert.equal(planned.records.length, 0);
+});
+
 test("malformed input produces input-parse evidence without storing raw input", () => {
 	const { input, side } = fixture();
 	const result = compareCompressCall({ ...input, input: 'SECRET SUMMARY NOT JSON', after: side(), observed: classifyBcpResult("Invalid compress content (not-object): got a string.", true) });

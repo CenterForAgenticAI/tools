@@ -7,7 +7,8 @@ import type {
 import { Type } from "typebox";
 import type { ContextAwareModesV1 } from "../context-service.js";
 import { createContextAwareModesV1, type ContextAwareModesRuntime } from "./modes-runtime.js";
-import { MAX_MODE_ID_LENGTH, MAX_MODE_REASON_LENGTH } from "./modes-state.js";
+import { createModeIndicatorWidget, MODES_WIDGET_KEY } from "./mode-indicator.js";
+import { MAX_MODE_ID_LENGTH, MAX_MODE_REASON_LENGTH, modeDisplayText } from "./modes-state.js";
 
 export const MODES_STATUS_KEY = "caair.context-aware/mode";
 export const SUGGEST_MODE_TOOL_NAME = "suggest_mode";
@@ -40,21 +41,39 @@ function statusText(runtime: ContextAwareModesRuntime | undefined): string | und
 	const current = runtime?.current();
 	if (current === null || current === undefined) return undefined;
 	const availability = current.available ? "" : " (unavailable)";
-	const outer = current.outer === undefined ? "" : ` ← ${current.outer.id}${current.outer.available ? "" : " (unavailable)"}`;
+	const outer = current.outer === undefined ? "" : ` ← ${modeDisplayText(current.outer.id)}${current.outer.available ? "" : " (unavailable)"}`;
 	const suggestion = current.suggestedBy === "model" ? " [model-confirmed]" : "";
-	return `mode: ${current.id}${availability}${outer} · owner: ${current.owner}${suggestion}`;
+	return `mode: ${modeDisplayText(current.id)}${availability}${outer} · owner: ${modeDisplayText(current.owner)}${suggestion}`;
 }
 
 export function createModesExtensionController(pi: ExtensionAPI, options: ModeControllerOptions): ModesExtensionController {
 	let activeRuntime: ContextAwareModesRuntime | undefined;
 	let activeContext: ExtensionContext | undefined;
 	let registered = false;
+	// The widget last set, and on which context: a replacement context starts with no widgets.
+	let shownWidget: string | undefined;
+	let shownContext: ExtensionContext | undefined;
 
+	const refreshWidget = (context: ExtensionContext): void => {
+		if (typeof context.ui?.setWidget !== "function") return;
+		const current = activeRuntime?.current() ?? null;
+		// Definitions of other modes also call onChange; only a visible change re-renders.
+		const signature = current === null ? undefined : JSON.stringify(current, (key, value) => key === "updatedAt" ? undefined : value);
+		if (context === shownContext && signature === shownWidget) return;
+		shownContext = context;
+		shownWidget = signature;
+		context.ui.setWidget(
+			MODES_WIDGET_KEY,
+			current === null ? undefined : createModeIndicatorWidget(current),
+			{ placement: "belowEditor" },
+		);
+	};
 	const refreshStatus = (): void => {
 		const context = activeContext;
 		if (context?.ui?.setStatus === undefined) return;
 		try {
 			context.ui.setStatus(MODES_STATUS_KEY, statusText(activeRuntime));
+			refreshWidget(context);
 		} catch {
 			// A replacement context can be torn down while a callback is completing.
 		}
@@ -159,6 +178,9 @@ export function createModesExtensionController(pi: ExtensionAPI, options: ModeCo
 				activeRuntime = undefined;
 				activeContext = undefined;
 				try { ctx.ui.setStatus(MODES_STATUS_KEY, undefined); } catch { /* session is already leaving */ }
+				try { ctx.ui.setWidget?.(MODES_WIDGET_KEY, undefined); } catch { /* session is already leaving */ }
+				shownWidget = undefined;
+				shownContext = undefined;
 			}
 		},
 		resend: (ctx) => {
@@ -172,6 +194,7 @@ export function createModesExtensionController(pi: ExtensionAPI, options: ModeCo
 			return Object.freeze({
 				instanceIds: true as const,
 				toolPolicies: true as const,
+				ui: true as const,
 				defineMode: runtime.defineMode,
 				current: runtime.current,
 				setSuggestionConfirmer: runtime.setSuggestionConfirmer,

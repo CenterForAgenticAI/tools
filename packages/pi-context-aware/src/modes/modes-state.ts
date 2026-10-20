@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ContextAwareModeSnapshotV1 } from "../context-service.js";
+import { CONTEXT_AWARE_MODE_COLOR_TOKENS_V1, type ContextAwareModeSnapshotV1, type ContextAwareModeUiV1 } from "../context-service.js";
 
 export const MODE_STATE_ENTRY_TYPE = "context-aware/mode@1" as const;
 export const MODE_MESSAGE_TYPE = "context-aware/mode-transition@1" as const;
@@ -8,6 +8,49 @@ export const MODE_STATE_SCHEMA_VERSION = 1 as const;
 export const MAX_MODE_ID_LENGTH = 128;
 export const MAX_MODE_OWNER_LENGTH = 128;
 export const MAX_MODE_TRANSITION_LENGTH = 4_000;
+export const MAX_MODE_LABEL_LENGTH = 32;
+
+const MODE_HEX_COLOR = /^#[0-9a-f]{6}$/iu;
+// Control and format characters would let a label move the cursor, recolor the
+// footer, or reorder text, so a label may contain neither.
+const MODE_LABEL_UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+const MODE_DISPLAY_UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/**
+ * A mode id or owner as the footer draws it. Both are only trimmed and
+ * length-checked, also when replayed from session entries, so each control or
+ * format character becomes U+FFFD: it can neither drive the terminal nor hide.
+ */
+export function modeDisplayText(text: string): string {
+	return text.replace(MODE_DISPLAY_UNSAFE, "\uFFFD");
+}
+
+/**
+ * Copy only `color` and `label`. Returns null when either is present but not
+ * accepted, so a mode with a bad indicator is refused rather than shown wrong.
+ */
+export function normalizeModeUi(value: unknown): Readonly<ContextAwareModeUiV1> | null {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+	const { color, label } = value as { color?: unknown; label?: unknown };
+	let normalizedColor: ContextAwareModeUiV1["color"];
+	if (color !== undefined) {
+		if (typeof color !== "string") return null;
+		if (MODE_HEX_COLOR.test(color)) normalizedColor = color.toLowerCase() as `#${string}`;
+		else if ((CONTEXT_AWARE_MODE_COLOR_TOKENS_V1 as readonly string[]).includes(color)) normalizedColor = color as ContextAwareModeUiV1["color"];
+		else return null;
+	}
+	let normalizedLabel: string | undefined;
+	if (label !== undefined) {
+		if (typeof label !== "string") return null;
+		const text = label.trim();
+		if (text.length === 0 || [...text].length > MAX_MODE_LABEL_LENGTH || MODE_LABEL_UNSAFE.test(text)) return null;
+		normalizedLabel = text;
+	}
+	return Object.freeze({
+		...(normalizedColor === undefined ? {} : { color: normalizedColor }),
+		...(normalizedLabel === undefined ? {} : { label: normalizedLabel }),
+	});
+}
 export const MAX_MODE_TOOL_LENGTH = 128;
 export const MAX_MODE_REASON_LENGTH = 500;
 export const MAX_MODE_INSTANCE_ID_LENGTH = 128;
@@ -302,6 +345,7 @@ export function snapshotReference(
 	available: boolean,
 	updatedAt: string,
 	outer?: ContextAwareModeSnapshotV1,
+	ui?: Readonly<ContextAwareModeUiV1>,
 ): ContextAwareModeSnapshotV1 {
 	const snapshot: ContextAwareModeSnapshotV1 = {
 		id: reference.id,
@@ -312,6 +356,7 @@ export function snapshotReference(
 		enteredAt: reference.enteredAt,
 		updatedAt,
 		...(outer === undefined ? {} : { outer }),
+		...(ui === undefined ? {} : { ui }),
 	};
 	return Object.freeze(snapshot);
 }

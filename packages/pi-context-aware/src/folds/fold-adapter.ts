@@ -6,13 +6,20 @@
  * session entry ids, and the block state is rebuilt from the fold entries on
  * the branch, so nothing outside the session file is needed. A planned fold is
  * returned as boundary drafts; the caller decides when Pi may append them.
+ *
+ * Planning prepares the turn the way billion-context-pi 0.1.83 does before its
+ * compress tool plans (pi-context-aware#186): the same message projection, then
+ * the engine's `processTurn` (folded messages pruned, tool calls without a
+ * result stripped, earlier compress calls cut to stubs), and only then the
+ * protected recent tail. A range whose ends lie inside an active fold is
+ * therefore refused as already folded (pi-context-aware#184).
  */
 
 import type { SessionBoundaryDraft, SessionEntry } from "@earendil-works/pi-coding-agent";
 
-import { assignRefs, baseIdOf, countMessageTokens, createCore, createInitialState, defaultConfig, emptyRefMap } from "./kernel/index.js";
+import { assignRefs, baseIdOf, countMessageTokens, createCore, createInitialState, defaultConfig, defaultCountTokens, emptyRefMap } from "./kernel/index.js";
 import type { CompressionBlock, CompressionState, Config, CoreMessage } from "./kernel/index.js";
-import { resolveBoundaries } from "./kernel/boundaries.js";
+import { BoundaryNotFoundError, resolveBoundaries } from "./kernel/boundaries.js";
 import { widenFoldCoverage } from "./fold-coverage.js";
 import { stubSummaryError } from "./stub-summary.js";
 import { DEFAULT_FOLDS_CONFIG, type FoldsConfig } from "../platform/config-layers.js";
@@ -26,33 +33,73 @@ import {
 	type FoldTier,
 } from "./fold-entries.js";
 
-type ContentPart = { type?: unknown; text?: unknown; id?: unknown; name?: unknown; arguments?: unknown };
+type ContentPart = { type?: unknown; text?: unknown; thinking?: unknown; id?: unknown; name?: unknown; arguments?: unknown };
 
 function partsOf(content: unknown): ContentPart[] {
 	if (typeof content === "string") return [{ type: "text", text: content }];
 	return Array.isArray(content) ? content.filter((part): part is ContentPart => typeof part === "object" && part !== null) : [];
 }
 
+// billion-context-pi strips a ref tag it rendered into a text when it reads the text back.
+const REF_TAG_SOURCE = "(?:<acp\\s[^>]*>m\\d{5}</acp>|\\[m\\d{1,5}\\])";
+const REF_TAG = new RegExp(`^${REF_TAG_SOURCE}\\s?\\n?`, "u");
+const TRAILING_REF_TAG = new RegExp(`\\n*${REF_TAG_SOURCE}\\s*$`, "u");
+
+/** The text parts of a message content, joined as billion-context-pi joins them. Images add no text. */
 function textOf(content: unknown): string {
 	return partsOf(content)
-		.map((part) => (part.type === "text" && typeof part.text === "string" ? part.text : part.type === "image" ? "[image]" : ""))
-		.filter((text) => text.length > 0)
+		.flatMap((part) => (part.type === "text" && typeof part.text === "string" ? [part.text.replace(REF_TAG, "").replace(TRAILING_REF_TAG, "")] : []))
 		.join("\n");
 }
 
+/** Context entries of these custom types are billion-context-pi panels; they never reach its planner. */
+const PANEL_CUSTOM_TYPES: ReadonlySet<string> = new Set(["acp-status", "acp-export", "acp-rule"]);
+
+function thinkingTokensOf(parts: readonly ContentPart[]): number {
+	const thinking = parts.flatMap((part) => (part.type === "thinking" && typeof part.thinking === "string" ? [part.thinking] : []));
+	return thinking.length > 0 ? defaultCountTokens(thinking.join("\n")) : 0;
+}
+
+function argumentsText(args: unknown): string {
+	if (!args) return "";
+	if (typeof args === "string") return args;
+	try {
+		return JSON.stringify(args) ?? "";
+	} catch {
+		return String(args);
+	}
+}
+
+/** The text of a message without text content: a bash execution's command and output, or a summary. */
+function fallbackText(message: { command?: unknown; output?: unknown; summary?: unknown }): string {
+	const parts: string[] = [];
+	if (typeof message.command === "string" && message.command) parts.push(`$ ${message.command}`);
+	const output = textOf(message.output);
+	if (output) parts.push(output);
+	if (typeof message.summary === "string" && message.summary) parts.push(message.summary);
+	return parts.join("\n").trim();
+}
+
 /**
- * Engine messages for one session entry. An assistant entry with tool calls
- * becomes one message per call, with ids `<entry id>#<call id>`; the engine
- * maps those back to the entry with `baseIdOf`.
+ * Engine messages for one session entry, projected as billion-context-pi 0.1.83
+ * projects them (`projectMessage`), so both engines count the same protected
+ * recent tail (pi-context-aware#186). An assistant entry with one tool call is
+ * one message keyed by the entry id, its text and then the call's arguments. An
+ * entry with several calls becomes one message per call, with ids
+ * `<entry id>#<call id>`; the engine maps those back to the entry with
+ * `baseIdOf`. An assistant entry without text or calls has no message.
+ * Thinking parts count as `thinkingTokens`, on the entry's first message.
  */
 export function entryToCoreMessages(entry: SessionEntry): CoreMessage[] {
 	if (entry.type === "custom_message") {
-		return [{ id: entry.id, role: "user", contentType: "text", text: textOf(entry.content) }];
+		if (entry.customType !== undefined && PANEL_CUSTOM_TYPES.has(entry.customType)) return [];
+		const text = textOf(entry.content);
+		return text.length > 0 ? [{ id: entry.id, role: "user", contentType: "text", text }] : [];
 	}
 	if (entry.type !== "message") return [];
 	// A persisted entry without a message object (hand-edited or damaged file) holds nothing to send.
 	if (typeof entry.message !== "object" || entry.message === null) return [];
-	const message = entry.message as { role?: unknown; content?: unknown; toolCallId?: unknown; toolName?: unknown };
+	const message = entry.message as { role?: unknown; content?: unknown; toolCallId?: unknown; toolName?: unknown; command?: unknown; output?: unknown; summary?: unknown };
 	if (message.role === "user") return [{ id: entry.id, role: "user", contentType: "text", text: textOf(message.content) }];
 	if (message.role === "toolResult") {
 		return [
@@ -66,25 +113,43 @@ export function entryToCoreMessages(entry: SessionEntry): CoreMessage[] {
 			},
 		];
 	}
-	if (message.role !== "assistant") return [];
+	if (message.role !== "assistant") {
+		const text = textOf(message.content) || fallbackText(message);
+		return text.length > 0 ? [{ id: entry.id, role: "user", contentType: "text", text }] : [];
+	}
 	const parts = partsOf(message.content);
-	const out: CoreMessage[] = [];
-	const text = textOf(parts.filter((part) => part.type === "text"));
-	if (text.length > 0) out.push({ id: entry.id, role: "assistant", contentType: "text", text });
-	for (const part of parts) {
-		if (part.type !== "toolCall" || typeof part.id !== "string") continue;
-		const name = typeof part.name === "string" ? part.name : "tool";
-		out.push({
-			id: `${entry.id}#${part.id}`,
+	const thinking = thinkingTokensOf(parts);
+	const thinkingField = thinking > 0 ? { thinkingTokens: thinking } : {};
+	const text = textOf(message.content);
+	const calls = parts.filter((part) => part.type === "toolCall" && typeof part.name === "string" && part.name.length > 0);
+	if (calls.length === 1) {
+		const call = calls[0]!;
+		const args = argumentsText(call.arguments);
+		return [{
+			id: entry.id,
 			role: "assistant",
 			contentType: "tool-call",
-			toolCallId: part.id,
-			toolName: name,
-			text: `${name}(${JSON.stringify(part.arguments ?? {})})`,
+			toolName: call.name as string,
+			toolCallId: typeof call.id === "string" ? call.id : "",
+			text: args && text ? `${text}\n${args}` : args || text,
+			...thinkingField,
+		}];
+	}
+	if (calls.length > 1) {
+		return calls.map((call, index): CoreMessage => {
+			const callId = typeof call.id === "string" ? call.id : "";
+			return {
+				id: `${entry.id}#${callId}`,
+				role: "assistant",
+				contentType: "tool-call",
+				toolName: call.name as string,
+				toolCallId: callId,
+				text: argumentsText(call.arguments) || text,
+				...(index === 0 ? thinkingField : {}),
+			};
 		});
 	}
-	if (out.length === 0) out.push({ id: entry.id, role: "assistant", contentType: "text", text: "" });
-	return out;
+	return text.trim() ? [{ id: entry.id, role: "assistant", contentType: "text", text, ...thinkingField }] : [];
 }
 
 /** Rebuilt fold state for one branch. */
@@ -140,6 +205,10 @@ export function foldStateFromBranch(
 			survivedCount: 0,
 			generation: "young",
 			active: !absorbed.has(record.blockId),
+			// The call that made the fold: the engine keeps an active fold's compress call visible as a
+			// stub and hides the calls of absorbed folds, as billion-context-pi does.
+			...(record.compressCallId ? { compressCallId: record.compressCallId }
+				: record.requestId && record.requestId.lastIndexOf("#") > 0 ? { compressCallId: record.requestId.slice(0, record.requestId.lastIndexOf("#")) } : {}),
 			...(record.refs.start ? { startRef: record.refs.start } : {}),
 			...(record.refs.end ? { endRef: record.refs.end } : {}),
 		};
@@ -178,6 +247,22 @@ export interface FoldRequest {
 	readonly endRef: string;
 	readonly summary: string;
 	readonly topic?: string;
+	/**
+	 * Longest summary this fold accepts, in place of the engine's `maxSummaryLength`
+	 * (pi-context-aware#183). Zero or a negative number removes the limit, as in the engine.
+	 * Anything but a finite number is ignored; see `summaryLimitOf`.
+	 */
+	readonly summaryMaxChars?: number;
+}
+
+/**
+ * The summary limit a caller's value sets, or `undefined` when it sets none. Only a finite
+ * number counts, the rule of the kernel's `parseCompressArgs` (kernel/parse-compress-input.ts).
+ * The kernel exports no helper for it, and its parsed ranges also carry per-range values, which
+ * billion-context-pi's compress tool drops. NaN or Infinity would switch the engine's check off.
+ */
+export function summaryLimitOf(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 export interface FoldPlanInput extends FoldRequest {
@@ -202,55 +287,101 @@ export function keptFirstUserId(branch: readonly SessionEntry[], folds: FoldsCon
 }
 
 /**
- * Widen message ranges to whole Pi entries and tool pairs, then run the
- * engine's validation (protected recent messages, tool pairs, summary limits).
- * Refuse a cut-off summary, and any protected carve that leaves a partial entry.
- * Nothing is written: the
- * drafts go to Pi from a boundary handler.
+ * Estimated tokens of the context the model is sent: unfolded messages plus the
+ * active folds' summaries. The engine's turn preparation truncates large tool
+ * outputs when this nears the context limit, as billion-context-pi's does.
+ */
+function sentTokens(state: BranchFoldState): number {
+	const folded = new Set(state.kernel.blocks.filter((block) => block.active).flatMap((block) => block.effectiveMessageIds.map(baseIdOf)));
+	const visible = state.messages.filter((message) => !folded.has(baseIdOf(message.id)));
+	const summaries = state.kernel.blocks.filter((block) => block.active).map((block) => defaultCountTokens(block.summary));
+	return [...visible.map((message) => countMessageTokens(message)), ...summaries].reduce((sum, tokens) => sum + tokens, 0);
+}
+
+/**
+ * Coverage after withdrawing every Pi entry the fold would only partly hide,
+ * together with the tool pairs it belongs to, until nothing is split. The
+ * engine already withdraws split call/result pairs; Pi folds whole entries, so
+ * an entry with several calls that the protected tail cuts through is withdrawn
+ * the same way rather than refused.
+ */
+function withdrawSplitEntries(messages: readonly CoreMessage[], ids: readonly string[]): Set<string> {
+	const selected = new Set(ids);
+	for (;;) {
+		const outside = messages.filter((message) => !selected.has(message.id));
+		const entries = new Set(outside.map((message) => baseIdOf(message.id)));
+		const calls = new Set(outside.flatMap((message) => (message.toolCallId ? [message.toolCallId] : [])));
+		const split = messages.filter((message) => selected.has(message.id)
+			&& (entries.has(baseIdOf(message.id)) || (message.toolCallId !== undefined && message.toolCallId !== "" && calls.has(message.toolCallId))));
+		if (split.length === 0) return selected;
+		for (const message of split) selected.delete(message.id);
+	}
+}
+
+/**
+ * Prepare the turn as billion-context-pi does, widen message ranges to whole Pi
+ * entries and tool pairs, then run the engine's validation (protected recent
+ * messages, tool pairs, summary limits). Refuse a cut-off summary. Entries the
+ * protected tail would split are withdrawn from the fold. Nothing is written:
+ * the drafts go to Pi from a boundary handler.
  */
 export function planFold(input: FoldPlanInput): FoldPlan {
 	const state = foldStateFromBranch(input.branch, input.contextEntries);
 	const config: Config = defaultConfig(input.modelContextLimit, input.config ?? {});
 	const stub = stubSummaryError(input.summary);
 	if (stub) return { ok: false, errors: [stub], validRefs: validFoldRefs(state) };
+	const core = createCore();
+	// billion-context-pi plans on the prepared turn (pi-context-aware#186): folded messages pruned
+	// and replaced by their summaries, tool calls without a result stripped (except compress),
+	// earlier compress calls cut to stubs, ref tags rendered. The protected tail is counted there.
+	const turn = core.processTurn({ messages: state.messages, state: state.kernel, config, tokenCount: sentTokens(state) });
 	let startRef = input.startRef;
 	let endRef = input.endRef;
-	let boundaryKind: string;
+	let boundaryKind: string = input.startRef.startsWith("b") || input.endRef.startsWith("b") ? "block" : "message";
 	try {
-		const resolved = resolveBoundaries({ startRef, endRef, messages: state.messages, state: state.kernel });
+		const resolved = resolveBoundaries({ startRef, endRef, messages: turn.messages, state: turn.state });
 		boundaryKind = resolved.boundaryKind;
-		const widened = new Set(widenFoldCoverage(state.messages, resolved.messageIds, true));
-		const first = state.messages.findIndex((message) => widened.has(message.id));
-		const last = state.messages.reduce((last, message, index) => widened.has(message.id) ? index : last, -1);
+		const widened = new Set(widenFoldCoverage(turn.messages, resolved.messageIds, true));
+		const first = turn.messages.findIndex((message) => widened.has(message.id));
+		const last = turn.messages.reduce((last, message, index) => widened.has(message.id) ? index : last, -1);
 		if (resolved.boundaryKind === "block") {
-			// Replacing a bN endpoint with mNNNNN changes the engine's tier semantics.
-			if (first < resolved.startIndex || last > resolved.endIndex) {
+			// Replacing a bN endpoint with mNNNNN changes the engine's tier semantics. In the pruned
+			// view a range of whole folds holds only their summaries, and nothing can split.
+			if (first >= 0 && (first < resolved.startIndex || last > resolved.endIndex)) {
 				return { ok: false, errors: ["Block range would split an entry or tool pair; include the adjacent entries explicitly."], validRefs: validFoldRefs(state) };
 			}
 		} else if (first >= 0 && last >= 0) {
-			startRef = state.kernel.messageRefs.byRaw[state.messages[first]!.id]!;
-			endRef = state.kernel.messageRefs.byRaw[state.messages[last]!.id]!;
+			startRef = turn.state.messageRefs.byRaw[turn.messages[first]!.id]!;
+			endRef = turn.state.messageRefs.byRaw[turn.messages[last]!.id]!;
 		}
 	} catch (error) {
-		return { ok: false, errors: [error instanceof Error ? error.message : String(error)], validRefs: validFoldRefs(state) };
+		// A ref inside an active fold is consumed: the engine refuses the range with
+		// billion-context-pi's wording, so let it decide (pi-context-aware#184).
+		if (!(error instanceof BoundaryNotFoundError) || error.kind !== "consumed") {
+			return { ok: false, errors: [error instanceof Error ? error.message : String(error)], validRefs: validFoldRefs(state) };
+		}
 	}
-	const before = new Set(state.kernel.blocks.map((block) => block.blockId));
-	const result = createCore().applyCompression({
+	const before = new Set(turn.state.blocks.map((block) => block.blockId));
+	const summaryMaxChars = summaryLimitOf(input.summaryMaxChars);
+	const result = core.applyCompression({
 		ranges: [
 			{
 				startRef,
 				endRef,
 				summary: input.summary,
 				...(input.topic ? { topic: input.topic } : {}),
+				...(summaryMaxChars !== undefined ? { summaryMaxChars } : {}),
 			},
 		],
-		messages: state.messages,
-		state: state.kernel,
+		messages: turn.messages,
+		state: turn.state,
 		config,
 	});
 	const created = result.state.blocks.filter((block) => !before.has(block.blockId));
 	if (result.result.errors.length > 0 || created.length === 0) {
-		const errors = result.result.errors.length > 0 ? result.result.errors : ["The engine created no fold for this range."];
+		// A consumed range below the size gate is skipped with a warning, not an error; that warning is the reason.
+		const errors = result.result.errors.length > 0 ? result.result.errors
+			: result.result.warnings.length > 0 ? [...result.result.warnings] : ["The engine created no fold for this range."];
 		return { ok: false, errors, validRefs: validFoldRefs(state) };
 	}
 	const keptFirst = keptFirstUserId(input.branch, input.folds);
@@ -273,23 +404,35 @@ export function planFold(input: FoldPlanInput): FoldPlan {
 	}
 	const records: FoldRecord[] = [];
 	const drafts: SessionBoundaryDraft[] = [];
+	const warnings = [...result.result.warnings];
+	const messageById = new Map(state.messages.map((message) => [message.id, message]));
+	const summaryById = new Map(turn.state.blocks.map((block) => [block.blockId, block.summary]));
 	for (const block of created) {
-		const selected = new Set(block.effectiveMessageIds);
-		if (widenFoldCoverage(state.messages, block.effectiveMessageIds).some((id) => !selected.has(id))) {
-			return { ok: false, errors: ["Engine protection would split a session entry or tool pair; wait until the whole entry can fold."], validRefs: validFoldRefs(state) };
+		const selected = withdrawSplitEntries(state.messages, block.effectiveMessageIds);
+		const withdrawn = block.effectiveMessageIds.filter((id) => !selected.has(id));
+		if (withdrawn.length > 0) {
+			warnings.push(`Withdrawn ${withdrawn.length} message(s) from fold ${block.blockId} to keep whole session entries and tool pairs visible beside the protected recent messages.`);
 		}
-		const covered = [...new Set(block.effectiveMessageIds.map(baseIdOf))]
+		// Tokens this fold hides, counted on the session's own text: the prepared turn carries
+		// rendered ref tags, which the engine's own count includes.
+		const hiddenTokens = block.directMessageIds.filter((id) => selected.has(id) && id !== keptFirst)
+			.reduce((sum, id) => sum + (messageById.has(id) ? countMessageTokens(messageById.get(id)!) : 0), 0)
+			+ block.directBlockIds.reduce((sum, id) => sum + defaultCountTokens(summaryById.get(id) ?? ""), 0);
+		const covered = [...new Set([...selected].map(baseIdOf))]
 			.filter((id) => {
 				const entry = entryById.get(id);
 				return entry !== undefined && isEditableEntry(entry) && id !== keptFirst;
 			})
 			.sort((a, b) => (indexById.get(a) ?? 0) - (indexById.get(b) ?? 0));
 		const [carrierId, ...hiddenIds] = covered;
-		if (!carrierId) return { ok: false, errors: [keptFirst && block.effectiveMessageIds.includes(keptFirst)
-			? "Keeping the first user message leaves nothing else to fold (covers no session entry)."
-			: `Fold ${block.blockId} covers no session entry.`], validRefs: validFoldRefs(state) };
-		const keptTokens = keptFirst && block.effectiveMessageIds.includes(keptFirst)
-			? state.messages.filter((message) => message.id === keptFirst).reduce((sum, message) => sum + countMessageTokens(message), 0) : 0;
+		if (!carrierId) {
+			const error = keptFirst && block.effectiveMessageIds.includes(keptFirst)
+				? "Keeping the first user message leaves nothing else to fold (covers no session entry)."
+				: withdrawn.length > 0
+					? "Range would split a session entry or tool pair at the protected-zone boundary; wait until the whole entry ages out of the protected zone."
+					: `Fold ${block.blockId} covers no session entry.`;
+			return { ok: false, errors: [error], validRefs: validFoldRefs(state) };
+		}
 		const record: FoldRecord = {
 			version: 1,
 			blockId: block.blockId,
@@ -301,12 +444,12 @@ export function planFold(input: FoldPlanInput): FoldPlan {
 			range: { startId: carrierId, endId: covered[covered.length - 1] ?? carrierId },
 			refs: { start: block.startRef ?? input.startRef, end: block.endRef ?? input.endRef },
 			directBlockIds: [...block.directBlockIds],
-			compressedTokens: Math.max(0, block.compressedTokens - keptTokens),
+			compressedTokens: hiddenTokens,
 			createdAt: block.createdAt,
 			origin: "fold",
 		};
 		records.push(record);
 		drafts.push(...foldDrafts(record, renderFoldSummary(block.summary, block.topic)));
 	}
-	return { ok: true, records, drafts, warnings: [...result.result.warnings] };
+	return { ok: true, records, drafts, warnings };
 }

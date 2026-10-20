@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { SessionDatabase } from "./database.js";
+import { SessionDatabase, UnsafeDatabaseFileError } from "./database.js";
 import { eraseSession, formatErasureReceipt, missingSessionSources, missingSourceNotice, sweepMissingSessions, type ErasureSession } from "./session-erasure.js";
 import { readStoreHeader, storeDirectories, withStoreDirectory } from "./files.js";
 import { restoredErasedSessions } from "./restored.js";
@@ -64,6 +64,8 @@ export function registerSessionErasure(pi: ExtensionAPI, agentDirectory: () => s
 	let leasedId: string | undefined;
 	let leasedFile: string | null = null;
 	let blocked = false;
+	// Set only by a refused start without UI; cleared when a later start succeeds, so an embedding host is not failed for good.
+	let failedProcess = false;
 	let maintenanceTimer: ReturnType<typeof setTimeout> | undefined;
 	let maintenance: (() => void) | undefined;
 	const reportRestored = (ctx: ExtensionContext, current = currentSession(ctx)) => {
@@ -165,9 +167,24 @@ export function registerSessionErasure(pi: ExtensionAPI, agentDirectory: () => s
 			leasedId = nextId;
 			leasedFile = nextFile;
 			blocked = false;
-		} catch {
+			if (failedProcess) {
+				if (process.exitCode === 1) process.exitCode = undefined;
+				failedProcess = false;
+			}
+		} catch (error) {
 			blocked = true;
-			notify(ctx, "Session activation refused: erased session or unavailable erasure protection. Shutdown requested. Extension writes and input are blocked; external turns will be aborted.", "error");
+			// Other error text can name a session path or id, and neither stderr nor the debug log is ever erased.
+			const unsafe = error instanceof UnsafeDatabaseFileError ? error : undefined;
+			const reason = unsafe ? `${unsafe.file} ${unsafe.reason}` : errorKind(error);
+			diagnostic(agentDirectory(), `activation refused (${unsafe ? `${path.basename(unsafe.file)} ${unsafe.reason}` : reason})`);
+			const message = `Session activation refused: erased session or unavailable erasure protection (${reason}). ${ctx.hasUI ? "Shutdown requested." : "The run is aborted and the process will exit non-zero."} Extension writes and input are blocked; external turns will be aborted.`;
+			notify(ctx, message, "error");
+			// Print and JSON modes have no UI. Without this, input is swallowed and pi exits 0 with no output.
+			if (!ctx.hasUI) {
+				try { process.stderr.write(`pi-context-aware: ${message}\n`); } catch { /* best effort */ }
+				process.exitCode = 1;
+				failedProcess = true;
+			}
 			ctx.shutdown();
 		} finally { db?.close(); }
 		// A refused session is shutting down: report restored data now, while its context is live.

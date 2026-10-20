@@ -1,7 +1,9 @@
-/** REQ-C3 control: widenFoldCoverage makes mixed assistant entries and all
- * their tool results indivisible; protected carving refuses partial entries.
- * Mutations: disable coverage widening, call/result identity mapping, or the
- * post-plan split guard.
+/** REQ-C3 control: a fold covers a mixed assistant entry and all its tool
+ * results together or not at all; an entry the protected tail would split is
+ * withdrawn, so a fold of nothing else is refused (pi-context-aware#186).
+ * Mutations: disable call/result identity mapping or the post-plan withdrawal
+ * of split entries. Coverage widening for sparse imports is killed through
+ * tests/folds.test.ts ("ACP import widens a partial entry").
  */
 import test from "node:test";
 import assert from "node:assert/strict";

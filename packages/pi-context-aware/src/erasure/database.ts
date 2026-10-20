@@ -37,10 +37,7 @@ export class SessionDatabase {
 		const file = sessionDatabaseFile(agentDir);
 		// The profile root is trusted. SQLite's database and WAL must not be redirected.
 		for (const candidate of [file, `${file}-wal`, `${file}-shm`]) {
-			try {
-				const info = fs.lstatSync(candidate);
-				if (!info.isFile() || info.nlink !== 1 || (process.getuid && info.uid !== process.getuid())) throw new Error("Unsafe session database file");
-			} catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+			assertSafeDatabaseFile(candidate, true);
 		}
 		const fd = fs.openSync(file, fs.constants.O_CREAT | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW, 0o600);
 		try { fs.fchmodSync(fd, 0o600); } finally { fs.closeSync(fd); }
@@ -172,12 +169,32 @@ export class SessionDatabase {
 	}
 }
 
+/** Names the file and the failed check, so a refused start can say what to fix without quoting other error text. */
+export class UnsafeDatabaseFileError extends Error {
+	readonly code = "UNSAFE_DATABASE_FILE";
+	constructor(readonly file: string, readonly reason: string) {
+		super(`Unsafe session database file ${file}: ${reason}`);
+		this.name = "UnsafeDatabaseFileError";
+	}
+}
+
+/** lstat is taken here so a caller cannot pass stat output and lose the symlink refusal. */
+function assertSafeDatabaseFile(file: string, missingOk: boolean): void {
+	let info: fs.Stats;
+	try { info = fs.lstatSync(file); } catch (error) {
+		if (missingOk && (error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	const reason = info.isSymbolicLink() ? "is a symbolic link" : !info.isFile() ? "is not a regular file" : info.nlink !== 1 ? "has more than one hard link" : process.getuid && info.uid !== process.getuid() ? "is owned by another user" : undefined;
+	if (reason) throw new UnsafeDatabaseFileError(file, reason);
+}
+
 /** No database is created by read-only retrieval or the shadow importer. Errors fail closed. */
 export function erasedSessionIds(agentDir: string): ReadonlySet<string> {
-	if (!fs.existsSync(sessionDatabaseFile(agentDir))) return new Set();
 	const file = sessionDatabaseFile(agentDir);
-	const info = fs.lstatSync(file);
-	if (!info.isFile() || info.nlink !== 1 || (process.getuid && info.uid !== process.getuid())) throw new Error("Unsafe session database file");
+	// lstat, not existsSync: a dangling symlink must refuse, not read as "nothing erased".
+	try { fs.lstatSync(file); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Set(); throw error; }
+	assertSafeDatabaseFile(file, false);
 	const db = new DatabaseSync(file, { readOnly: true });
 	try {
 		return new Set(db.prepare("SELECT session_id FROM erased_sessions ORDER BY session_id").all().map((row) => String(row.session_id)));

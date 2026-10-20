@@ -206,3 +206,40 @@ test("differential gate recomputes differences instead of trusting a stored matc
 		assert.equal(buildFoldParityReport([compress, next], [], "engine").counts.diff, 1);
 	}
 });
+
+test("differential gate leaves a call without a session file out, as the readiness report does", () => {
+	// The recorder's records for a call in a session without a session file (pi-context-aware#185).
+	const noFile = { kind: "side-file-missing", reason: "session has no file" };
+	const noFileCall = { ...base, sessionId: "in-memory", kind: "compress", toolCallId: "in-memory", nested: false, verdict: "inconclusive", diffs: [noFile, noFile] };
+	const noFileRequest = { ...base, sessionId: "in-memory", kind: "next-request", toolCallIds: ["in-memory"], verdict: "inconclusive", diffs: [noFile], bcp: { messages: [], total: 0, tagsSeen: true } };
+	const records = [call, request, noFileCall, noFileRequest];
+	assert.deepEqual(inspectParityCase(records, [], "engine", V, judgeParityCalls), { count: 1, failures: [] });
+	const report = buildFoldParityReport(records, [], "engine");
+	assert.equal(report.count, 1);
+	assert.equal(report.notComparable, 1);
+	// A case whose only calls are not comparable compared nothing.
+	assert.deepEqual(kinds([noFileCall, noFileRequest]), ["calls-missing"]);
+	// A side file that is missing or unreadable in a session with a file is still inconclusive.
+	const unreadable = { kind: "side-file-missing", reason: "side file is missing or unreadable" };
+	const missing = inspect([call, request, { ...noFileCall, diffs: [unreadable] }, { ...noFileRequest, diffs: [unreadable] }]);
+	assert.deepEqual(missing.filter((failure) => failure.kind === "inconclusive").map((failure) => failure.toolCallId), ["in-memory"]);
+});
+
+
+test("differential mechanism cases fail when real bcp takes another path or the native plan disagrees", async () => {
+	const { mechanismFailures } = await import("../scripts/parity-differential-support.mjs");
+	const item = { expect: [{ outcome: "accepted", coverage: 5 }, { outcome: "rejected", reasons: ["consumed"] }] };
+	const accepted = { kind: "compress", bcpOutcome: { type: "accepted", reasons: [] }, bcp: { coverageCount: 5 }, ours: { coverageCount: 5 }, diffs: [] };
+	const refused = { kind: "compress", bcpOutcome: { type: "rejected", reasons: ["consumed"] }, diffs: [] };
+	assert.deepEqual(mechanismFailures([accepted, refused], item), []);
+	// bcp folded another number of entries: the case no longer exercises its mechanism.
+	assert.deepEqual(mechanismFailures([{ ...accepted, bcp: { coverageCount: 4 } }, refused], item), ["step 0: bcp covers 4 entries, expected 5; ours 5"]);
+	// The native plan disagrees with bcp.
+	assert.deepEqual(mechanismFailures([{ ...accepted, diffs: [{ kind: "coverage", oursOnlyCount: 2, bcpOnlyCount: 0 }] }, refused], item), ["step 0: coverage ours-only 2, bcp-only 0"]);
+	assert.deepEqual(mechanismFailures([accepted, { ...refused, diffs: [{ kind: "error-type", reason: "ours=protected-zone; bcp=consumed" }] }], item), ["step 1: error-type (ours=protected-zone; bcp=consumed)"]);
+	// A missing step or another bcp outcome fails too; request-content differences are not engine differences.
+	assert.deepEqual(mechanismFailures([accepted], item), ["step 1: no record"]);
+	assert.deepEqual(mechanismFailures([accepted, { ...refused, bcpOutcome: { type: "rejected", reasons: ["protected-zone"] } }], item), ["step 1: bcp reasons [\"protected-zone\"]"]);
+	assert.deepEqual(mechanismFailures([{ ...accepted, diffs: [{ kind: "content" }] }, refused], item), []);
+});
+

@@ -3,7 +3,7 @@ import { resolveFoldConfig, type FoldEngine } from "../folds/fold-engine.js";
 import { configuredFoldFingerprint } from "./fingerprint.js";
 import { budgetDiff, estimateBytes, ParityBudget, processParityBudget, shareLease, type BudgetLimit, type FoldParityLimits, type Lease, type ParityRetention, type ParityTask } from "./budget.js";
 import { compareBatchRequest, compareCompressCall, hashRequestMessages, MAX_BRANCH_ENTRIES, shortHash, type BatchCall, type BatchComparison, type PreviewInput, type ShadowCall } from "./compare.js";
-import { bcpOutcome, classifyBcpResult, type ObservedResult } from "./outcome.js";
+import { bcpOutcome, classifyBcpResult, rejectedUnknownRef, type ObservedResult } from "./outcome.js";
 import { isRefusalOutcome, PARITY_RECORD_VERSION, verdictFor, type CompressRecord, type NextRequestRecord, type ParityDiff, type ParityRecord, type RefusalOutcome, type RequestHashes } from "./records.js";
 import { registerFoldParityCommand } from "./report.js";
 import { snapshotSideFile, type SideSnapshot } from "./side-file.js";
@@ -249,7 +249,9 @@ export function registerFoldParityRecorder(pi: ExtensionAPI, options: FoldParity
 				return;
 			}
 			// Queue the identity synchronously: the context event can precede the deferred comparison.
-			const waiting: WaitingCall = { ...identity, evidence: call.evidence, evidenceLease: call.previewLease, ...(isRefusalOutcome(observedOutcome.type) ? { refusal: observedOutcome.type } : {}) };
+			// The next-request preview judges a ref unknown to both engines the same way the call comparison does.
+			const evidence: ShadowCall = rejectedUnknownRef(observed) ? { ...call.evidence, bcpUnknownRef: true } : call.evidence;
+			const waiting: WaitingCall = { ...identity, evidence, evidenceLease: call.previewLease, ...(isRefusalOutcome(observedOutcome.type) ? { refusal: observedOutcome.type } : {}) };
 			state.waiting.push(waiting);
 			if (state.batchDiffs.length) releaseWaiting([waiting]);
 			const afterBytes = estimateBytes(after, budget.remainingBytes);

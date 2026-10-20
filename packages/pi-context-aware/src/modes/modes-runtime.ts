@@ -6,6 +6,7 @@ import type {
 	ContextAwareModeHandleV1,
 	ContextAwareModeResultV1,
 	ContextAwareModeSnapshotV1,
+	ContextAwareModeUiV1,
 	ContextAwareModesV1,
 } from "../context-service.js";
 import {
@@ -15,6 +16,7 @@ import {
 	MAX_MODE_OWNER_LENGTH,
 	MAX_MODE_TOOL_LENGTH,
 	MAX_MODE_TRANSITION_LENGTH,
+	normalizeModeUi,
 	MODE_MESSAGE_TYPE,
 	MODE_STATE_ENTRY_TYPE,
 	replayModeState,
@@ -45,6 +47,7 @@ interface RuntimeDefinition {
 	readonly guard?: Guard;
 	readonly commandAllowed?: CommandAllowed;
 	readonly toolPolicy?: RuntimeToolPolicy;
+	readonly ui?: Readonly<ContextAwareModeUiV1>;
 }
 
 interface RuntimeState {
@@ -117,6 +120,8 @@ function normalizeDefinition(value: ContextAwareModeDefinitionV1): RuntimeDefini
 	if (toolPolicy === null) return null;
 	if (value.guard !== undefined && typeof value.guard !== "function") return null;
 	if (value.commandAllowed !== undefined && typeof value.commandAllowed !== "function") return null;
+	const ui = value.ui === undefined ? undefined : normalizeModeUi(value.ui);
+	if (ui === null) return null;
 	return {
 		id,
 		owner,
@@ -125,6 +130,7 @@ function normalizeDefinition(value: ContextAwareModeDefinitionV1): RuntimeDefini
 		...(value.guard === undefined ? {} : { guard: value.guard }),
 		...(value.commandAllowed === undefined ? {} : { commandAllowed: value.commandAllowed }),
 		...(toolPolicy === undefined ? {} : { toolPolicy }),
+		...(ui === undefined ? {} : { ui }),
 	};
 }
 
@@ -219,7 +225,7 @@ export function createContextAwareModesV1(deps: ContextAwareModesRuntimeDeps): C
 	const effectiveDefinition = (): RuntimeDefinition | undefined => available(state.current);
 	const snapshot = (reference: ModeStateReference | null, updatedAt: string, outerSnapshot?: ContextAwareModeSnapshotV1): ContextAwareModeSnapshotV1 | null => {
 		if (reference === null) return null;
-		return snapshotReference(reference, available(reference) !== undefined, updatedAt, outerSnapshot);
+		return snapshotReference(reference, available(reference) !== undefined, updatedAt, outerSnapshot, available(reference)?.ui);
 	};
 	const current = (): ContextAwareModeSnapshotV1 | null => {
 		const outerSnapshot = state.outer === null ? undefined : snapshot(state.outer, state.updatedAt);

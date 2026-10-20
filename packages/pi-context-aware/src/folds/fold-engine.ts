@@ -50,7 +50,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { isBillionContextPiLoaded, type RegisteredToolView } from "../compaction/compaction-blocker.js";
-import { foldStateFromBranch, planFold, validFoldRefs } from "./fold-adapter.js";
+import { foldStateFromBranch, planFold, summaryLimitOf, validFoldRefs } from "./fold-adapter.js";
 import { renderEarlierFoldCalls } from "./fold-call-render.js";
 import {
 	checkFoldRequestId,
@@ -281,6 +281,7 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 			endRef: request.endRef,
 			summary: request.summary,
 			...(request.topic ? { topic: request.topic } : {}),
+			...limitOf(request),
 			branch,
 			contextEntries,
 			modelContextLimit: contextWindow(ctx),
@@ -335,6 +336,7 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 				endRef: request.endRef,
 				summary: request.summary,
 				...(request.topic ? { topic: request.topic } : {}),
+				...limitOf(request),
 				branch,
 				contextEntries,
 				modelContextLimit: contextWindow(ctx),
@@ -354,12 +356,15 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 					endRef: request.endRef,
 					summary: request.summary,
 					...(request.topic ? { topic: request.topic } : {}),
+					...limitOf(request),
 					...(requestId ? { requestId } : {}),
 				};
-				if (requestId) recovery = buildFoldRequestRecovery({ requestId, request: copy, source });
+				// The leaf the request is made on binds it to this branch, live and after a restart (pi-context-aware#176).
+				const leafId = ctx.sessionManager.getLeafId();
+				if (requestId) recovery = buildFoldRequestRecovery({ requestId, request: copy, source, leafId });
 				const accepted: QueuedFoldRequest = {
 					...copy,
-					accepted: { source, leafId: ctx.sessionManager.getLeafId(), ...(recovery ? { recovery } : {}) },
+					accepted: { source, leafId, ...(recovery ? { recovery } : {}) },
 				};
 				queues.set(ctx.sessionManager, [...(queues.get(ctx.sessionManager) ?? []), accepted]);
 			}
@@ -377,6 +382,12 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 
 function isRecoveredItem(item: QueuedFold): item is RecoveredFoldRequest {
 	return "recovery" in item;
+}
+
+/** The request's summary limit, copied by name and only when it is a finite number (pi-context-aware#183). */
+function limitOf(request: { readonly summaryMaxChars?: number }): { summaryMaxChars?: number } {
+	const summaryMaxChars = summaryLimitOf(request.summaryMaxChars);
+	return summaryMaxChars === undefined ? {} : { summaryMaxChars };
 }
 
 const normalRef = (ref: string): string => ref.trim().toLowerCase().slice(0, MAX_REQUEST_REF_LENGTH);
@@ -479,6 +490,7 @@ export function planQueuedFolds(
 					endRef: plain.endRef,
 					summary: plain.summary,
 					...(plain.topic ? { topic: plain.topic } : {}),
+					...limitOf(plain),
 					branch: preview.getBranch(),
 					contextEntries: preview.buildContextEntries(),
 					modelContextLimit,

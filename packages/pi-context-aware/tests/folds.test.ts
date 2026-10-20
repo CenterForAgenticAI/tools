@@ -319,9 +319,11 @@ test("a partial block-boundary range is refused without changing tier semantics"
 	const before = manager.getEntries().length;
 	const partial = planFold({ branch: manager.getBranch(), startRef: "b1", endRef: "m00008",
 		summary: SUMMARY, modelContextLimit: 64_000, config: TEST_CONFIG });
+	// billion-context-pi 0.1.83 numbers this session m00001..m00014: the two-call entry is two messages
+	// (m00008, m00009) with no separate text message, so there is no m00015 (pi-context-aware#186).
 	assert.deepEqual(partial, { ok: false,
 		errors: ["Block range would split an entry or tool pair; include the adjacent entries explicitly."],
-		validRefs: ["m00005", "m00006", "m00007", "m00008", "m00009", "m00010", "m00011", "m00012", "m00013", "m00014", "m00015", "b1"] });
+		validRefs: ["m00005", "m00006", "m00007", "m00008", "m00009", "m00010", "m00011", "m00012", "m00013", "m00014", "b1"] });
 	assert.equal(manager.getEntries().length, before, "a refused fold must not write");
 	assertToolPairsVisible(manager);
 	const whole = planFold({ branch: manager.getBranch(), startRef: "b1", endRef: "m00012",

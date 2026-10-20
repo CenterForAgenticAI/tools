@@ -4,6 +4,7 @@ import { PARITY_REGISTER, type ParityRegisterEntry } from "./register.js";
 import { canonicalJson, compareBlockEvidence, compareNextRequest, MAX_MESSAGE_HASHES, summaryEvidenceDiff } from "./compare.js";
 import { compareOutcomes } from "./outcome.js";
 import { isBlockEvidence, isComparableBlockEvidence, isOutcomeEvidence, isRequestHashes, parityEvidenceFault } from "./evidence.js";
+import { sessionHasNoFile } from "./side-file.js";
 
 /** All-record, difference-level diagnostics, including historical schemas.
  * Missing evidence stays unexplained. This does not establish cut-over readiness.
@@ -132,6 +133,11 @@ export interface ParityCallJudgment {
 	readonly hits: readonly string[];
 	readonly missingRequest: boolean;
 	readonly inconclusive: boolean;
+	/**
+	 * The call ran in a session without a session file, so billion-context-pi kept no side file to
+	 * compare with. The readiness report leaves it out of the count; the call is still inconclusive.
+	 */
+	readonly notComparable: boolean;
 }
 
 /**
@@ -188,12 +194,16 @@ export function judgeParityCalls(allRecords: readonly ParityRecord[], register: 
 		const missingRequest = requests.length === 0;
 		const inconclusive = missingRequest || call.verdict === "inconclusive" || requests.some((request) => request.verdict === "inconclusive")
 			|| evidence.some(({ diff }) => INCONCLUSIVE_KINDS.has(diff.kind) || diff.kind === "import-skipped");
-		return { call, requests, evidence, unexplained, hits, missingRequest, inconclusive };
+		const notComparable = Array.isArray(call.diffs) && call.diffs.some(sessionHasNoFile);
+		return { call, requests, evidence, unexplained, hits, missingRequest, inconclusive, notComparable };
 	});
 }
 
 export function buildFoldParityReport(allRecords: readonly ParityRecord[], register: readonly ParityRegisterEntry[], fingerprint: string) {
-	const judgments = judgeParityCalls(allRecords, register, fingerprint);
+	const all = judgeParityCalls(allRecords, register, fingerprint);
+	// Calls without a session file can never be compared; they neither count nor block readiness.
+	const judgments = all.filter((judgment) => !judgment.notComparable);
+	const notComparable = all.length - judgments.length;
 	const window = judgments.slice(-500);
 	const counts = { match: 0, explained: 0, diff: 0, inconclusive: 0 };
 	const hits = new Map<string, number>();
@@ -212,8 +222,8 @@ export function buildFoldParityReport(allRecords: readonly ParityRecord[], regis
 	const count = judgments.length;
 	const ready = count >= 500 && counts.diff === 0 && counts.inconclusive === 0;
 	return {
-		count, counts, ready, unexplainedKinds,
-		text: [`Fold parity ${fingerprint.slice(0, 12)}`, `count ${count}/500 (window ${window.length})`, `match ${counts.match} / explained ${counts.explained} / diff ${counts.diff} / inconclusive ${counts.inconclusive}`, ...[...hits].map(([id, count]) => `${id}: ${count}`), `Ready: ${ready ? "yes" : "no"}`, ...unexplained].join("\n"),
+		count, counts, ready, unexplainedKinds, notComparable,
+		text: [`Fold parity ${fingerprint.slice(0, 12)}`, `count ${count}/500 (window ${window.length})`, ...(notComparable ? [`not comparable ${notComparable} (session has no file)`] : []), `match ${counts.match} / explained ${counts.explained} / diff ${counts.diff} / inconclusive ${counts.inconclusive}`, ...[...hits].map(([id, count]) => `${id}: ${count}`), `Ready: ${ready ? "yes" : "no"}`, ...unexplained].join("\n"),
 	};
 }
 

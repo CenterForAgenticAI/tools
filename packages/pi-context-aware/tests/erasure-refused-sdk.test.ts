@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,6 +7,11 @@ import { createAgentSessionFromServices, createAgentSessionServices, ModelRuntim
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import extension from "../src/index.js";
 import { eraseSession } from "../src/erasure/session-erasure.js";
+
+// These tests refuse sessions on purpose. Without UI, a refusal sets process.exitCode = 1, which node:test reads as a failed file.
+let exitCodeBefore: typeof process.exitCode;
+beforeEach(() => { exitCodeBefore = process.exitCode; });
+afterEach(() => { process.exitCode = exitCodeBefore; });
 
 async function refusedRuntime() {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "erasure-refused-sdk-"));

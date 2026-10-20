@@ -78,6 +78,11 @@ export function classifyBcpResult(text: string, isError: boolean): ObservedResul
 	return { kind: "panel", blocks, reasons: groups === undefined ? [] : rejectReasons(groups) };
 }
 
+/** billion-context-pi's panel names at least one ref it does not know. */
+export function rejectedUnknownRef(observed: ObservedResult): boolean {
+	return observed.kind === "panel" && observed.reasons.includes("unknown-ref");
+}
+
 /** Combine the observed text with the blocks the side file shows this call created. */
 export function bcpOutcome(observed: ObservedResult, createdBlocks: number): OutcomeEvidence {
 	if (observed.kind === "terminal") return { type: observed.type, reasons: [] };

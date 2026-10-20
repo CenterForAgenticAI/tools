@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { SessionManager, type SessionEntry, type SessionHeader } from "@earendil-works/pi-coding-agent";
 import { importAcpSideFile } from "../folds/acp-import.js";
-import { entryToCoreMessages, foldStateFromBranch, keptFirstUserId, planFold, type FoldRequest } from "../folds/fold-adapter.js";
+import { entryToCoreMessages, foldStateFromBranch, keptFirstUserId, planFold, summaryLimitOf, type BranchFoldState, type FoldRequest } from "../folds/fold-adapter.js";
 import type { FoldsConfig } from "../platform/config-layers.js";
 import { applyFoldDrafts } from "../folds/fold-engine.js";
 import { coveredEntryIds, foldDrafts, isEditableEntry, readFoldRecord, type FoldRecord } from "../folds/fold-entries.js";
 import { parseCompressArgs } from "../folds/kernel/parse-compress-input.js";
 import { baseIdOf, SUMMARY_HEADER } from "../folds/kernel/prune.js";
-import { bcpOutcome, compareOutcomes, nativeOutcome, type ObservedResult } from "./outcome.js";
+import { bcpOutcome, compareOutcomes, nativeOutcome, rejectedUnknownRef, type ObservedResult } from "./outcome.js";
 import { verdictFor, type BlockEvidence, type Verdict, type OutcomeEvidence, type ParityDiff, type RefusalOutcome, type RefusedCall, type RequestDelta, type RequestDeltaReason, type RequestHashes, type ToolCallHash, type ToolResultHash, type MessageHash } from "./records.js";
 import type { SideSnapshot } from "./side-file.js";
 
@@ -19,6 +19,12 @@ export interface ShadowCall {
 	readonly toolCallId: string;
 	readonly input: unknown;
 	readonly before: SideSnapshot;
+	/**
+	 * billion-context-pi rejected at least one of this call's refs as unknown. A message ref that
+	 * neither its side file nor the native engine knows then goes to the native planner unchanged,
+	 * so both engines judge the same unknown ref (pi-context-aware#201).
+	 */
+	readonly bcpUnknownRef?: boolean;
 }
 export interface PreviewInput {
 	readonly sessionId: string;
@@ -97,6 +103,18 @@ function toolEvidence(message: RequestMessage) {
 	return { ...(toolCalls.length ? { toolCalls } : {}), ...(toolResult ? { toolResult } : {}), ...(incomplete ? { toolEvidence: "incomplete" as const } : {}) };
 }
 
+/**
+ * The text billion-context-pi gives a message without text content (`fallbackText` in its 0.1.83
+ * projection): the command as `$ <command>`, then the output. Only `bashExecution` messages use it
+ * here; billion-context-pi writes this text into the content of the message it sends.
+ */
+function bashExecutionText(message: RequestMessage): string {
+	const { command, output } = message as { command?: unknown; output?: unknown };
+	const parts: string[] = [];
+	if (typeof command === "string" && command) parts.push(`$ ${command}`);
+	if (typeof output === "string" && output) parts.push(output);
+	return parts.join("\n").trim();
+}
 /** No text, summary bodies, topic lines or tool arguments escape this normalization boundary. */
 export function hashRequestMessages(messages: readonly RequestMessage[]): RequestHashes {
 	let tagsSeen = false;
@@ -106,7 +124,8 @@ export function hashRequestMessages(messages: readonly RequestMessage[]): Reques
 		const text = typeof message.content === "string" ? message.content : Array.isArray(message.content)
 			? message.content.flatMap((part: { type?: unknown; text?: unknown }) => part?.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n") : "";
 		if (/<acp(?:\s|>)/u.test(text)) tagsSeen = true;
-		const clean = text.replace(/<acp\b[^>]*>[\s\S]*?<\/acp>/gu, "").trim();
+		const sent = !text && message.role === "bashExecution" ? bashExecutionText(message) : text;
+		const clean = sent.replace(/<acp\b[^>]*>[\s\S]*?<\/acp>/gu, "").trim();
 		const summary = clean.startsWith(SUMMARY_HEADER);
 		const newline = clean.indexOf("\n");
 		return summary
@@ -140,6 +159,37 @@ function summaryHash(content: unknown): SummaryHash | undefined {
 	return message ? { summary: message.summary, ...(message.topicHash !== undefined ? { topicHash: message.topicHash } : {}), hash: message.hash } : undefined;
 }
 
+/**
+ * Native ref for a raw id from billion-context-pi's side file. A `<entry>#<call>` id names one
+ * native message. Both engines key a single-call assistant entry by the bare entry id and give an
+ * entry with several calls one `<entry>#<call>` message per call (pi-context-aware#186). A bare id
+ * names the whole entry: a start ref resolves to the entry's first native message and an end ref
+ * to its last.
+ */
+function nativeRefs(state: BranchFoldState): (raw: string, end: boolean) => string | undefined {
+	let byEntry: Map<string, string[]> | undefined;
+	return (raw, end) => {
+		if (raw.includes("#")) return state.kernel.messageRefs.byRaw[raw];
+		if (!byEntry) {
+			byEntry = new Map();
+			for (const message of state.messages) {
+				const base = baseIdOf(message.id);
+				const ids = byEntry.get(base);
+				if (ids) ids.push(message.id); else byEntry.set(base, [message.id]);
+			}
+		}
+		const ids = byEntry.get(raw);
+		const id = end ? ids?.at(-1) : ids?.[0];
+		return id === undefined ? undefined : state.kernel.messageRefs.byRaw[id];
+	};
+}
+/** A well-formed message ref the native engine does not know, by the kernel's own lookup (exact, then padded). */
+function unknownMessageRef(state: BranchFoldState, ref: string): boolean {
+	const match = /^m0*(\d{1,5})$/u.exec(ref);
+	if (!match) return false;
+	const byRef = state.kernel.messageRefs.byRef;
+	return byRef[ref] === undefined && byRef[`m${match[1]!.padStart(5, "0")}`] === undefined;
+}
 /**
  * Build an isolated preview; never appends to the supplied branch or its session. Calls whose ids are
  * in `omit` are skipped and get no outcome; the first call's side-file snapshot still seeds the import,
@@ -237,18 +287,25 @@ export function previewShadowCalls(input: PreviewInput, calls: readonly ShadowCa
 		parseInvalidItems.push(parsed.diagnostics.invalidItems);
 		if (!parsed.diagnostics.ok || parsed.diagnostics.kind !== "ok" || parsed.diagnostics.invalidItems > 0) diffs.push({ kind: "input-parse", reason: `${parsed.diagnostics.kind}; invalidItems=${parsed.diagnostics.invalidItems}` });
 		const state = foldStateFromBranch(preview.getBranch(), preview.buildContextEntries());
-		const translate = (ref: string): string | undefined => {
-			const mapped = ref.startsWith("b") ? state.records.some((record) => record.blockId === ref) ? ref : undefined : state.kernel.messageRefs.byRaw[call.before.ok ? call.before.byRef[ref] ?? "" : ""];
+		const native = nativeRefs(state);
+		const translate = (ref: string, end: boolean): string | undefined => {
+			const raw = call.before.ok ? call.before.byRef[ref] : undefined;
+			const unknownToBoth = call.bcpUnknownRef === true && raw === undefined && unknownMessageRef(state, ref);
+			const mapped = unknownToBoth ? ref : ref.startsWith("b") ? state.records.some((record) => record.blockId === ref) ? ref : undefined : raw === undefined ? undefined : native(raw, end);
 			const safeRef = /^[mb]\d{1,7}$/u.test(ref) ? ref : "invalid-ref";
 			refs.push({ bcp: safeRef, ...(mapped && mapped !== "BLOCKED" ? { ours: mapped } : {}) });
 			if (!mapped || mapped === "BLOCKED") { diffs.push({ kind: "ref-unmapped", reason: `unmapped ref ${safeRef}` }); return undefined; }
 			return mapped;
 		};
+		// bcp 0.1.83's compress tool limits every range by the call's top-level summaryMaxChars and
+		// drops a per-range value (its normalizeRanges keeps none), so the parsed ranges' own value is
+		// not used (pi-context-aware#183). Pi validated the arguments first: a numeric string is a number here.
+		const summaryMaxChars = topLevelSummaryLimit(call.input);
 		const requests: FoldRequest[] = [];
 		for (const range of parsed.ranges) {
-			const startRef = translate(range.startRef);
-			const endRef = translate(range.endRef);
-			if (startRef && endRef) requests.push({ startRef, endRef, summary: range.summary, ...(range.topic ? { topic: range.topic } : {}) });
+			const startRef = translate(range.startRef, false);
+			const endRef = translate(range.endRef, true);
+			if (startRef && endRef) requests.push({ startRef, endRef, summary: range.summary, ...(range.topic ? { topic: range.topic } : {}), ...(summaryMaxChars !== undefined ? { summaryMaxChars } : {}) });
 		}
 		let created = 0;
 		const droppedErrors: string[] = [];
@@ -326,6 +383,11 @@ export function compareBlockEvidence(ours: BlockEvidence, bcp: BlockEvidence): P
 	return diffs;
 }
 
+/** The summary limit set by a recorded compress call's top-level `summaryMaxChars`, if any. */
+function topLevelSummaryLimit(input: unknown): number | undefined {
+	return input !== null && typeof input === "object" && !Array.isArray(input) ? summaryLimitOf((input as { summaryMaxChars?: unknown }).summaryMaxChars) : undefined;
+}
+
 /** Pure call comparison shared by the real-session recorder and differential runner. */
 export interface CompressComparison {
 	readonly verdict: Verdict;
@@ -340,7 +402,7 @@ export interface CompressComparison {
 	readonly bcpOutcome: OutcomeEvidence;
 }
 export function compareCompressCall(input: PreviewInput & ShadowCall & { readonly after: SideSnapshot; readonly observed: ObservedResult }): CompressComparison {
-	const planned = previewShadowCalls(input, [input]);
+	const planned = previewShadowCalls(input, [{ ...input, bcpUnknownRef: rejectedUnknownRef(input.observed) }]);
 	const diffs = [...planned.diffs];
 	if (!input.after.ok) diffs.push(input.after.diff);
 	const textBlocks = input.observed.kind === "panel" ? input.observed.blocks : 0;
@@ -431,6 +493,16 @@ export function expectedSummariesMatch(request: RequestHashes): boolean {
 		&& bodies.every((hash, index) => actual[index]?.hash === hash && actual[index]?.topicHash === topics[index]);
 }
 
+/**
+ * The sorted role and text hash of each non-summary message. Pi sends a custom_message with role
+ * `custom`; billion-context-pi rebuilds it as a `user` message with the same text, and the provider
+ * sees a user message either way. The comparison therefore reads `custom` as `user`. It does not
+ * read `bashExecution` as `user`: billion-context-pi keeps that role, and Pi sends the message to the
+ * provider as different text from a user message with the same content.
+ */
+export function contentKeys(request: RequestHashes): string[] {
+	return request.messages.filter((message) => !message.summary).map((message) => `${message.role === "custom" ? "user" : message.role}:${message.hash}`).sort();
+}
 /** Summary order is significant; non-summary text order is not. Tool calls, results and their pairing are compared too. */
 export function compareNextRequest(ours: RequestHashes, bcp: RequestHashes, priorDiffs: readonly ParityDiff[] = []) {
 	const diffs = [...priorDiffs];
@@ -441,12 +513,11 @@ export function compareNextRequest(ours: RequestHashes, bcp: RequestHashes, prio
 	if (ours.total > MAX_MESSAGE_HASHES || bcp.total > MAX_MESSAGE_HASHES) diffs.push({ kind: "too-large", reason: "request exceeds 2,000 messages" });
 	else {
 		const summaries = (request: RequestHashes) => request.messages.filter((message) => message.summary).map((message) => `${message.topicHash}:${message.hash}`);
-		const content = (request: RequestHashes) => request.messages.filter((message) => !message.summary).map((message) => `${message.role}:${message.hash}`).sort();
 		// If every native summary disappears, both sides' sequences are empty.
 		// Independent planned bodies and topics must still diagnose the lost context.
 		const expectedMismatch = ours.expectedSummaryHashes !== undefined && !expectedSummariesMatch(ours);
 		if (expectedMismatch || JSON.stringify(summaries(ours)) !== JSON.stringify(summaries(bcp))) diffs.push({ kind: "summaries" });
-		if (JSON.stringify(content(ours)) !== JSON.stringify(content(bcp))) diffs.push({ kind: "content" });
+		if (JSON.stringify(contentKeys(ours)) !== JSON.stringify(contentKeys(bcp))) diffs.push({ kind: "content" });
 		if ([ours, bcp].some((request) => request.messages.some((message) => message.toolEvidence))) diffs.push({ kind: "tool-evidence", reason: "a tool call or result lacks an id or name" });
 		if ([ours, bcp].some(duplicateCallIds)) diffs.push({ kind: "tool-evidence", reason: "two tool calls share an id" });
 		if (JSON.stringify(toolCallKeys(ours)) !== JSON.stringify(toolCallKeys(bcp))) diffs.push({ kind: "tool-calls" });

@@ -10,7 +10,7 @@
 import type { SessionBoundaryDraft, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { erasedSessionIds } from "../erasure/database.js";
 
-import { FOLD_ENTRY_TYPE, foldDrafts, isEditableEntry, renderFoldSummary, type FoldRecord } from "./fold-entries.js";
+import { FOLD_ENTRY_TYPE, cleanRequestId, foldDrafts, isEditableEntry, renderFoldSummary, type FoldRecord } from "./fold-entries.js";
 import { baseIdOf } from "./kernel/prune.js";
 import { entryToCoreMessages } from "./fold-adapter.js";
 import { widenFoldCoverage } from "./fold-coverage.js";
@@ -56,6 +56,7 @@ interface LegacyBlock {
 	active: boolean;
 	startRef?: string;
 	endRef?: string;
+	compressCallId?: string;
 }
 
 /** Required entry point for persisted imports/backfill; the pure importer below is for shadow previews. */
@@ -154,6 +155,7 @@ export function importAcpSideFile(input: AcpImportInput): AcpImportResult {
 			compressedTokens: block.compressedTokens,
 			createdAt: block.createdAt,
 			origin: "acp-import",
+			...(block.compressCallId ? { compressCallId: block.compressCallId } : {}),
 		};
 		imported.add(block.blockId);
 		records.push(record);
@@ -194,6 +196,7 @@ function readLegacyBlock(raw: unknown): LegacyBlock | string {
 		active,
 		...(typeof block.startRef === "string" ? { startRef: block.startRef } : {}),
 		...(typeof block.endRef === "string" ? { endRef: block.endRef } : {}),
+		...(cleanRequestId(block.compressCallId) ? { compressCallId: cleanRequestId(block.compressCallId) } : {}),
 	};
 }
 
