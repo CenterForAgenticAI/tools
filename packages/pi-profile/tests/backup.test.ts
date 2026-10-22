@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { main } from "../src/cli/main.ts";
@@ -22,7 +22,9 @@ import { encrypts, parseReplica, parseReplicas } from "../src/core/replica.ts";
 import { REMOTE_READ } from "../src/core/repo.ts";
 import { Refusal } from "../src/core/result.ts";
 import { addStore } from "../src/core/sessions.ts";
+import { archiveSessions } from "../src/core/archive.ts";
 import { captureIo, rsyncSkip, sandbox, type Sandbox } from "./helpers.ts";
+import { piSession } from "./sessionfixture.ts";
 
 let s: Sandbox;
 beforeEach(() => {
@@ -385,6 +387,119 @@ describe("backup run", () => {
 		assert.match(io.stderr, /cloud: warning: 1 sessions are smaller than their backup and were not sent: --home-alice--\/2026_a.jsonl/);
 	});
 
+	it("keeps the full copy of an archived session and does not warn about its stub; a stub with new lines still warns", { skip: rsyncSkip }, () => {
+		const root = store();
+		const a = join(root, "--home-alice--", "2026_a.jsonl");
+		const old = Date.now() - 40 * 86_400_000;
+		writeFileSync(a, piSession({ id: "a", cwd: "/nowhere", name: "a", prompts: ["first", "x".repeat(4000), "last"], t0: old }));
+		utimesSync(a, old / 1000, old / 1000);
+		const full = readFileSync(a, "utf8");
+		addReplica(s.l, { id: "cloud", kind: "s3", uri: "s3://bucket", encrypt: { recipients: [AGE] } }, env());
+		runBackup(s.l, { env: env(), runner: fakeTools([]) });
+		const sent = join(s.home, "s3/bucket/hosts/box/sessions/--home-alice--/2026_a.jsonl.age");
+		assert.equal(readFileSync(sent, "utf8"), `AGE[${full}]`);
+		const vol = join(s.home, "volume");
+		mkdirSync(vol);
+		const archived = archiveSessions(s.l, root, { store: { kind: "local", path: vol }, olderThanDays: 30, keepLocalDays: 0 }, { host: "box", apply: true, run: processToolRunner });
+		assert.deepEqual(archived.outcomes.filter((o) => o.kind === "stub").map((o) => o.rel), ["--home-alice--/2026_a.jsonl"]);
+		const r = runBackup(s.l, { env: env(), runner: fakeTools([]) })[0];
+		assert.deepEqual(r?.ok === true && [r.files, r.held], [0, []], "the stub is expected: no warning");
+		assert.equal(readFileSync(sent, "utf8"), `AGE[${full}]`, "the replica keeps the full session");
+		const io = Object.assign(captureIo(env()), { tools: fakeTools([]) });
+		assert.equal(main(["backup", "run"], io), 0);
+		assert.doesNotMatch(io.stderr, /smaller than their backup/);
+		// Lines Pi adds to the stub are not in any copy yet: that is still worth a warning.
+		appendFileSync(a, JSON.stringify({ type: "message", id: "n", parentId: null, timestamp: "2026-11-01T00:00:00.000Z", message: { role: "user", content: "new", timestamp: 1 } }) + "\n");
+		const grown = runBackup(s.l, { env: env(), runner: fakeTools([]) })[0];
+		assert.deepEqual(grown?.ok === true && grown.held, ["--home-alice--/2026_a.jsonl"]);
+	});
+
+	it("after the recipients change, does not warn about a stub whose archived copy the replica holds, and still warns about a stale one", { skip: rsyncSkip }, () => {
+		const root = store();
+		const old = Date.now() - 40 * 86_400_000;
+		const path = (n: string): string => join(root, "--home-alice--", `2026_${n}.jsonl`);
+		for (const n of ["a", "b"]) {
+			writeFileSync(path(n), piSession({ id: n, cwd: "/nowhere", name: n, prompts: ["first", "x".repeat(4000), "last"], t0: old }));
+			utimesSync(path(n), old / 1000, old / 1000);
+		}
+		addReplica(s.l, { id: "cloud", kind: "s3", uri: "s3://bucket", encrypt: { recipients: [AGE] } }, env());
+		runBackup(s.l, { env: env(), runner: fakeTools([]) });
+		const sent = (n: string): string => join(s.home, `s3/bucket/hosts/box/sessions/--home-alice--/2026_${n}.jsonl.age`);
+		const full = readFileSync(sent("a"), "utf8");
+		// b changes after the backup and before the archive, at the same size: the replica's copy of b is not the archived one.
+		writeFileSync(path("b"), readFileSync(path("b"), "utf8").replace("first", "FIRST"));
+		utimesSync(path("b"), (old + 5000) / 1000, (old + 5000) / 1000);
+		const vol = join(s.home, "volume");
+		mkdirSync(vol);
+		const archived = archiveSessions(s.l, root, { store: { kind: "local", path: vol }, olderThanDays: 30, keepLocalDays: 0 }, { host: "box", apply: true, run: processToolRunner });
+		assert.deepEqual(archived.outcomes.filter((o) => o.kind === "stub").map((o) => o.rel).sort(), ["a", "b"].map((n) => `--home-alice--/2026_${n}.jsonl`));
+		const cfg = JSON.parse(readFileSync(configPath(s.l), "utf8")) as { replicas: Array<{ encrypt: unknown }> };
+		(cfg.replicas[0] as { encrypt: unknown }).encrypt = { recipients: ["age1zvkyg2lqzraa2lnjvqej32nkuu0ues2s82hzrye869xeexvn73equnujwj"] };
+		writeFileSync(configPath(s.l), JSON.stringify(cfg));
+		for (const when of ["first run after the change", "next run"]) {
+			const r = runBackup(s.l, { env: env(), runner: fakeTools([]) })[0];
+			assert.deepEqual(r?.ok === true && [r.files, r.held], [0, ["--home-alice--/2026_b.jsonl"]], when);
+		}
+		assert.equal(readFileSync(sent("a"), "utf8"), full, "the replica keeps the full session");
+	});
+
+	it("warns about the stub of a session whose replica copy is older than the archived copy", { skip: rsyncSkip }, () => {
+		const root = store();
+		const old = Date.now() - 40 * 86_400_000;
+		const line = JSON.stringify({ type: "message", id: "n", parentId: null, timestamp: "2026-11-01T00:00:00.000Z", message: { role: "user", content: "new", timestamp: 1 } }) + "\n";
+		const path = (n: string): string => join(root, "--home-alice--", `2026_${n}.jsonl`);
+		// a: Pi adds a line (size and time change); b: a line, but the old time; c: the same size, another time; d: unchanged.
+		for (const n of ["a", "b", "c", "d"]) {
+			writeFileSync(path(n), piSession({ id: n, cwd: "/nowhere", name: n, prompts: ["first", "x".repeat(4000), "last"], t0: old }));
+			utimesSync(path(n), old / 1000, old / 1000);
+		}
+		addReplica(s.l, { id: "cloud", kind: "s3", uri: "s3://bucket", encrypt: { recipients: [AGE] } }, env());
+		runBackup(s.l, { env: env(), runner: fakeTools([]) });
+		const sent = (n: string): string => join(s.home, `s3/bucket/hosts/box/sessions/--home-alice--/2026_${n}.jsonl.age`);
+		const first = readFileSync(sent("a"), "utf8");
+		// The next backup does not run before the archive does.
+		appendFileSync(path("a"), line);
+		utimesSync(path("a"), (old + 5000) / 1000, (old + 5000) / 1000);
+		appendFileSync(path("b"), line);
+		utimesSync(path("b"), old / 1000, old / 1000);
+		writeFileSync(path("c"), readFileSync(path("c"), "utf8").replace("first", "FIRST"));
+		utimesSync(path("c"), (old + 5000) / 1000, (old + 5000) / 1000);
+		const vol = join(s.home, "volume");
+		mkdirSync(vol);
+		const archived = archiveSessions(s.l, root, { store: { kind: "local", path: vol }, olderThanDays: 30, keepLocalDays: 0 }, { host: "box", apply: true, run: processToolRunner });
+		assert.deepEqual(archived.outcomes.filter((o) => o.kind === "stub").map((o) => o.rel).sort(), ["a", "b", "c", "d"].map((n) => `--home-alice--/2026_${n}.jsonl`));
+		const r = runBackup(s.l, { env: env(), runner: fakeTools([]) })[0];
+		assert.deepEqual(r?.ok === true && [r.files, [...r.held].sort()], [0, ["a", "b", "c"].map((n) => `--home-alice--/2026_${n}.jsonl`)], "the replica lacks what was archived: warn");
+		assert.equal(readFileSync(sent("a"), "utf8"), first, "the stub is still not sent");
+		const again = runBackup(s.l, { env: env(), runner: fakeTools([]) })[0];
+		assert.deepEqual(again?.ok === true && [...again.held].sort(), ["a", "b", "c"].map((n) => `--home-alice--/2026_${n}.jsonl`), "still warned next time");
+	});
+
+	it("warns about a stub the archive list does not name", { skip: rsyncSkip }, () => {
+		const root = store();
+		const a = join(root, "--home-alice--", "2026_a.jsonl");
+		const old = Date.now() - 40 * 86_400_000;
+		writeFileSync(a, piSession({ id: "a", cwd: "/nowhere", name: "a", prompts: ["first", "x".repeat(4000), "last"], t0: old }));
+		utimesSync(a, old / 1000, old / 1000);
+		addReplica(s.l, { id: "cloud", kind: "s3", uri: "s3://bucket", encrypt: { recipients: [AGE] } }, env());
+		runBackup(s.l, { env: env(), runner: fakeTools([]) });
+		const vol = join(s.home, "volume");
+		mkdirSync(vol);
+		archiveSessions(s.l, root, { store: { kind: "local", path: vol }, olderThanDays: 30, keepLocalDays: 0 }, { host: "box", apply: true, run: processToolRunner });
+		const list = join(root, ".pi-profile-archive.json");
+		const m = JSON.parse(readFileSync(list, "utf8")) as { sessions: Record<string, { sha256: string; stubbedAt?: string }> };
+		const entry = m.sessions["--home-alice--/2026_a.jsonl"];
+		assert.ok(entry?.stubbedAt !== undefined);
+		for (const wrong of [{ ...entry, sha256: "0".repeat(64) }, { ...entry, stubbedAt: undefined }]) {
+			writeFileSync(list, JSON.stringify({ ...m, sessions: { "--home-alice--/2026_a.jsonl": wrong } }));
+			const r = runBackup(s.l, { env: env(), runner: fakeTools([]) })[0];
+			assert.deepEqual(r?.ok === true && r.held, ["--home-alice--/2026_a.jsonl"], JSON.stringify(wrong));
+		}
+		rmSync(list);
+		const r = runBackup(s.l, { env: env(), runner: fakeTools([]) })[0];
+		assert.deepEqual(r?.ok === true && r.held, ["--home-alice--/2026_a.jsonl"], "no archive list");
+	});
+
 	it("--full resends every staged file; removed sessions drop out of the state", () => {
 		const root = store();
 		addReplica(s.l, { id: "cloud", kind: "s3", uri: "s3://bucket", encrypt: false }, env());
@@ -468,6 +583,24 @@ describe("backup run", () => {
 });
 
 const hasRsync = rsyncSkip === false;
+
+describe("the tool runner", () => {
+	it("runs a tool in / when the folder pi-profile was started in has been removed", () => {
+		const here = process.cwd();
+		const gone = join(s.home, "gone");
+		mkdirSync(gone);
+		process.chdir(gone);
+		rmSync(gone, { recursive: true });
+		let r;
+		try {
+			r = processToolRunner("sh", ["-c", "pwd -P"]);
+		} finally {
+			process.chdir(here);
+		}
+		assert.deepEqual([r.status, r.stdout], [0, "/\n"]);
+		assert.equal(processToolRunner("sh", ["-c", "pwd -P"]).stdout, realpathSync(here) + "\n", "a folder that is still there is kept");
+	});
+});
 
 describe("backup run with the real rsync", { skip: hasRsync ? false : "rsync is not installed" }, () => {
 	it("copies and then appends to a growing session, without links or secrets", () => {

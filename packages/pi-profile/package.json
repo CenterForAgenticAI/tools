@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Named, isolated Pi profiles: create, switch and check profile directories, with a colour badge in the Pi status bar.",
   "keywords": [
     "pi-package"
@@ -25,7 +25,7 @@
     "test:public": "npm test && npm run smoke:package",
     "scan:public-references": "node scripts/public-reference-scan.ts",
     "smoke:package": "node scripts/smoke-package.mjs",
-    "proof": "cd model && bend PROOF.bend --check-only",
+    "proof": "sh scripts/check-model.sh",
     "check": "npm run lint && npm run typecheck && npm run test:coverage && npm run build && npm run smoke:package",
     "hooks:install": "node scripts/install-hooks.mjs"
   },

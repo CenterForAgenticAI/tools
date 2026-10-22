@@ -635,6 +635,8 @@ function ownsBelow(key: string): boolean {
  * these forms count: `${VAR}`, `$VAR`, `env:VAR` (VAR is a shell name:
  * a letter or `_`, then letters, digits or `_`), and `!command`. A bare
  * name such as `OPENAI_API_KEY` is not a reference: it is a literal.
+ * Pi and pi-web-access do not resolve `env:VAR`; `envColonPaths` finds it
+ * in their files for doctor.
  */
 export function credentialReference(v: string): boolean {
 	return REFERENCE.test(v) || COMMAND.test(v);
@@ -1228,6 +1230,33 @@ export function scanConfigFile(file: string, rel: string): { ok: true; at: strin
 	const r = readConfigText(file);
 	if (!r.ok) return r;
 	return { ok: true, at: [...new Set(scanText(r.text, rel).map((f) => f.at))] };
+}
+
+const ENV_COLON = /^env:[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * The dotted key paths of the JSON file `file` whose whole value, trimmed,
+ * is `env:VAR`. A reference for some extension configs, so the credential
+ * scan does not flag it, but a literal string to Pi and pi-web-access. Empty
+ * when the file cannot be read or is not JSON. Never returns the values.
+ */
+export function envColonPaths(file: string): string[] {
+	const r = readConfigText(file);
+	if (!r.ok) return [];
+	let value: unknown;
+	try {
+		value = JSON.parse(r.text);
+	} catch {
+		return [];
+	}
+	const out: string[] = [];
+	const visit = (v: unknown, path: readonly string[]): void => {
+		if (Array.isArray(v)) v.forEach((x, i) => visit(x, [...path, String(i)]));
+		else if (typeof v === "object" && v !== null) for (const [k, x] of Object.entries(v)) visit(x, [...path, k]);
+		else if (typeof v === "string" && ENV_COLON.test(v.trim())) out.push(path.length === 0 ? "(value)" : path.join("."));
+	};
+	visit(value, []);
+	return out;
 }
 
 /** The scrypt parameters of an allow entry: N = 2^14, r = 8, p = 1, 32 bytes out. */

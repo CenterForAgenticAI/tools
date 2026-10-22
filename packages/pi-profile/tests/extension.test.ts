@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { CLI_PATH, currentRuntime, type AttachedSpawn, type Runtime } from "../src/core/autobackup.ts";
 import { createProfile } from "../src/core/profiles.ts";
 import piProfile, { badgeFor, titleFor, USAGE, type Deps } from "../src/index.ts";
-import { sandbox, type Sandbox } from "./helpers.ts";
+import { archiveSessions } from "../src/core/archive.ts";
+import type { ArchiveSettings } from "../src/core/archivesettings.ts";
+import { processToolRunner } from "../src/core/backup.ts";
+import { readStub } from "../src/core/sessionfile.ts";
+import { rsyncSkip, sandbox, type Sandbox } from "./helpers.ts";
+import { piSession } from "./sessionfixture.ts";
 
 let s: Sandbox;
 beforeEach(() => {
@@ -455,5 +460,117 @@ describe("/profile status, list, doctor and switch", () => {
 			["profiles: default, play, *work", "info"],
 			["switch: Pi cannot change profile while it runs. Quit, then start it with: pi-profile run play (or pi --profile play with the shell integration)", "info"],
 		]);
+	});
+});
+
+describe("archived sessions", { skip: rsyncSkip }, () => {
+	const DAY = 86_400_000;
+	let store: string;
+	let path: string;
+	let original: Buffer;
+	const env = (): Record<string, string> => ({ PI_PROFILE_HOME: s.home, PI_PROFILE_NO_GLOBAL_DEFAULT: "1", PI_PROFILE_HOST_ID: "box" });
+	const settings = (): ArchiveSettings => ({ store: { kind: "local", path: join(s.home, "volume") }, olderThanDays: 30, keepLocalDays: 0 });
+
+	beforeEach(() => {
+		mkdirSync(join(s.home, "volume"));
+		mkdirSync(join(s.home, "pi-profile"), { recursive: true });
+		writeFileSync(join(s.home, "pi-profile", "config.json"), JSON.stringify({ schemaVersion: 1, hostId: "box", sessionStores: {}, archive: { store: { kind: "local", path: join(s.home, "volume") }, keepLocalDays: 0 } }));
+		store = join(s.home, "agent", "sessions");
+		path = join(store, "--p--", "s.jsonl");
+		mkdirSync(join(store, "--p--"), { recursive: true });
+		writeFileSync(path, piSession({ id: "abc", cwd: "/nowhere", name: "n", prompts: ["first"], t0: Date.now() - 40 * DAY }));
+		utimesSync(path, (Date.now() - 40 * DAY) / 1000, (Date.now() - 40 * DAY) / 1000);
+		original = readFileSync(path);
+		archiveSessions(s.l, store, settings(), { host: "box", apply: true, run: processToolRunner });
+		assert.ok(readStub(readFileSync(path, "utf8")) !== undefined);
+	});
+
+	const switchTo = async (pi: FakePi, u: FakeUi, target: string | undefined, reason = "resume"): Promise<unknown> =>
+		pi.handlers.get("session_before_switch")?.({ type: "session_before_switch", reason, targetSessionFile: target }, u.ctx);
+
+	it("/resume restores the full session before Pi opens it", async () => {
+		const pi = load(env());
+		const u = ui("/x");
+		const result = await switchTo(pi, u, path);
+		assert.equal((result as { cancel?: boolean } | undefined)?.cancel, undefined);
+		assert.ok(readFileSync(path).equals(original));
+		assert.deepEqual(u.notes.map((n) => n[1]), ["info"]);
+	});
+
+	it("/resume of a stub with new lines keeps it and puts the full session beside it", async () => {
+		appendFileSync(path, JSON.stringify({ type: "message", id: "n", parentId: null, timestamp: "x", message: { role: "user", content: "hi" } }) + "\n");
+		const grown = readFileSync(path);
+		const pi = load(env());
+		const u = ui("/x");
+		await switchTo(pi, u, path);
+		assert.ok(readFileSync(path).equals(grown));
+		const kept = readdirSync(join(store, "--p--")).filter((n) => n.includes(".kept-"));
+		assert.equal(kept.length, 1);
+		assert.ok(readFileSync(join(store, "--p--", kept[0] ?? "")).equals(original));
+		assert.match(u.notes[0]?.[0] ?? "", /kept/);
+	});
+
+	it("/resume of a stub grown past 1 MiB keeps it and puts the full session beside it", async () => {
+		appendFileSync(path, JSON.stringify({ type: "message", id: "n", parentId: null, timestamp: "x", message: { role: "user", content: "x".repeat(1_100_000) } }) + "\n");
+		const grown = readFileSync(path);
+		const pi = load(env());
+		const u = ui("/x");
+		await switchTo(pi, u, path);
+		assert.ok(readFileSync(path).equals(grown));
+		const kept = readdirSync(join(store, "--p--")).filter((n) => n.includes(".kept-"));
+		assert.equal(kept.length, 1);
+		assert.ok(readFileSync(join(store, "--p--", kept[0] ?? "")).equals(original));
+		assert.match(u.notes[0]?.[0] ?? "", /kept/);
+	});
+
+	it("cancels the switch and says why when the archive copy cannot be read", async () => {
+		rmSync(join(s.home, "volume", "box"), { recursive: true });
+		const stub = readFileSync(path);
+		const pi = load(env());
+		const u = ui("/x");
+		const result = await switchTo(pi, u, path);
+		assert.equal((result as { cancel?: boolean }).cancel, true);
+		assert.ok(readFileSync(path).equals(stub));
+		assert.equal(u.notes[0]?.[1], "error");
+		assert.match(u.notes[0]?.[0] ?? "", /pi-profile sessions restore abc/);
+	});
+
+	it("leaves /new and ordinary sessions alone", async () => {
+		const plainPath = join(store, "--p--", "plain.jsonl");
+		writeFileSync(plainPath, piSession({ id: "p", cwd: "/x", prompts: ["x"], t0: 0 }));
+		const before = readFileSync(plainPath);
+		const pi = load(env());
+		const u = ui("/x");
+		assert.equal(await switchTo(pi, u, undefined, "new"), undefined);
+		assert.equal(await switchTo(pi, u, plainPath), undefined);
+		assert.ok(readFileSync(plainPath).equals(before));
+		assert.deepEqual(u.notes, []);
+	});
+
+	it("does not tag a stub opened at startup, so it stays restorable in place", () => {
+		const appended: string[] = [];
+		const handlers = new Map<string, Handler>();
+		const api = { on: (n: string, h: Handler) => handlers.set(n, h), registerCommand: () => undefined, appendEntry: (t: string) => appended.push(t) };
+		piProfile(api as never, { env: env() });
+		const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+		const u = ui("/x");
+		const ctx = { ...(u.ctx as object), sessionManager: { getBranch: () => lines.slice(1), getHeader: () => lines[0], getEntries: () => lines.slice(1) } };
+		handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+		assert.deepEqual(appended, []);
+		const forked = { ...(u.ctx as object), sessionManager: { getBranch: () => lines.slice(1), getHeader: () => ({ ...lines[0], id: "fork" }), getEntries: () => lines.slice(1) } };
+		handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, forked);
+		assert.deepEqual(appended, ["pi-profile/tag"], "a fork is a live session and is tagged");
+	});
+
+	it("at startup on a stub (pi --session, -c, --resume) warns with the restore command", () => {
+		const pi = load(env());
+		const u = ui("/x");
+		const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+		const ctx = { ...(u.ctx as object), sessionManager: { getBranch: () => [], getHeader: () => lines[0], getEntries: () => lines.slice(1) } };
+		pi.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+		assert.deepEqual(u.notes.filter((n) => n[1] === "warning").map((n) => n[0].includes("pi-profile sessions restore abc")), [true]);
+		const forked = { ...(u.ctx as object), sessionManager: { getBranch: () => [], getHeader: () => ({ ...lines[0], id: "fork" }), getEntries: () => lines.slice(1) } };
+		pi.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, forked);
+		assert.match(u.notes.at(-1)?.[0] ?? "", /forked from an archived session/);
 	});
 });

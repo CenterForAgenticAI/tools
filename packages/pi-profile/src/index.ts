@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { beforeSwitch, startupNotice } from "./core/archivehook.ts";
 import { authPoolOnSessionEnd, authPoolOnSessionStart } from "./core/authpool.ts";
 import { autoBackupOnSessionEnd, currentRuntime, nodeExecPath, startBackupRun, startCliRun, type AttachedSpawn, type BackupRunOutcome, type CliRun, type Runtime } from "./core/autobackup.ts";
 import type { BackupResult } from "./core/backup.ts";
@@ -225,6 +226,24 @@ function notify(ctx: ExtensionContext, note: Note): void {
 	}
 }
 
+/**
+ * pi --session, -c, --resume and --fork pick a session before extensions
+ * load, so they can open a stub without session_before_switch. Say so, with
+ * the command that restores it.
+ */
+function archivedNotice(ctx: ExtensionContext): boolean {
+	try {
+		const sm = ctx.sessionManager;
+		const notice = startupNotice({ header: sm.getHeader(), entries: sm.getEntries() });
+		if (notice === undefined) return false;
+		notify(ctx, [notice.text, "warning"]);
+		return notice.stub;
+	} catch {
+		// A context replaced by a newer session throws; that one checks itself.
+		return false;
+	}
+}
+
 /** Test seams: the environment, the process spawner and the runtime. Pi passes none. */
 export interface Deps {
 	readonly env?: Env;
@@ -249,9 +268,18 @@ export default function piProfile(pi: ExtensionAPI, deps: Deps = {}): void {
 				if (current === session) retitle(ctx, env());
 			}, ms).unref();
 		}
-		tag(pi, ctx, env());
+		// A stub of an archived session is not a live session: a tag would add a
+		// line to it, and a restore keeps a stub with added lines beside the full one.
+		if (!archivedNotice(ctx)) tag(pi, ctx, env());
 		// Pooled auth: note the logins as the session starts, so the end can tell what changed. Never throws.
 		authPoolOnSessionStart(env());
+	});
+	// /resume (and session import) name the file before Pi opens it: restore an archived session first.
+	pi.on("session_before_switch", (event, ctx) => {
+		const action = beforeSwitch(env(), event.targetSessionFile);
+		if (action.kind === "none") return undefined;
+		notify(ctx, [action.note, action.kind === "cancel" ? "error" : action.kind === "kept-both" ? "warning" : "info"]);
+		return action.kind === "cancel" ? { cancel: true } : undefined;
 	});
 	// A session rename makes Pi rewrite the title before extensions hear of it.
 	pi.on("session_info_changed", (_event, ctx) => {

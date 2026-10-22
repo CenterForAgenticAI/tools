@@ -125,20 +125,75 @@ law force_takes_incoming:
   for +i: D.Cred
   {D.merge(l, i, True{}) == i : D.Cred}
 
-# L20: API keys are never pushed automatically, in any mode.
-law api_keys_never_auto_pushed:
-  for +m: N.AuthMode
-  for +k: Nat
-  {D.autoPush(m, D.ApiKey{k}) == False{} : Bool}
+# L20 and L21 changed, and L26 added, as proposed on 2026-10-21 (decisions on
+# issue 67); pending review. autoPush(mode, pushKeys, source, entry): pushKeys
+# is the profile's flag for pushing API keys; source says whether this machine
+# ran /login for the entry or received it from a peer.
 
-# L21: only pooled mode pushes anything automatically.
-law shared_never_auto_pushes:
-  for +c: D.Cred
-  {D.autoPush(N.Shared{}, c) == False{} : Bool}
+# L20: without the profile's flag for it, an API key is never pushed
+# automatically, in any mode.
+law api_keys_pushed_only_with_flag:
+  for +m: N.AuthMode
+  for +s: D.LoginSource
+  for +k: Nat
+  {D.autoPush(m, False{}, s, D.ApiKey{k}) == False{} : Bool}
+
+# L21: any machine may refresh a shared login and push it. A shared or pooled
+# profile pushes a changed OAuth login whether this machine logged in or
+# received the login from a peer: no machine owns a login. A separate profile
+# never pushes.
+law shared_pushes_logins:
+  for +f: Bool
+  for +s: D.LoginSource
+  for +e: Nat
+  {D.autoPush(N.Shared{}, f, s, D.OAuth{e}) == True{} : Bool}
+
+law pooled_pushes_logins:
+  for +f: Bool
+  for +s: D.LoginSource
+  for +e: Nat
+  {D.autoPush(N.Pooled{}, f, s, D.OAuth{e}) == True{} : Bool}
 
 law separate_never_auto_pushes:
+  for +f: Bool
+  for +s: D.LoginSource
   for +c: D.Cred
-  {D.autoPush(N.Separate{}, c) == False{} : Bool}
+  {D.autoPush(N.Separate{}, f, s, c) == False{} : Bool}
+
+# L26, rewritten on 2026-10-21 (Chris's decision on issue 67): the newest
+# login wins. A push or merge without --force takes the incoming OAuth login
+# when it was written later than the local copy, whatever either expiry says.
+# When the write times are equal, the later expiry wins; a full tie keeps the
+# local copy. Automatic pushes never pass --force, and --force still takes the
+# incoming entry (L19). In takeIncoming(lw, le, iw, ie), lw and iw are when
+# the local and incoming copies were written, le and ie when they expire. The
+# code follows in the auth change.
+law newer_login_taken:
+  for +lw: Nat
+  for +le: Nat
+  for +iw: Nat
+  for +ie: Nat
+  for h: L.T(L.ltN(lw, iw))
+  {D.takeIncoming(lw, le, iw, ie) == True{} : Bool}
+
+law older_login_kept:
+  for +lw: Nat
+  for +le: Nat
+  for +iw: Nat
+  for +ie: Nat
+  for h: L.T(L.ltN(iw, lw))
+  {D.takeIncoming(lw, le, iw, ie) == False{} : Bool}
+
+law same_write_later_expiry_wins:
+  for +w: Nat
+  for +le: Nat
+  for +ie: Nat
+  {D.takeIncoming(w, le, w, ie) == L.ltN(le, ie) : Bool}
+
+law full_tie_keeps_local:
+  for +w: Nat
+  for +e: Nat
+  {D.takeIncoming(w, e, w, e) == False{} : Bool}
 
 # ---------------------------------------------------------------- pi-multi-account
 
@@ -215,3 +270,30 @@ law install_shown_first:
   for +c: D.Command
   for +p: D.PinCheck
   {D.showsFirst(D.plan(c, p)) == True{} : Bool}
+
+# ---------------------------------------------------------------- the session archive
+# L27-L29 proposed on 2026-10-21 (decisions on issue 64); pending review.
+
+# L27: an archive never deletes or stubs a session before its compressed copy
+# is verified on the target, and never removes a session whose copy did not
+# verify.
+law archive_verifies_before_removing:
+  for +d: Bool
+  for +c: D.CopyCheck
+  {D.verifiedFirst(D.archivePlan(d, c)) == True{} : Bool}
+
+law archive_keeps_unverified:
+  for +d: Bool
+  for +c: D.CopyCheck
+  {Bool.and(D.removes(D.archivePlan(d, c)), Bool.not(D.copyMatches(c))) == False{} : Bool}
+
+# L28: a restore never overwrites a stub that has had lines added after
+# archiving; it keeps both copies.
+law restore_keeps_grown_stub:
+  for +n: Nat
+  {D.overwritesStub(D.restoreAct(1n+n)) == False{} : Bool}
+
+# L29: an archive dry run changes nothing.
+law archive_dry_run_changes_nothing:
+  for +c: D.CopyCheck
+  {D.changes(D.archivePlan(True{}, c)) == False{} : Bool}

@@ -282,20 +282,41 @@ def merge(l: Cred, i: Cred, force: Bool) -> Cred:
     case False{}:
       mergeLocal(l, i)
 
-# Pooled mode pushes refreshed OAuth entries to peers after a session. It
-# never pushes API keys, and no other mode pushes anything on its own.
-def autoPush(m: N.AuthMode, c: Cred) -> Bool:
+# When an entry stops working. An API key does not expire; it reads as 0, and
+# the laws read an expiry only where the local entry is an OAuth login.
+def credExpiry(c: Cred) -> Nat:
+  match c:
+    case ApiKey{k}:
+      0n
+    case OAuth{e}:
+      e
+
+# How this machine came to hold a login: it ran /login here, or it received
+# the login from a peer.
+type LoginSource is Data:
+  LoggedInHere{}
+  FromPeer{}
+
+# Whether a profile pushes an entry to its peers on its own when it changes.
+# Shared and pooled profiles push OAuth logins. Any machine may refresh a
+# shared login and push it: no machine owns a login, so the push does not
+# depend on the LoginSource. An API key is pushed only when the profile turns
+# on its own flag for that (pushKeys). A separate profile pushes nothing.
+def pushesCred(pushKeys: Bool, c: Cred) -> Bool:
+  match c:
+    case ApiKey{k}:
+      pushKeys
+    case OAuth{e}:
+      True{}
+
+def autoPush(m: N.AuthMode, pushKeys: Bool, s: LoginSource, c: Cred) -> Bool:
   match m:
     case N.Shared{}:
-      False{}
+      pushesCred(pushKeys, c)
     case N.Separate{}:
       False{}
     case N.Pooled{}:
-      match c:
-        case ApiKey{k}:
-          False{}
-        case OAuth{e}:
-          True{}
+      pushesCred(pushKeys, c)
 
 # ---------------------------------------------------------------- pi-multi-account
 
@@ -535,8 +556,10 @@ def showsFirst(xs: List<Step>) -> Bool:
 
 # The exit status of a command that takes steps xs, when the Pi it launches
 # exits with piExit. Refuse ends the command with exit 2. Launch ends it too:
-# the command exits with Pi's status. A command that does neither exits 0;
-# the model leaves out other failures (exit 1).
+# the command exits with Pi's status. A command that does neither exits 0.
+# The model leaves out the exits that happen before the pin check: other
+# failures (exit 1), refusals not caused by the pin, such as a profile that
+# does not exist (exit 2), and a `pi` that cannot start (exit 127).
 def exitStep(s: Step, piExit: Nat, rest: Nat) -> Nat:
   match s:
     case Warn{}:
@@ -556,3 +579,151 @@ def exitCode(xs: List<Step>, +piExit: Nat) -> Nat:
       0n
     case h <> t:
       exitStep(h, piExit, exitCode(t, piExit))
+
+# ---------------------------------------------------------------- the session archive
+
+# What reading the archived copy back from the target found: it matches the
+# session (decompressed bytes and SHA-256), it differs, or it is not there.
+type CopyCheck is Data:
+  CopyMatches{}
+  CopyDiffers{}
+  CopyMissing{}
+
+# What an archive run does to one session, in order. Report lists the session
+# and the bytes it would free. Compress writes the compressed copy to the
+# target. Verified means the copy on the target was read back and matched.
+# Record writes the manifest entry. Stub replaces the live file with a small
+# stub (header, name, first prompt). Delete removes the live file; the archive
+# as decided leaves a stub, and Delete is here so the laws also cover an
+# archive that removes the file outright.
+type ArchStep is Data:
+  Report{}
+  Compress{}
+  Verified{}
+  Record{}
+  Stub{}
+  Delete{}
+
+# A dry run only reports. With --apply the session is stubbed only after its
+# copy verified; a copy that did not verify leaves the session in place.
+def archivePlan(dryRun: Bool, c: CopyCheck) -> List<ArchStep>:
+  match dryRun:
+    case True{}:
+      [Report{}]
+    case False{}:
+      match c:
+        case CopyMatches{}:
+          [Report{}, Compress{}, Verified{}, Record{}, Stub{}]
+        case CopyDiffers{}:
+          [Report{}, Compress{}]
+        case CopyMissing{}:
+          [Report{}, Compress{}]
+
+def copyMatches(c: CopyCheck) -> Bool:
+  match c:
+    case CopyMatches{}:
+      True{}
+    case CopyDiffers{}:
+      False{}
+    case CopyMissing{}:
+      False{}
+
+# Steps that change something: everything but Report.
+def isChange(s: ArchStep) -> Bool:
+  match s:
+    case Report{}:
+      False{}
+    case Compress{}:
+      True{}
+    case Verified{}:
+      True{}
+    case Record{}:
+      True{}
+    case Stub{}:
+      True{}
+    case Delete{}:
+      True{}
+
+# Steps that take the full session out of the live store.
+def isRemoval(s: ArchStep) -> Bool:
+  match s:
+    case Report{}:
+      False{}
+    case Compress{}:
+      False{}
+    case Verified{}:
+      False{}
+    case Record{}:
+      False{}
+    case Stub{}:
+      True{}
+    case Delete{}:
+      True{}
+
+def isVerified(s: ArchStep) -> Bool:
+  match s:
+    case Report{}:
+      False{}
+    case Compress{}:
+      False{}
+    case Verified{}:
+      True{}
+    case Record{}:
+      False{}
+    case Stub{}:
+      False{}
+    case Delete{}:
+      False{}
+
+def hasArch(~f: ArchStep -> Bool, xs: List<ArchStep>) -> Bool:
+  match xs:
+    case Nil{}:
+      False{}
+    case h <> t:
+      Bool.or(f(h), hasArch(~f, t))
+
+def changes(xs: List<ArchStep>) -> Bool:
+  hasArch(~isChange, xs)
+
+def removes(xs: List<ArchStep>) -> Bool:
+  hasArch(~isRemoval, xs)
+
+# Every Stub or Delete comes after a Verified.
+def verifiedFirst.go(xs: List<ArchStep>, +seen: Bool) -> Bool:
+  match xs:
+    case Nil{}:
+      True{}
+    case +h <> t:
+      Bool.and(Bool.or(seen, Bool.not(isRemoval(h))), verifiedFirst.go(t, Bool.or(seen, isVerified(h))))
+
+def verifiedFirst(xs: List<ArchStep>) -> Bool:
+  verifiedFirst.go(xs, False{})
+
+# Restoring an archived session over its stub. `added` is the number of lines
+# written to the stub after it was archived (the session was continued from
+# the stub). An untouched stub is replaced by the restored file; a stub with
+# added lines is kept, and the restored file is written beside it.
+type Restore is Data:
+  ReplaceStub{}
+  KeepBoth{}
+
+def restoreAct(added: Nat) -> Restore:
+  match added:
+    case 0n:
+      ReplaceStub{}
+    case 1n+n:
+      KeepBoth{}
+
+def overwritesStub(r: Restore) -> Bool:
+  match r:
+    case ReplaceStub{}:
+      True{}
+    case KeepBoth{}:
+      False{}
+
+# Whether a merge without --force takes the incoming OAuth login. lw and iw
+# are the times the local and incoming copies were written; le and ie are
+# their expiry times. The later write wins whatever the expiry says; equal
+# write times fall back to the later expiry; a full tie keeps the local copy.
+def takeIncoming(+lw: Nat, le: Nat, +iw: Nat, ie: Nat) -> Bool:
+  Bool.pick(Bool, L.ltN(lw, iw), True{}, Bool.pick(Bool, L.ltN(iw, lw), False{}, L.ltN(le, ie)))

@@ -9,6 +9,8 @@ import { isAuthMode, isGroupName, type AuthMode, type Manifest } from "../core/m
 import { addStore, removeStore, useProfileSessions, useStore } from "../core/sessions.ts";
 import { DEFAULT_HUB, loadConfig } from "../core/config.ts";
 import { migrateSessions, resolveEndpoint, type MigrateResult, type OutcomeKind } from "../core/migrate.ts";
+import type { ArchiveKind, ArchiveResult } from "../core/archive.ts";
+import { archiveFolders, archiveRun, homeOf, installSchedule, resolveRestoreTarget, restoreOne, sessionFolders } from "../core/archivecli.ts";
 import { DEFAULT_PROFILE } from "../core/names.ts";
 import { pullSessions } from "../core/pull.ts";
 import { exportAuth, parsePayload, payloadText, processSshRunner, pullAuth, pushAuth, readStdinPayload, receiveAuth, type Outcome, type SshRunner } from "../core/authsync.ts";
@@ -127,6 +129,14 @@ export const HELP = `Usage: pi-profile <command>
   sessions migrate FROM TO [--apply]
                                Move session files (store IDs or absolute
                                paths); a dry run unless --apply
+  sessions archive [--older-than 30d] [--profile P | --all] [--apply] [--quiet]
+                               Compress old sessions into the archive store
+                               and leave a stub Pi still lists; a dry run
+                               unless --apply
+  sessions archive --install-schedule
+                               Write a daily systemd user timer (Linux) or
+                               launchd agent (macOS); does not start it
+  sessions restore ID|PATH     Bring an archived session back from the archive
   sessions pull REPLICA [--host H] [--identity FILE]
                                Copy other hosts' sessions from a replica to
                                ~/.pi/pi-profile/remote (read-only; fork to continue);
@@ -237,6 +247,38 @@ function printMigration(io: Io, r: MigrateResult): number {
 	if (r.tempsRemoved > 0) io.out(`  removed ${r.tempsRemoved} temporary files from an interrupted run\n`);
 	if (!r.applied) io.out("repeat with --apply to move the files\n");
 	return r.outcomes.some((o) => o.kind === "conflict" || o.kind === "fail") ? 1 : 0;
+}
+
+const ARCHIVE_LABELS: Record<ArchiveKind, [string, string]> = {
+	archive: ["would archive", "archived, local copy kept for now"],
+	stub: ["would replace by a stub", "archived and replaced by a stub"],
+	skip: ["would skip", "skipped"],
+	fail: ["failed, kept", "failed, kept"],
+	recover: ["would tidy after an interrupted run", "tidied after an interrupted run"],
+};
+
+function printArchive(io: Io, results: readonly ArchiveResult[], quiet: boolean): number {
+	let bad = false;
+	for (const r of results) {
+		const lines: string[] = [];
+		for (const kind of ["archive", "stub", "skip", "fail", "recover"] as const) {
+			const group = r.outcomes.filter((o) => o.kind === kind);
+			if (group.length === 0) continue;
+			const n = group.length;
+			lines.push(`  ${ARCHIVE_LABELS[kind][r.applied ? 1 : 0]}: ${String(n)} ${n === 1 ? "session" : "sessions"}, ${size(group.reduce((t, o) => t + o.bytes, 0))}\n`);
+			if (kind === "fail") bad = true;
+			if (kind === "skip" || kind === "fail") for (const o of group) io.err(`pi-profile: ${kind}: ${printable(o.rel)}: ${o.reason ?? ""}\n`);
+			else if (!quiet && !r.applied) for (const o of group) lines.push(`    ${printable(o.rel)}\n`);
+		}
+		if (quiet && !bad) continue;
+		io.out(`${r.applied ? "archived" : "dry run"}: ${r.store} -> ${r.target}\n`);
+		if (lines.length === 0) io.out("  nothing to archive\n");
+		for (const line of lines) io.out(line);
+		io.out(`  ${r.applied ? "freed" : "would free"}: ${size(r.freed)}\n`);
+	}
+	if (!quiet && results.length === 0) io.out("no session folders to archive\n");
+	if (!quiet && results.some((r) => !r.applied)) io.out("repeat with --apply to archive\n");
+	return bad ? 1 : 0;
 }
 
 function guessShell(env: Env): Shell {
@@ -561,6 +603,43 @@ export function main(argv: readonly string[], io: Io): number {
 					const result = migrateSessions(resolveEndpoint(l, from, io.env), resolveEndpoint(l, to, io.env), { apply });
 					return printMigration(io, result);
 				}
+				if (sub === "archive") {
+					const usage = "pi-profile sessions archive [--older-than 30d] [--profile P | --all] [--apply] [--quiet] | --install-schedule";
+					if (takeFlag(args, "--install-schedule")) {
+						noExtra(args, usage);
+						const r = installSchedule(l, io.env);
+						for (const p of r.written) io.out(`wrote ${p}\n`);
+						for (const p of r.unchanged) io.out(`unchanged ${p}\n`);
+						io.out(`not started; start it with:\n${r.start.map((c) => `  ${c}\n`).join("")}`);
+						return 0;
+					}
+					const apply = takeFlag(args, "--apply");
+					const quiet = takeFlag(args, "--quiet");
+					const all = takeFlag(args, "--all");
+					const profile = take(args, "--profile");
+					const olderThan = take(args, "--older-than");
+					if (all && profile !== undefined) throw new Refusal("use either --profile or --all, not both");
+					noExtra(args, usage);
+					const run = archiveRun(l, io.env, io.tools);
+					const names = all ? listProfiles(l) : [profile ?? currentProfile(l, io.env).name];
+					const results = archiveFolders(l, sessionFolders(l, names, homeOf(io.env)), run, apply, olderThan);
+					return printArchive(io, results, quiet);
+				}
+				if (sub === "restore") {
+					const usage = "pi-profile sessions restore ID|PATH [--profile P | --all]";
+					const all = takeFlag(args, "--all");
+					const profile = take(args, "--profile");
+					const target = one(args, usage);
+					noExtra(args, usage);
+					const names = all || profile === undefined ? listProfiles(l) : [profile];
+					const path = resolveRestoreTarget(sessionFolders(l, names, homeOf(io.env)), target);
+					const r = restoreOne(l, io.env, path, io.tools);
+					if (r.kind === "not-archived") throw new Refusal(`${path} is not an archived session stub`);
+					if (r.warning !== undefined) io.err(`pi-profile: warning: ${printable(r.warning)}\n`);
+					if (r.kind === "restored") io.out(`restored ${path}\n`);
+					else io.out(`kept both: ${path} has lines added after it was archived, so it stays; the full session is at ${r.full ?? "?"}\n`);
+					return 0;
+				}
 				if (sub === "pull") {
 					const usage = "pi-profile sessions pull REPLICA [--host H] [--identity FILE]";
 					const host = take(args, "--host");
@@ -577,7 +656,7 @@ export function main(argv: readonly string[], io: Io): number {
 					if (r.failed.length > 0) io.err(`pi-profile: ${r.replica}: ${String(r.failed.length)} failure(s) downloading, decrypting or saving session files; the rest were pulled\n`);
 					return r.unreadable.length > 0 || r.failed.length > 0 ? 1 : 0;
 				}
-				throw new Refusal("usage: pi-profile sessions store add|list|remove, sessions use, sessions migrate or sessions pull");
+				throw new Refusal("usage: pi-profile sessions store add|list|remove, sessions use, sessions migrate, sessions archive, sessions restore or sessions pull");
 			}
 			case "repo": {
 				const sub = args.shift();

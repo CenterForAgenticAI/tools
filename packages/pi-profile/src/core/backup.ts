@@ -2,6 +2,7 @@ import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_p
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, futimesSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync, type Stats } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { loadManifest, type ManifestEntry } from "./archivemanifest.ts";
 import { isSecretName } from "./auth.ts";
 import { loadConfig, updateConfig, type HostIdRunner, type MachineConfig } from "./config.ts";
 import { readJson, writeJsonAtomic } from "./fsutil.ts";
@@ -10,6 +11,7 @@ import { overlapsPulled, pullStateDir, remoteDir, type Env, type Layout } from "
 import { encrypts, parseReplica, type Replica, type SshReplica } from "./replica.ts";
 import { localHost, parseAdvertised, printable, sshArgs } from "./repo.ts";
 import { Refusal } from "./result.ts";
+import { readStubFd } from "./sessionfile.ts";
 
 /** What one external tool run returned. */
 export interface ToolResult {
@@ -26,9 +28,27 @@ export interface ToolResult {
  */
 export type ToolRunner = (command: string, args: readonly string[], opts?: { readonly stdin?: number; readonly noTerminal?: boolean }) => ToolResult;
 
+/**
+ * The folder a tool runs in: this process's, unless that folder has been
+ * removed. rsync reads its working folder before anything else and stops
+ * with "errors selecting input/output files, dirs (code 3)" when it is gone;
+ * every path pi-profile passes a tool is absolute, so / is as good.
+ */
+function toolCwd(): string | undefined {
+	try {
+		// Node keeps the folder's name after it is removed; "." still opens the removed folder itself.
+		const here = statSync(".");
+		const named = statSync(process.cwd(), { throwIfNoEntry: false });
+		return here.nlink === 0 || named === undefined || named.dev !== here.dev || named.ino !== here.ino ? "/" : undefined;
+	} catch {
+		return "/";
+	}
+}
+
 export const processToolRunner: ToolRunner = (command, args, opts) => {
+	const cwd = toolCwd();
 	// spawnSync honours `detached` as spawn does (setsid() on POSIX), though @types/node omits it.
-	const options: SpawnSyncOptionsWithStringEncoding & { readonly detached: boolean } = { encoding: "utf8", stdio: [opts?.stdin ?? "ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024, detached: opts?.noTerminal === true };
+	const options: SpawnSyncOptionsWithStringEncoding & { readonly detached: boolean } = { encoding: "utf8", stdio: [opts?.stdin ?? "ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024, detached: opts?.noTerminal === true, ...(cwd === undefined ? {} : { cwd }) };
 	const r = spawnSync(command, [...args], options);
 	const error = r.error === undefined ? undefined : (r.error as NodeJS.ErrnoException).code === "ENOENT" ? `${command} is not installed` : r.error.message;
 	return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", ...(error === undefined ? {} : { error }) };
@@ -155,10 +175,12 @@ interface Mark {
 /**
  * What a replica was last sent: the run times and, for staged replicas, each
  * file's size and mtime as sent under `fingerprint`. `sizes` is the size of
- * the copy each replica file holds at the target named by `target`. It is
- * kept across a change of `fingerprint` alone, so a session that shrank is
- * still held back after the recipients change, and forgotten when the target
- * changes, so the new target gets every session.
+ * the copy each replica file holds at the target named by `target`, and
+ * `mtimes` the mtime that copy was sent with. They are kept across a change
+ * of `fingerprint` alone, so a session that shrank is still held back after
+ * the recipients change, and an archived session's stub is still known to
+ * have its archived copy there; both are forgotten when the target changes,
+ * so the new target gets every session.
  */
 export interface ReplicaState {
 	readonly schemaVersion: 1;
@@ -168,6 +190,7 @@ export interface ReplicaState {
 	readonly fingerprint?: string;
 	readonly files?: Readonly<Record<string, Mark>>;
 	readonly sizes?: Readonly<Record<string, number>>;
+	readonly mtimes?: Readonly<Record<string, number>>;
 	readonly target?: string;
 }
 
@@ -187,10 +210,12 @@ export function loadReplicaState(l: Layout, id: string): ReplicaState {
 		}
 	}
 	const out: Record<string, unknown> = { schemaVersion: 1, files };
-	if (record(raw.sizes)) {
-		const sizes: Record<string, number> = {};
-		for (const [rel, n] of Object.entries(raw.sizes)) if (typeof n === "number") sizes[rel] = n;
-		out.sizes = sizes;
+	for (const k of ["sizes", "mtimes"] as const) {
+		const v = raw[k];
+		if (!record(v)) continue;
+		const nums: Record<string, number> = {};
+		for (const [rel, n] of Object.entries(v)) if (typeof n === "number") nums[rel] = n;
+		out[k] = nums;
 	}
 	for (const k of ["lastRunAt", "lastOkAt", "lastError", "fingerprint", "target"] as const) {
 		const v = str(raw[k]);
@@ -334,6 +359,39 @@ export function target(r: Replica, store: string | undefined, run: ToolRunner): 
 	}
 }
 
+/** The oldest rsync pi-profile works with: `--chmod` and `--append-verify` need 3.1. */
+const RSYNC_MIN: readonly [number, number] = [3, 1];
+
+/**
+ * Why the rsync on PATH cannot run what pi-profile asks of it, or undefined if
+ * it can or its version line is not recognised. macOS ships openrsync as
+ * `/usr/bin/rsync`, which has no `--chmod` and no `--append-verify`.
+ */
+export function unsupportedRsync(run: ToolRunner): string | undefined {
+	const v = run("rsync", ["--version"]);
+	if (v.error !== undefined || v.status !== 0) return undefined;
+	const fix = `install rsync ${RSYNC_MIN.join(".")} or later and put it first on PATH (macOS: brew install rsync)`;
+	if (/^openrsync\b/m.test(v.stdout)) return `the rsync on PATH is openrsync, which has no --chmod or --append-verify; ${fix}`;
+	const m = /^rsync\s+version\s+v?(\d+)\.(\d+)/m.exec(v.stdout);
+	if (m === null) return undefined;
+	const major = Number(m[1]);
+	const minor = Number(m[2]);
+	if (major > RSYNC_MIN[0] || (major === RSYNC_MIN[0] && minor >= RSYNC_MIN[1])) return undefined;
+	return `the rsync on PATH is version ${String(major)}.${String(minor)}; ${fix}`;
+}
+
+/**
+ * check() for an rsync run. On a failure it asks the local rsync for its
+ * version, so a missing option reads as "install rsync 3.1" rather than as
+ * rsync's own usage error. A run that succeeded costs nothing extra.
+ */
+export function checkRsync(run: ToolRunner, res: ToolResult, allowed: readonly number[] = [0]): void {
+	if (res.error === undefined && res.status !== null && allowed.includes(res.status)) return;
+	const why = res.error === undefined ? unsupportedRsync(run) : undefined;
+	if (why !== undefined) throw new Error(`rsync failed: ${why}`);
+	check(res, "rsync", allowed);
+}
+
 export function rsyncBase(r: Replica, recursive: boolean, chmod = "D700,F600"): string[] {
 	// No links, devices or specials: only regular session files leave the host.
 	// The session list is sent without -r, so a listed name that became a
@@ -348,13 +406,13 @@ function makeSubtree(r: Replica, t: Target, host: string, scratch: string, run: 
 	const skel = join(scratch, "skeleton");
 	mkdirSync(join(skel, host, "sessions"), { recursive: true });
 	// --omit-dir-times: the shared hosts/ directory is not this host's to touch (law L6).
-	check(run("rsync", [...rsyncBase(r, true), "--omit-dir-times", "--", `${skel}/`, `${t.rsyncRoot}/hosts/`]), "rsync");
+	checkRsync(run, run("rsync", [...rsyncBase(r, true), "--omit-dir-times", "--", `${skel}/`, `${t.rsyncRoot}/hosts/`]));
 }
 
 /** Upload a directory tree of files under `hosts/<hostId>/<under>`. */
 function upload(r: Replica, t: Target, from: string, host: string, under: string, run: ToolRunner): void {
 	if (t.rsyncRoot !== undefined) {
-		check(run("rsync", [...rsyncBase(r, true), "--", `${from}/`, `${t.rsyncRoot}/hosts/${host}/${under}`]), "rsync");
+		checkRsync(run, run("rsync", [...rsyncBase(r, true), "--", `${from}/`, `${t.rsyncRoot}/hosts/${host}/${under}`]));
 		return;
 	}
 	const dest = `${t.objectRoot ?? ""}/hosts/${host}/${under}`;
@@ -477,7 +535,7 @@ function runRsync(r: Replica, t: Target, store: string, files: readonly SessionF
 		const list = join(opts.scratch, "files");
 		writeFileSync(list, rels.map((rel) => `${rel}\0`).join(""), { mode: 0o600 });
 		const args = [...rsyncBase(r, false), "--append-verify", "--from0", `--files-from=${list}`, "--", `${dir}/`, `${t.rsyncRoot ?? ""}/hosts/${host}/sessions/`];
-		check(opts.run("rsync", args), "rsync", [0, RSYNC_VANISHED]);
+		checkRsync(opts.run, opts.run("rsync", args), [0, RSYNC_VANISHED]);
 		rmSync(list, { force: true });
 		sent += rels.length;
 	};
@@ -557,6 +615,40 @@ function copyFd(fd: number, out: string, mtimeMs?: number): void {
 	}
 }
 
+/** The store's archive list; none when it cannot be read, so every smaller session is reported. */
+function archivedSessions(store: string): Readonly<Record<string, ManifestEntry>> {
+	try {
+		return loadManifest(store).sessions;
+	} catch {
+		return {};
+	}
+}
+
+/**
+ * Whether a scanned session is the stub the archive left for it, over a
+ * replica copy that is the archived one: the archive list says it was
+ * replaced by a stub; the copy at this replica has the archived size (`size`)
+ * and was sent with the archived mtime (`mtimeMs`), whatever the recipients
+ * were then; and the file is
+ * that stub, naming the same archived copy, with no lines added since. Lines
+ * Pi added to a stub, or to the session after the replica's copy was sent,
+ * are in no replica copy, so such a stub is still reported.
+ */
+function isArchivedStub(store: string, f: SessionFile, entry: ManifestEntry | undefined, mtimeMs: number | undefined, size: number | undefined, fstat: Fstat): boolean {
+	if (entry?.stubbedAt === undefined) return false;
+	if (size !== entry.size || mtimeMs !== entry.mtimeMs) return false;
+	const src = openSession(store, f, fstat);
+	if (src === undefined) return false;
+	try {
+		const stub = readStubFd(src.fd, src.size);
+		return stub !== undefined && !stub.grown && stub.details.sha256 === entry.sha256 && stub.details.size === entry.size && stub.details.archive === entry.archive;
+	} catch {
+		return false;
+	} finally {
+		closeSync(src.fd);
+	}
+}
+
 /**
  * Encrypted replicas, and every s3 replica: send only files whose size or
  * mtime changed since the last run, in batches staged under the state
@@ -585,15 +677,22 @@ function runStaged(
 	const tfp = targetFingerprint(r, host);
 	const sameTarget = state.target === undefined ? state.fingerprint === fp : state.target === tfp;
 	const sizes: Record<string, number> = sameTarget ? { ...(state.sizes ?? Object.fromEntries(Object.entries(state.files ?? {}).map(([rel, m]) => [rel, m.size]))) } : {};
+	// The mtime each copy at this target was sent with, kept like its size. State
+	// saved before `mtimes` existed has them only for the files sent under its
+	// last fingerprint.
+	const mtimes: Record<string, number> = sameTarget ? { ...(state.mtimes ?? Object.fromEntries(Object.entries(state.files ?? {}).map(([rel, m]) => [rel, m.mtimeMs]))) } : {};
 	// Forget a session only when it is gone from the store, not when it was swapped mid-run.
 	const present = new Set(files.map((f) => f.rel));
 	for (const rel of Object.keys(marks)) if (!present.has(rel)) delete marks[rel];
 	for (const rel of Object.keys(sizes)) if (!present.has(rel)) delete sizes[rel];
+	for (const rel of Object.keys(mtimes)) if (!present.has(rel)) delete mtimes[rel];
 	const held: string[] = [];
+	const archived = archivedSessions(store);
 	const changed = files.filter((f) => {
 		const floor = sizes[f.rel];
 		if (floor !== undefined && f.size < floor) {
-			held.push(f.rel);
+			// An archived session's stub is meant to be smaller: when the replica has the archived copy, no warning.
+			if (!isArchivedStub(store, f, archived[f.rel], mtimes[f.rel], floor, opts.fstat)) held.push(f.rel);
 			const before = sent0[f.rel];
 			if (before !== undefined) marks[f.rel] = before;
 			return false;
@@ -638,11 +737,12 @@ function runStaged(
 		for (const [rel, mark] of staged) {
 			marks[rel] = mark;
 			sizes[rel] = mark.size;
+			mtimes[rel] = mark.mtimeMs;
 		}
 		sent += staged.length;
-		saveState(l, r.id, { ...state, fingerprint: fp, target: tfp, files: marks, sizes });
+		saveState(l, r.id, { ...state, fingerprint: fp, target: tfp, files: marks, sizes, mtimes });
 	}
-	saveState(l, r.id, { ...state, fingerprint: fp, target: tfp, files: marks, sizes });
+	saveState(l, r.id, { ...state, fingerprint: fp, target: tfp, files: marks, sizes, mtimes });
 	return { files: sent, bytes, held };
 }
 

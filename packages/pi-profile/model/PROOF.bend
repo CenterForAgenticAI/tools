@@ -101,7 +101,7 @@ def Laws.oauth_not_replaced_by_key(e, b):
 def Laws.force_takes_incoming(l, i):
   {==}
 
-def Laws.api_keys_never_auto_pushed(m, k):
+def Laws.api_keys_pushed_only_with_flag(m, s, k):
   match m:
     case N.Shared{}:
       {==}
@@ -110,11 +110,64 @@ def Laws.api_keys_never_auto_pushed(m, k):
     case N.Pooled{}:
       {==}
 
-def Laws.shared_never_auto_pushes(c):
+def Laws.shared_pushes_logins(f, s, e):
   {==}
 
-def Laws.separate_never_auto_pushes(c):
+def Laws.pooled_pushes_logins(f, s, e):
   {==}
+
+def Laws.separate_never_auto_pushes(f, s, c):
+  {==}
+
+# Lemma for L26: no number is before itself.
+law lt_irrefl:
+  for n: Nat
+  {L.ltN(n, n) == False{} : Bool}
+
+def lt_irrefl(n):
+  match n:
+    case 0n:
+      {==}
+    case 1n+p:
+      lt_irrefl(p)
+
+# Each L26 proof walks both write times down together; ltN(1+p, 1+q) is
+# ltN(p, q), so takeIncoming on the successors is takeIncoming on p and q.
+def Laws.newer_login_taken(lw, le, iw, ie, h):
+  match lw iw:
+    case 0n 0n:
+      Empty.absurd({D.takeIncoming(0n, le, 0n, ie) == True{} : Bool}, h)
+    case 0n 1n+q:
+      {==}
+    case 1n+p 0n:
+      Empty.absurd({D.takeIncoming(1n+p, le, 0n, ie) == True{} : Bool}, h)
+    case 1n+p 1n+q:
+      Laws.newer_login_taken(p, le, q, ie, h)
+
+def Laws.older_login_kept(lw, le, iw, ie, h):
+  match lw iw:
+    case 0n 0n:
+      Empty.absurd({D.takeIncoming(0n, le, 0n, ie) == False{} : Bool}, h)
+    case 0n 1n+q:
+      Empty.absurd({D.takeIncoming(0n, le, 1n+q, ie) == False{} : Bool}, h)
+    case 1n+p 0n:
+      {==}
+    case 1n+p 1n+q:
+      Laws.older_login_kept(p, le, q, ie, h)
+
+def Laws.same_write_later_expiry_wins(w, le, ie):
+  match w:
+    case 0n:
+      {==}
+    case 1n+p:
+      Laws.same_write_later_expiry_wins(p, le, ie)
+
+def Laws.full_tie_keeps_local(w, e):
+  match w:
+    case 0n:
+      lt_irrefl(e)
+    case 1n+p:
+      Laws.full_tie_keeps_local(p, e)
 
 def Laws.unknown_group_refused(c, g):
   {==}
@@ -309,3 +362,41 @@ def Laws.install_shown_first(c, p):
           {==}
         case True{}:
           {==}
+
+def Laws.archive_verifies_before_removing(d, c):
+  match d:
+    case True{}:
+      {==}
+    case False{}:
+      match c:
+        case D.CopyMatches{}:
+          {==}
+        case D.CopyDiffers{}:
+          {==}
+        case D.CopyMissing{}:
+          {==}
+
+def Laws.archive_keeps_unverified(d, c):
+  match d:
+    case True{}:
+      match c:
+        case D.CopyMatches{}:
+          {==}
+        case D.CopyDiffers{}:
+          {==}
+        case D.CopyMissing{}:
+          {==}
+    case False{}:
+      match c:
+        case D.CopyMatches{}:
+          {==}
+        case D.CopyDiffers{}:
+          {==}
+        case D.CopyMissing{}:
+          {==}
+
+def Laws.restore_keeps_grown_stub(n):
+  {==}
+
+def Laws.archive_dry_run_changes_nothing(c):
+  {==}

@@ -96,7 +96,7 @@ export function resolveEndpoint(l: Layout, arg: string, env?: Readonly<Record<st
 	throw new Refusal(`not a session store ID or an absolute path: ${arg}`);
 }
 
-function hashFd(fd: number): string {
+export function hashFd(fd: number): string {
 	const hash = createHash("sha256");
 	const buf = Buffer.allocUnsafe(CHUNK);
 	for (;;) {
@@ -107,7 +107,7 @@ function hashFd(fd: number): string {
 	return hash.digest("hex");
 }
 
-function sha256(path: string): string {
+export function sha256(path: string): string {
 	const fd = openSync(path, "r");
 	try {
 		return hashFd(fd);
@@ -143,7 +143,7 @@ function copyHashed(src: string, tmp: string): { hash: string; size: number } {
 	}
 }
 
-function syncDir(dir: string): void {
+export function syncDir(dir: string): void {
 	try {
 		const fd = openSync(dir, "r");
 		try {
@@ -180,7 +180,7 @@ const APPLY_LOCK_ENDINGS = [".pi-daemon.lock", ".lock"];
  * `x.y.pi-daemon.lock`. A file named `n` is locked when `n` is in the set,
  * which matches any `<n>.*.lock` beside it.
  */
-function lockOwners(names: readonly string[]): Set<string> {
+export function lockOwners(names: readonly string[]): Set<string> {
 	const owners = new Set<string>();
 	for (const name of names) {
 		if (!name.endsWith(".lock")) continue;
@@ -193,7 +193,7 @@ function lockOwners(names: readonly string[]): Set<string> {
  * True when `<path>.pi-daemon.lock` or `<path>.lock` exists. Checks only the
  * file's own lock names, so its folder is not listed again for every file.
  */
-function hasOwnLock(path: string): boolean {
+export function hasOwnLock(path: string): boolean {
 	return APPLY_LOCK_ENDINGS.some((ending) => lstatSync(`${path}${ending}`, { throwIfNoEntry: false }) !== undefined);
 }
 

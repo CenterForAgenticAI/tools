@@ -6,6 +6,7 @@ import { readJson } from "./fsutil.ts";
 import { readSnapshot, replaceIfUnchanged } from "./swap.ts";
 import { withProfileLock } from "./lock.ts";
 import { isHubName } from "./manifest.ts";
+import { parseArchive, type ArchiveSettings } from "./archivesettings.ts";
 import { type Layout } from "./paths.ts";
 import { HOST_LABEL, parseReplicas, type Replica } from "./replica.ts";
 import { Refusal } from "./result.ts";
@@ -93,8 +94,10 @@ export interface MachineConfig {
 	readonly codeRoot?: string;
 	/** Config hubs by name; a profile names one in `sync.hub`, else `default`. */
 	readonly hubs?: Readonly<Record<string, Hub>>;
+	/** Where `sessions archive` puts old sessions, and when. */
+	readonly archive?: ArchiveSettings;
 }
-const KEYS = new Set(["schemaVersion", "hostId", "defaultProfile", "sessionStores", "defaultSessionStore", "replicas", "autoBackup", "authSync", "pullIdentity", "codeRoot", "hubs"]);
+const KEYS = new Set(["schemaVersion", "hostId", "defaultProfile", "sessionStores", "defaultSessionStore", "replicas", "autoBackup", "authSync", "pullIdentity", "codeRoot", "hubs", "archive"]);
 const MAX_AUTH_PEERS = 32;
 function record(v: unknown): v is Record<string, unknown> { return typeof v === "object" && v !== null && !Array.isArray(v); }
 export function configPath(l: Layout): string { return join(l.piHome, "pi-profile", "config.json"); }
@@ -201,6 +204,14 @@ export function parseConfig(raw: unknown): MachineConfig {
 			errors.push((error as Error).message);
 		}
 	}
+	let archive: ArchiveSettings | undefined;
+	if (raw.archive !== undefined) {
+		try {
+			archive = parseArchive(raw.archive);
+		} catch (error) {
+			errors.push((error as Error).message);
+		}
+	}
 	if (errors.length) throw new Refusal(errors.join("; "));
 	return {
 		schemaVersion: 1,
@@ -214,6 +225,7 @@ export function parseConfig(raw: unknown): MachineConfig {
 		...(raw.pullIdentity === undefined ? {} : { pullIdentity: raw.pullIdentity as string }),
 		...(raw.codeRoot === undefined ? {} : { codeRoot: raw.codeRoot as string }),
 		...(hubs === undefined ? {} : { hubs }),
+		...(archive === undefined ? {} : { archive }),
 	};
 }
 export function loadConfig(l: Layout, _env: Readonly<Record<string, string | undefined>> = process.env, _runner?: HostIdRunner): MachineConfig {

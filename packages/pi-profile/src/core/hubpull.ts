@@ -616,19 +616,23 @@ function planHub(ctx: Ctx, hub: string, remote: string, env: Env, names: Readonl
 			skippedProfiles.push({ profile: name, reason: error.message });
 		}
 	}
+	// The profiles of this hub a pull that names them would take here.
+	const pulled = new Set(plan.readers);
 	for (const [name, target] of Object.entries(hubJson.aliases).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-		if (names !== undefined && !names.has(name)) {
-			plan.readers.push(name);
+		const named = names === undefined || names.has(name);
+		const here = lstatOrUndefined(join(profilesRoot(ctx.l), name));
+		const targetHere = lstatOrUndefined(join(profilesRoot(ctx.l), target));
+		const targetOk = (targetHere !== undefined && targetHere.isDirectory()) || (named ? plan.profiles.some((p) => p.name === target) : pulled.has(target));
+		let problem: string | undefined;
+		if (here !== undefined && !(here.isSymbolicLink() && readlinkSync(join(profilesRoot(ctx.l), name)) === target)) problem = `${name} is an alias of ${target} in the hub, and something else here; left as it is`;
+		else if (!targetOk) problem = `${name} is an alias of ${target}, which is not a profile here`;
+		if (!named) {
+			// A printed way out names an alias only when a pull that names it would take it here; else that pull refuses.
+			if (problem === undefined) plan.readers.push(name);
 			plan.pending.add(name);
 			continue;
 		}
 		plan.named = true;
-		const here = lstatOrUndefined(join(profilesRoot(ctx.l), name));
-		const targetHere = lstatOrUndefined(join(profilesRoot(ctx.l), target));
-		const targetOk = (targetHere !== undefined && targetHere.isDirectory()) || plan.profiles.some((p) => p.name === target);
-		let problem: string | undefined;
-		if (here !== undefined && !(here.isSymbolicLink() && readlinkSync(join(profilesRoot(ctx.l), name)) === target)) problem = `${name} is an alias of ${target} in the hub, and something else here; left as it is`;
-		else if (!targetOk) problem = `${name} is an alias of ${target}, which is not a profile here`;
 		if (problem !== undefined) {
 			if (!all) throw new Refusal(problem);
 			plan.pending.add(name);

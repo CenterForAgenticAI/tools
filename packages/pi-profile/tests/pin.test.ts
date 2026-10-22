@@ -471,6 +471,7 @@ describe("a diverged Pi version pin is refused like a file conflict (issue 54)",
 		assert.doesNotMatch(pull.stderr, /--theirs/, pull.stderr);
 		const ran = cli(envB, ["sync", "pull", "--theirs", "p"]);
 		assert.equal(ran.code, 0, ran.stderr);
+		assert.ok(ran.stdout.includes("hub default: Pi version pin moved from none to 1.1.0; took the hub's, instead of this host's 1.0.4\n"), ran.stdout);
 		assert.equal(cli(envB, ["sync", "pull"]).code, 0);
 		assert.equal(cli(envB, ["sync", "push"]).code, 0);
 		assert.equal((JSON.parse(show("hub.json")) as { pi: { version: string } }).pi.version, "1.1.0");
@@ -663,6 +664,84 @@ describe("no printed pin way out overwrites a file the user was not shown (issue
 			assert.deepEqual((JSON.parse(readP(b, "p", "profile.json")) as { sync?: unknown }).sync, { exclude: ["extra"] });
 			// p stays held (its own rule, with its own way out); the pin is settled.
 			assert.equal(readPinState(b.l).get("default")?.agreed, "1.1.0", way);
+		}
+	});
+
+	it("after --keep-local settles the pin of a held profile's hub, sync push refuses for the hold, not for a pin the hub no longer holds", () => {
+		fresh();
+		const envA = envOf(a, "host-a");
+		const envB = envOf(b, "host-b");
+		createProfile(a.l, "p");
+		initHub(a.l, remote, { env: envA });
+		initHub(b.l, remote, { env: envB });
+		assert.equal(cli(envA, ["pin", "1.0.0"]).code, 0);
+		assert.equal(cli(envA, ["sync", "push"]).code, 0);
+		assert.equal(cli(envB, ["sync", "pull"]).code, 0);
+		// B excludes extra/ and A pushes a file there, so p is held on B and the mirror's main stays at pin 1.0.0.
+		const pjB = JSON.parse(readP(b, "p", "profile.json")) as Record<string, unknown>;
+		edit(b, "p", "profile.json", `${JSON.stringify({ ...pjB, sync: { exclude: ["extra"] } }, null, "\t")}\n`);
+		const pjA = JSON.parse(readP(a, "p", "profile.json")) as Record<string, unknown>;
+		edit(a, "p", "profile.json", `${JSON.stringify({ ...pjA, sync: { include: ["extra"] } }, null, "\t")}\n`);
+		mkdirSync(join(a.home, "profiles", "p", "extra"), { recursive: true });
+		edit(a, "p", "extra/notes.txt", "notes from A\n");
+		assert.equal(cli(envA, ["sync", "push"]).code, 0);
+		assert.equal(cli(envB, ["sync", "pull", "--keep-local"]).code, 0);
+		// Then the pin diverges, and B keeps its own.
+		assert.equal(cli(envB, ["pin", "1.0.4"]).code, 0);
+		assert.equal(cli(envA, ["pin", "1.1.0"]).code, 0);
+		assert.equal(cli(envA, ["sync", "push"]).code, 0);
+		const kept = cli(envB, ["sync", "pull", "--keep-local", "p"]);
+		assert.equal(kept.code, 0, kept.stdout + kept.stderr);
+		assert.deepEqual(readPinState(b.l).get("default"), { pin: "1.0.4", agreed: "1.1.0" });
+		// The push names the hold and its way out; it never sends the user back to a pull with nothing to settle.
+		const push = cli(envB, ["sync", "push"]);
+		assert.equal(push.code, 2, push.stdout + push.stderr);
+		assert.doesNotMatch(push.stderr, /Pi version pin/, push.stderr);
+		assert.match(push.stderr, /p: the last sync pull left out hub files that are not config on this host: extra\/notes\.txt\./, push.stderr);
+		assert.equal((JSON.parse(show("hub.json")) as { pi: { version: string } }).pi.version, "1.1.0", "nothing was pushed");
+		const again = cli(envB, ["sync", "pull"]);
+		assert.equal(again.code, 0, again.stdout + again.stderr);
+		assert.doesNotMatch(again.stdout + again.stderr, /Pi version pin/, "the pull has no pin left to settle");
+		// Following the hold's way out (B takes A's sync rules) ends in a push that writes B's pin.
+		edit(b, "p", "profile.json", readP(a, "p", "profile.json"));
+		const full = cli(envB, ["sync", "pull", "p"]);
+		assert.equal(full.code, 0, full.stdout + full.stderr);
+		const done = cli(envB, ["sync", "push"]);
+		assert.equal(done.code, 0, done.stdout + done.stderr);
+		assert.ok(done.stdout.includes("hub default: Pi version pin 1.0.4 recorded, replacing the hub's 1.1.0\n"), done.stdout);
+		assert.equal((JSON.parse(show("hub.json")) as { pi: { version: string } }).pi.version, "1.0.4");
+	});
+
+	it("the named-pull warning names a hub alias in --keep-local only when that pull would take it here", () => {
+		for (const ownAlias of [false, true]) {
+			fresh();
+			const envA = envOf(a, "host-a");
+			const envB = envOf(b, "host-b");
+			createProfile(a.l, "p");
+			symlinkSync("p", join(a.home, "profiles", "al"));
+			const w = createProfile(a.l, "w").dir;
+			const pj = JSON.parse(readFileSync(join(w, "profile.json"), "utf8")) as Record<string, unknown>;
+			writeFileSync(join(w, "profile.json"), `${JSON.stringify({ ...pj, sync: { hub: "work" } }, null, "\t")}\n`);
+			const work = join(a.home, "work.git");
+			git(["init", "--quiet", "--bare", "--initial-branch=main", work]);
+			for (const [s, env] of [[a, envA], [b, envB]] as const) {
+				initHub(s.l, remote, { env });
+				initHub(s.l, work, { env, hub: "work" });
+			}
+			// B has a profile of its own named al: the hub's alias al -> p cannot be pulled there.
+			if (ownAlias) createProfile(b.l, "al");
+			assert.equal(cli(envB, ["pin", "1.0.4"]).code, 0);
+			assert.equal(cli(envA, ["pin", "1.1.0"]).code, 0);
+			const pushed = cli(envA, ["sync", "push"]);
+			assert.equal(pushed.code, 0, pushed.stdout + pushed.stderr);
+			assert.deepEqual((JSON.parse(show("hub.json")) as { aliases: unknown }).aliases, { al: "p" });
+			const pull = cli(envB, ["sync", "pull", "w"]);
+			assert.equal(pull.code, 0, pull.stdout + pull.stderr);
+			const ways = waysOut(pull.stderr);
+			assert.deepEqual(ways, ["pi-profile pin 1.1.0", ownAlias ? "pi-profile sync pull --keep-local p" : "pi-profile sync pull --keep-local p al"], pull.stderr);
+			const ran = runPrinted(envB, ways[1] as string);
+			assert.equal(ran.code, 0, `ownAlias=${ownAlias}: ${ran.stdout}${ran.stderr}`);
+			assert.deepEqual(readPinState(b.l).get("default"), { pin: "1.0.4", agreed: "1.1.0" }, `ownAlias=${ownAlias}`);
 		}
 	});
 });

@@ -23,6 +23,8 @@ need:
 | bash | `eval "$(pi-profile shell-init bash)"` | `~/.bashrc` |
 | zsh | `eval "$(pi-profile shell-init zsh)"` | `~/.zshrc` |
 
+New to pi-profile, or setting up another machine? Start with the [usage guide](docs/usage.md): it walks through each task step by step.
+
 ## Use
 
 ```sh
@@ -38,6 +40,9 @@ pi-profile sync pull [NAME...]    # write each hub's config into the profiles he
 pi-profile sync status [NAME]     # class each path as config, state, secret, sessions or unknown
 pi-profile sync status [NAME] --allow-line PATH:LINE  # print the allowFindings entry for a checked line
 ```
+
+On a host where nobody has logged in yet, `doctor` warns that the shared auth
+file does not exist yet. That is expected until the first `/login`.
 
 Session storage:
 
@@ -66,6 +71,146 @@ swapped at the wrong moment can still leave a stray copy outside `TO`; the
 source is always kept then.
 An interrupted run never loses a file; run it again to finish.
 
+### Archive old sessions
+
+Move sessions you have not touched for a while to a cold archive, compressed,
+and keep a small stub in their place so Pi still lists them:
+
+```sh
+pi-profile sessions archive                      # dry run: what would move, bytes freed
+pi-profile sessions archive --apply              # this profile's sessions
+pi-profile sessions archive --all --apply        # every profile's sessions
+pi-profile sessions archive --older-than 45d     # override the cutoff for one run
+pi-profile sessions restore ID|PATH              # bring one back in full
+pi-profile sessions archive --install-schedule   # write a daily timer; does not start it
+```
+
+Set the archive in `~/.pi/pi-profile/config.json`:
+
+```json
+"archive": {
+	"store": { "kind": "local", "path": "/absolute/path/to/archive" },
+	"olderThanDays": 30,
+	"keepLocalDays": 0
+}
+```
+
+- `olderThanDays` (default 30): a session file unchanged for this many days
+  is archived. Files changed in the last 10 minutes and any session with a
+  `<name>.*.lock` beside it stay, as for `sessions migrate`.
+- `keepLocalDays`: how long the full local copy stays after the archive holds
+  a verified copy. The default is 60 on macOS (so a laptop keeps 90 days of
+  sessions in total) and 0 elsewhere (the session is replaced at once).
+- `store` is `{ "kind": "local", "path": ... }`, a folder on this machine
+  (each host writes under `<path>/<host>/`), or
+  `{ "kind": "ssh", "host": HOST, "identity": "/path/to/key" }` for another
+  machine, below.
+
+For each session, `--apply` compresses the file with zstd, uploads it to the
+archive (never replacing a file there, and with `rsync --fsync`, so the copy
+is on the archive's disk), reads it back and checks its SHA-256 and size, and
+only then replaces the session with a stub. The archive needs rsync 3.2.4 or
+later on both machines for `--fsync`. The archive copy is
+named `<name>.<sha256 prefix>.jsonl.zst`. A dry run reads file metadata and
+the first lines of each old session, and writes nothing. A run that is killed
+loses nothing; the next run tidies up and finishes. If Pi writes to a session
+while its stub is being placed, the full session keeps its name, and a stub
+Pi has also written to is kept beside it as
+`<name>.kept-<sha256 prefix>.jsonl`. A local archive folder that does not exist (a volume that is not
+mounted) makes the run fail before it changes anything. A failed rsync step
+says whether it was the upload or the read-back, and how many files it
+carried.
+
+The stub is a valid Pi session at the original path, with the session's id,
+name, folder, first prompt and file time, and a notice that says how to
+restore it. The full list of what was archived is in
+`<store>/.pi-profile-archive.json`: id, folder, name, first and last prompt,
+dates, the checkout's `origin` remote as `host/path`, the folder inside the
+checkout, size, SHA-256, archive path and the SHA-256 of the stub. A run
+killed just after it put a session back leaves its stub under a hidden name;
+the next run deletes that file only when its bytes have that SHA-256, and
+otherwise keeps it as `<name>.kept-<sha256 prefix>.jsonl`. The list's `summary` field is reserved and
+not written yet.
+
+How each way of opening a session meets a stub:
+
+| Entry point | What happens |
+|---|---|
+| `/resume` inside Pi | The extension restores the full session before Pi opens it. If the archive cannot be read, the switch is cancelled with the restore command. |
+| `pi --resume`, `pi --session ID\|PATH` | Pi picks the session before extensions load, so it opens the stub: it shows the first prompt and the notice, and the extension warns. Quit and run `pi-profile sessions restore ID`. |
+| `pi -c` | Opens the newest session by file time. A stub keeps the session's old time, so this happens only when every newer session is gone; then as above. |
+| `pi --fork ID\|PATH` | Forks the stub: the new session has only the first prompt, and the extension warns. Restore first, then fork. |
+
+A restore never replaces a stub that has lines after its notice (for example
+when a prompt was sent in a stub opened at startup), however large it has
+grown. It keeps that stub and puts the full session beside it as
+`<name>.kept-<sha256 prefix>.jsonl`. The archive never archives that copy or
+the grown stub again. A restored session counts as changed on the day it was
+restored: it is archived again only after `olderThanDays` more, and on a Mac
+it gets a new `keepLocalDays` period.
+
+#### Archive to another machine over SSH
+
+Give each machine that archives its own key, used only for this, and force it
+to `rrsync` on the machine that holds the archive, so the key can only add
+files to that host's folder. On the receiving machine, add one line per
+sending host to `~/.ssh/authorized_keys` (all on one line):
+
+```text
+command="rrsync -munge -no-del -no-overwrite /ARCHIVE/ROOT/SENDING-HOST",restrict ssh-ed25519 AAAA... archive key of SENDING-HOST
+```
+
+`-no-del` refuses deletions and `-no-overwrite` refuses replacing a file, so
+the key cannot damage what is already archived. `-munge` stores any symlink
+the key uploads as a harmless file, and `restrict` turns off every SSH
+feature the key does not need (terminals, forwarding, `~/.ssh/rc`). Create
+`/ARCHIVE/ROOT/SENDING-HOST` first.
+
+`-no-overwrite` needs the `rrsync` of rsync 3.3.0 or later. Check with
+`rrsync -help | grep -- -no-overwrite`. Debian 12 and Ubuntu 24.04 ship
+rsync 3.2.7, whose `/usr/bin/rrsync` has no `-no-overwrite`: there the
+archive fails with `the rrsync on HOST has no -no-overwrite option`, and no
+session is replaced by a stub. On such a host, install the newer script
+beside the packaged rsync (it is one Python file and runs with rsync 3.2.7)
+and put its full path in the `command=` line above:
+
+```sh
+sudo curl -fsSL -o /usr/local/bin/rrsync https://raw.githubusercontent.com/RsyncProject/rsync/v3.4.1/support/rrsync
+echo '0bb743f8155907ed2a337c12a4672c67269e372803939ec98dac497edc714c9b  /usr/local/bin/rrsync' | sha256sum -c -
+sudo chmod 755 /usr/local/bin/rrsync
+```
+
+On the sending machine:
+
+```sh
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_pi_archive -C "archive key of $(hostname -s)"
+```
+
+```json
+"archive": { "store": { "kind": "ssh", "host": "archive-host", "identity": "/ABSOLUTE/PATH/TO/.ssh/id_pi_archive" } }
+```
+
+`identity` is the absolute path of the key made above (`~` is not expanded).
+
+`host` is a Tailscale short name. pi-profile runs
+`ssh -o BatchMode=yes -i IDENTITY -o IdentitiesOnly=yes`, so the run never
+prompts. The same key reads copies back when it verifies and restores.
+
+#### Run it every day
+
+`pi-profile sessions archive --install-schedule` writes a systemd user timer
+(`~/.config/systemd/user/pi-profile-archive.{service,timer}`) on Linux or a
+launchd agent (`~/Library/LaunchAgents/io.pi-profile.archive.plist`) on
+macOS. Each runs `pi-profile sessions archive --all --apply --quiet` once a
+day with the current `PI_PROFILE_HOME` and `PATH`. It does not start them; it
+prints the command that does (`systemctl --user enable --now pi-profile-archive.timer`,
+or `launchctl bootstrap gui/$(id -u) ...`). The files name the first `node` on
+`PATH` that is the running Node and not in a versioned folder (nvm, fnm,
+volta, Homebrew's `Cellar`); with no such `node` they name the running one.
+Run `--install-schedule` again after upgrading Node in that case. On Linux the
+run logs to the journal (`journalctl --user -u pi-profile-archive`); on macOS
+to `~/.pi/pi-profile/state/archive.log`.
+
 A **session repository** is a directory one device offers so your other devices
 can back up their sessions into it:
 
@@ -78,11 +223,14 @@ pi-profile repo discover                        # what your devices offer
 `repo discover` asks only your own online Tailscale devices (never tagged
 servers), over `ssh -o BatchMode=yes`, and reads `~/.pi/pi-profile/advertised.json`
 on each. A device it cannot reach (a phone, or one without SSH access) is listed
-on stderr as skipped.
+on stderr as skipped. `backup add ID ssh HOST REPO` and every `backup run` to
+that replica read the same file, so keep the repository advertised on the
+receiving host: once it stops advertising, the sender's backups fail.
 
 Back up this host's sessions to a disk, a device or S3:
 
 ```sh
+pi-profile sessions store add main /absolute/path            # once: the store to back up
 pi-profile backup add usb local /media/usb/pi-sessions
 pi-profile backup add studio ssh atlas-studio sessions   # a repository the device advertises
 pi-profile backup add cloud s3 s3://my-bucket/pi --encrypt-to age1...
@@ -91,7 +239,9 @@ pi-profile backup list                                       # last run of each
 ```
 
 Backups go under `hosts/<this host>/sessions/` and never delete anything.
-They need `rsync`, plus `age` for encrypted replicas and `aws` or `rclone`
+They need `rsync` 3.1 or later (on macOS, `brew install rsync`: the system
+`/usr/bin/rsync` is openrsync, which pi-profile names when a run fails), plus
+`age` for encrypted replicas and `aws` or `rclone`
 for S3. S3 replicas are encrypted unless you pass `--no-encrypt`; keep the age
 private key safe, because without it those backups cannot be read.
 Encryption hides session contents, not folder or file names. If a
@@ -106,19 +256,19 @@ inode, or the same inode with another size, mtime or birth time) is skipped
 and sent by the next run. A
 session that has become smaller than its copy in a replica is held back, even
 after `--full` or a change of age recipients; a new replica target gets every
-session.
+session. The stub `sessions archive` leaves for an archived session is held
+back too. It is not reported as smaller when the replica's copy is the
+archived one: the size recorded for the replica equals the archived copy's
+size, and the copy was sent with the archived copy's mtime. Both are kept
+when the age recipients change, so the stub is still not reported then. Otherwise, as when
+Pi added lines after the last backup and before the archive, it is reported,
+and so is a stub that Pi has added lines to.
 
-To back up whenever a Pi session ends, add `autoBackup` to
-`~/.pi/pi-profile/config.json`:
+To back up whenever a Pi session ends, add an `autoBackup` key to the existing
+`~/.pi/pi-profile/config.json`, beside the keys already there:
 
 ```json
-{
-  "schemaVersion": 1,
-  "hostId": "my-laptop",
-  "sessionStores": { "main": { "path": "/home/user/pi-sessions" } },
-  "replicas": [{ "id": "usb", "kind": "local", "path": "/media/usb/pi-sessions" }],
-  "autoBackup": { "onSessionEnd": true, "minIntervalSeconds": 300 }
-}
+"autoBackup": { "onSessionEnd": true, "minIntervalSeconds": 300 }
 ```
 
 When a session ends (quit, `/new`, `/resume` or a fork; not `/reload`), the
@@ -630,9 +780,11 @@ with `--dry-run` first. The pin's ways out never print it.
 The pin belongs to a hub, so the flags settle the pin of each hub the pull
 reads: every hub with no names, or the hubs that hold the named profiles.
 The printed `--keep-local` names that hub's profiles, so it reads no other
-hub. When a pull with names leaves another hub's pin as it is, it warns
-and prints the same two ways out; since it listed none of that hub's
-files, it says to run the `--keep-local` with `--dry-run` first. `--dry-run` lists the conflict and writes
+hub. A hub that holds only its pin (no profile for this host) has nothing
+to name: the `--keep-local` then has no names and reads every hub. When a
+pull with names leaves another hub's pin as it is, it warns and prints the
+same two ways out; since it listed none of that hub's files, it says to run
+the `--keep-local` with `--dry-run` first, with names or without. `--dry-run` lists the conflict and writes
 nothing. `sync push` also
 refuses to replace a hub's pin that moved since this host last pulled it:
 pull first.

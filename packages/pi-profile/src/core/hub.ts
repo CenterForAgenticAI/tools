@@ -810,6 +810,12 @@ function pulledPastMain(g: Git, hub: string, ps: readonly Prepared[], state: Syn
 	return past;
 }
 
+/** The hub.json of tree `entries`, parsed, or why it is invalid. */
+function hubJsonAt(g: Git, entries: ReadonlyMap<string, Entry>): ReturnType<typeof parseHubJson> {
+	const e = entries.get(HUB_JSON);
+	return parseHubJson(e === undefined ? undefined : readBlobs(g, [e.sha]).get(e.sha));
+}
+
 /** Build, gate, commit and push the profiles `ps` of hub `hub`. */
 function pushHub(l: Layout, hub: string, remote: string, ps: readonly Prepared[], host: string, env: Env, hooks: PushHooks, dropped: SkippedPath[]): HubPush {
 	const g = openMirror(l, hub, remote, env);
@@ -836,12 +842,16 @@ function pushHub(l: Layout, hub: string, remote: string, ps: readonly Prepared[]
 	const onTip = main !== undefined && tip !== undefined && tip !== main && pulledPastMain(g, hub, ps, state, main, tip);
 	const base = onTip ? tip : main;
 	const entries = base === undefined ? new Map<string, Entry>() : treeEntries(g, base);
-	const hubJson = parseHubJson(entries.has(HUB_JSON) ? readBlobs(g, [(entries.get(HUB_JSON) as Entry).sha]).get((entries.get(HUB_JSON) as Entry).sha) : undefined);
+	const hubJson = hubJsonAt(g, entries);
 	if (typeof hubJson === "string") throw new Refusal(`hub ${hub}: ${hubJson}; fix the hub before pushing`);
+	// The hub's pin is the fetched head's. `main` stays behind it while a profile is held, and the pull that settled a
+	// diverged pin compared it with the head, so reading `main` here would refuse a pin already settled.
+	const headJson = tip === undefined || tip === base ? hubJson : hubJsonAt(g, treeEntries(g, tip));
+	if (typeof headJson === "string") throw new Refusal(`hub ${hub}: ${headJson}; fix the hub before pushing`);
 	const mine = localPin.get(hub);
 	// A pin waiting here never replaces one another host set since this host last agreed with the hub (issue 54).
-	if (pinDiverged(mine, hubJson.pin)) {
-		const theirs = hubJson.pin === undefined ? "another host removed the Pi version pin" : `another host set the Pi version pin ${shownPin(hubJson.pin)}`;
+	if (pinDiverged(mine, headJson.pin)) {
+		const theirs = headJson.pin === undefined ? "another host removed the Pi version pin" : `another host set the Pi version pin ${shownPin(headJson.pin)}`;
 		const here = mine?.pin === undefined ? "this host's removal of its pin" : `this host's pin ${shownPin(mine.pin)}`;
 		throw new Refusal(`hub ${hub}: ${theirs}, and ${here} is not pushed yet; nothing was pushed.\nrun pi-profile sync pull first: it names the ways to settle the pin.`);
 	}

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { closeSync, constants, fchmodSync, fstatSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readSync, renameSync, rmSync, writeSync, type Dirent } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { check, failure, processToolRunner, removeRunDirs, rsyncBase, target, type Target, type ToolResult, type ToolRunner } from "./backup.ts";
+import { check, checkRsync, failure, processToolRunner, removeRunDirs, rsyncBase, target, type Target, type ToolResult, type ToolRunner } from "./backup.ts";
 import { loadConfig, type HostIdRunner } from "./config.ts";
 import { withProfileLock } from "./lock.ts";
 import { pullStateDir, realWithin, remoteDir, type Env, type Layout } from "./paths.ts";
@@ -593,7 +593,7 @@ function stagedPull(l: Layout, r: Replica, t: Target, dir: string, who: { self: 
 			const res = rsyncHosts(r, t, download, pullFilter(who.self, who.only, encrypted), "D700,F600", run);
 			if (res !== undefined) {
 				unreadable = someUnreadable(res) ?? [];
-				if (unreadable.length === 0) check(res, "rsync", [0, RSYNC_VANISHED]);
+				if (unreadable.length === 0) checkRsync(run, res, [0, RSYNC_VANISHED]);
 			}
 		}
 		const updated: string[] = [];
@@ -661,7 +661,7 @@ export function pullSessions(l: Layout, replicaId: string, opts: PullOptions = {
 		const res = rsyncHosts(r, t, dir, pullFilter(self, only), "D700,F400", run);
 		if (res === undefined) return { replica: r.id, dir, updated: [], unreadable: [], failed: [], skipped: [] };
 		const unreadable = someUnreadable(res) ?? [];
-		if (unreadable.length === 0) check(res, "rsync", [0, RSYNC_VANISHED]);
+		if (unreadable.length === 0) checkRsync(run, res, [0, RSYNC_VANISHED]);
 		const updated = res.stdout.split("\n").filter((line) => line.endsWith(".jsonl")).map(printable);
 		return { replica: r.id, dir, updated, unreadable, failed: [], skipped: [] };
 	});

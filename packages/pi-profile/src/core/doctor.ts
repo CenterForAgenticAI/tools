@@ -14,7 +14,7 @@ import { KEYED_FILES } from "./hub.ts";
 import { leftoverBreaker } from "./lock.ts";
 import { pinFindings } from "./pin.ts";
 import { printable, shellQuote } from "./repo.ts";
-import { configReport, profileSyncRules, shown, surveyProfile, UNKNOWN_REASONS } from "./syncmanifest.ts";
+import { configReport, envColonPaths, profileSyncRules, shown, surveyProfile, UNKNOWN_REASONS } from "./syncmanifest.ts";
 
 export type Level = "ok" | "warn" | "error";
 
@@ -72,6 +72,9 @@ function checkProfile(l: Layout, name: string, out: Finding[]): void {
 
 const UNKNOWN_SHOWN = 10;
 
+/** Who reads each keyed file and resolves its references: `$NAME` and `${NAME}`, never `env:NAME`. */
+const KEY_READER: Readonly<Record<string, string>> = { "models.json": "Pi", "web-search.json": "pi-web-access" };
+
 /** Unknown paths, which never sync, and config files whose content looks like a credential. Never prints a value. */
 function checkSyncManifest(l: Layout, name: string, add: (level: Level, message: string) => void): void {
 	const { dir, rules } = profileSyncRules(l, name, false);
@@ -87,6 +90,11 @@ function checkSyncManifest(l: Layout, name: string, add: (level: Level, message:
 		if (f.unscanned !== undefined) add("warn", `${path} is config but was not scanned for credentials: ${f.unscanned}`);
 		else if (KEYED_FILES.has(f.path)) add("warn", `${path} holds a literal API key at ${f.at.map(printable).join(", ")}; sync push leaves it out of the hub until each is an environment variable reference such as "\${NAME}" (see API keys in the pi-profile README)`);
 		else add("warn", `${path} is config but holds a credential-looking value at ${f.at.map(printable).join(", ")}; config sync skips it, so move the value to an environment variable or auth.json (or, for a value that is not a secret, see pi-profile sync status ${name} --allow-line)`);
+	}
+	for (const e of entries) {
+		if (e.cls !== "config" || e.dir || e.link || !KEYED_FILES.has(e.path)) continue;
+		const at = envColonPaths(join(dir, e.path));
+		if (at.length > 0) add("warn", `${printable(e.path)} uses env:NAME at ${at.map(printable).join(", ")}, which ${KEY_READER[e.path] ?? "Pi"} does not resolve, so the key never reaches the provider; write each as an environment variable reference such as "\${NAME}" (see API keys in the pi-profile README)`);
 	}
 	for (const g of report.ignored) add("warn", `sync.allowFindings entry for ${printable(g.entry.path)}:${String(g.entry.line)} is ignored: ${g.reason}`);
 	for (const a of report.stale) add("warn", `stale allow entry: ${printable(a.path)}:${String(a.line)} (${printable(a.key)}) matches no finding; remove it from sync.allowFindings in profile.json`);
