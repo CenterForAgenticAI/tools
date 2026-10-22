@@ -36,7 +36,7 @@ node scripts/acp-kernel-tests.mjs --upstream-check
 `--run` checks provenance, then uses the existing TypeScript compiler to transpile
 into a temporary directory and runs Node's test runner there. Like upstream's
 tsx command, it does not type-check the upstream test bodies. Production code
-is still type-checked by `npm run check`. The 66 test files contain 869 tests;
+is still type-checked by `npm run check`. The 66 test files contain 845 tests;
 three prompt fixtures are also copied. These tests are separate from the
 package's `npm test` glob and ESLint rules. The CI `acp-kernel-tests` job runs
 both upstream verification and the suite.
@@ -46,7 +46,7 @@ and the upstream SHA-256 after reversing only the recorded import-specifier
 changes. `--upstream-check` also clones the pinned commit and independently
 compares bytes and the complete upstream inventory. It needs GitHub access.
 `tests/acp-kernel/provenance.json` records each file, both hashes, every import
-change and occurrence count, and all 20 exclusions. Mixed test files importing
+change and occurrence count, and all 21 exclusions. Mixed test files importing
 uncopied wire, panel or persist modules are excluded whole; `search.test.ts`
 also imports the uncopied semantic-search implementation. No assertions are
 changed or skipped. The upstream license is in `src/folds/kernel/PROVENANCE.md`.
@@ -72,10 +72,11 @@ This online command is not part of `npm test`. On a cache miss it runs
 the pinned SHA-512 in `scripts/parity-differential-support.mjs`, verifies the
 cached tarball bytes, and extracts into a fresh temporary directory. It adds
 no package dependency. The CI `parity-differential` job runs it after building.
-The `acp-kernel-tests` job gates package publishing. The `parity-differential`
-job runs in every pipeline but does not gate publishing yet, because the native
-engine still differs from bcp in ways the register does not explain. It becomes
-a cut-over gate for issue #137 once it passes.
+The `acp-kernel-tests` and `parity-differential` jobs gate package publishing.
+The `parity-differential` job runs in branch, merge request, `main` and tag
+pipelines, and it is not allowed to fail: a change that breaks parity with bcp
+fails both the branch pipeline and the merge request pipeline. It is a gate for
+the native-compaction cut-over.
 
 The runner uses Pi's faux provider with the real bcp extension loaded before
 our compiled extension. Our shadow recorder does the comparisons; the existing
@@ -96,8 +97,6 @@ agent settings, logs and side files stay under the temporary test root; only the
 verified package download stays in the cache. Do not copy real session content
 into the corpus. The pure runner tests remain offline in `npm test`.
 
-The register is empty on the lane's base. This job is intentionally failing
-until the investigated register entries and remaining parity fixes land. In
-particular, invalid refs and assistant tool-call edge refs currently produce
-`ref-unmapped` inconclusive evidence; register explanations alone cannot make
-inconclusive records pass.
+The job passes on `main`: every remaining difference is explained by an entry in
+`src/parity/register.ts`. A new unexplained difference or inconclusive record
+fails the pipeline. Register explanations cannot make an inconclusive record pass.

@@ -47,6 +47,19 @@ If uncertain, leave focus unset. `session_focus` is not a to-do list, progress t
 
 A self-contained answer, routine one-file edit, or task expected to finish in the current response should remain without focus; if the objective later must survive context loss, start focus then after any required thinking-effort preflight. When focus is justified, state one concise overall purpose instead of copying the user's prompt. Use a goal only for a durable sub-objective whose state must survive context loss, a ref only when it is needed to resume the work, and a boundary only for a lasting constraint. Mutate it only for a durable semantic change needed after context loss: the objective materially changes, the user establishes or changes a lasting constraint, a resumable external reference becomes essential, or the lifecycle truly pauses, completes, or detaches. Otherwise do not call `session_focus`.
 
+#### Goals and the session brief
+
+A goal is a durable sub-objective recorded on the focus snapshot. The agent sets, changes or removes one with the `goal` action; the status defaults to `active`, and a goal needs started focus:
+
+```ts
+session_focus({ action: "goal", goal: { id: "g1", text: "Expose goals on session_focus", status: "active" } })
+session_focus({ action: "goal", goal: { id: "g1", text: "" }, remove: true })
+```
+
+A goal id follows the task-id rules (at most 32 characters, `^[A-Za-z0-9][A-Za-z0-9._-]*$`); a goal status is `pending`, `active`, `blocked` or `done`. Tasks link to a goal by its id; see the session task list.
+
+The brief is a short note of where the session stands: what is going on, what was decided, what comes next. It does not need focus. `{action: "brief", brief: "<text>"}` replaces it and `{action: "brief", clear: true}` removes it. Text over 1,200 characters (`MAX_BRIEF_CHARS`) is refused with a reason, never truncated, and secret-shaped text is redacted before it is stored. Each change is a `context-aware.brief.v1` session entry; the latest one on the current branch wins, so replay, reload and `/tree` follow it. The brief is shown every turn in a `<session-brief>` block in the hidden per-turn message next to `<session-tasks>`, labelled as agent-written state rather than a user request, and stays out of the system prompt so changing it leaves the cached prefix intact. `/focus` shows it.
+
 Agent-created objectives start unpinned so the agent can refine them. An explicit user `/focus edit <objective>` creates or updates a pinned objective that agent mutations cannot replace. The initial agent `start` operation is rejected when a focus already exists; invalid mutations are rejected without changing the authoritative snapshot. A user uses `/focus edit` to establish or replace a user-owned objective.
 
 Only enabled, active focus affects prompt context, compaction guidance/details, or next-phase seed constraints. Missing, disabled, paused, completed, and detached focus leaves normal compaction unchanged and contributes no durable-workstream content.
@@ -253,7 +266,7 @@ Current behavior splits this into two pieces:
 1. a stable `<context-awareness>` system prompt block that explains how to interpret context-pressure telemetry;
 2. a hidden, self-describing custom message persisted once when the outer user turn starts.
 
-The system prompt text is set as named Pi prompt sections, one per block: `context-awareness`, `durable-focus-guidance`, `context-cache`, `session_focus` (the active focus envelope), and `compaction_history`. Pi sends a changed section as an update, so a focus edit changes only `session_focus` and the other sections stay byte-identical. Task state and pressure telemetry change every turn, so they stay in the hidden message rather than in a section. When another extension has already replaced the whole prompt, context-aware appends the same blocks to that prompt instead.
+The system prompt text is set as named Pi prompt sections, one per block: `context-awareness`, `durable-focus-guidance`, `context-cache`, `session_focus` (the active focus envelope), and `compaction_history`. Pi sends a changed section as an update, so a focus edit changes only `session_focus` and the other sections stay byte-identical. Task state, the session brief, and pressure telemetry change every turn, so they stay in the hidden message rather than in a section. When another extension has already replaced the whole prompt, context-aware appends the same blocks to that prompt instead.
 
 Envelope format:
 
@@ -433,6 +446,8 @@ When rewriting is enabled, the expanded seed replaces the raw seed for both purp
 A successful `compact_session` call is a terminating tool action: Pi ends the current agent run without an extra LLM continuation, then the extension starts compaction from the `agent_settled` lifecycle boundary. After compaction, the extension sends the expanded seed automatically, so the user does not need to repeat the prompt. The agent should call `compact_session` as the only tool in its response because Pi only terminates a mixed tool batch when every result in that batch is terminating.
 
 `/compact-then` follows the same no-reprompt handoff contract. As an extension command it waits for an idle boundary, compacts, and auto-sends its captured or generated seed.
+
+When Pi would refuse the compaction, `compact_session` returns `Nothing to compact (session too small); the conversation is unchanged.` (or `Already compacted; …` when the newest entry is a compaction) as its result, without reporting `queued` first. That result does not end the run. `/compact-then`, the typed service's `requestHandoff` (status `nothing-to-compact`), and a Pi Fabric `compact.request` under the owner claim (`queued: false`) refuse the same way, before any seed is generated or queued. The check reproduces Pi's refusal for the session snapshot as it stands when asked. The `compact_session` snapshot includes an estimate for this call's own persisted result; entries that land after the check are not covered and may change Pi's eventual decision. Unverified Pi versions, missing settings, queued input, pending context edits, and an estimated result that already reaches the kept tail all leave the request to Pi.
 
 ### Prior-session search
 

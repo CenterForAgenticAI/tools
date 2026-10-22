@@ -114,7 +114,7 @@ for (const [name, result, entry] of [["dead-range", RESULTS.deadRange, "FP-005"]
 		const report = buildFoldParityReport([...records, ...fillers], PARITY_REGISTER, PROBE);
 		assert.deepEqual(report.counts, { match: 499, explained: 1, diff: 0, inconclusive: 0 });
 		assert.equal(report.ready, true);
-		assert.match(report.text, new RegExp(`${entry}: \\d+\\n`, "u"));
+		assert.ok((report.registerHits[entry]?.differences ?? 0) > 0);
 	});
 }
 
@@ -141,7 +141,7 @@ test("a batch with a matching sibling and a refused call keeps only the refusal'
 	// With the sibling outside the 500-call window, the refused call alone still keeps the corruption.
 	const sibling = corrupted.calls.find((call) => call.toolCallId === "sibling")!;
 	const windowed = buildFoldParityReport([{ ...sibling, at: "1999-01-01T00:00:00.000Z" }, ...corrupted.records.filter((record) => record !== sibling), ...fillers], PARITY_REGISTER, PROBE);
-	assert.match(windowed.text, /window 500/u);
+	assert.equal(windowed.window?.calls, 500);
 	assert.deepEqual(windowed.counts, { match: 499, explained: 0, diff: 1, inconclusive: 0 });
 	assert.equal(windowed.ready, false);
 });
@@ -242,6 +242,7 @@ test("the round-4 probe: a delta that holds only its verdict does not explain a 
 	assert.equal(probe.compared.counterfactual?.delta?.verdict, "other");
 	assert.deepEqual(probe.report.counts, { match: 499, explained: 0, diff: 1, inconclusive: 0 });
 	assert.equal(probe.report.ready, false);
+	assert.ok(probe.report.blocking.some((blocked) => blocked.toolCallId === "refused"));
 	assert.match(probe.report.text, /refused/u);
 });
 
@@ -641,7 +642,7 @@ test("a refusal after an earlier accepted fold is explained: FP-001 explains the
 	assert.ok(explainsCounterfactual("FP-001", { kind: "summaries" }, request, records));
 	assert.deepEqual(report.counts, { match: 499, explained: 1, diff: 0, inconclusive: 0 });
 	assert.equal(report.ready, true);
-	assert.match(report.text, /FP-005: \d+\n/u);
+	assert.ok((report.registerHits["FP-005"]?.differences ?? 0) > 0);
 });
 
 test("a refusal after a compress call with a long summary is explained: FP-002 explains the counterfactual's compress arguments", async () => {
@@ -651,7 +652,7 @@ test("a refusal after a compress call with a long summary is explained: FP-002 e
 	assert.ok(explainsCounterfactual("FP-002", { kind: "tool-calls" }, request, records));
 	assert.deepEqual(report.counts, { match: 499, explained: 1, diff: 0, inconclusive: 0 });
 	assert.equal(report.ready, true);
-	assert.match(report.text, /FP-005: \d+\n/u);
+	assert.ok((report.registerHits["FP-005"]?.differences ?? 0) > 0);
 });
 
 test("a refusal after the opening user message was folded is explained: FP-001 and FP-003 explain the counterfactual", async () => {
@@ -661,7 +662,7 @@ test("a refusal after the opening user message was folded is explained: FP-001 a
 	assert.ok(explainsCounterfactual("FP-003", { kind: "content" }, request, records));
 	assert.deepEqual(report.counts, { match: 499, explained: 1, diff: 0, inconclusive: 0 });
 	assert.equal(report.ready, true);
-	assert.match(report.text, /FP-005: \d+\n/u);
+	assert.ok((report.registerHits["FP-005"]?.differences ?? 0) > 0);
 });
 
 for (const background of ["earlier-fold", "long-summary", "opening-folded"] as const) {
@@ -723,5 +724,6 @@ test("a refused list that names an accepted call cannot take that call's block i
 	const forgedRequest = { ...request, refused: [...request.refused!, { toolCallId: ACCEPTED_SECOND.id, type: "dead-range" as const }] };
 	const report = buildFoldParityReport([...records.filter((record) => record !== sibling && record !== request), forgedCall, forgedRequest, ...fillers.slice(2)], PARITY_REGISTER, PROBE);
 	assert.deepEqual(report.counts, { match: 498, explained: 0, diff: 0, inconclusive: 2 });
+	assert.ok(report.blocking.some((blocked) => blocked.toolCallId === "accepted-second"));
 	assert.match(report.text, /accepted-second/u);
 });

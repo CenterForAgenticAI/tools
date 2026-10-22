@@ -12,10 +12,14 @@ import { prepareSessionFocusArguments, prepareSessionTasksArguments } from "../s
 // compaction estimator uses the same characters / 4 rule. Before the schemas
 // were trimmed the estimates were 841 tokens (session_focus, 3,363 characters)
 // and 1,090 tokens (session_tasks, 4,358 characters); after, 308 and 538. The
-// ceilings leave about ten per cent for small additions.
+// goal and brief actions (issue #212, #213) and the task goal
+// link added about 70 and 60 tokens, with no new descriptions. The update
+// ask and answer fields (issue #214) bring session_tasks to
+// 684, again with no new descriptions. The ceilings leave about ten per cent
+// for small additions.
 const TOKEN_CEILINGS = {
-	session_focus: 340,
-	session_tasks: 590,
+	session_focus: 420,
+	session_tasks: 750,
 } as const;
 
 interface RegisteredTool {
@@ -68,7 +72,7 @@ for (const name of Object.keys(TOKEN_CEILINGS) as Array<keyof typeof TOKEN_CEILI
 
 test("both schemas still advertise every action", async () => {
 	assert.deepEqual((await tool("session_focus")).parameters.properties.action?.enum,
-		["get", "start", "edit", "ref", "boundary", "status", "detach", "activity", "pin"]);
+		["get", "start", "edit", "ref", "boundary", "status", "detach", "activity", "pin", "goal", "brief"]);
 	assert.deepEqual((await tool("session_tasks")).parameters.properties.action?.enum,
 		["plan", "add", "update", "remove", "reorder", "list", "subtree"]);
 });

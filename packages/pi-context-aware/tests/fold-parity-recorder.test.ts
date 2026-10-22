@@ -4,11 +4,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { registerFoldParityRecorder } from "../src/parity/recorder.js";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { registerFoldEngine } from "../src/folds/fold-engine.js";
+import type { Config } from "../src/folds/kernel/index.js";
+import { ParityBudget, registerFoldParityRecorder, type FoldParityLimits } from "../src/parity/recorder.js";
 import { CONFIG_POLICY_ENTRY_TYPE, configPolicyEntry } from "../src/platform/config-layers.js";
 import { readParityRecords } from "../src/parity/records.js";
 
-function harness(dir: string) {
+function harness(dir: string, limits?: FoldParityLimits, budget?: ParityBudget) {
 	const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
 	const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
 	const api = { on(name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) { handlers.set(name, handler); }, registerCommand(name: string, definition: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) { commands.set(name, definition); } } as unknown as ExtensionAPI;
@@ -17,7 +20,7 @@ function harness(dir: string) {
 	const original = manager.appendMessage({ role: "user", content: "original", timestamp: 1 });
 	fs.writeFileSync(`${manager.getSessionFile()}.acp.json`, JSON.stringify({ schemaVersion: 1, blocks: [], messageRefs: { byRef: { m00001: original } } }));
 	const ctx = { sessionManager: manager, cwd: dir, model: { contextWindow: 200_000 } } as unknown as ExtensionContext;
-	const recorder = registerFoldParityRecorder(api, { engine: { mode: () => "shadow" }, agentDir: dir, fingerprint: "test" });
+	const recorder = registerFoldParityRecorder(api, { engine: { mode: () => "shadow" }, agentDir: dir, fingerprint: "test", ...(budget ? { budget } : limits ? { limits } : {}) });
 	const emit = (name: string, event: unknown, context = ctx) => handlers.get(name)!(event, context);
 	return { manager, ctx, recorder, emit, commands };
 }
@@ -83,10 +86,11 @@ test("recorder settings reach previews, persist folded-opening evidence and rese
 		let notice = "";
 		const commandCtx = { ...ctx, ui: { notify(message: string) { notice = message; } } } as unknown as ExtensionContext;
 		await commands.get("fold-parity")!.handler("", commandCtx);
-		assert.match(notice, /count 1\/500/u);
+		assert.match(notice, /1 of 500 calls recorded/u);
 		manager.appendCustomEntry(CONFIG_POLICY_ENTRY_TYPE, configPolicyEntry("session", { "folds.firstUserMessage": "keep" }));
 		await commands.get("fold-parity")!.handler("", commandCtx);
-		assert.match(notice, /count 0\/500/u);
+		assert.match(notice, /0 of 500 calls recorded/u);
+		assert.match(notice, /folds\.firstUserMessage keep,/u);
 	} finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -106,5 +110,80 @@ test("session lifecycle resets clear pending calls without affecting inputs", as
 		emit("tool_result", result);
 		await recorder.flush();
 		assert.deepEqual(await readParityRecords(dir), []);
+	} finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+const TURN_CONFIG: Partial<Config> = { compress: { minCompressRange: 0, maxSummaryLength: 20_000, minSummaryLength: 10 }, preserveRecentMessages: 2, preserveRecentTokens: 0 };
+const TURN_SUMMARY = (n: number) => `Summary ${n}: the archived exchange is settled; keep its numbered decision.`;
+
+function tierTriggerSession(dir: string): SessionManager {
+	const manager = SessionManager.create(dir, path.join(dir, "sessions"));
+	manager.appendMessage({ role: "user", content: "Opening.", timestamp: 1 });
+	for (let i = 1; i <= 10; i++) {
+		manager.appendMessage({ role: "user", content: `Question ${i}.`, timestamp: 1 });
+		manager.appendMessage(fauxAssistantMessage(`Answer ${i}.`));
+	}
+	for (let i = 1; i <= 3; i++) manager.appendMessage({ role: "user", content: `Recent ${i}.`, timestamp: 1 });
+	manager.appendMessage({ role: "user", content: "Continue.", timestamp: 1 });
+	const ids = manager.getBranch().filter((entry) => entry.type === "message").map((entry) => entry.id);
+	const blocks = Array.from({ length: 10 }, (_, index) => ({ blockId: `b${index + 1}`, runId: `r${index + 1}`, compressCallId: `prior-${index + 1}`, tier: 1, active: true, summary: TURN_SUMMARY(index + 1), directBlockIds: [], effectiveMessageIds: ids.slice(index * 2 + 1, index * 2 + 3) }));
+	fs.writeFileSync(`${manager.getSessionFile()}.acp.json`, JSON.stringify({ schemaVersion: 1, blocks, messageRefs: { byRef: Object.fromEntries(ids.map((id, i) => [`m${String(i + 1).padStart(5, "0")}`, id])) } }));
+	return manager;
+}
+
+function engineRecorderHarness(dir: string) {
+	const handlers = new Map<string, ((event: unknown, ctx: ExtensionContext) => unknown)[]>();
+	const api = {
+		on(name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) { const list = handlers.get(name) ?? []; list.push(handler); handlers.set(name, list); },
+		registerCommand() {},
+		getAllTools() { return [{ name: "compress" }, { name: "acp_status" }]; },
+	} as unknown as ExtensionAPI;
+	const manager = tierTriggerSession(dir);
+	let hostTokens = 60_000;
+	const ctx = { sessionManager: manager, cwd: dir, model: { contextWindow: 200_000 }, getContextUsage: () => ({ tokens: hostTokens }) } as unknown as ExtensionContext;
+	const engine = registerFoldEngine(api, { config: TURN_CONFIG });
+	const recorder = registerFoldParityRecorder(api, { engine, agentDir: dir, fingerprint: "turn-memory", limits: { maxSnapshots: 8 } });
+	const emit = (name: string, event: unknown) => { for (const handler of handlers.get(name) ?? []) handler(event, ctx); };
+	return { manager, recorder, emit, setHostTokens(tokens: number) { hostTokens = tokens; } };
+}
+
+test("shadow recorder advances FP-201 memory on ordinary context events before previewing a compress batch", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "parity-turn-memory-"));
+	try {
+		const { manager, recorder, emit, setHostTokens } = engineRecorderHarness(dir);
+		const messages = manager.buildSessionContext().messages.filter((message) => message.role !== "system");
+		emit("context", { type: "context", messages });
+		emit("tool_call", { ...call, toolCallId: "trigger" });
+		emit("tool_result", { ...result, toolCallId: "trigger" });
+		await recorder.flush();
+		setHostTokens(90_000);
+		emit("context", { type: "context", messages });
+		await recorder.flush();
+		const next = (await readParityRecords(dir)).find((record) => record.kind === "next-request");
+		assert.equal(next?.ours?.nudgeFix?.cause, "tier-trigger", JSON.stringify(next));
+		assert.equal(next?.ours?.messages.length, 16);
+	} finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an inconclusive context poisons later replay instead of allowing a stale match", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "parity-turn-unknown-"));
+	try {
+		const budget = new ParityBudget({ maxSnapshots: 2 });
+		const blocker = budget.lease(0, true);
+		const { recorder, emit } = harness(dir, undefined, budget);
+		emit("tool_call", { ...call, toolCallId: "untracked" });
+		emit("tool_result", { ...result, toolCallId: "untracked" });
+		emit("context", { type: "context", messages: [{ role: "user", content: "original\n\n<acp tokens=\"1\" type=\"text\">m00001</acp>\n" }] });
+		blocker.release();
+		await recorder.flush();
+		emit("tool_call", { ...call, toolCallId: "following" });
+		emit("tool_result", { ...result, toolCallId: "following" });
+		await recorder.flush();
+		emit("context", { type: "context", messages: [{ role: "user", content: "original\n\n<acp tokens=\"1\" type=\"text\">m00001</acp>\n" }] });
+		await recorder.flush();
+		const next = (await readParityRecords(dir)).filter((record) => record.kind === "next-request");
+		assert.deepEqual(next[1]?.toolCallIds, ["following"]);
+		assert.equal(next[1]?.verdict, "inconclusive");
+		assert.ok(next[1]?.diffs.some((diff) => diff.kind === "recorder-error"), JSON.stringify(next[1]));
 	} finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

@@ -81,6 +81,7 @@ test("REQ-192-3: without billion-context-pi, its four names also register, and e
 		context_recall: "direct",
 		context_status: "direct",
 		context_compact: "direct",
+		context_fold: "direct",
 		search_prior_sessions: "deferred",
 		session_recall: "deferred",
 		session_compaction_history: "deferred",
@@ -103,6 +104,7 @@ test("REQ-192-3: each alias names the new tool it stands for", () => {
 		context_recall: undefined,
 		context_status: undefined,
 		context_compact: undefined,
+		context_fold: undefined,
 		search_prior_sessions: "context_recall",
 		session_recall: "context_recall",
 		session_compaction_history: "context_status",
@@ -114,12 +116,12 @@ test("REQ-192-3: each alias names the new tool it stands for", () => {
 	});
 });
 
-test("REQ-192-4: acp_cache and context_fold are never listed", () => {
+test("REQ-192-4: acp_cache is never listed; context_fold only without billion-context-pi (pi-context-aware#189)", () => {
 	for (const tools of [bcpLoaded, bcpAbsent]) {
 		for (const blocker of [undefined, BILLION_CONTEXT_PI_BLOCKER]) {
 			const names = decideContextToolSurface(tools, blocker).map((entry) => entry.name);
 			assert.ok(!names.includes("acp_cache" as never));
-			assert.ok(!names.includes("context_fold" as never));
+			assert.equal(names.includes("context_fold"), tools === bcpAbsent);
 		}
 	}
 });

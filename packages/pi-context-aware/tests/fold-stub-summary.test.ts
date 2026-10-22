@@ -298,7 +298,7 @@ test("shadow parity classifies the refusal as stub-summary, never keeps the summ
 
 	const report = buildFoldParityReport([call, matchingRequest], PARITY_REGISTER, "current");
 	assert.deepEqual(report.counts, { match: 0, explained: 1, diff: 0, inconclusive: 0 });
-	assert.match(report.text, /FP-008: \d+/u);
+	assert.ok((report.registerHits["FP-008"]?.differences ?? 0) > 0);
 
 	const otherRejection: CompressRecord = { ...call, oursOutcome: { type: "rejected", reasons: ["no-fold"] } };
 	assert.equal(buildFoldParityReport([otherRejection, matchingRequest], PARITY_REGISTER, "current").counts.diff, 1, "without the stub-summary reason the same differences stay unexplained");

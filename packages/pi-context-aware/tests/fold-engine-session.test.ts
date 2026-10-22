@@ -202,7 +202,8 @@ test("session keep reaches the live planner and the provider receives the openin
 
 test("fold mode sends a user-role summary before the first assistant to the provider", async () => {
 	const live = await run(false);
-	const messages = JSON.parse(live.provider[1] ?? "[]") as { role: string; content: unknown }[];
+	// A context handler that changes the request gets Pi's system state as one leading system message.
+	const messages = (JSON.parse(live.provider[1] ?? "[]") as { role: string; content: unknown }[]).filter((message) => message.role !== "system");
 	assert.equal(messages[0]?.role, "user");
 	assert.match(JSON.stringify(messages[0]?.content), /FOLD-SUMMARY/u);
 	assert.ok(messages.findIndex((message) => message.role === "assistant") > 0);

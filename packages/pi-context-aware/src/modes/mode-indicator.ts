@@ -35,31 +35,40 @@ function modeLabel(mode: ContextAwareModeSnapshotV1): string {
 	return mode.available ? label : `${label} (unavailable)`;
 }
 
+/** A pinned layer's chip carries a flag. */
+function chipText(mode: ContextAwareModeSnapshotV1): string {
+	return ` ◆ ${modeLabel(mode)}${mode.pinned === true ? " ⚑" : ""} `;
+}
+
 /**
- * One line: the effective mode as a solid chip in its color, the outer mode it
- * returns to, the owner, and a rule in the effective mode's color to the edge.
+ * One line: a solid chip per active layer in its mode's color, lowest rank
+ * first, the owners, the step trail, and a rule in the top layer's color to the
+ * edge. `modes` is in rank order, as `layers()` returns it.
  */
-export function renderModeIndicatorLine(mode: ContextAwareModeSnapshotV1, theme: Theme, width: number): string {
-	if (width <= 0) return "";
-	const color = modeColor(mode);
-	const parts = [paint(theme, ` ◆ ${modeLabel(mode)} `, color, { inverse: true, bold: true })];
-	if (mode.outer !== undefined) {
-		parts.push(theme.fg("muted", " ← "), paint(theme, `◇ ${modeLabel(mode.outer)}`, modeColor(mode.outer), { bold: true }));
-	}
-	parts.push(theme.fg("muted", ` · ${modeDisplayText(mode.owner)}`));
-	if (mode.suggestedBy === "model") parts.push(theme.fg("warning", " [model-confirmed]"));
-	parts.push(paint(theme, ` ${"─".repeat(width)}`, color));
+export function renderModeIndicatorLine(modes: readonly ContextAwareModeSnapshotV1[], theme: Theme, width: number, trail?: string): string {
+	const top = modes.at(-1);
+	if (width <= 0 || top === undefined) return "";
+	const parts: string[] = [];
+	modes.forEach((mode, index) => {
+		if (index > 0) parts.push(" ");
+		parts.push(paint(theme, chipText(mode), modeColor(mode), { inverse: true, bold: true }));
+	});
+	const owners = [...new Set(modes.map((mode) => modeDisplayText(mode.owner)))];
+	parts.push(theme.fg("muted", ` · ${owners.join(", ")}`));
+	if (modes.some((mode) => mode.suggestedBy === "model")) parts.push(theme.fg("warning", " [model-confirmed]"));
+	if (trail !== undefined) parts.push(theme.fg("muted", " › "), theme.fg("text", modeDisplayText(trail)));
+	parts.push(paint(theme, ` ${"─".repeat(width)}`, modeColor(top)));
 	// Cut, never wrap: word wrapping would break at the hyphen in an owner such as `pi-stack`.
 	return truncateToWidth(parts.join(""), width, "", true);
 }
 
-/** A widget factory for the effective mode; Pi calls it with the live theme. */
-export function createModeIndicatorWidget(mode: ContextAwareModeSnapshotV1): (tui: unknown, theme: Theme) => { render(width: number): string[]; invalidate(): void } {
+/** A widget factory for the active layers; Pi calls it with the live theme. */
+export function createModeIndicatorWidget(modes: readonly ContextAwareModeSnapshotV1[], trail?: string): (tui: unknown, theme: Theme) => { render(width: number): string[]; invalidate(): void } {
 	return (_tui, theme) => {
 		let cached: { width: number; lines: string[] } | undefined;
 		return {
 			render(width: number): string[] {
-				if (cached?.width !== width) cached = { width, lines: width > 0 ? [renderModeIndicatorLine(mode, theme, width)] : [] };
+				if (cached?.width !== width) cached = { width, lines: width > 0 ? [renderModeIndicatorLine(modes, theme, width, trail)] : [] };
 				return cached.lines;
 			},
 			invalidate(): void {

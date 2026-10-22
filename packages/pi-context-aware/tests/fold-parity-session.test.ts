@@ -140,7 +140,7 @@ test("shadow recorder agrees on hand-written four-entry coverage and next-reques
 	assert.ok(next);
 	assert.equal(next.verdict, "match", JSON.stringify(next));
 	assert.equal(next.bcp?.messages.filter((message) => message.summary).length, 1);
-	assert.match(result.notifications.join("\n"), /count 1\/500.*\nmatch 1/u);
+	assert.match(result.notifications.join("\n"), /1 of 500 calls recorded[\s\S]*\n +1 {2}match /u);
 	assert.doesNotMatch(JSON.stringify(result.records), /opening decisions|ALPHA-QUESTION|opening history/u);
 });
 
@@ -159,7 +159,7 @@ test("shadow recorder reports changed summary at the next provider request", asy
 	const next = result.records.find((record) => record.kind === "next-request");
 	assert.equal(next?.verdict, "diff");
 	assert.deepEqual(next?.diffs.map((diff) => diff.kind), ["summaries"]);
-	assert.match(result.notifications.join("\n"), /diff 1.*\n.*Ready: no[\s\S]*summaries/u);
+	assert.match(result.notifications.join("\n"), /^Not ready to cut over\. 1 of 500 calls recorded; 1 has differences no known entry explains\.$[\s\S]*\n +1 {2}different [\s\S]*\n +1 {2}summaries /mu);
 });
 
 test("native nested compress calls are recorded with the execute toolCallId and nested flag", async () => {
@@ -184,13 +184,13 @@ test("several nested calls before one provider request are previewed in order fr
 	assert.deepEqual(requests[0]?.toolCallIds, ["parity-probe/1", "parity-probe/2"]);
 	assert.equal(requests[0]?.verdict, "match", JSON.stringify(requests[0]));
 	assert.equal(requests[0]?.ours?.messages.filter((message) => message.summary).length, 2);
-	assert.match(result.notifications.join("\n"), /count 2\/500/u);
+	assert.match(result.notifications.join("\n"), /2 of 500 calls recorded/u);
 });
 
 test("without bcp the recorder ignores even an unrelated compress tool", async () => {
 	const result = await run({ absent: true });
 	assert.deepEqual(result.records, []);
-	assert.match(result.notifications.join("\n"), /count 0\/500/u);
+	assert.match(result.notifications.join("\n"), /0 of 500 calls recorded/u);
 });
 
 test("recorder is observe-only: identical session entries, side bytes, and tool names", async () => {

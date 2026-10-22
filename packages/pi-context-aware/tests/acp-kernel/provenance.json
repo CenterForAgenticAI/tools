@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/ranxianglei/acp-kernel.git",
-  "commit": "5d7b5380df0aef87d9c96f2993dc8e2368dddb91",
+  "commit": "4d38906e004e7fd9fe4b0c06cbd8c661694f506f",
   "files": [
     {
       "file": "absorb.test.ts",
@@ -104,58 +104,6 @@
       ]
     },
     {
-      "file": "ccr.test.ts",
-      "upstreamSha256": "1f7e94b135f175a00c85a78a728fa37db63b5d48e306c76bea4fd6534587a6ed",
-      "sha256": "ca046b447935b999322ced3d2aee4e777c184da9776e1c981347a4531f404de3",
-      "changes": [
-        {
-          "from": "../src/content-store.js",
-          "to": "../../src/folds/kernel/content-store.js",
-          "count": 2
-        },
-        {
-          "from": "../src/ccr.js",
-          "to": "../../src/folds/kernel/ccr.js",
-          "count": 1
-        },
-        {
-          "from": "../src/compress.js",
-          "to": "../../src/folds/kernel/compress.js",
-          "count": 1
-        },
-        {
-          "from": "../src/state.js",
-          "to": "../../src/folds/kernel/state.js",
-          "count": 1
-        },
-        {
-          "from": "../src/config.js",
-          "to": "../../src/folds/kernel/config.js",
-          "count": 1
-        },
-        {
-          "from": "../src/refs.js",
-          "to": "../../src/folds/kernel/refs.js",
-          "count": 1
-        },
-        {
-          "from": "../src/absorb.js",
-          "to": "../../src/folds/kernel/absorb.js",
-          "count": 2
-        },
-        {
-          "from": "../src/compress-tools.js",
-          "to": "../../src/folds/kernel/compress-tools.js",
-          "count": 1
-        },
-        {
-          "from": "../src/types.js",
-          "to": "../../src/folds/kernel/types.js",
-          "count": 1
-        }
-      ]
-    },
-    {
       "file": "checkpoint-carrier.test.ts",
       "upstreamSha256": "ced36d9e4bd92e203c6c8961b05377b0b8d6efab1ea4b6a59d864c0ce3f97bba",
       "sha256": "e44dfc26a8a0c36fb6b7459bc6d9ac2a41515b7c80cc47826c36ec9f2f9e020b",
@@ -218,8 +166,8 @@
     },
     {
       "file": "compress.test.ts",
-      "upstreamSha256": "3e77e391b93b3c4a2aef2f923f72a3e3d65db13141d98880819ffe531396edb2",
-      "sha256": "3fd23a52e4bced4ffe36ece34da8fee1eab38aef9722e6ad4a8b33c8613700cf",
+      "upstreamSha256": "536b4fa4b234e799a2eb2cb58f09327695f3c795628186fb4a9d976fa0bf88b1",
+      "sha256": "ed2834f6e1d621cf3b2df895b221920bc63ec8fd3a63c9f16295f90e52ac662d",
       "changes": [
         {
           "from": "../src/compress.js",
@@ -597,8 +545,8 @@
     },
     {
       "file": "nudge.test.ts",
-      "upstreamSha256": "b11489f6332baa4a9580f0a3092975426dadee90080adbbe03712195bd7da9c6",
-      "sha256": "618d9a1207f9628ca5e3ee342f38303917739ba208be52d3b0f5bba68be323dc",
+      "upstreamSha256": "a02cb5e0df049c7bbfdacbb0b575b6379b366e06be02745392c20e999090ec58",
+      "sha256": "c7276e5eaccd3c991733ecf1f1641f1fa39730fde5a1f213cbfa872476656abb",
       "changes": [
         {
           "from": "../src/compress.js",
@@ -732,8 +680,8 @@
     },
     {
       "file": "packs.test.ts",
-      "upstreamSha256": "99a459368314a07a3b7f960049b62357ce4101c77568cde63b5751fcbc1d0a32",
-      "sha256": "e0c9b56de319d6c6c0f5f63740a0b5fb4f3eea04a34891ab4906c592bbafe926",
+      "upstreamSha256": "cd78c86a6b623022481a3a1c26aae548813fd7082f7f1c24f1dfaa4c64d8dc2d",
+      "sha256": "f5f6990c8c0e78947f2ec38f5e51dc84f7d3d24a074ee3aa97e5258747591b8e",
       "changes": [
         {
           "from": "../src/index.js",
@@ -744,8 +692,8 @@
     },
     {
       "file": "parse-compress-input.test.ts",
-      "upstreamSha256": "60f46a87806bed05816b1839a26777897f66c06a12362af44c6159a6cad1289c",
-      "sha256": "18705f6ff7e4affc71830bc59402aae16bc66c7ac7b32db5d07784985af49de8",
+      "upstreamSha256": "916b8668486a92dd9bc33c846330c1019d0decc86fb9e8ca6bac1bd64887dede",
+      "sha256": "7698b8d6ee005233119e0125dd4fd862ae893140b5213496bd07c59fbea95285",
       "changes": [
         {
           "from": "../src/parse-compress-input.js",
@@ -818,8 +766,8 @@
     },
     {
       "file": "prompts.test.ts",
-      "upstreamSha256": "925999652241ce184a6ec27f86bac5071efdc4104012cc4c32c34c1ea0569a6f",
-      "sha256": "9e5eeb856c75eede1d0b794dcdf5835c0d930f9fd203dbaf5e497534879716ae",
+      "upstreamSha256": "879db0bc82222968a8fa13c466ec06ab41eaff5742acfbaeb4106d95bb4f4c47",
+      "sha256": "1d6ecabba937dfd8873578a200cf180a7067a12d664e63ed1f75362f0a704351",
       "changes": [
         {
           "from": "../src/prompts.js",
@@ -845,8 +793,8 @@
     },
     {
       "file": "protect-recent.test.ts",
-      "upstreamSha256": "5d7caf71570f738ab352ab161669d10e93767f41288cbaca2fd7ff873ce213ad",
-      "sha256": "aa927dcb56c647a58eb14a584d401dc787dad53f018bba7097f4f286418b02d8",
+      "upstreamSha256": "440866b00fb61f6fa70a1faad6fc5717551938f34cbaf2053c2e39867225ce38",
+      "sha256": "286df9c11026ef9bf799a809e48348f5e7cfb785714c3d6bea4197a44d9e0501",
       "changes": [
         {
           "from": "../src/compress.js",
@@ -881,7 +829,7 @@
         {
           "from": "../src/recommend.js",
           "to": "../../src/folds/kernel/recommend.js",
-          "count": 5
+          "count": 6
         }
       ]
     },
@@ -950,6 +898,38 @@
         {
           "from": "../src/absorb.js",
           "to": "../../src/folds/kernel/absorb.js",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "file": "prune-recommend-scale.test.ts",
+      "upstreamSha256": "4116654454c5432d262f19383cf1959eb6b88796fe0f6d73f6753efbba6e437e",
+      "sha256": "a6669c475f31e72d21719f260548fbdb23652cb7380a884cdcb17f3cb0666b93",
+      "changes": [
+        {
+          "from": "../src/index.js",
+          "to": "../../src/folds/kernel/index.js",
+          "count": 1
+        },
+        {
+          "from": "../src/prune.js",
+          "to": "../../src/folds/kernel/prune.js",
+          "count": 1
+        },
+        {
+          "from": "../src/recommend.js",
+          "to": "../../src/folds/kernel/recommend.js",
+          "count": 1
+        },
+        {
+          "from": "../src/state.js",
+          "to": "../../src/folds/kernel/state.js",
+          "count": 1
+        },
+        {
+          "from": "../src/types.js",
+          "to": "../../src/folds/kernel/types.js",
           "count": 1
         }
       ]
@@ -1180,8 +1160,8 @@
     },
     {
       "file": "refs.test.ts",
-      "upstreamSha256": "630420bf782974392ced520d4a0b2fcb3f0b5ba9355404e1ee4fe8c6b5a36b6c",
-      "sha256": "a3618bf1734b3daf13d9ba110b7e2f95fe89eb16d8220abfcf888efd328699cf",
+      "upstreamSha256": "5d7f9241e2042dcc3a0e649f72268376357c15af551d793eb1f2b84853f2e410",
+      "sha256": "e47f70167867abad254da6cf714dd6502f448c2481aeb38d5454864cb8c84cca",
       "changes": [
         {
           "from": "../src/refs.js",
@@ -1191,6 +1171,11 @@
         {
           "from": "../src/types.js",
           "to": "../../src/folds/kernel/types.js",
+          "count": 1
+        },
+        {
+          "from": "../src/boundaries.js",
+          "to": "../../src/folds/kernel/boundaries.js",
           "count": 1
         }
       ]
@@ -1514,8 +1499,8 @@
     },
     {
       "file": "surface-config.test.ts",
-      "upstreamSha256": "bbafd946de4ffe2048748a0c17439567bc3bd59bec1a94bea2c7472069821daf",
-      "sha256": "b263eeffac376df3e6097887693f60b40d59db8d4e9adfe517d244fb5beee8a8",
+      "upstreamSha256": "f76c7aad60baf6f2a5252d72da7556fe1b1817ec9f9e48fa182249e13a94250d",
+      "sha256": "e8302581b51ab7ea486bd65a1667b0b5a3ca69686d2eb79734348169e160b4ca",
       "changes": [
         {
           "from": "../src/surface-config.js",
@@ -1525,6 +1510,16 @@
         {
           "from": "../src/compress-tools.js",
           "to": "../../src/folds/kernel/compress-tools.js",
+          "count": 1
+        },
+        {
+          "from": "../src/prompts.js",
+          "to": "../../src/folds/kernel/prompts.js",
+          "count": 1
+        },
+        {
+          "from": "../src/compression-rules.js",
+          "to": "../../src/folds/kernel/compression-rules.js",
           "count": 1
         }
       ]
@@ -1904,6 +1899,10 @@
     }
   ],
   "excluded": [
+    {
+      "file": "ccr.test.ts",
+      "reason": "Imports uncopied entrypoint modules: wire/openai.js, wire/responses.js"
+    },
     {
       "file": "compress-detect.test.ts",
       "reason": "Imports uncopied entrypoint modules: wire/compress-detect.js, wire/bili-message.js"

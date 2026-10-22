@@ -108,6 +108,40 @@ function refusedStubSummary(diff: ParityDiff, record: CompressRecord): boolean {
 }
 
 /**
+ * True when the request's only content difference is its nudge, changed by a fix of `cause`:
+ * taking the native nudge out and putting billion-context-pi 0.1.83's in makes the non-summary
+ * content equal. Both nudges come from the same preview (fold-turn.ts), as body hashes.
+ */
+function nudgeFixOnly(cause: "tier-trigger" | "emergency-defer") {
+	return (diff: ParityDiff, _call: CompressRecord, request?: NextRequestRecord): boolean => {
+		const fix = request?.ours?.nudgeFix;
+		if (diff.kind !== "content" || !fix || fix.cause !== cause || !request?.bcp || !complete(request.ours!) || !complete(request.bcp)) return false;
+		const ours = contentKeys(request.ours!);
+		if (fix.sent !== undefined) {
+			const at = ours.indexOf(`user:${fix.sent}`);
+			if (at < 0) return false;
+			ours.splice(at, 1);
+		}
+		if (fix.compatible !== undefined) ours.push(`user:${fix.compatible}`);
+		return JSON.stringify(ours.sort()) === JSON.stringify(contentKeys(request.bcp));
+	};
+}
+
+/** Nudge fixes billion-context-pi 0.1.83 lacks (pi-context-aware#201). */
+const NUDGE_FIXES: readonly ParityRegisterEntry[] = [
+	{
+		id: "FP-201", title: "Tier-2 nudge reachable", issue: "pi-context-aware#201",
+		reason: "billion-context-pi 0.1.83 keeps the kernel's tier2Trigger 1000 and tier3Trigger 2000, which make the tier-2 nudge unreachable (ranxianglei/billion-context-pi#628); the native engine uses 10 and 20 from ranxianglei/billion-context-pi#629.",
+		matches: nudgeFixOnly("tier-trigger"),
+	},
+	{
+		id: "FP-202", title: "Emergency nudge deferred after a failed turn", issue: "pi-context-aware#201",
+		reason: "billion-context-pi 0.1.83 sends the emergency nudge again on every failed model turn (ranxianglei/billion-context-pi#666); the native engine defers it until a turn completes.",
+		matches: nudgeFixOnly("emergency-defer"),
+	},
+];
+
+/**
  * Known request differences between the native engine and billion-context-pi, each judged on the
  * request evidence it is given. The refusal entries below apply these same entries to the
  * counterfactual request (`counterfactualExplained`). Only evidence-backed differences are
@@ -150,6 +184,7 @@ const KNOWN_REQUEST_DIFFERENCES: readonly ParityRegisterEntry[] = [
 			return JSON.stringify(contentKeys(request.ours)) === JSON.stringify(theirs);
 		},
 	},
+	...NUDGE_FIXES,
 ];
 
 /** Every entry is documented in docs/fold-parity.md under the same id. */

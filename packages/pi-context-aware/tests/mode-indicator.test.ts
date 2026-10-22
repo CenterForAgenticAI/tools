@@ -92,45 +92,55 @@ test("supportsContextAwareModeUiV1 needs the ui flag on a modes capability", () 
 
 test("the indicator paints the mode chip and rule in the mode's own color", () => {
 	const pink = { kind: "rgb", r: 255, g: 0, b: 128 } as const;
-	const line = renderModeIndicatorLine(snapshot("plan", { ui: { color: "#ff0080", label: "Plan" } }), theme, 60);
+	const line = renderModeIndicatorLine([snapshot("plan", { ui: { color: "#ff0080", label: "Plan" } })], theme, 60);
 	assert.equal(visibleWidth(line), 60);
 	assert.ok(line.includes(theme.style(" ◆ Plan ", { fg: pink, inverse: true, bold: true })), "chip uses the mode color, inverted");
 	const pinkStart = theme.style("X", { fg: pink }).split("X")[0] ?? "";
 	assert.ok(pinkStart.length > 0 && line.includes(`${pinkStart} ─`), "rule uses the mode color");
 	assert.match(stripAnsi(line), /^ ◆ Plan {2}· pi-stack ─+$/u);
 
-	const token = renderModeIndicatorLine(snapshot("review"), theme, 40);
+	const token = renderModeIndicatorLine([snapshot("review")], theme, 40);
 	assert.ok(token.includes(theme.style(" ◆ review ", { fg: "accent", inverse: true, bold: true })), "no ui falls back to accent");
 	assert.ok(!token.includes(theme.style(" ◆ review ", { fg: "warning", inverse: true, bold: true })));
 });
 
-test("the indicator shows a stacked mode, availability, and model provenance", () => {
-	const mode = snapshot("review", {
-		ui: { color: "warning" },
-		suggestedBy: "model",
-		outer: snapshot("plan", { available: false, ui: { color: "success", label: "Plan" } }),
-	});
-	const line = renderModeIndicatorLine(mode, theme, 120);
-	assert.match(stripAnsi(line), /^ ◆ review {2}← ◇ Plan \(unavailable\) · pi-stack \[model-confirmed\] ─+$/u);
-	assert.ok(line.includes(theme.style("◇ Plan (unavailable)", { fg: "muted", bold: true })), "an unavailable mode loses its color");
+test("the indicator draws one chip per layer in the given order, with availability, pin and model provenance", () => {
+	const modes = [
+		snapshot("role", { layer: "role", rank: 0, pinned: true, owner: "pi-launch", ui: { color: "mdLink", label: "Builder" } }),
+		snapshot("plan", { layer: "stage", rank: 1, available: false, ui: { color: "success", label: "Plan" } }),
+		snapshot("review", { layer: "stance", rank: 2, ui: { color: "warning" }, suggestedBy: "model" }),
+	];
+	const line = renderModeIndicatorLine(modes, theme, 120);
+	assert.match(stripAnsi(line), /^ ◆ Builder ⚑ {3}◆ Plan \(unavailable\) {3}◆ review {2}· pi-launch, pi-stack \[model-confirmed\] ─+$/u);
+	assert.ok(line.includes(theme.style(" ◆ Plan (unavailable) ", { fg: "muted", inverse: true, bold: true })), "an unavailable mode loses its color");
 	assert.ok(line.includes(theme.style(" ◆ review ", { fg: "warning", inverse: true, bold: true })));
+	const warningStart = theme.style("X", { fg: "warning" }).split("X")[0] ?? "";
+	assert.ok(line.includes(`${warningStart} ─`), "the rule takes the top layer's color");
+});
+
+test("the indicator draws the trail after the chips and owners", () => {
+	const modes = [snapshot("plan", { layer: "stage", rank: 1 }), snapshot("review", { layer: "stance", rank: 2 })];
+	const line = stripAnsi(renderModeIndicatorLine(modes, theme, 120, "build 2/5"));
+	assert.match(line, /^ ◆ plan {3}◆ review {2}· pi-stack › build 2\/5 ─+$/u);
+	assert.doesNotMatch(stripAnsi(renderModeIndicatorLine(modes, theme, 120)), /›/u, "no trail, no separator");
+	assert.equal(renderModeIndicatorLine([], theme, 120), "", "no layer draws nothing");
 });
 
 test("the indicator fits any width", () => {
-	const mode = snapshot("a-very-long-mode-identifier", { outer: snapshot("outer-mode") });
-	for (const width of [1, 2, 7, 33, 200]) assert.equal(visibleWidth(renderModeIndicatorLine(mode, theme, width)), width, `width ${width}`);
-	assert.equal(renderModeIndicatorLine(mode, theme, 0), "");
+	const modes = [snapshot("outer-mode", { layer: "stage", rank: 1 }), snapshot("a-very-long-mode-identifier", { layer: "stance", rank: 2 })];
+	for (const width of [1, 2, 7, 33, 200]) assert.equal(visibleWidth(renderModeIndicatorLine(modes, theme, width, "trail")), width, `width ${width}`);
+	assert.equal(renderModeIndicatorLine(modes, theme, 0), "");
 });
 
 type WidgetCall = [key: string, value: unknown, options: unknown];
 
-test("the indicator draws a mode id and owner without their control characters", () => {
-	const mode = snapshot(`plan${ESC}[2J`, { owner: `evil\n${ESC}]0;title\u0007owner\u202e`, outer: snapshot(`outer${ESC}[H`) });
-	const line = renderModeIndicatorLine(mode, theme, 120);
+test("the indicator draws a mode id, owner and trail without their control characters", () => {
+	const modes = [snapshot(`outer${ESC}[H`), snapshot(`plan${ESC}[2J`, { owner: `evil\n${ESC}]0;title\u0007owner\u202e` })];
+	const line = renderModeIndicatorLine(modes, theme, 160, `step${ESC}[3J`);
 	const visible = stripAnsi(line);
-	assert.ok(!line.includes(`${ESC}[2J`) && !line.includes(`${ESC}[H`) && !line.includes(`${ESC}]0;`), "no raw escape from id or owner reaches the line");
+	assert.ok(!line.includes(`${ESC}[2J`) && !line.includes(`${ESC}[H`) && !line.includes(`${ESC}]0;`) && !line.includes(`${ESC}[3J`), "no raw escape from id, owner or trail reaches the line");
 	assert.doesNotMatch(visible, /[\p{Cc}\p{Cf}]/u, "only the theme's own color codes remain");
-	assert.match(visible, /^ ◆ plan\uFFFD\[2J {2}← ◇ outer\uFFFD\[H · evil\uFFFD\uFFFD\]0;title\uFFFDowner\uFFFD ─+$/u);
+	assert.match(visible, /^ ◆ outer\uFFFD\[H {3}◆ plan\uFFFD\[2J {2}· pi-stack, evil\uFFFD\uFFFD\]0;title\uFFFDowner\uFFFD › step\uFFFD\[3J ─+$/u);
 });
 
 test("on a theme without style, the indicator keeps the theme token and bold but drops fixed colors", () => {
@@ -139,9 +149,9 @@ test("on a theme without style, the indicator keeps the theme token and bold but
 		fg: (token: string, text: string) => { calls.push(token); return `<${token}>${text}</>`; },
 		bold: (text: string) => `*${text}*`,
 	} as unknown as Theme;
-	const hex = renderModeIndicatorLine(snapshot("plan", { ui: { color: "#ff0080", label: "Plan" } }), plain, 200);
+	const hex = renderModeIndicatorLine([snapshot("plan", { ui: { color: "#ff0080", label: "Plan" } })], plain, 200);
 	assert.ok(hex.startsWith("*<accent> ◆ Plan </>*"), "a fixed color falls back to accent, still bold");
-	const token = renderModeIndicatorLine(snapshot("review", { ui: { color: "warning" } }), plain, 200);
+	const token = renderModeIndicatorLine([snapshot("review", { ui: { color: "warning" } })], plain, 200);
 	assert.ok(token.startsWith("*<warning> ◆ review </>*"), "a theme token is kept");
 	assert.ok(token.includes("<warning> ─"), "the rule keeps the token, without bold");
 	assert.ok(!calls.includes("#ff0080"), "no hex color is passed to fg");
@@ -170,7 +180,7 @@ function controllerHarness() {
 		} as unknown as ExtensionContext;
 		return { ctx, widgets, statuses };
 	};
-	return { controller, context };
+	return { controller, context, entries };
 }
 
 function renderWidget(call: WidgetCall | undefined, width = 60): string[] | undefined {
@@ -180,14 +190,15 @@ function renderWidget(call: WidgetCall | undefined, width = 60): string[] | unde
 }
 
 test("the controller shows the indicator below the editor and clears it on exit and shutdown", async () => {
-	const { controller, context } = controllerHarness();
+	const { controller, context, entries } = controllerHarness();
 	const first = context();
 	controller.start(first.ctx);
 	const modes = controller.capability();
 	assert.ok(modes);
 	assert.equal(modes.ui, true);
-	const outer = modes.defineMode(definition("plan", { ui: { color: "success", label: "Plan" } }));
-	const inner = modes.defineMode(definition("review", { ui: { color: "#ff0080" } }));
+	assert.equal(modes.layered, true);
+	const outer = modes.defineMode(definition("plan", { ui: { color: "success", label: "Plan" }, layer: { name: "stage", rank: 1 } }));
+	const inner = modes.defineMode(definition("review", { ui: { color: "#ff0080" }, layer: { name: "stance", rank: 2 } }));
 	assert.ok(outer.status === "ok" && inner.status === "ok");
 	const before = first.widgets.length;
 	modes.defineMode(definition("unrelated"));
@@ -198,7 +209,20 @@ test("the controller shows the indicator below the editor and clears it on exit 
 	assert.equal(first.widgets.at(-1)?.[0], MODES_WIDGET_KEY);
 	assert.match(renderWidget(first.widgets.at(-1))?.[0] ?? "", /^ ◆ Plan {2}· indicator-test ─+$/u);
 	await inner.handle.enter();
-	assert.match(renderWidget(first.widgets.at(-1))?.[0] ?? "", /^ ◆ review {2}← ◇ Plan · indicator-test/u);
+	assert.match(renderWidget(first.widgets.at(-1))?.[0] ?? "", /^ ◆ Plan {3}◆ review {2}· indicator-test/u);
+	assert.equal(first.statuses.at(-1), "mode: stage: plan · owner: indicator-test | stance: review · owner: indicator-test");
+	const drawn = first.widgets.length;
+	assert.deepEqual(modes.setTrail?.("build 2/5"), { status: "ok" });
+	assert.equal(first.widgets.length, drawn + 1, "a new trail redraws");
+	assert.match(renderWidget(first.widgets.at(-1), 80)?.[0] ?? "", / › build 2\/5 ─/u);
+	modes.setTrail?.("build 2/5");
+	assert.equal(first.widgets.length, drawn + 1, "the same trail does not redraw");
+	assert.equal(modes.setTrail?.(`bad${ESC}[2J`).status, "refused", "a trail with a control character is refused");
+	assert.equal(modes.setTrail?.("x".repeat(65)).status, "refused", "a trail over 64 characters is refused");
+	assert.match(renderWidget(first.widgets.at(-1), 80)?.[0] ?? "", / › build 2\/5 ─/u, "a refused trail keeps the old one");
+	modes.setTrail?.(undefined);
+	assert.doesNotMatch(renderWidget(first.widgets.at(-1), 80)?.[0] ?? "", /›/u);
+	assert.doesNotMatch(JSON.stringify(entries), /build 2/u, "the trail is never persisted");
 	inner.handle.exit();
 	assert.match(renderWidget(first.widgets.at(-1))?.[0] ?? "", /^ ◆ Plan /u);
 	outer.handle.exit();

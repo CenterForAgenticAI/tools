@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
-import { SessionManager, type SessionEntry, type SessionHeader } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type SessionBoundaryDraft, type SessionEntry, type SessionHeader } from "@earendil-works/pi-coding-agent";
 import { importAcpSideFile } from "../folds/acp-import.js";
 import { entryToCoreMessages, foldStateFromBranch, keptFirstUserId, planFold, summaryLimitOf, type BranchFoldState, type FoldRequest } from "../folds/fold-adapter.js";
 import type { FoldsConfig } from "../platform/config-layers.js";
 import { applyFoldDrafts } from "../folds/fold-engine.js";
+import { cloneFoldTurnMemory, createFoldTurnMemory, previewFoldTurnState, type FoldTurnMemory, type FoldTurnModel } from "../folds/fold-turn.js";
 import { coveredEntryIds, foldDrafts, isEditableEntry, readFoldRecord, type FoldRecord } from "../folds/fold-entries.js";
 import { parseCompressArgs } from "../folds/kernel/parse-compress-input.js";
 import { baseIdOf, SUMMARY_HEADER } from "../folds/kernel/prune.js";
 import { bcpOutcome, compareOutcomes, nativeOutcome, rejectedUnknownRef, type ObservedResult } from "./outcome.js";
-import { verdictFor, type BlockEvidence, type Verdict, type OutcomeEvidence, type ParityDiff, type RefusalOutcome, type RefusedCall, type RequestDelta, type RequestDeltaReason, type RequestHashes, type ToolCallHash, type ToolResultHash, type MessageHash } from "./records.js";
+import { verdictFor, type BlockEvidence, type Verdict, type OutcomeEvidence, type ParityDiff, type RefusalOutcome, type RefusedCall, type RequestDelta, type RequestDeltaReason, type RequestHashes, type ToolCallHash, type ToolResultHash, type MessageHash, type NudgeFixHashes } from "./records.js";
 import type { SideSnapshot } from "./side-file.js";
 
 export const MAX_BRANCH_ENTRIES = 50_000;
@@ -33,6 +34,17 @@ export interface PreviewInput {
 	readonly branch: readonly SessionEntry[];
 	readonly contextWindow: number;
 	readonly folds?: FoldsConfig;
+	/** What the live per-turn pass reads from the request's context (pi-context-aware#201). */
+	readonly turn?: PreviewTurn;
+	/** Detached state from the preceding live or shadow-preview turn. Fresh when this is the first turn. */
+	readonly turnMemory?: FoldTurnMemory;
+}
+export interface PreviewTurn {
+	readonly maxOutputTokens?: number;
+	readonly api?: string;
+	readonly vision?: boolean;
+	readonly systemPromptTokens?: number;
+	readonly hostTokens?: number;
 }
 /** Full digest of the canonical sorted list, not the diagnostic prefix. */
 export function coverageHash(ids: readonly string[]): string {
@@ -192,8 +204,8 @@ function unknownMessageRef(state: BranchFoldState, ref: string): boolean {
 }
 /**
  * Build an isolated preview; never appends to the supplied branch or its session. Calls whose ids are
- * in `omit` are skipped and get no outcome; the first call's side-file snapshot still seeds the import,
- * because it is the state before the whole batch.
+ * in `omit` are skipped and get no outcome. A call batch uses the first call's pre-state; an
+ * ordinary provider request supplies its current side-file state explicitly.
  */
 /** One isolated preview of a batch. Early returns carry only the diagnostics and the empty lists. */
 export interface ShadowPreview {
@@ -214,7 +226,7 @@ export interface ShadowPreview {
 	readonly firstUserFolded?: MessageHash;
 	readonly firstUserReplacementHash?: string;
 }
-export function previewShadowCalls(input: PreviewInput, calls: readonly ShadowCall[], omit?: ReadonlySet<string>): ShadowPreview {
+export function previewShadowCalls(input: PreviewInput, calls: readonly ShadowCall[], omit?: ReadonlySet<string>, seed?: SideSnapshot): ShadowPreview {
 	const diffs: ParityDiff[] = [];
 	const refs: { bcp: string; ours?: string }[] = [];
 	const records: FoldRecord[] = [];
@@ -235,19 +247,19 @@ export function previewShadowCalls(input: PreviewInput, calls: readonly ShadowCa
 	const topicHash = (topic?: string) => shortHash(topic ? `${SUMMARY_HEADER} — ${topic}` : SUMMARY_HEADER);
 	const blockKey = (record: FoldRecord) => `${record.blockId}/${record.runId}`;
 	if (input.branch.length > MAX_BRANCH_ENTRIES) return { expectedSummaryHashes, firstUserReplacementHash, firstUserFolded, diffs: [{ kind: "too-large", reason: "branch exceeds 50,000 entries" } satisfies ParityDiff], refs, records, folds, parseKinds, outcomes, dropped };
-	const first = calls[0];
-	if (!first) return { expectedSummaryHashes, firstUserReplacementHash, firstUserFolded, diffs, refs, records, folds, parseKinds, outcomes, dropped };
-	if (!first.before.ok) return { expectedSummaryHashes, firstUserReplacementHash, firstUserFolded, diffs: [first.before.diff], refs, records, folds, parseKinds, outcomes, dropped };
+	const before = calls[0]?.before ?? seed;
+	if (!before) return { expectedSummaryHashes, firstUserReplacementHash, firstUserFolded, diffs, refs, records, folds, parseKinds, outcomes, dropped };
+	if (!before.ok) return { expectedSummaryHashes, firstUserReplacementHash, firstUserFolded, diffs: [before.diff], refs, records, folds, parseKinds, outcomes, dropped };
 	if (!input.header) return { expectedSummaryHashes, firstUserReplacementHash, firstUserFolded, diffs: [{ kind: "recorder-error", reason: "session header unavailable" } satisfies ParityDiff], refs, records, folds, parseKinds, outcomes, dropped };
 	const preview = SessionManager.inMemory(input.cwd, undefined, [input.header, ...input.branch]);
-	const imported = importAcpSideFile({ sideFileText: first.before.text, entries: input.branch, branch: input.branch, sessionId: input.sessionId });
+	const imported = importAcpSideFile({ sideFileText: before.text, entries: input.branch, branch: input.branch, sessionId: input.sessionId });
 	if (imported.status === "unsupported") diffs.push({ kind: "import-unsupported", reason: imported.reason.slice(0, 200) });
 	else if (imported.status === "imported") {
 		const kept = keptFirstUserId(input.branch, input.folds);
 		// Read bodies and topics from side-file inputs, not the import's rendered drafts.
 		const sourceHashes = new Map<string, string | undefined>();
 		const sourceTopicHashes = new Map<string, string>();
-		const sourceBlocks = (JSON.parse(first.before.text) as { blocks: unknown[] }).blocks;
+		const sourceBlocks = (JSON.parse(before.text) as { blocks: unknown[] }).blocks;
 		for (const raw of sourceBlocks) {
 			if (!raw || typeof raw !== "object") continue;
 			const block = raw as { blockId?: unknown; runId?: unknown; summary?: unknown; topic?: unknown };
@@ -321,6 +333,8 @@ export function previewShadowCalls(input: PreviewInput, calls: readonly ShadowCa
 				summaryHashes.set(blockKey(record), shortHash(request.summary.trim()));
 				topicHashes.set(blockKey(record), topicHash(request.topic));
 			}
+			// The call that made the fold, as the live tool records it, so the per-turn pass can hide it.
+			plan.drafts.splice(0, plan.drafts.length, ...withCompressCallId(plan.drafts, call.toolCallId));
 			/** The latest summary text written to each carrier; a fold's own carrier edit precedes its metadata. */
 			const carrierText = new Map<string, unknown>();
 			for (const draft of plan.drafts) {
@@ -549,6 +563,10 @@ interface PreviewedRequest {
 	/** Source entry id per hashed message; undefined when the preview does not expose its projection. */
 	readonly sources?: readonly string[];
 	readonly folds: readonly PreviewFold[];
+	/** Detached state after the full preview, for the next request in a sequential replay. */
+	readonly turnMemory: FoldTurnMemory;
+	/** False when the per-turn pass could not run and `turnMemory` is only the unchanged fallback. */
+	readonly turnMemoryKnown: boolean;
 }
 type Projection = { readonly entries: readonly { readonly sourceEntry: { readonly id: string }; readonly messages: readonly { readonly role: string }[] }[] };
 /**
@@ -562,12 +580,59 @@ function messageSources(preview: { buildSessionProjection?: () => Projection } |
 	if (projected.length !== messages.length || projected.some((message, i) => message.role !== messages[i]!.role)) return undefined;
 	return projected.filter((message) => message.role !== "system").slice(0, MAX_MESSAGE_HASHES).map((message) => message.id);
 }
+/** Fold drafts whose metadata records the call that made them. */
+function withCompressCallId(drafts: readonly SessionBoundaryDraft[], compressCallId: string): SessionBoundaryDraft[] {
+	return drafts.map((draft) => {
+		if (draft.type !== "custom") return draft;
+		const record = readFoldRecord(draft.data);
+		return record ? { ...draft, data: { ...record, compressCallId } } : draft;
+	});
+}
+/**
+ * The request the native engine sends in live mode: Pi's request from the preview session after
+ * the per-turn pass (ref tags, hidden absorbed calls, nudge). Undefined when the pass cannot line
+ * the request up with the preview's projection.
+ */
+function liveRequest(preview: SessionManager, input: PreviewInput): { messages: RequestMessage[]; sources: string[]; turnMemory: FoldTurnMemory; nudgeFix?: NudgeFixHashes } | undefined {
+	// Without its projection the request cannot be traced to entries; the caller fails closed.
+	if (typeof (preview as Partial<SessionManager>).buildSessionProjection !== "function") return undefined;
+	const turn = input.turn ?? {};
+	const model: FoldTurnModel = { contextWindow: input.contextWindow, ...(turn.maxOutputTokens ? { maxOutputTokens: turn.maxOutputTokens } : {}), ...(turn.api ? { api: turn.api } : {}), vision: turn.vision === true };
+	const projection = preview.buildSessionProjection();
+	// The request is the preview's session context, the messages Pi would send.
+	const prepared = previewFoldTurnState({
+		messages: preview.buildSessionContext().messages.filter((message) => message.role !== "system"), projection, branch: preview.getBranch(), contextEntries: preview.buildContextEntries(),
+		model, systemPromptTokens: turn.systemPromptTokens ?? 0, ...(turn.hostTokens !== undefined ? { hostTokens: turn.hostTokens } : {}), memory: input.turnMemory ?? createFoldTurnMemory(),
+		compatibility: true,
+	});
+	const result = prepared.result;
+	if (!result) return undefined;
+	const fix = result.nudgeFix;
+	const nudgeHash = (text: string | undefined) => text === undefined ? {} : { hash: hashRequestMessages([{ role: "user", content: [{ type: "text", text }] }]).messages[0]!.hash };
+	const nudgeFix: NudgeFixHashes | undefined = fix ? {
+		cause: fix.cause,
+		...(fix.sent !== undefined ? { sent: nudgeHash(fix.sent).hash } : {}),
+		...(fix.compatible !== undefined ? { compatible: nudgeHash(fix.compatible).hash } : {}),
+	} : undefined;
+	// The nudge and a live-only tail have no entry; attribution reads them as the empty id.
+	return { messages: result.messages, sources: result.sources.slice(0, MAX_MESSAGE_HASHES).map((id) => id ?? ""), turnMemory: prepared.memory, ...(nudgeFix ? { nudgeFix } : {}) };
+}
 /** Hash one preview's request; the preview session is dropped when this returns. */
-function previewRequest(preview: typeof previewShadowCalls, input: PreviewInput, calls: readonly ShadowCall[], omit?: ReadonlySet<string>): PreviewedRequest {
-	const planned = preview(input, calls, omit);
-	const messages = planned.preview?.buildSessionContext().messages ?? [];
-	const sources = messageSources(planned.preview as { buildSessionProjection?: () => Projection } | undefined, messages);
-	return { ours: requestEvidence(planned, messages), diffs: planned.diffs, ...(sources ? { sources } : {}), folds: Array.isArray(planned.folds) ? planned.folds : [] };
+function previewRequest(preview: typeof previewShadowCalls, input: PreviewInput, calls: readonly ShadowCall[], omit?: ReadonlySet<string>, seed?: SideSnapshot): PreviewedRequest {
+	const planned = preview(input, calls, omit, seed);
+	const live = planned.preview ? liveRequest(planned.preview, input) : undefined;
+	const messages = live?.messages ?? planned.preview?.buildSessionContext().messages ?? [];
+	const sources = live?.sources ?? messageSources(planned.preview as { buildSessionProjection?: () => Projection } | undefined, messages);
+	const ours = requestEvidence(planned, messages);
+	return { ours: live?.nudgeFix ? { ...ours, nudgeFix: live.nudgeFix } : ours, diffs: planned.diffs, ...(sources ? { sources } : {}), folds: Array.isArray(planned.folds) ? planned.folds : [], turnMemory: live?.turnMemory ?? cloneFoldTurnMemory(input.turnMemory ?? createFoldTurnMemory()), turnMemoryKnown: live !== undefined };
+}
+
+/** Advance hypothetical-live per-turn memory for a provider request with no compress batch. */
+export function previewShadowTurnMemory(input: PreviewInput, before: SideSnapshot): FoldTurnMemory | undefined {
+	const planned = previewShadowCalls(input, [], undefined, before);
+	const failed = planned.diffs.some((diff) => diff.kind !== "import-skipped" || diff.reason !== "already-folded");
+	if (failed || !planned.preview) return undefined;
+	return liveRequest(planned.preview, input)?.turnMemory;
 }
 /** A preview's request hashes with the preview's own source evidence for its summaries and opening user. */
 export function requestEvidence(planned: ShadowPreview, messages: readonly RequestMessage[]): RequestHashes {
@@ -638,12 +703,19 @@ function refusedFoldDelta(full: PreviewedRequest, counterfactual: PreviewedReque
  * check keeps only the first preview's hashes and entry ids until it is done. If the counterfactual
  * cannot be computed, or its comparison is inconclusive, the request is inconclusive.
  */
-export function compareBatchRequest(input: PreviewInput, calls: readonly BatchCall[], bcp: RequestHashes, preview: typeof previewShadowCalls = previewShadowCalls): BatchComparison {
+export interface BatchComparisonPreview {
+	readonly comparison: BatchComparison;
+	readonly turnMemory: FoldTurnMemory;
+	readonly turnMemoryKnown: boolean;
+}
+
+export function compareBatchRequestWithMemory(input: PreviewInput, calls: readonly BatchCall[], bcp: RequestHashes, preview: typeof previewShadowCalls = previewShadowCalls): BatchComparisonPreview {
 	const full = previewRequest(preview, input, calls);
+	const finish = (comparison: BatchComparison): BatchComparisonPreview => ({ comparison, turnMemory: full.turnMemory, turnMemoryKnown: full.turnMemoryKnown });
 	const compared = compareNextRequest(full.ours, bcp, full.diffs);
 	const refused = calls.flatMap((call) => call.refusal ? [{ toolCallId: call.toolCallId, type: call.refusal }] : []);
-	if (!refused.length) return { ours: full.ours, ...compared };
-	if (compared.verdict !== "diff") return { ours: full.ours, ...compared, refused };
+	if (!refused.length) return finish({ ours: full.ours, ...compared });
+	if (compared.verdict !== "diff") return finish({ ours: full.ours, ...compared, refused });
 	let counterfactual: { diffs: ParityDiff[]; delta?: RequestDelta };
 	let counterfactualOurs: RequestHashes;
 	try {
@@ -652,13 +724,17 @@ export function compareBatchRequest(input: PreviewInput, calls: readonly BatchCa
 		const diffs = compareNextRequest(omitted.ours, bcp, omitted.diffs).diffs;
 		if (verdictFor(diffs) === "inconclusive") {
 			const all = [...compared.diffs, COUNTERFACTUAL_INCONCLUSIVE];
-			return { ours: full.ours, verdict: verdictFor(all), diffs: all, refused, counterfactual: { diffs }, counterfactualOurs: omitted.ours };
+			return finish({ ours: full.ours, verdict: verdictFor(all), diffs: all, refused, counterfactual: { diffs }, counterfactualOurs: omitted.ours });
 		}
 		counterfactual = { diffs, delta: refusedFoldDelta(full, omitted, refusedIds) };
 		counterfactualOurs = omitted.ours;
 	} catch {
 		const diffs = [...compared.diffs, COUNTERFACTUAL_FAILED];
-		return { ours: full.ours, verdict: verdictFor(diffs), diffs, refused };
+		return finish({ ours: full.ours, verdict: verdictFor(diffs), diffs, refused });
 	}
-	return { ours: full.ours, ...compared, refused, counterfactual, counterfactualOurs };
+	return finish({ ours: full.ours, ...compared, refused, counterfactual, counterfactualOurs });
+}
+
+export function compareBatchRequest(input: PreviewInput, calls: readonly BatchCall[], bcp: RequestHashes, preview: typeof previewShadowCalls = previewShadowCalls): BatchComparison {
+	return compareBatchRequestWithMemory(input, calls, bcp, preview).comparison;
 }

@@ -5,7 +5,6 @@ import {
 	classifyCompactionError,
 	decideCompactionError,
 	lookupReusableSummary,
-	preflightCompaction,
 	recordRetainedSummary,
 	recordSummaryRetentionFailure,
 } from "../src/compaction/compaction-outcome.js";
@@ -227,7 +226,6 @@ test("compaction outcome seam preserves both existing error branches", () => {
 	const otherDecision = decideCompactionError(other);
 	assert.equal(otherDecision.injectRecoveryFollowUp, true);
 	assert.equal(otherDecision.recoveryFollowUp?.("seed"), "(Compaction failed: provider failed. Continuing with original context.)\n\nseed");
-	assert.equal(preflightCompaction({ ctx: context(), seed: "seed" }).kind, "proceed");
 });
 
 test("compaction outcome no-op hooks are callable", () => {

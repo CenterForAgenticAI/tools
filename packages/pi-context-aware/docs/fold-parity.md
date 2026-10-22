@@ -180,12 +180,51 @@ The enumeration test requires exactly one row for every `DiffKind`.
 | `tool-evidence` | a | Either request's incomplete tool evidence or duplicate call ids; always blocking. |
 | `tags-absent` | a | Provider request `bcp.tagsSeen: false`; always blocking. |
 
+## Reading the report
+
+`/fold-parity` prints, in order:
+
+- **Headline.** `Ready to cut over.` or `Not ready to cut over.` with the reason
+  in one sentence: how many of the 500 calls are recorded, how many have
+  undocumented differences, and how many could not be compared.
+- **Build.** The combined fingerprint (first 12 hex characters) `=` the engine
+  fingerprint `+` the effective `folds.firstUserMessage` and
+  `firstUserMessageMaxTokens`. Without the parts (for example from
+  `scripts/parity-differential.mjs`) only the combined fingerprint is shown.
+- **Window.** How many compress calls, in how many sessions, and the local-time
+  span of the 500-call window. Each timestamp shows `UTC` when applicable or its
+  numeric UTC offset. `Not counted:` lists records that exist but do not count:
+  calls in sessions with no file, calls from earlier builds (other fingerprints)
+  and calls from older record versions.
+- **Calls.** Every call is in one bucket: `match` (same folds and next request),
+  `explained` (every difference is a known one), `different` (at least one
+  undocumented difference) or `inconclusive` (the comparison could not be made).
+  `different` and `inconclusive` block cut-over.
+- **Undocumented differences** and **Could not compare.** One row per diff kind,
+  counted in calls (a call with two `summaries` differences counts once), with a
+  one-line meaning from `DIFF_KIND_LABELS` in `src/parity/report.ts`.
+  `next-request-pending` means the request after the call is not recorded yet.
+- **Known differences that applied.** Register id, title, calls and differences
+  it explained, and its issue. One call can contribute several differences.
+- **Blocking calls.** The newest 10 calls that block cut-over: local time with
+  `UTC` or its numeric UTC offset, the first 8 characters of the session id, the
+  call id, its diff kinds, and `nested` for a call inside a Fabric program. `/fold-parity all` lists every
+  blocking call and the stored reason of each difference that has one.
+
+Sections without rows are left out. `buildFoldParityReport` also returns these
+values as fields (`counts`, `window`, `earlierBuilds`, `olderVersionCalls`,
+`undocumentedKindCalls`, `inconclusiveKindCalls`, `registerHits`, `blocking`);
+the readiness rule below is unchanged by how they are shown.
+
 ## Count and cut-over rule
 
-The fingerprint is SHA-256 over sorted relative paths and contents of compiled
-`.js` files under `folds/`. The command displays its first 12 hex characters.
-The effective `folds.firstUserMessage` and `folds.firstUserMessageMaxTokens`
-values are hashed with that engine fingerprint. Their sources are not hashed.
+The engine fingerprint is SHA-256 over sorted relative paths and contents of compiled
+`.js` files under `folds/`. The effective `folds.firstUserMessage` and
+`folds.firstUserMessageMaxTokens` values are hashed with that engine fingerprint
+(`configuredFoldFingerprint`); their sources are not hashed. Records carry this
+combined fingerprint, never the engine fingerprint alone. The command shows the
+first 12 hex characters of the combined fingerprint and, beside it, the engine
+fingerprint and folds values it was made from (see [Reading the report](#reading-the-report)).
 Only calls recorded under the current fingerprint count. A call in a session
 without a session file is not comparable and does not count. Such sessions are
 in-memory: `SessionManager.inMemory` (pi-delegate workers), Fabric durable
@@ -193,7 +232,7 @@ workers and `pi --no-session`. billion-context-pi writes no side file for
 them, so no record can ever supply the evidence. The recorder still writes the
 call's records, with `side-file-missing` and reason `session has no file`. The
 report leaves those calls out of the count and the 500-call window and shows
-how many it left out as `not comparable N (session has no file)`. A side
+how many it left out on the `Not counted:` line (`N calls in a session with no file`). A side
 file that is missing or unreadable for a session that has a file is still
 `side-file-missing` and inconclusive. The most recent 500 comparable calls
 determine readiness: at least 500 calls, no unexplained differences and no
@@ -395,7 +434,8 @@ now runs the actual comparator on a matched short-summary rejection instead of
 changing only an accepted call's native count. Existing assertions are unchanged.
 
 The command shows match / explained / diff / inconclusive counts, register hits,
-and up to 20 unexplained or inconclusive calls. Register explanations apply at
+and the newest 10 unexplained or inconclusive calls; `/fold-parity all` lists
+every one. Register explanations apply at
 report time, including to earlier records.
 
 ## Difference register
@@ -414,6 +454,8 @@ predicate that matches only that difference.
 | FP-006 | Tier-3 rewrite rejection | billion-context-pi refuses a call that only re-condenses tier-3 blocks (`tier3-rewrite`). The native engine has no such rejection. Applies only as described below. | pi-context-aware#131 |
 | FP-007 | Abort | billion-context-pi stops a call when its signal aborts (`aborted`). The native preview runs to completion. Applies only as described below. | pi-context-aware#131 |
 | FP-008 | Cut-off summaries are refused | The native adapter refuses a summary of at most 200 characters that ends in `…`, or a copied block pointer (`stub-summary`). billion-context-pi folds such a summary. Applies only to call differences, as described below. | pi-context-aware#173 |
+| FP-201 | Tier-2 nudge reachable | billion-context-pi 0.1.83 keeps the kernel's `tier2Trigger` 1000 and `tier3Trigger` 2000, which make the tier-2 nudge unreachable (ranxianglei/billion-context-pi#628). The native per-turn pass uses 10 and 20, as ranxianglei/billion-context-pi#629 proposes. Applies only to a `content` difference, and only when the preview recorded a `tier-trigger` nudge fix and swapping its native nudge for billion-context-pi's makes the non-summary content equal. | pi-context-aware#201 |
+| FP-202 | Emergency nudge deferred after a failed turn | billion-context-pi 0.1.83 sends the emergency nudge again on every failed model turn (ranxianglei/billion-context-pi#666). The native per-turn pass sends no emergency nudge while the latest model turn ended in `error` or `aborted`, and sends it on the first turn after one completes. Applies only to a `content` difference, and only when the preview recorded an `emergency-defer` fix and billion-context-pi's emergency nudge is the only extra message. | pi-context-aware#201 |
 
 Every shadow next-request comparison requires expected-summary evidence. An
 explicit empty body and topic list certifies that no summaries were planned;
@@ -423,6 +465,28 @@ both engines send no summaries.
 This prevents total summary loss from counting as a match.
 
 Register explanations use next-request evidence, not just the difference kind.
+
+### Live per-turn pass (pi-context-aware#201)
+
+The native preview of a next request runs the same per-turn pass the engine runs
+in live mode (`src/folds/fold-turn.ts`): ref tags at the end of each user,
+custom and tool-result message, absorbed fold calls and their results hidden,
+and billion-context-pi's nudge with its thresholds, measured on the sent view.
+
+The recorder never gives a preview the live session's mutable turn memory. It takes a
+detached snapshot of any state the engine already has, then copies that snapshot again
+for the full and counterfactual previews. The full preview advances a separate shadow
+replay state for the session's next recorded request; the counterfactual starts from the
+same pre-turn snapshot and is discarded. A session or process with no prior state starts
+with the same empty memory as live mode's first turn. The differential's successive
+recorded turns run through one recorder and therefore one shadow replay state. Running a
+preview or `/fold-parity` cannot shift a live growth baseline or mark its nudge as shown.
+
+When the native nudge differs from the one billion-context-pi 0.1.83 would send
+only because of FP-201 or FP-202, the preview records `ours.nudgeFix`: the
+cause and the body hashes of both nudges. A `nudgeFix` that names no nudge,
+names the same nudge twice, or for `emergency-defer` names a sent nudge, is a
+recorder fault.
 Historical records without exact shortened-argument hashes or folded-opening
 evidence stay unexplained. No raw arguments or opening text are stored.
 Call coverage excludes bcp's metadata-only pinned opening when the native policy
@@ -538,8 +602,8 @@ is inconclusive, for example `too-large`, the request is inconclusive too
 
 The entries explain nothing else: not `tool-pairing`, not an inconclusive kind,
 and not a difference where billion-context-pi has something the native preview
-lacks. The calls still count toward 500, and the report shows how many
-differences each entry explained.
+lacks. The calls still count toward 500, and the report shows, for each entry,
+how many calls it applied to and how many differences it explained.
 
 These four were registered as explained on 2026-10-11, instead of excluding the
 calls or keeping them as blockers, so the gate can pass while each case stays

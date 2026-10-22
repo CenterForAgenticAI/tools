@@ -300,21 +300,51 @@ if (supportsContextAwareModesV1(service)) {
 
 Definitions copy only the named fields, enforce bounds, and retain callbacks only in process memory. Unknown fields are not persisted or included in transition messages. A duplicate id is refused. `handle.commandAllowed(name)` is advisory only: it reports whether the handle is the effective available mode and never intercepts commands.
 
-Each accepted enter or exit appends one `context-aware/mode@1` state entry and sends one `context-aware/mode-transition@1` custom message with `triggerTurn: false`. State entries contain only ids, instance ids, owner labels, `suggestedBy`, nesting, timestamps, and a random `transitionId` that the message's `details` repeat. They contain no definition, transition text, callback, or caller-owned field. The system prompt and active tool list are unchanged.
+Each accepted enter or exit appends one `context-aware/mode@2` state entry and sends one `context-aware/mode-transition@1` custom message with `triggerTurn: false`. State entries contain only the active layers (layer name, rank, `pinned`, `scope: "run"`) and each layer's id, instance id, owner label, `suggestedBy` and timestamps, plus a random `transitionId` that the message's `details` repeat. They contain no definition, transition text, callback, or caller-owned field. The system prompt and active tool list are unchanged.
 
-The runtime permits one outer mode and one nested mode. The inner mode replaces the outer tool rules; exiting it restores the outer transition. `/mode` reports the effective mode and `/mode exit` always leaves the innermost mode. The active mode is shown in the qualified footer status `caair.context-aware/mode` and in the indicator widget described in [Mode indicator](#mode-indicator).
+Modes sit on layers, and one mode is active per layer; see [Layers](#layers). `/mode` lists the active layers, `/mode exit` leaves the highest-ranked layer that is not pinned, and `/mode exit <layer>` leaves the named layer. The active mode is shown in the qualified footer status `caair.context-aware/mode` and in the indicator widget described in [Mode indicator](#mode-indicator).
 
-Modes replay from the active session branch after resume, fork, replacement, and tree navigation. A replayed mode is unavailable until its owner defines the same id and owner label again; redefinition re-arms it without adding a transition. An orphan does not block tools and can always be cleared with `/mode exit`.
+Modes replay from the active session branch after resume, fork, replacement, and tree navigation. A replayed mode is unavailable until its owner defines the same id, owner label, layer, rank and pin again; redefinition re-arms it without adding a transition. An orphan does not block tools and can always be cleared with `/mode exit <layer>`, even on a pinned layer. A run-scoped mode is not restored. Replay also reads the older `context-aware/mode@1` entry: its current mode lands on the `default` layer.
 
-Each enter gets a random `instanceId`, shown on the snapshot and its `outer`. Use it, not `enteredAt`, to tell one enter from another: `enteredAt` has millisecond precision, so an exit and re-enter can share it. A nested mode keeps the outer `instanceId`, and replay keeps the persisted one. An entry written before `instanceId` existed gets a stable `legacy-` id, derived from the session entry id of the first state entry of that enter on the branch, so every replay gives the same value; such an entry with no session entry id is refused. Replay also refuses a state entry that reuses an `instanceId` that ended earlier on the branch, gives one `instanceId` to a different enter, or puts one `instanceId` on both `current` and `outer`, and falls back to the last accepted entry, as it does for a malformed field. Transition text is recovered only from the message whose `details.transitionId` matches the accepted state entry, so the message of a refused entry is never resent, and a message Pi delivers at the end of a turn, after later state entries, is still found. For an entry written before `transitionId` existed, replay reads messages without one between that entry and the next state entry. Check `supportsContextAwareModeInstanceIdsV1(service)` to learn, with no mode active, that the producer sets `instanceId`; older producers omit it. Compaction resends the active transition once through the existing successful-compaction owner.
+Each enter gets a random `instanceId`, shown on the snapshot and its `outer`. Use it, not `enteredAt`, to tell one enter from another: `enteredAt` has millisecond precision, so an exit and re-enter can share it. Entering a mode on one layer keeps every other layer's `instanceId`, and replay keeps the persisted one. An entry written before `instanceId` existed gets a stable `legacy-` id, derived from the session entry id of the first state entry of that enter on the branch, so every replay gives the same value; such an entry with no session entry id is refused. Replay also refuses a state entry that reuses an `instanceId` that ended earlier on the branch, gives one `instanceId` to a different enter, or puts one `instanceId` on two layers, and falls back to the last accepted entry, as it does for a malformed field. Transition text is recovered only from the message whose `details.transitionId` matches the accepted state entry, so the message of a refused entry is never resent, and a message Pi delivers at the end of a turn, after later state entries, is still found. For an entry written before `transitionId` existed, replay reads messages without one between that entry and the next state entry. Check `supportsContextAwareModeInstanceIdsV1(service)` to learn, with no mode active, that the producer sets `instanceId`; older producers omit it. Compaction sends one message through the existing successful-compaction owner. It joins every active layer's transition, lowest rank first, without repeating a text two layers share.
 
 Model suggestions use the built-in `suggest_mode { mode, action, reason }` tool, or the API form `handle.enter({ suggestedBy: "model", confirm: true })`. Confirmation uses `ctx.ui.confirm` when UI is available, then the process-local confirmer installed with `modes.setSuggestionConfirmer`. Declines, missing confirmation, missing confirmers, and stale asynchronous confirmations leave state, entries, and messages unchanged. Set `modes.suggestTool` to `false`, or use `--context-aware-modes-suggest-tool=off`, to hide the model suggestion declaration.
 
 A mode guard runs once in the extension-lifetime `tool_call` handler. It covers foreground calls and nested `pi.*` calls because Fabric emits the same preflight event. Declarative blocks and throwing guards fail closed; unavailable orphan definitions do not block. Guard reasons are bounded and thrown error contents are not exposed.
 
+### Layers
+
+A mode sits on a layer. One mode is active per layer, and the modes on different layers are active together: pi-stack, for example, holds a role, a stage such as Build, and a reviewer stance at once. Name the layer and its rank in the definition. Check `supportsContextAwareModeLayersV1(service)` first; an older runtime ignores `layer`.
+
+```ts
+if (supportsContextAwareModeLayersV1(service)) {
+	const build = service.modes.defineMode({
+		id: "build",
+		owner: "my-extension",
+		transition: "Build stage is active.",
+		blockedTools: [],
+		layer: { name: "stage", rank: 1 },
+	});
+	if (build.status === "ok") await build.handle.enter();
+	service.modes.setTrail("plan › build › review");
+}
+```
+
+- `name` is 1 to 64 characters. `default` is reserved: a definition without `layer` sits on the `default` layer at rank 0, so two such modes replace each other instead of nesting.
+- `rank` is an integer from -1000000 to 1000000. Layers are ordered by rank, then by name. The runtime knows no layer names.
+- Every definition on one layer must name the same rank and `pinned`; another is refused with `INVALID_REQUEST`.
+- Entering a mode on a layer that holds one replaces it with one state entry and one transition message. The other layers keep their modes and `instanceId`s.
+- A tool call must pass every active layer. See [Tool policies](#tool-policies).
+- `layers()` returns every active layer's snapshot, lowest rank first, each with `layer`, `rank`, `pinned` and `runScoped`. `current()` returns the highest-ranked one, with the next layer down as `outer`.
+- `setTrail(text)` shows a short step trail after the chips in the indicator; `setTrail(undefined)` clears it. It is at most 64 characters with no control or format characters, is never persisted, and any extension may replace it.
+
+**Run-scoped entry.** `handle.enter({ until: signal })` enters the mode for one run. When the signal aborts, the mode leaves its layer with one entry and one exit message, unless another mode has replaced it there. A run-scoped mode is not restored on resume. An already-aborted signal is refused with `RUN_ENDED`.
+
+**Pinned layer.** A definition with `layer.pinned: true` is entered only through its handle, in a new session (start reason `startup` or `new`, no user or assistant message on the branch) before its first agent run, and only when no pinned mode was replayed. Every later enter or exit on that layer is refused with `PINNED_LAYER`, as are run-scoped entry (`INVALID_REQUEST`) and model suggestions. Bare `/mode exit` skips it. Resume restores it. Once its definition is gone, only the user can clear it, with `/mode exit <layer>`.
+
 ### Mode indicator
 
-While a mode is active, the runtime draws a one-line widget below the editor under the key `caair.context-aware/mode-indicator`. It shows the effective mode as a solid chip in the mode's color, `← ◇ outer` when a mode is nested, the owner label, `[model-confirmed]` for a model-suggested enter, and a rule in the mode's color to the edge of the terminal. A replayed mode is drawn muted with `(unavailable)` until its owner defines it again. The widget clears when the last mode exits and at shutdown. The footer status stays as the short text form.
+While a mode is active, the runtime draws a one-line widget below the editor under the key `caair.context-aware/mode-indicator`. It shows one solid chip per active layer in its mode's color, lowest rank first, with ` ⚑` on a pinned layer; then the owner labels, `[model-confirmed]` when a mode was entered on the model's suggestion, the step trail set with `setTrail`, and a rule in the top layer's color to the edge of the terminal. A replayed mode is drawn muted with `(unavailable)` until its owner defines it again. The widget clears when the last mode exits and at shutdown. The footer status stays as the short text form.
 
 Set the color and text with the optional `ui` field. Check `supportsContextAwareModeUiV1(service)` first; an older runtime ignores `ui`.
 
@@ -363,7 +393,7 @@ if (supportsContextAwareModeToolPoliciesV1(service)) {
 
 An invalid policy (a non-array `allowedTools`, too many or invalid names, a non-boolean `readOnlyShell`, or a non-function `lifted`) refuses the definition with `INVALID_REQUEST`. The runtime copies only these three fields into its own definition and never keeps the caller's object, so changing the object after `defineMode` changes nothing.
 
-Each tool call is checked in this order: `blockedTools`, then the policy, then `guard`. A tool in `blockedTools` is refused even if `allowedTools` lists it. The guard sees only calls the policy let through, and it still runs while the policy is lifted. A refusal reason is fixed text naming the tool and the mode; it never repeats the command or other input. As with `blockedTools`, a nested mode's policy replaces the outer one, exiting restores it, and an unavailable orphan mode enforces nothing until its owner defines it again.
+Each tool call is checked in this order: `blockedTools`, then the policy, then `guard`. A tool in `blockedTools` is refused even if `allowedTools` lists it. The guard sees only calls the policy let through, and it still runs while the policy is lifted. A refusal reason is fixed text naming the tool and the mode; it never repeats the command or other input. With several layers active, a call must pass every layer: all `blockedTools` lists first, then every policy, then every guard, and the first refusal wins. A layer's `lifted` lifts only that layer's policy. An unavailable orphan mode enforces nothing until its owner defines it again.
 
 #### What the policy sees
 

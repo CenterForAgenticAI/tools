@@ -16,6 +16,7 @@ export const ALLOWED_ROOT_ENTRIES = new Set([
 	".gitlab",
 	".gitlab-ci.yml",
 	".graft", // Repository workflow records.
+	".work", // pi-work workspecs and drafts.
 	".public-release.json",
 	".spec", // Design record: briefs, plans, measurements.
 	"LICENSE",

@@ -5,8 +5,9 @@ import { isTransientFailure } from "./transient-retry.js";
 const COMPACTION_CANCELLED_MESSAGE = "Compaction cancelled";
 const NOTHING_TO_COMPACT_MESSAGE = "Nothing to compact (session too small)";
 const ALREADY_COMPACTED_MESSAGE = "Already compacted";
-const NOTHING_TO_COMPACT_TOOL_MESSAGE =
+export const NOTHING_TO_COMPACT_TOOL_MESSAGE =
 	"Nothing to compact (session too small); the conversation is unchanged.";
+export const ALREADY_COMPACTED_TOOL_MESSAGE = "Already compacted; the conversation is unchanged.";
 
 export type CompactionErrorKind =
 	| "transient"
@@ -74,7 +75,7 @@ export function decideCompactionError(
 	if (classification.kind === "nothing-to-compact" || classification.kind === "already-compacted") {
 		const label = classification.kind === "nothing-to-compact"
 			? NOTHING_TO_COMPACT_TOOL_MESSAGE
-			: "Already compacted";
+			: ALREADY_COMPACTED_TOOL_MESSAGE;
 		return {
 			notification: null,
 			injectRecoveryFollowUp: false,
@@ -151,32 +152,6 @@ export function decideOwedCompactionReattempt(
 	// on its own; drop the marker and leave the cooldown to expire normally.
 	if (!input.contextStillOverThreshold) return "clear-owed";
 	return "clear-cooldown";
-}
-
-export interface CompactionPreflightInput {
-	ctx: ExtensionContext;
-	seed: string;
-	summaryFocus?: string | null;
-	metadata?: unknown;
-	summaryFocusHints?: readonly string[];
-}
-
-export type CompactionPreflightResult =
-	| { kind: "proceed" }
-	| {
-			kind: "nothing-to-compact";
-			toolMessage: typeof NOTHING_TO_COMPACT_TOOL_MESSAGE;
-			serviceStatus: "nothing-to-compact";
-	  };
-
-/**
- * Pi exposes the compaction settings only on the later preparation event.
- * Context usage alone cannot reproduce Pi's keepRecentTokens/reserveTokens
- * predicate, so preflight deliberately refuses to guess and suppress a real
- * compaction. The asynchronous Pi error is classified above instead.
- */
-export function preflightCompaction(_input: CompactionPreflightInput): CompactionPreflightResult {
-	return { kind: "proceed" };
 }
 
 export interface ReusableSummaryLookupInput {

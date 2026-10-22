@@ -310,7 +310,7 @@ test("REQ-193-3: session_start registers context_recall direct and its aliases d
 		assert.equal(f.tool("session_recall").exposure, "deferred");
 		assert.equal(f.tool("search_context").exposure, "deferred");
 		assert.equal(f.tool("decompress").exposure, "deferred");
-		for (const owned of ["context_status", "context_compact", "context_fold"]) assert.equal(f.host.tools.has(owned), false, `${owned} belongs to another lane`);
+		for (const owned of ["context_status", "context_compact", "context_fold"]) assert.equal(f.host.tools.has(owned), owned === "context_fold", `${owned}: only context_fold registers beside context_recall (pi-context-aware#189)`);
 		assert.match(JSON.stringify(f.tool("context_recall")), /memory\.recall/u, "the description points programs to Fabric memory.recall");
 	} finally { f.restore(); }
 });

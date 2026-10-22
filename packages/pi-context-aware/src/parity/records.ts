@@ -114,6 +114,17 @@ export interface RequestHashes {
 	readonly messages: readonly MessageHash[];
 	readonly tagsSeen: boolean;
 	readonly total: number;
+	/**
+	 * Set when the native nudge differs from the one billion-context-pi 0.1.83 would send only
+	 * because of a fix it lacks (pi-context-aware#201): the cause and the body hashes of both
+	 * nudges, as `hashRequestMessages` hashes a user message. An absent hash means no nudge.
+	 */
+	readonly nudgeFix?: NudgeFixHashes;
+}
+export interface NudgeFixHashes {
+	readonly cause: "tier-trigger" | "emergency-defer";
+	readonly sent?: string;
+	readonly compatible?: string;
 }
 /** Endings only billion-context-pi produces: it refused the call and created no fold. */
 export const REFUSAL_OUTCOMES = ["capped-retry", "dead-range", "tier3-rewrite", "aborted"] as const satisfies readonly OutcomeType[];

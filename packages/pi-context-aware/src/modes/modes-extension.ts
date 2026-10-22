@@ -8,7 +8,7 @@ import { Type } from "typebox";
 import type { ContextAwareModesV1 } from "../context-service.js";
 import { createContextAwareModesV1, type ContextAwareModesRuntime } from "./modes-runtime.js";
 import { createModeIndicatorWidget, MODES_WIDGET_KEY } from "./mode-indicator.js";
-import { MAX_MODE_ID_LENGTH, MAX_MODE_REASON_LENGTH, modeDisplayText } from "./modes-state.js";
+import { MAX_MODE_ID_LENGTH, MAX_MODE_LAYER_LENGTH, MAX_MODE_REASON_LENGTH, MODE_DEFAULT_LAYER, modeDisplayText } from "./modes-state.js";
 
 export const MODES_STATUS_KEY = "caair.context-aware/mode";
 export const SUGGEST_MODE_TOOL_NAME = "suggest_mode";
@@ -25,7 +25,10 @@ interface ModeControllerOptions {
 
 export interface ModesExtensionController {
 	readonly register: () => void;
-	readonly start: (ctx: ExtensionContext) => void;
+	/** `reason` is Pi's session start reason; `startup` and `new` on an empty branch open the pinned-layer window. */
+	readonly start: (ctx: ExtensionContext, reason?: string) => void;
+	/** The first agent run of the session started: a pinned layer can no longer be entered. */
+	readonly agentStart: () => void;
 	readonly restore: (ctx: ExtensionContext) => void;
 	readonly shutdown: (ctx: ExtensionContext) => void;
 	readonly resend: (ctx: ExtensionContext) => void;
@@ -37,13 +40,33 @@ function resultText(result: { status: string; code?: string; message?: string })
 	return result.status === "ok" ? "ok" : `${result.code ?? "REFUSED"}: ${result.message ?? "Mode operation refused."}`;
 }
 
+/** One part per layer, lowest rank first. A mode on the default layer shows no layer name. */
 function statusText(runtime: ContextAwareModesRuntime | undefined): string | undefined {
-	const current = runtime?.current();
-	if (current === null || current === undefined) return undefined;
-	const availability = current.available ? "" : " (unavailable)";
-	const outer = current.outer === undefined ? "" : ` ← ${modeDisplayText(current.outer.id)}${current.outer.available ? "" : " (unavailable)"}`;
-	const suggestion = current.suggestedBy === "model" ? " [model-confirmed]" : "";
-	return `mode: ${modeDisplayText(current.id)}${availability}${outer} · owner: ${modeDisplayText(current.owner)}${suggestion}`;
+	const layers = runtime?.layers() ?? [];
+	if (layers.length === 0) return undefined;
+	const parts = layers.map((mode) => {
+		const place = mode.layer === undefined || mode.layer === MODE_DEFAULT_LAYER ? "" : `${modeDisplayText(mode.layer)}: `;
+		const availability = mode.available ? "" : " (unavailable)";
+		const pinned = mode.pinned === true ? " [pinned]" : "";
+		const run = mode.runScoped === true ? " [run]" : "";
+		const suggestion = mode.suggestedBy === "model" ? " [model-confirmed]" : "";
+		return `${place}${modeDisplayText(mode.id)}${availability}${pinned}${run}${suggestion} · owner: ${modeDisplayText(mode.owner)}`;
+	});
+	return `mode: ${parts.join(" | ")}`;
+}
+
+function pinnedWindowCanOpen(ctx: ExtensionContext, reason: string | undefined): boolean {
+	if (reason !== "startup" && reason !== "new") return false;
+	try {
+		return !ctx.sessionManager.getBranch().some((entry) => {
+			const role = (entry as { type?: unknown; message?: { role?: unknown } }).type === "message"
+				? (entry as { message?: { role?: unknown } }).message?.role
+				: undefined;
+			return role === "user" || role === "assistant";
+		});
+	} catch {
+		return false;
+	}
 }
 
 export function createModesExtensionController(pi: ExtensionAPI, options: ModeControllerOptions): ModesExtensionController {
@@ -56,15 +79,16 @@ export function createModesExtensionController(pi: ExtensionAPI, options: ModeCo
 
 	const refreshWidget = (context: ExtensionContext): void => {
 		if (typeof context.ui?.setWidget !== "function") return;
-		const current = activeRuntime?.current() ?? null;
+		const layers = activeRuntime?.layers() ?? [];
+		const trail = activeRuntime?.trail();
 		// Definitions of other modes also call onChange; only a visible change re-renders.
-		const signature = current === null ? undefined : JSON.stringify(current, (key, value) => key === "updatedAt" ? undefined : value);
+		const signature = layers.length === 0 ? undefined : JSON.stringify({ layers, trail }, (key, value) => key === "updatedAt" ? undefined : value);
 		if (context === shownContext && signature === shownWidget) return;
 		shownContext = context;
 		shownWidget = signature;
 		context.ui.setWidget(
 			MODES_WIDGET_KEY,
-			current === null ? undefined : createModeIndicatorWidget(current),
+			layers.length === 0 ? undefined : createModeIndicatorWidget(layers, trail),
 			{ placement: "belowEditor" },
 		);
 	};
@@ -120,18 +144,18 @@ export function createModesExtensionController(pi: ExtensionAPI, options: ModeCo
 				return result;
 			});
 			pi.registerCommand("mode", {
-				description: "Show the active session mode or exit the innermost mode. Usage: /mode [status|exit]",
+				description: "Show the active session modes, or exit one. Bare exit leaves the highest-ranked layer that is not pinned. Usage: /mode [status|exit [<layer>]]",
 				handler: async (args, ctx) => {
 					activeContext = ctx;
 					const runtime = ensureRuntime(ctx);
-					const action = args.trim();
-					if (action === "exit") {
-						const result = runtime.userExit();
+					const [action = "", layer, ...rest] = args.trim().split(/\s+/u).filter((part) => part.length > 0);
+					if (action === "exit" && rest.length === 0 && (layer === undefined || layer.length <= MAX_MODE_LAYER_LENGTH)) {
+						const result = runtime.userExit(layer);
 						ctx.ui.notify(resultText(result), result.status === "ok" ? "info" : "warning");
 						return;
 					}
-					if (action !== "" && action !== "status") {
-						ctx.ui.notify("Usage: /mode [status|exit]", "warning");
+					if ((action !== "" && action !== "status") || layer !== undefined) {
+						ctx.ui.notify("Usage: /mode [status|exit [<layer>]]", "warning");
 						return;
 					}
 					ctx.ui.notify(statusText(runtime) ?? "No active mode.", "info");
@@ -162,11 +186,15 @@ export function createModesExtensionController(pi: ExtensionAPI, options: ModeCo
 				},
 			});
 		},
-		start: (ctx) => {
+		start: (ctx, reason) => {
 			activeRuntime?.close();
 			activeContext = ctx;
 			activeRuntime = undefined;
-			ensureRuntime(ctx);
+			const runtime = ensureRuntime(ctx);
+			if (pinnedWindowCanOpen(ctx, reason)) runtime.openPinnedWindow();
+		},
+		agentStart: () => {
+			activeRuntime?.closePinnedWindow();
 		},
 		restore: (ctx) => {
 			activeContext = ctx;
@@ -195,8 +223,11 @@ export function createModesExtensionController(pi: ExtensionAPI, options: ModeCo
 				instanceIds: true as const,
 				toolPolicies: true as const,
 				ui: true as const,
+				layered: true as const,
 				defineMode: runtime.defineMode,
 				current: runtime.current,
+				layers: runtime.layers,
+				setTrail: runtime.setTrail,
 				setSuggestionConfirmer: runtime.setSuggestionConfirmer,
 			});
 		},

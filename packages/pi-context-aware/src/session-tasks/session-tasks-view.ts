@@ -107,19 +107,35 @@ function hiddenDetailCount(tasks: readonly Task[], budget: RenderBudget, depth =
 	return hidden;
 }
 
-function renderTaskElement(task: Task, budget: RenderBudget, indent: string, depth = 0): string {
-	const ref = task.ref === undefined ? "" : ` ref="${xmlAttribute(task.ref)}"`;
-	const note = budget.noteChars > 0 && task.note !== undefined ? ` note="${xmlAttribute(safe(task.note, budget.noteChars))}"` : "";
+/** Task id to the question an open ask puts to the user. */
+type OpenAskQuestions = ReadonlyMap<string, string>;
+
+const NO_ASKS: OpenAskQuestions = new Map();
+
+function renderTaskElement(task: Task, budget: RenderBudget, indent: string, depth = 0, asks: OpenAskQuestions = NO_ASKS): string {
+	// The goal id rides with the id so a compacted session keeps the link even
+	// at the tightest budget; it is a bounded task-id-shaped value.
+	const ref = `${task.ref === undefined ? "" : ` ref="${xmlAttribute(task.ref)}"`}${task.goal === undefined ? "" : ` goal="${xmlAttribute(task.goal)}"`}`;
+	// A blocked task with an open ask waits on the user. The marker survives every
+	// budget; the question shrinks with the note budget and replaces a note that
+	// only repeats it.
+	const question = task.status === "blocked" ? asks.get(task.id) : undefined;
+	const waiting = question === undefined
+		? ""
+		: ` waiting-on="user"${budget.noteChars > 0 ? ` question="${xmlAttribute(safe(question, budget.noteChars))}"` : ""}`;
+	const noteRepeatsQuestion = question !== undefined && task.note !== undefined
+		&& question.replace(/\s+/gu, " ").trim().startsWith(task.note.replace(/…$/u, "").trim());
+	const note = budget.noteChars > 0 && task.note !== undefined && !noteRepeatsQuestion ? ` note="${xmlAttribute(safe(task.note, budget.noteChars))}"` : "";
 	const status = budget.includeStatus ? ` status="${task.status}"` : "";
 	const children = budget.showSubtasks && depth < budget.maxDepth ? task.subtasks ?? [] : [];
-	const open = `${indent}<task id="${xmlAttribute(task.id)}"${ref}${status}${note}>`;
+	const open = `${indent}<task id="${xmlAttribute(task.id)}"${ref}${status}${waiting}${note}>`;
 	const titleChars = task.status === "active" || task.status === "blocked" ? Math.max(48, budget.titleChars) : budget.titleChars;
 	const title = xmlText(safe(task.title, titleChars));
 	if (!budget.includeStatus && (task.status === "done" || task.status === "deferred") && children.length === 0) {
 		return `${indent}<task id="${xmlAttribute(task.id)}"${ref} />`;
 	}
 	if (children.length === 0) return `${open}${title}</task>`;
-	const childMarkup = children.map((child) => `\n${renderTaskElement(child, budget, `${indent}  `, depth + 1)}`).join("");
+	const childMarkup = children.map((child) => `\n${renderTaskElement(child, budget, `${indent}  `, depth + 1, asks)}`).join("");
 	return `${open}${title}${childMarkup}\n${indent}</task>`;
 }
 
@@ -144,6 +160,8 @@ export interface TasksContextOptions {
 	 */
 	readonly toolAvailable?: boolean;
 	readonly audience?: TasksAudience;
+	/** Open asks: task id to question. A blocked task in it is marked as waiting on the user. */
+	readonly asks?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -199,6 +217,7 @@ function renderEnvelope(
 	budget: RenderBudget,
 	audience: TasksAudience,
 	toolAvailable: boolean,
+	asks: OpenAskQuestions = NO_ASKS,
 ): string {
 	const counts = countTasks(snapshot.tasks);
 	// Keep the work that is still live. A done task is the least useful thing to
@@ -209,7 +228,7 @@ function renderEnvelope(
 		: [...snapshot.tasks].sort((a, b) => rankForRetention(a) - rankForRetention(b)).slice(0, budget.maxTasks);
 	const droppedTasks = snapshot.tasks.length - shown.length;
 	const omitted = hiddenDetailCount(shown, budget) + droppedTasks;
-	const taskMarkup = shown.map((task) => `\n  ${renderTaskElement(task, budget, "  ").trimStart()}`).join("");
+	const taskMarkup = shown.map((task) => `\n  ${renderTaskElement(task, budget, "  ", 0, asks).trimStart()}`).join("");
 	const elision = omitted > 0 ? `\n  <elided count="${omitted}" />` : "";
 	const state = isListStuck(snapshot.tasks) ? "stuck" : isListFinished(snapshot.tasks) ? "finished" : "in-progress";
 	return `<${TASKS_CONTEXT_ELEMENT} source="${TASKS_CONTEXT_SOURCE}" user-input="false" response-expected="false">\n` +
@@ -247,6 +266,7 @@ export function buildTasksContextEnvelope(
 ): string | null {
 	const audience = options.audience ?? "foreground";
 	const toolAvailable = options.toolAvailable ?? true;
+	const asks = options.asks ?? NO_ASKS;
 	const maxChars = Math.max(1, Math.floor(options.maxChars ?? MAX_TASKS_CONTEXT_CHARS));
 	if (snapshot === null || snapshot.tasks.length === 0) {
 		// `null` is the un-seeded worker: replay found no task entry at all. That
@@ -276,7 +296,7 @@ export function buildTasksContextEnvelope(
 		{ titleChars: 1, noteChars: 0, showSubtasks: false, maxDepth: 0, includeStatus: false, terseInstruction: true, maxTasks: 1 },
 	];
 	for (const budget of stages) {
-		const rendered = renderEnvelope(snapshot, budget, audience, toolAvailable);
+		const rendered = renderEnvelope(snapshot, budget, audience, toolAvailable, asks);
 		if (rendered.length <= maxChars) return rendered;
 	}
 	// A caller-supplied cap below the fixed envelope overhead opts out rather
@@ -286,6 +306,7 @@ export function buildTasksContextEnvelope(
 		{ titleChars: 1, noteChars: 0, showSubtasks: false, maxDepth: 0, includeStatus: false, terseInstruction: true },
 		audience,
 		toolAvailable,
+		asks,
 	);
 	return minimal.length <= maxChars ? minimal : null;
 }

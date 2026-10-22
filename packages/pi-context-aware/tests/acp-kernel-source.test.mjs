@@ -38,7 +38,7 @@ test("vendored CLI rejects an unlisted test file", () => {
 // Offline: the independent online byte comparison is a separate CI step.
 test("vendored kernel provenance matches the pinned inventory offline", () => {
 	const output = execFileSync(process.execPath, ["scripts/acp-kernel-tests.mjs", "--check"], { encoding: "utf8", timeout: 20_000 });
-	assert.match(output, /Kernel test provenance OK: 69 files, 20 exclusions, offline sha256 comparison/u);
+	assert.match(output, /Kernel test provenance OK: 69 files, 21 exclusions, offline sha256 comparison/u);
 });
 
 const original = 'import { test } from "../src/compress.js";\nassert.equal(1, 1);\n';

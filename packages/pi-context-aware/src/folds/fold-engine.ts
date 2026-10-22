@@ -11,7 +11,9 @@
  * but queues nothing and returns no entries, so the session file is not
  * changed. This module registers no tools.
  *
- * In live mode a `context` handler shows each earlier fold tool call with a
+ * In live mode a `context` handler runs billion-context-pi's per-turn pass on
+ * the request (fold-turn.ts, pi-context-aware#201): ref tags, hidden absorbed
+ * fold calls and the nudge. It also shows each earlier fold tool call with a
  * block pointer in place of the summary its fold already carries (see
  * fold-call-render.ts). The session file keeps the call as the model wrote it.
  *
@@ -52,6 +54,7 @@ import {
 import { isBillionContextPiLoaded, type RegisteredToolView } from "../compaction/compaction-blocker.js";
 import { foldStateFromBranch, planFold, summaryLimitOf, validFoldRefs } from "./fold-adapter.js";
 import { renderEarlierFoldCalls } from "./fold-call-render.js";
+import { cloneFoldTurnMemory, createFoldTurnMemory, prepareFoldTurn, type FoldTurnMemory } from "./fold-turn.js";
 import {
 	checkFoldRequestId,
 	foldRecordsOnBranch,
@@ -77,7 +80,7 @@ import {
 	type QueuedFoldRequest,
 	type RecoveryDrop,
 } from "./fold-recovery.js";
-import type { Config } from "./kernel/index.js";
+import { defaultCountTokens, type Config } from "./kernel/index.js";
 
 /** A fold request, optionally with the id that makes writing it idempotent. */
 export type FoldRequest = Omit<QueuedFoldRequest, "accepted">;
@@ -102,7 +105,22 @@ export type FoldMode = "live" | "shadow";
 
 /** Shadow while billion-context-pi owns context management; live otherwise. */
 export function foldModeFor(tools: readonly RegisteredToolView[]): FoldMode {
-	return isBillionContextPiLoaded(tools) ? "shadow" : "live";
+	return isBillionContextPiLoaded(foldToolViews(tools)) ? "shadow" : "live";
+}
+
+/**
+ * The tool list as billion-context-pi detection must read it once this extension's
+ * compress alias is registered (pi-context-aware#189). Pi lists the first tool registered
+ * under a name, so when billion-context-pi loads later (a reload) our alias stands in
+ * front of its compress. The alias comes from the same source as our context_fold;
+ * with acp_status from another source, that compress is read as billion-context-pi's.
+ */
+export function foldToolViews(tools: readonly RegisteredToolView[]): readonly RegisteredToolView[] {
+	const own = tools.find((tool) => tool.name === "context_fold")?.sourceInfo?.path;
+	const status = tools.find((tool) => tool.name === "acp_status");
+	const compress = tools.find((tool) => tool.name === "compress");
+	if (!own || !status || !compress || compress.sourceInfo?.path !== own || status.sourceInfo?.path === own) return tools;
+	return tools.map((tool) => (tool === compress ? { name: "compress", ...(status.sourceInfo ? { sourceInfo: status.sourceInfo } : {}) } : tool));
 }
 
 /** A request the engine refused. `code` is set when the refusal is not a planner error. */
@@ -162,6 +180,8 @@ export interface QueuedFoldPlan {
 }
 export interface FoldEngine {
 	mode(ctx: ExtensionContext): FoldMode;
+	/** Copy the state the next live per-turn pass would read, without creating or changing it. */
+	snapshotTurnMemory(ctx: ExtensionContext): FoldTurnMemory;
 	/** Plan a fold now; in live mode, queue it for the next boundary. */
 	request(ctx: ExtensionContext, request: FoldRequest): FoldRequestResult;
 	/** Requests waiting for the next boundary. */
@@ -179,6 +199,8 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 	const dropped = new WeakMap<SessionKey, DroppedFold[]>();
 	/** Records the last queue rebuild could not queue. Kept until the next rebuild. */
 	const scanDrops = new WeakMap<SessionKey, DroppedFold[]>();
+	/** What the per-turn pass carries between turns. Reset with the queue. */
+	const turnMemory = new WeakMap<SessionKey, FoldTurnMemory>();
 
 	const modeOf = (ctx: ExtensionContext): FoldMode => {
 		const known = modes.get(ctx.sessionManager);
@@ -209,6 +231,7 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 		queues.delete(manager);
 		dropped.delete(manager);
 		scanDrops.delete(manager);
+		turnMemory.delete(manager);
 		if (modeOf(ctx) !== "live") return;
 		const scan = scanFoldRequests(manager.getBranch());
 		if (scan.recovered.length > 0) queues.set(manager, scan.recovered);
@@ -236,7 +259,33 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 	// billion-context-pi renders its own compress calls; a shadow session has no native fold calls.
 	pi.on("context", (event, ctx) => {
 		if (modeOf(ctx) !== "live") return undefined;
-		const records = foldRecordsOnBranch(ctx.sessionManager.getBranch()).map(({ record }) => record);
+		const manager = ctx.sessionManager;
+		const branch = manager.getBranch();
+		try {
+			let memory = turnMemory.get(manager);
+			if (!memory) turnMemory.set(manager, memory = createFoldTurnMemory());
+			const usage = ctx.getContextUsage?.();
+			const turn = prepareFoldTurn({
+				messages: event.messages,
+				projection: manager.buildSessionProjection(),
+				branch,
+				contextEntries: manager.buildContextEntries(),
+				model: {
+					contextWindow: contextWindow(ctx),
+					...(ctx.model?.maxTokens ? { maxOutputTokens: ctx.model.maxTokens } : {}),
+					...(ctx.model?.api ? { api: ctx.model.api } : {}),
+					vision: Array.isArray(ctx.model?.input) && ctx.model.input.includes("image"),
+				},
+				systemPromptTokens: defaultCountTokens(ctx.getSystemPrompt?.() ?? ""),
+				...(typeof usage?.tokens === "number" ? { hostTokens: usage.tokens } : {}),
+				memory,
+				...(options.config ? { config: options.config } : {}),
+			});
+			if (turn) return { messages: turn.messages };
+		} catch {
+			// The pass failed: still send the block pointers, so no summary is repeated.
+		}
+		const records = foldRecordsOnBranch(branch).map(({ record }) => record);
 		const messages = renderEarlierFoldCalls(event.messages, records);
 		return messages === event.messages ? undefined : { messages };
 	});
@@ -315,6 +364,10 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 
 	return {
 		mode: modeOf,
+		snapshotTurnMemory: (ctx) => {
+			const memory = turnMemory.get(ctx.sessionManager);
+			return memory ? cloneFoldTurnMemory(memory) : createFoldTurnMemory();
+		},
 		pending: (ctx) => queues.get(ctx.sessionManager)?.length ?? 0,
 		dropped: (ctx) => [...(scanDrops.get(ctx.sessionManager) ?? []), ...(dropped.get(ctx.sessionManager) ?? [])],
 		request(ctx, request) {

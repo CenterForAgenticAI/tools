@@ -2,9 +2,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { resolveFoldConfig, type FoldEngine } from "../folds/fold-engine.js";
 import { configuredFoldFingerprint } from "./fingerprint.js";
 import { budgetDiff, estimateBytes, ParityBudget, processParityBudget, shareLease, type BudgetLimit, type FoldParityLimits, type Lease, type ParityRetention, type ParityTask } from "./budget.js";
-import { compareBatchRequest, compareCompressCall, hashRequestMessages, MAX_BRANCH_ENTRIES, shortHash, type BatchCall, type BatchComparison, type PreviewInput, type ShadowCall } from "./compare.js";
+import { compareBatchRequestWithMemory, compareCompressCall, hashRequestMessages, MAX_BRANCH_ENTRIES, previewShadowTurnMemory, shortHash, type BatchCall, type BatchComparison, type PreviewInput, type PreviewTurn, type ShadowCall } from "./compare.js";
+import { cloneFoldTurnMemory, createFoldTurnMemory, type FoldTurnMemory } from "../folds/fold-turn.js";
+import { defaultCountTokens } from "../folds/kernel/index.js";
 import { bcpOutcome, classifyBcpResult, rejectedUnknownRef, type ObservedResult } from "./outcome.js";
-import { isRefusalOutcome, PARITY_RECORD_VERSION, verdictFor, type CompressRecord, type NextRequestRecord, type ParityDiff, type ParityRecord, type RefusalOutcome, type RequestHashes } from "./records.js";
+import { isRefusalOutcome, PARITY_RECORD_VERSION, verdictFor, type CompressRecord, type NextRequestRecord, type ParityDiff, type ParityRecord, type RefusalOutcome } from "./records.js";
 import { registerFoldParityCommand } from "./report.js";
 import { snapshotSideFile, type SideSnapshot } from "./side-file.js";
 
@@ -45,6 +47,8 @@ interface WaitingCall extends CallIdentity {
 }
 interface SessionState {
 	readonly pending: Map<string, FullCall | SlimCall>;
+	/** Shadow replay state only; live mode never reads or mutates it. */
+	turnMemory: FoldTurnMemory | undefined;
 	readonly waiting: WaitingCall[];
 	/** Reasons the next-request preview for the current batch cannot be valid. */
 	readonly batchDiffs: ParityDiff[];
@@ -52,7 +56,7 @@ interface SessionState {
 	untracked: number;
 }
 export interface FoldParityOptions {
-	readonly engine: Pick<FoldEngine, "mode">;
+	readonly engine: Pick<FoldEngine, "mode"> & Partial<Pick<FoldEngine, "snapshotTurnMemory">>;
 	readonly agentDir: string;
 	readonly fingerprint: string;
 	readonly now?: () => Date;
@@ -71,6 +75,7 @@ export interface FoldParityRecorder {
 const MAX_BATCH_DIFFS = 10;
 const CANCELLED: ParityDiff = { kind: "recorder-error", reason: "session ended before the comparison ran" };
 const RECORDER_ERROR: ParityDiff = { kind: "recorder-error", reason: "shadow recorder failed" };
+const REPLAY_UNKNOWN: ParityDiff = { kind: "recorder-error", reason: "hypothetical live turn memory is unknown" };
 const releaseWaiting = (calls: readonly WaitingCall[]) => {
 	for (const call of calls) { call.evidenceLease?.release(); delete call.evidence; delete call.evidenceLease; }
 };
@@ -95,21 +100,29 @@ function comparisonTask(content: { snapshot: PreviewInput; evidence: ShadowCall;
 		release: () => { held = undefined; for (const lease of leases) lease.release(); },
 	};
 }
-function previewTask(content: { snapshot: PreviewInput; calls: readonly BatchCall[]; bcp: RequestHashes }, leases: readonly Lease[], records: {
+function previewTask(comparison: BatchComparison, leases: readonly Lease[], records: {
 	readonly previewed: (compared: BatchComparison) => NextRequestRecord;
 	readonly failed: () => ParityRecord;
 	readonly cancelled: () => ParityRecord;
 }): ParityTask {
-	let held: typeof content | undefined = content;
+	let held: BatchComparison | undefined = comparison;
 	return {
-		run: () => {
-			if (!held) throw new Error("preview content released");
-			// A counterfactual preview, when needed, reuses this snapshot after the first preview is dropped.
-			return records.previewed(compareBatchRequest(held.snapshot, held.calls, held.bcp));
-		},
+		run: () => { if (!held) throw new Error("preview result released"); return records.previewed(held); },
 		failed: records.failed,
 		cancelled: records.cancelled,
 		release: () => { held = undefined; for (const lease of leases) lease.release(); },
+	};
+}
+
+/** What the live per-turn pass would read from this request's context: model limits, prompt size, host usage. */
+function previewTurn(ctx: ExtensionContext): PreviewTurn {
+	const usage = ctx.getContextUsage?.();
+	return {
+		...(ctx.model?.maxTokens ? { maxOutputTokens: ctx.model.maxTokens } : {}),
+		...(ctx.model?.api ? { api: ctx.model.api } : {}),
+		vision: Array.isArray(ctx.model?.input) && ctx.model.input.includes("image"),
+		systemPromptTokens: defaultCountTokens(ctx.getSystemPrompt?.() ?? ""),
+		...(typeof usage?.tokens === "number" ? { hostTokens: usage.tokens } : {}),
 	};
 }
 
@@ -126,9 +139,14 @@ export function registerFoldParityRecorder(pi: ExtensionAPI, options: FoldParity
 	const fingerprints = new Map<string, string>();
 	const fingerprintFor = (ctx: ExtensionContext) => configuredFoldFingerprint(options.fingerprint, resolveFoldConfig(ctx, options.agentDir));
 	const now = () => (options.now?.() ?? new Date()).toISOString();
-	const stateFor = (id: string) => {
+	const stateFor = (id: string, ctx?: ExtensionContext) => {
 		let state = states.get(id);
-		if (!state) { state = { pending: new Map(), waiting: [], batchDiffs: [], untracked: 0 }; states.set(id, state); }
+		if (!state) {
+			let turnMemory: FoldTurnMemory | undefined = createFoldTurnMemory();
+			try { if (ctx && options.engine.snapshotTurnMemory) turnMemory = options.engine.snapshotTurnMemory(ctx); } catch { turnMemory = undefined; }
+			state = { pending: new Map(), turnMemory, waiting: [], batchDiffs: [], untracked: 0 };
+			states.set(id, state);
+		}
 		return state;
 	};
 	const callCount = () => { let count = 0; for (const state of states.values()) count += state.pending.size + state.waiting.length; return count; };
@@ -182,7 +200,7 @@ export function registerFoldParityRecorder(pi: ExtensionAPI, options: FoldParity
 		const nested = Boolean(event.parentToolCallId) || event.toolCallId.startsWith("fabric_");
 		try {
 			id = ctx.sessionManager.getSessionId();
-			const state = stateFor(id);
+			const state = stateFor(id, ctx);
 			if (callCount() >= limits.maxCalls) { state.untracked++; return; }
 			const folds = resolveFoldConfig(ctx, options.agentDir);
 			const fingerprint = configuredFoldFingerprint(options.fingerprint, folds);
@@ -282,24 +300,35 @@ export function registerFoldParityRecorder(pi: ExtensionAPI, options: FoldParity
 		let state: SessionState | undefined;
 		try {
 			id = ctx.sessionManager.getSessionId();
-			state = states.get(id);
-			if (!state) return;
+			state = stateFor(id, ctx);
 			const owner = state;
-			const batchDiffs = state.batchDiffs.splice(0);
-			if (!state.waiting.length) return;
 			calls = state.waiting.splice(0).sort((a, b) => a.at.localeCompare(b.at));
+			const batchDiffs = state.batchDiffs.splice(0);
+			const folds = resolveFoldConfig(ctx, options.agentDir);
+			fingerprints.set(id, configuredFoldFingerprint(options.fingerprint, folds));
+			if (!calls.length) {
+				if (!state.turnMemory) return;
+				const branch = ctx.sessionManager.getBranch();
+				const header = ctx.sessionManager.getHeader();
+				const before = snapshotSideFile(ctx.sessionManager.getSessionFile());
+				const bytes = estimateBytes([header, branch, before], limits.maxRetainedBytes);
+				if (branch.length > MAX_BRANCH_ENTRIES || !before.ok || !(bytes <= limits.maxRetainedBytes)) { state.turnMemory = undefined; return; }
+				const snapshot: PreviewInput = { sessionId: id, cwd: ctx.cwd, header: structuredClone(header), branch: structuredClone(branch), contextWindow: ctx.model?.contextWindow ?? 200_000, folds, turn: previewTurn(ctx), turnMemory: cloneFoldTurnMemory(state.turnMemory) };
+				state.turnMemory = previewShadowTurnMemory(snapshot, before);
+				return;
+			}
 			const toolCallIds = calls.map((call) => call.toolCallId);
 			const bcp = hashRequestMessages(event.messages);
 			const at = now();
-			const folds = resolveFoldConfig(ctx, options.agentDir);
-			fingerprints.set(id, configuredFoldFingerprint(options.fingerprint, folds));
 			const requestBase = { ...base(id), at };
 			const inconclusive = (diffs: readonly ParityDiff[]) => {
+				owner.turnMemory = undefined;
 				releaseWaiting(calls);
 				const all = [...diffs, ...(bcp.tagsSeen ? [] : [{ kind: "tags-absent" as const }])];
 				record(owner, id, { ...base(id), at, kind: "next-request", toolCallIds, bcp, verdict: verdictFor(all), diffs: all });
 			};
 			if (batchDiffs.length) return inconclusive(batchDiffs);
+			if (!state.turnMemory) return inconclusive([REPLAY_UNKNOWN]);
 			const blocked = snapshotBlocked();
 			if (blocked) return inconclusive([budgetDiff(blocked)]);
 			const branch = ctx.sessionManager.getBranch();
@@ -311,16 +340,22 @@ export function registerFoldParityRecorder(pi: ExtensionAPI, options: FoldParity
 			if (!work) return inconclusive([budgetDiff("queue")]);
 			let snapshot: PreviewInput;
 			try {
-				snapshot = { sessionId: id, cwd: ctx.cwd, header: structuredClone(header), branch: structuredClone(branch), contextWindow: ctx.model?.contextWindow ?? 200_000, folds };
+				snapshot = { sessionId: id, cwd: ctx.cwd, header: structuredClone(header), branch: structuredClone(branch), contextWindow: ctx.model?.contextWindow ?? 200_000, folds, turn: previewTurn(ctx) };
 			} catch (error) { work.release(); throw error; }
 			const shadowCalls: BatchCall[] = calls.map((call) => ({
 				...(call.evidence ?? { toolCallId: call.toolCallId, input: undefined, before: { ok: false, diff: { kind: "recorder-error", reason: "call evidence released" } } }),
 				...(call.refusal ? { refusal: call.refusal } : {}),
 			}));
-			// The preview job now owns the evidence shares; the waiting identities no longer hold content.
+			let previewed: ReturnType<typeof compareBatchRequestWithMemory>;
+			try {
+				previewed = compareBatchRequestWithMemory({ ...snapshot, turnMemory: cloneFoldTurnMemory(state.turnMemory) }, shadowCalls, bcp);
+			} catch (error) { work.release(); throw error; }
+			if (!previewed.turnMemoryKnown) { work.release(); return inconclusive([REPLAY_UNKNOWN]); }
+			state.turnMemory = previewed.turnMemory;
+			// The queued writer owns only the completed comparison and the evidence leases; replay already advanced synchronously.
 			const leases = [budget.lease(bytes, true), ...calls.flatMap((call) => call.evidenceLease ? [call.evidenceLease] : [])];
 			for (const call of calls) { delete call.evidence; delete call.evidenceLease; }
-			const task = previewTask({ snapshot, calls: shadowCalls, bcp }, leases, {
+			const task = previewTask(previewed.comparison, leases, {
 				previewed: (compared) => ({ ...requestBase, kind: "next-request", toolCallIds, bcp, ...compared }),
 				failed: () => failureRecord(id, "next-request", false, toolCallIds),
 				cancelled: () => ({ ...requestBase, kind: "next-request", toolCallIds, bcp, verdict: "inconclusive", diffs: [CANCELLED] }),
@@ -329,10 +364,11 @@ export function registerFoldParityRecorder(pi: ExtensionAPI, options: FoldParity
 		} catch {
 			releaseWaiting(calls);
 			const target = state ?? stateFor(id);
-			record(target, id, failureRecord(id, "next-request", false, calls.map((call) => call.toolCallId)));
+			target.turnMemory = undefined;
+			if (calls.length) record(target, id, failureRecord(id, "next-request", false, calls.map((call) => call.toolCallId)));
 		}
 	});
-	registerFoldParityCommand(pi, { agentDir: options.agentDir, fingerprint: fingerprintFor, flush });
+	registerFoldParityCommand(pi, { agentDir: options.agentDir, fingerprint: fingerprintFor, build: (ctx) => ({ engine: options.fingerprint, folds: resolveFoldConfig(ctx, options.agentDir) }), flush });
 	return {
 		flush,
 		retained: () => ({ bytes: budget.bytes, snapshots: budget.snapshots, calls: callCount(), queued: budget.work }),

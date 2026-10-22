@@ -1,11 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import ts from "typescript";
-import { buildFoldParityReport } from "../src/parity/report.js";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { BUCKET_LABELS, buildFoldParityReport, DIFF_KIND_LABELS, registerFoldParityCommand } from "../src/parity/report.js";
 import { coverageHash } from "../src/parity/compare.js";
 import { PARITY_REGISTER } from "../src/parity/register.js";
-import { PARITY_RECORD_VERSION, verdictFor, type CompressRecord, type NextRequestRecord, type ParityRecord, type RequestDelta } from "../src/parity/records.js";
+import { appendParityRecords, PARITY_RECORD_VERSION, verdictFor, type CompressRecord, type NextRequestRecord, type ParityRecord, type RequestDelta } from "../src/parity/records.js";
 
 const call = (n: number, fingerprint = "current", diffs: CompressRecord["diffs"] = []): CompressRecord => ({
 	v: PARITY_RECORD_VERSION, kind: "compress", fingerprint, sessionId: "session", toolCallId: `call-${n}`, nested: false,
@@ -22,11 +25,22 @@ const request = (call: CompressRecord): NextRequestRecord => ({
 	bcp: { messages: [], total: 0, tagsSeen: true },
 });
 const linked = (calls: CompressRecord[]): ParityRecord[] => calls.flatMap((call) => [call, request(call)]);
+const withTimeZone = <T>(timeZone: string, render: () => T): T => {
+	const previousTz = process.env.TZ;
+	process.env.TZ = timeZone;
+	try {
+		return render();
+	} finally {
+		if (previousTz === undefined) delete process.env.TZ;
+		else process.env.TZ = previousTz;
+	}
+};
 
 test("fingerprint changes reset the count", () => {
 	const report = buildFoldParityReport([call(0, "old"), call(1)], [], "current");
 	assert.equal(report.count, 1);
-	assert.match(report.text, /count 1\/500/u);
+	assert.equal(report.window?.calls, 1);
+	assert.deepEqual(report.earlierBuilds, { calls: 1, builds: 1 });
 });
 
 test("only the most recent 500 calls determine readiness, including their next request", () => {
@@ -37,7 +51,9 @@ test("only the most recent 500 calls determine readiness, including their next r
 	const report = buildFoldParityReport(records, [], "current");
 	assert.equal(report.ready, false);
 	assert.equal(report.counts.diff, 1);
-	assert.match(report.text, /call-500.*summaries/u);
+	assert.equal(report.blocking[0]?.toolCallId, "call-500");
+	assert.deepEqual(report.blocking[0]?.kinds, ["summaries"]);
+	assert.match(report.text, /call-500 {2}summaries$/mu);
 });
 
 test("register entries explain differences retroactively", () => {
@@ -45,7 +61,7 @@ test("register entries explain differences retroactively", () => {
 	const report = buildFoldParityReport(records, [{ id: "FP-001", title: "Known widening", reason: "Entry atomicity", matches: (diff) => diff.kind === "coverage" }], "current");
 	assert.equal(report.counts.explained, 1);
 	assert.equal(report.counts.diff, 0);
-	assert.match(report.text, /FP-001: 1/u);
+	assert.deepEqual(report.registerHits, { "FP-001": { calls: 1, differences: 1 } });
 });
 
 test("inconclusive calls block readiness even if a register entry matches", () => {
@@ -80,6 +96,7 @@ test("duplicate compress records for one call identity cannot reach readiness", 
 	oneExtra.push({ ...call(500), toolCallId: "call-499" });
 	const extraReport = buildFoldParityReport(oneExtra, [], "current");
 	assert.equal(extraReport.ready, false);
+	assert.ok(extraReport.blocking.some((blocked) => blocked.toolCallId === "call-499"));
 	assert.match(extraReport.text, /call-499/u);
 });
 
@@ -169,7 +186,7 @@ for (const [id, type] of ENDINGS) {
 		const report = buildFoldParityReport([refused(type, consequences(type)), nextRequest(REQUEST_DIFFS, clean([{ toolCallId: "call-1", type }]))], PARITY_REGISTER, "current");
 		assert.deepEqual(report.counts, { match: 0, explained: 1, diff: 0, inconclusive: 0 });
 		// Hits count differences: four in the call and four in its next request.
-		assert.match(report.text, new RegExp(`${id}: 8\n`, "u"));
+		assert.deepEqual(report.registerHits[id], { calls: 1, differences: 8 });
 	});
 }
 
@@ -177,7 +194,7 @@ test("each request consequence of a refusal is explained on its own, tool calls 
 	for (const diff of REQUEST_DIFFS) {
 		const report = buildFoldParityReport([refused("dead-range", consequences("dead-range")), nextRequest([diff], clean([{ toolCallId: "call-1", type: "dead-range" }]))], PARITY_REGISTER, "current");
 		assert.deepEqual(report.counts, { match: 0, explained: 1, diff: 0, inconclusive: 0 }, diff.kind);
-		assert.match(report.text, /FP-005: 5\n/u, diff.kind);
+		assert.equal(report.registerHits["FP-005"]?.differences, 5, diff.kind);
 	}
 });
 
@@ -284,7 +301,7 @@ test("the request decision does not depend on whether a sibling is inside the 50
 	const report = (request: NextRequestRecord) => buildFoldParityReport([sibling, dead, request, ...linked(fillers)], PARITY_REGISTER, "current");
 	const corrupted = report(nextRequest(REQUEST_DIFFS, { refused: [{ toolCallId: dead.toolCallId, type: "dead-range" }], counterfactual: { diffs: [{ kind: "tool-calls" }] } }, ids));
 	// The sibling has left the window; the refused call alone must still keep the corruption.
-	assert.match(corrupted.text, /window 500/u);
+	assert.equal(corrupted.window?.calls, 500);
 	assert.deepEqual(corrupted.counts, { match: 499, explained: 0, diff: 1, inconclusive: 0 });
 	assert.equal(corrupted.ready, false);
 	const genuine = report(nextRequest(REQUEST_DIFFS, clean([{ toolCallId: dead.toolCallId, type: "dead-range" }]), ids));
@@ -300,7 +317,7 @@ test("several refused calls in one batch are explained together only by a clean 
 	const explained = buildFoldParityReport([dead, aborted, nextRequest(REQUEST_DIFFS, clean(both), ids, 3)], PARITY_REGISTER, "current");
 	assert.deepEqual(explained.counts, { match: 0, explained: 2, diff: 0, inconclusive: 0 });
 	// Each call's own differences go to its own entry; the shared request goes to the first entry that names an ending in the batch.
-	assert.match(explained.text, /FP-005: 12\nFP-007: 4\n/u);
+	assert.deepEqual(Object.fromEntries(Object.entries(explained.registerHits).map(([id, hit]) => [id, hit.differences])), { "FP-005": 12, "FP-007": 4 });
 	const remaining = buildFoldParityReport([dead, aborted, nextRequest(REQUEST_DIFFS, { refused: both, counterfactual: { diffs: [{ kind: "content" }] } }, ids, 3)], PARITY_REGISTER, "current");
 	assert.deepEqual(remaining.counts, { match: 0, explained: 0, diff: 2, inconclusive: 0 });
 });
@@ -347,4 +364,119 @@ test("a refused call with an inconclusive difference stays inconclusive", () => 
 	const report = buildFoldParityReport([refused("aborted", [...consequences("aborted"), { kind: "side-file-missing" }])], PARITY_REGISTER, "current");
 	assert.equal(report.counts.inconclusive, 1);
 	assert.equal(report.ready, false);
+});
+
+// ---- Reading the report (presentation only; readiness is unchanged) ----
+
+const diffKinds = (): string[] => {
+	const source = ts.createSourceFile("records.ts", fs.readFileSync("src/parity/records.ts", "utf8"), ts.ScriptTarget.Latest, true);
+	const declaration = source.statements.find((node): node is ts.TypeAliasDeclaration => ts.isTypeAliasDeclaration(node) && node.name.text === "DiffKind");
+	assert.ok(declaration && ts.isUnionTypeNode(declaration.type));
+	return declaration.type.types.map((node) => {
+		assert.ok(ts.isLiteralTypeNode(node) && ts.isStringLiteral(node.literal));
+		return node.literal.text;
+	});
+};
+
+test("every DiffKind and every bucket has a non-empty plain-language label", () => {
+	assert.deepEqual(Object.keys(DIFF_KIND_LABELS).sort(), diffKinds().sort());
+	for (const [kind, label] of Object.entries(DIFF_KIND_LABELS)) assert.ok(label.trim().length > 10, kind);
+	assert.deepEqual(Object.keys(BUCKET_LABELS).sort(), ["diff", "explained", "inconclusive", "match"]);
+	for (const [bucket, label] of Object.entries(BUCKET_LABELS)) assert.ok(label.trim().length > 10, bucket);
+});
+
+test("the headline says Ready or Not ready with the reason in one sentence", () => {
+	const different = buildFoldParityReport(linked([call(1, "current", [{ kind: "coverage" }]), call(2), call(3, "current", [{ kind: "too-large" }])]), [], "current");
+	assert.equal(different.text.split("\n")[2], "Not ready to cut over. 3 of 500 calls recorded; 1 has differences no known entry explains and 1 could not be compared.");
+	const short = buildFoldParityReport(linked([call(1)]), [], "current");
+	assert.equal(short.text.split("\n")[2], "Not ready to cut over. 1 of 500 calls recorded; 499 more are needed.");
+	const ready = buildFoldParityReport(linked(Array.from({ length: 501 }, (_, i) => call(i))), [], "current");
+	assert.equal(ready.ready, true);
+	assert.match(ready.text.split("\n")[2]!, /^Ready to cut over\. The latest 500 of 501 comparable calls have no undocumented differences and none was inconclusive\.$/u);
+});
+
+test("the build line shows the combined fingerprint and, when given, its engine and folds parts", () => {
+	const records = linked([{ ...call(1), fingerprint: "4a987a5925d2ffffffff" }]);
+	const bare = buildFoldParityReport(records, [], "4a987a5925d2ffffffff");
+	assert.match(bare.text, /^Build {4}fingerprint 4a987a5925d2$/mu);
+	assert.equal(bare.engine, undefined);
+	const parts = buildFoldParityReport(records, [], "4a987a5925d2ffffffff", { engine: "eec704d7e43d0000", folds: { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000 } });
+	assert.match(parts.text, /^Build {4}fingerprint 4a987a5925d2 = engine eec704d7e43d \+ folds\.firstUserMessage keep, firstUserMessageMaxTokens 8000$/mu);
+	assert.equal(parts.engine, "eec704d7e43d0000");
+	assert.deepEqual(parts.folds, { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000 });
+});
+
+test("calls from other fingerprints and older record versions are shown as not counted", () => {
+	const legacy = { ...call(9, "current"), v: 1 } as unknown as ParityRecord;
+	const records = [...linked([call(0, "old"), call(1, "older"), call(2, "old"), call(3), { ...call(4), sessionId: "other" }]), legacy];
+	const report = withTimeZone("UTC", () => buildFoldParityReport(records, [], "current"));
+	assert.equal(report.count, 2);
+	assert.deepEqual(report.earlierBuilds, { calls: 3, builds: 2 });
+	assert.equal(report.olderVersionCalls, 1);
+	assert.deepEqual(report.window, { calls: 2, sessions: 2, from: new Date(3).toISOString(), to: new Date(4).toISOString() });
+	assert.match(report.text, /^ {9}Not counted: 3 calls from 2 earlier builds; 1 call from an older record version$/mu);
+	assert.equal(report.text.split("\n").find((line) => line.startsWith("Window")), "Window   2 compress calls in 2 sessions, 1970-01-01 00:00 UTC to 1970-01-01 00:00 UTC");
+});
+
+test("report timestamps use the fixed local time zone and show its UTC offset", () => {
+	const winter = { ...call(1, "current", [{ kind: "coverage" }]), at: "2026-01-15T11:34:00.000Z" };
+	const summer = { ...call(2, "current", [{ kind: "coverage" }]), at: "2026-07-15T11:34:00.000Z" };
+	const lines = withTimeZone("Europe/Berlin", () => buildFoldParityReport(linked([winter, summer]), [], "current").text.split("\n"));
+	assert.equal(lines.find((line) => line.startsWith("Window")), "Window   2 compress calls in 1 session, 2026-01-15 12:34 +01:00 to 2026-07-15 13:34 +02:00");
+	assert.deepEqual(lines.filter((line) => line.includes("session session")), [
+		"   2026-07-15 13:34 +02:00  session session  call-2  coverage",
+		"   2026-01-15 12:34 +01:00  session session  call-1  coverage",
+	]);
+});
+
+test("every diff kind in a blocking call is listed with its label, counted in calls", () => {
+	for (const kind of diffKinds() as (keyof typeof DIFF_KIND_LABELS)[]) {
+		const report = buildFoldParityReport(linked([call(1, "current", [{ kind }, { kind, reason: "second" }]), call(2, "current", [{ kind }])]), [], "current");
+		assert.equal(report.ready, false, kind);
+		const section = INCONCLUSIVE.has(kind) ? report.inconclusiveKindCalls : report.undocumentedKindCalls;
+		assert.equal(section[kind], 2, kind);
+		assert.match(report.text, new RegExp(`^ +2  ${kind} +${DIFF_KIND_LABELS[kind].replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "mu"), kind);
+	}
+});
+const INCONCLUSIVE = new Set(["side-file-missing", "import-unsupported", "import-skipped", "ref-unmapped", "too-large", "tags-absent", "recorder-error", "tool-evidence", "outcome-unknown"]);
+
+test("register hits show calls and differences with the entry title and qualified issue", () => {
+	const entry = { id: "FP-001" as const, title: "Known widening", reason: "test", issue: "pi-context-aware#175", matches: (diff: { kind: string }) => diff.kind === "coverage" };
+	const report = buildFoldParityReport(linked([call(1, "current", [{ kind: "coverage" }, { kind: "coverage", reason: "b" }]), call(2, "current", [{ kind: "coverage" }])]), [entry], "current");
+	assert.deepEqual(report.registerHits, { "FP-001": { calls: 2, differences: 3 } });
+	assert.match(report.text, /^ {3}FP-001 {2}Known widening {2}2; 3 {2}intel\/pi-context-aware#175$/mu);
+});
+
+test("the default lists the newest 10 blocking calls and all lists every one with reasons", () => {
+	const records = linked(Array.from({ length: 12 }, (_, i) => ({ ...call(i, "current", [{ kind: "coverage", reason: `reason-${i}` }]), nested: i === 11 })));
+	const lines = (text: string) => text.split("\n").filter((line) => /session session/u.test(line));
+	const short = buildFoldParityReport(records, [], "current");
+	assert.equal(short.blocking.length, 12);
+	assert.equal(short.blocking[0]?.toolCallId, "call-11");
+	assert.equal(lines(short.text).length, 10);
+	assert.match(short.text, /^Newest calls that block cut-over \(10 of 12; \/fold-parity all lists every one\)$/mu);
+	assert.match(lines(short.text)[0]!, /call-11 {2}coverage {2}nested$/u);
+	assert.doesNotMatch(short.text, /nested=|reason-/u);
+	const every = buildFoldParityReport(records, [], "current", { all: true });
+	assert.equal(lines(every.text).length, 12);
+	assert.match(every.text, /^ +coverage: reason-0$/mu);
+});
+
+test("the /fold-parity command passes the build parts and the all argument", async () => {
+	const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "parity-command-")));
+	try {
+		const calls = Array.from({ length: 12 }, (_, i) => call(i, "combined", [{ kind: "coverage" }]));
+		await appendParityRecords(dir, "session", linked(calls));
+		const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
+		const api = { registerCommand(name: string, options: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) { commands.set(name, options.handler); } } as unknown as ExtensionAPI;
+		registerFoldParityCommand(api, { agentDir: dir, fingerprint: () => "combined", build: () => ({ engine: "engine-hash", folds: { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000 } }) });
+		const notices: string[] = [];
+		const ctx = { ui: { notify: (message: string) => { notices.push(message); } } } as unknown as ExtensionContext;
+		await commands.get("fold-parity")!("", ctx);
+		await commands.get("fold-parity")!(" all ", ctx);
+		assert.match(notices[0]!, /fingerprint combined = engine engine-hash \+ folds\.firstUserMessage keep/u);
+		const count = (text: string) => text.split("\n").filter((line) => /session session/u.test(line)).length;
+		assert.equal(count(notices[0]!), 10);
+		assert.equal(count(notices[1]!), 12);
+	} finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

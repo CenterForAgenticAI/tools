@@ -7,7 +7,6 @@ import {
 	decideOwedCompactionReattempt,
 	lookupReusableSummary,
 	lookupReusableSummaryWithBoundary,
-	preflightCompaction,
 	recordRetainedSummary,
 	recordSummaryRetentionFailure,
 } from "../src/compaction/compaction-outcome.js";
@@ -79,10 +78,6 @@ test("genuine failures retain the existing error recovery policy", () => {
 		decision.recoveryFollowUp?.("seed"),
 		"(Compaction failed: provider failed. Continuing with original context.)\n\nseed",
 	);
-});
-
-test("preflight stays conservative because Pi's size predicate is unavailable before preparation", () => {
-	assert.deepEqual(preflightCompaction({ ctx: context(), seed: "seed" }), { kind: "proceed" });
 });
 
 test("a retained summary is reused on the same branch without another summarization call", () => {

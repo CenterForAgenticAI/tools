@@ -42,7 +42,7 @@ test("historical diagnostics explain only evidence-backed differences without co
 test("FP-001 explains native summary placement when bcp has no summary", () => {
 	const output = report({ ...hashRequestMessages([summary()]), ...expectedSettled }, hashRequestMessages([]));
 	assert.equal(output.counts.explained, 1);
-	assert.match(output.text, /FP-001: 1/u);
+	assert.equal(output.registerHits["FP-001"]?.differences, 1);
 });
 test("FP-001 does not explain wrong summary text when bcp has no summary", () => {
 	const ours = { ...hashRequestMessages([summary("corrupted")]), ...expectedSettled };
@@ -106,7 +106,7 @@ test("FP-002 explains only the exact compress summary shortening and stores no a
 	const ours = unfolded([tool("compress", { content: [{ startId: "m00001", endId: "m00002", summary: "x".repeat(250) }] }), result]);
 	const bcp = hashRequestMessages([tool("compress", { content: [{ startId: "m00001", endId: "m00002", summary: `${"x".repeat(199)}…` }] }), result]);
 	assert.equal(report(ours, bcp).counts.explained, 1);
-	assert.match(report(ours, bcp).text, /FP-002: 1/u);
+	assert.equal(report(ours, bcp).registerHits["FP-002"]?.differences, 1);
 	assert.doesNotMatch(JSON.stringify(ours), /xxxxx|startId|m00001/u);
 });
 test("FP-002 handles JSON-string content and surrogate-safe prefixes exactly", () => {
@@ -168,7 +168,7 @@ test("FP-003 explains only an opening user actually folded under the effective s
 	assert.equal(ours.messages[0]?.hash, "8a53c3f03202");
 	const output = report(ours, bcp);
 	assert.equal(output.counts.explained, 1);
-	assert.match(output.text, /FP-003: 1/u);
+	assert.equal(output.registerHits["FP-003"]?.differences, 1);
 	assert.equal(foldedOpening("keep").ours.firstUserFolded, undefined);
 });
 

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
-export const KERNEL_TEST_COMMIT = "5d7b5380df0aef87d9c96f2993dc8e2368dddb91";
+export const KERNEL_TEST_COMMIT = "4d38906e004e7fd9fe4b0c06cbd8c661694f506f";
+export const KERNEL_TEST_VERSION = "0.0.101";
 export const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 
 /** Only import specifiers may change; reversing the recorded edits must recover upstream bytes. */

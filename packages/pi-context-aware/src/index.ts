@@ -67,7 +67,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Api, AssistantMessage, ImageContent, Message, Model, ProviderHeaders, TextContent } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { compatCanDispatch } from "./platform/model-transport.js";
-import { registerFoldEngine } from "./folds/fold-engine.js";
+import { foldToolViews, registerFoldEngine } from "./folds/fold-engine.js";
 import { foldEngineFingerprint } from "./parity/fingerprint.js";
 import { registerFoldParityRecorder } from "./parity/recorder.js";
 import { decideBuiltinCompactionFallback, extrapolateBoundedInputTokens } from "./compaction/compaction-fallback-guard.js";
@@ -230,7 +230,9 @@ import {
 	type WorkstreamCompactionProjection,
 } from "./workstream/workstream-context.js";
 import { replayWorkstreamEntries } from "./workstream/workstream-replay.js";
-import { MAX_FOCUS_REF_VALUE_CHARS, prepareSessionFocusArguments, SESSION_FOCUS_ACTIONS, SESSION_FOCUS_REF_KINDS, SESSION_FOCUS_STATUSES, stringEnum } from "./tool-arguments.js";
+import { MAX_FOCUS_REF_VALUE_CHARS, prepareSessionFocusArguments, SESSION_FOCUS_ACTIONS, SESSION_FOCUS_GOAL_STATUSES, SESSION_FOCUS_REF_KINDS, SESSION_FOCUS_STATUSES, stringEnum } from "./tool-arguments.js";
+import { BRIEF_ENTRY_TYPE, briefViewText, buildBriefContextBlock, changeBrief, MAX_BRIEF_CHARS, replayBrief, type SessionBrief } from "./workstream/session-brief.js";
+import { isValidTaskRef, MAX_TASK_ID_CHARS } from "./session-tasks/session-tasks.js";
 import { redactPinnedVerbatimBlock, redactText } from "./workstream/workstream-safety.js";
 import { appendWorkstreamSnapshot } from "./workstream/workstream-state.js";
 import {
@@ -332,9 +334,14 @@ import {
 	decideCompactionError,
 	decideOwedCompactionReattempt,
 	lookupReusableSummaryWithBoundary,
-	preflightCompaction,
 	recordRetainedSummary,
 } from "./compaction/compaction-outcome.js";
+import {
+	preflightCompaction,
+	type CompactionPreflightBoundary,
+	type CompactionPreflightEnvironment,
+	type CompactionPreflightResult,
+} from "./compaction/compaction-preflight.js";
 import {
 	collectCompactionHistory,
 	formatCompactionCountPrompt,
@@ -413,6 +420,7 @@ import {
 import type { RecallCachePool } from "./cache/recall.js";
 import { createContextRecallSurface } from "./context-tools/context-recall.js";
 import { decideContextToolSurface } from "./context-tools/surface.js";
+import { createContextFoldSurface } from "./context-tools/context-fold.js";
 import { erasedSessionIds } from "./erasure/database.js";
 import { registerSessionErasure } from "./erasure/extension.js";
 import { guardErasureWrites } from "./erasure/write-boundary.js";
@@ -1673,7 +1681,7 @@ function recallCachePools(ctx: ExtensionContext): RecallCachePool[] {
 }
 
 function refreshCompactionBlocker(pi: ExtensionAPI, ctx: ExtensionContext): void {
-	const tools = registeredToolViews(pi);
+	const tools = foldToolViews(registeredToolViews(pi));
 	const blocker = detectCompactionBlocker(tools, { env: process.env, modelBaseUrl: ctx.model?.baseUrl });
 	if (blocker) compactionBlockerBySession.set(ctx.sessionManager, blocker);
 	else compactionBlockerBySession.delete(ctx.sessionManager);
@@ -4038,8 +4046,7 @@ type DeferredCoreCompactionHandoff = {
 
 type CompactionScheduleResult =
 	| { ok: true; runId: string; state: "queued" | "running" }
-	| { ok: false; reason: "active"; active: CompactionFlight }
-	| { ok: false; reason: "nothing-to-compact"; toolMessage: string; serviceStatus: "nothing-to-compact" };
+	| { ok: false; reason: "active"; active: CompactionFlight };
 
 /**
  * A compaction asked for through the compaction-owner claim. The seed, when the
@@ -4405,6 +4412,24 @@ const pendingRestartNotices = new Map<string, PendingRestartNotice>();
 
 let compactionRunCounter = 0;
 
+// Keyed by extension instance: each load reads its own Pi settings and fold queue.
+const compactionPreflightEnvironments = new WeakMap<ExtensionAPI, CompactionPreflightEnvironment>();
+
+/**
+ * Pi's refusal of the compaction requested at `boundary` for the session
+ * snapshot represented there (#43). `undefined` leaves the decision to Pi, and
+ * decideCompactionError() classifies Pi's own refusal.
+ */
+function predictedCompactionRefusal(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	boundary: CompactionPreflightBoundary,
+): Extract<CompactionPreflightResult, { kind: "nothing-to-compact" }> | undefined {
+	const result = preflightCompaction({ ...compactionPreflightEnvironments.get(pi), ctx, boundary });
+	debugLog(`compaction preflight at ${boundary.kind}: ${result.kind === "proceed" ? `proceed (${result.reason})` : `refused (${result.refusal})`}`);
+	return result.kind === "proceed" ? undefined : result;
+}
+
 function annotateDetailsWithHandoff(details: unknown, transcriptPath: string | null, metadata: SeedHandoffMetadata | undefined): unknown {
 	let out = annotateDetailsWithTranscript(details, transcriptPath);
 	if (metadata) out = mergeDetails(out, metadata as unknown as Record<string, unknown>);
@@ -4524,15 +4549,6 @@ function queueCompactionAfterCurrentTurn(
 	preferredRunId?: string,
 	handoffModel?: Model<Api>,
 ): CompactionScheduleResult {
-	const preflight = preflightCompaction({ ctx, seed, summaryFocus, metadata, summaryFocusHints });
-	if (preflight.kind === "nothing-to-compact") {
-		return {
-			ok: false,
-			reason: "nothing-to-compact",
-			toolMessage: preflight.toolMessage,
-			serviceStatus: preflight.serviceStatus,
-		};
-	}
 	const queueId = preferredRunId ?? `compact-queue-${Date.now().toString(36)}-${++compactionRunCounter}`;
 	const sessionKey = sessionMetadataKey(ctx);
 	const active = getActiveCompactionFlight(sessionKey);
@@ -5152,15 +5168,6 @@ function runCompaction(
 	lifecycle?: CompactionLifecycleObserver,
 	handoffModel?: Model<Api>,
 ): CompactionScheduleResult {
-	const preflight = preflightCompaction({ ctx, seed, summaryFocus, metadata, summaryFocusHints });
-	if (preflight.kind === "nothing-to-compact") {
-		return {
-			ok: false,
-			reason: "nothing-to-compact",
-			toolMessage: preflight.toolMessage,
-			serviceStatus: preflight.serviceStatus,
-		};
-	}
 	const runId = reservedRunId ?? `compact-${Date.now().toString(36)}-${++compactionRunCounter}`;
 	const sessionKey = sessionMetadataKey(ctx);
 	const transcriptPath = getTranscriptReference(ctx);
@@ -6220,7 +6227,6 @@ function launchStaticGenerationReserveHandoff(
 		lifecycle,
 	);
 	if (!scheduled.ok) {
-		if (scheduled.reason === "nothing-to-compact") return null;
 		throw new Error(`Compaction is already ${scheduled.active.state} as ${scheduled.active.runId}`);
 	}
 	recordProactiveCompactionQueued(ctx, u, scheduled.runId);
@@ -6488,11 +6494,7 @@ function startQueuedProactiveCompaction(
 			armProviderDrain(pi, ctx);
 			return;
 		}
-		const started = runPendingCompaction(pi, ctx);
-		if (started && !started.ok && started.reason === "nothing-to-compact") {
-			clearSeedPreviewWidget(ctx);
-			return;
-		}
+		runPendingCompaction(pi, ctx);
 	} catch (err) {
 		if (proactivePreparationJobs.get(key) === job) proactivePreparationJobs.delete(key);
 		discardSessionCompaction(key);
@@ -6641,11 +6643,6 @@ async function runProactivePreparation(
 			lifecycle,
 		);
 		if (!scheduled.ok) {
-			if (scheduled.reason === "nothing-to-compact") {
-				if (proactivePreparationJobs.get(key) === job) proactivePreparationJobs.delete(key);
-				clearSeedPreviewWidget(ctx);
-				return;
-			}
 			throw new Error(`Compaction is already ${scheduled.active.state} as ${scheduled.active.runId}`);
 		}
 		recordProactiveCompactionQueued(ctx, job.request.usage, scheduled.runId);
@@ -7211,6 +7208,12 @@ const focusSchema = Type.Object({
 	}, { description: "Only a reference needed to resume the work." })),
 	boundary: Type.Optional(Type.String({ description: "A lasting constraint.", maxLength: 512 })),
 	pinned_block: Type.Optional(Type.String({ description: "pin: durable text repeated verbatim on every request.", maxLength: MAX_PINNED_VERBATIM_BLOCK_CHARS })),
+	goal: Type.Optional(Type.Object({
+		id: Type.String({ maxLength: MAX_TASK_ID_CHARS }),
+		text: Type.String({ maxLength: 512 }),
+		status: Type.Optional(stringEnum(SESSION_FOCUS_GOAL_STATUSES)),
+	})),
+	brief: Type.Optional(Type.String({ maxLength: MAX_BRIEF_CHARS })),
 	clear: Type.Optional(Type.Boolean()),
 	status: Type.Optional(stringEnum(SESSION_FOCUS_STATUSES)),
 	remove: Type.Optional(Type.Boolean()),
@@ -7926,6 +7929,11 @@ function focusCommandFromToolInput(input: SessionFocusInput): FocusCommand | nul
 		const ref = input.ref ?? (input.refKind === undefined || input.refValue === undefined ? null : { kind: input.refKind as WorkstreamRef["kind"], value: input.refValue });
 		return ref === null ? null : { action: "ref", ref, ...(input.remove === true ? { remove: true } : {}) };
 	}
+	if (input.action === "goal") {
+		const goal = input.goal;
+		if (goal === undefined || typeof goal.id !== "string" || typeof goal.text !== "string") return null;
+		return { action: "goal", goal: { id: goal.id, text: goal.text, status: goal.status ?? "active" }, ...(input.remove === true ? { remove: true } : {}) };
+	}
 	if (input.action === "boundary") return typeof input.boundary === "string" ? { action: "boundary", boundary: input.boundary, ...(input.remove === true ? { remove: true } : {}) } : null;
 	return input.status === undefined ? null : { action: "status", status: input.status };
 }
@@ -7945,8 +7953,40 @@ function focusActivityText(ctx: ExtensionContext): string {
 	].join("\n");
 }
 
+function currentBrief(ctx: ExtensionContext): SessionBrief | null {
+	try {
+		return replayBrief(workstreamTranscriptEntries(ctx));
+	} catch {
+		// Minimal/custom session managers may not expose a readable branch.
+		return null;
+	}
+}
+
 function focusGetText(ctx: ExtensionContext, result: ReturnType<typeof sessionFocus>): string {
-	return `${focusResultText(result)}\n\n${focusActivityText(ctx)}`;
+	return `${focusResultText(result)}\n\n${briefViewText(currentBrief(ctx))}\n\n${focusActivityText(ctx)}`;
+}
+
+/** session_focus brief: replace or clear the brief. It does not need focus to be started. */
+function executeBriefAction(pi: ExtensionAPI, ctx: ExtensionContext, input: SessionFocusInput) {
+	const current = currentBrief(ctx);
+	const wantsClear = input.clear === true;
+	if (wantsClear && typeof input.brief === "string") {
+		return { content: [{ type: "text" as const, text: "session_focus brief takes either brief or clear: true, not both." }], details: { error: "ambiguous-brief", brief: current }, isError: true };
+	}
+	if (!wantsClear && typeof input.brief !== "string") {
+		return { content: [{ type: "text" as const, text: "session_focus brief requires brief text or clear: true." }], details: { error: "missing-brief", brief: current }, isError: true };
+	}
+	const change = changeBrief(current, wantsClear ? { clear: true } : { text: input.brief ?? "" }, new Date());
+	if (!change.accepted) {
+		return { content: [{ type: "text" as const, text: `Brief unchanged: ${change.reason}` }], details: { error: "brief-refused", reason: change.reason, brief: current }, isError: true };
+	}
+	if (change.changed && change.entry !== null) pi.appendEntry(BRIEF_ENTRY_TYPE, change.entry);
+	const verb = wantsClear ? (change.changed ? "Brief cleared." : "No brief to clear.") : (change.changed ? "Brief set." : "Brief unchanged.");
+	const redaction = change.redacted ? " Secret-shaped text and paths were redacted before storage." : "";
+	return {
+		content: [{ type: "text" as const, text: `${verb}${redaction}\n${briefViewText(change.brief)}` }],
+		details: { accepted: true, changed: change.changed, brief: change.brief, redacted: change.redacted },
+	};
 }
 
 interface LauncherContextProjection {
@@ -8511,6 +8551,22 @@ function createContextAwareService(
 					provenance,
 				};
 			}
+			const combinedSignal = options?.signal
+				? AbortSignal.any([sessionSignal, options.signal])
+				: sessionSignal;
+			if (combinedSignal.aborted) {
+				return { status: "cancelled", requestId: request.requestId, stage: "preparation", provenance };
+			}
+			// Snapshot contract: answer for the session now; later entries are not covered.
+			const refusal = predictedCompactionRefusal(pi, ctx, { kind: "idle" });
+			if (refusal) {
+				return {
+					status: refusal.serviceStatus,
+					requestId: request.requestId,
+					message: refusal.toolMessage,
+					provenance,
+				};
+			}
 			const effectiveRewrite = request.rewriteSeed ?? cfg.seedRewrite;
 			if (cfg.seedMode === "user-approve" && effectiveRewrite) {
 				return {
@@ -8521,12 +8577,6 @@ function createContextAwareService(
 					recoverable: true,
 					provenance,
 				};
-			}
-			const combinedSignal = options?.signal
-				? AbortSignal.any([sessionSignal, options.signal])
-				: sessionSignal;
-			if (combinedSignal.aborted) {
-				return { status: "cancelled", requestId: request.requestId, stage: "preparation", provenance };
 			}
 
 			const sessionKey = sessionMetadataKey(ctx);
@@ -8658,14 +8708,6 @@ function createContextAwareService(
 				runId,
 			);
 			if (!scheduled.ok) {
-				if (scheduled.reason === "nothing-to-compact") {
-					return {
-						status: scheduled.serviceStatus,
-						requestId: request.requestId,
-						message: scheduled.toolMessage,
-						provenance,
-					};
-				}
 				return {
 					status: "failed",
 					code: "COMPACTION_CONFLICT",
@@ -8725,15 +8767,7 @@ function createContextAwareService(
 			let state: "queued" | "running" = "queued";
 			if (arbitrateQueuedInteraction({ isIdle: ctx.isIdle() }).mayRun) {
 				try {
-					const started = runPendingCompaction(pi, ctx);
-					if (started && !started.ok && started.reason === "nothing-to-compact") {
-						return {
-							status: started.serviceStatus,
-							requestId: request.requestId,
-							message: started.toolMessage,
-							provenance,
-						};
-					}
+					runPendingCompaction(pi, ctx);
 					state = "running";
 				} catch (err) {
 					return {
@@ -8947,10 +8981,12 @@ export default function (pi: ExtensionAPI) {
 						debugLog(`${earlier.runId}: replaced by a newer compact.request through the owner claim`);
 					}
 				}
+				// Exact when idle: the queued run then starts below without yielding.
+				const refusal = predictedCompactionRefusal(pi, ctx, { kind: "idle" });
+				if (refusal) return { status: "nothing-to-compact", message: refusal.toolMessage };
 				const runId = `owner-${Date.now().toString(36)}-${++compactionRunCounter}`;
 				const scheduled = queueCompactionAfterCurrentTurn(ctx, "", focus.summaryFocus, undefined, [...focus.hints], undefined, runId);
 				if (!scheduled.ok) {
-					if (scheduled.reason === "nothing-to-compact") return { status: "nothing-to-compact", message: scheduled.toolMessage };
 					// A compaction already running, or one another caller queued: refused, not a fault.
 					throw new OwnerCallRefused(`compaction ${scheduled.active.runId} is already ${scheduled.active.state}`);
 				}
@@ -8958,11 +8994,7 @@ export default function (pi: ExtensionAPI) {
 				ownerHandoffs.set(sessionKey, { runId, ...(seed === undefined ? {} : { seed }) });
 				let state: "queued" | "running" = "queued";
 				if (arbitrateQueuedInteraction({ isIdle: ctx.isIdle() }).mayRun) {
-					const started = runPendingCompaction(pi, ctx);
-					if (started && !started.ok && started.reason === "nothing-to-compact") {
-						ownerHandoffs.delete(sessionKey);
-						return { status: "nothing-to-compact", message: started.toolMessage };
-					}
+					runPendingCompaction(pi, ctx);
 					state = "running";
 				}
 				return { status: state, runId };
@@ -9066,6 +9098,12 @@ export default function (pi: ExtensionAPI) {
 					details: { activity: activityTimeline(workstreamTranscriptEntries(ctx)) },
 				};
 			}
+			if (params.action === "brief") {
+				return executeBriefAction(pi, ctx, params);
+			}
+			if (params.action === "goal" && params.goal !== undefined && !isValidTaskRef(params.goal.id.trim())) {
+				return { content: [{ type: "text", text: `session_focus goal id must use letters, digits, ".", "_" or "-", start with a letter or digit, and be at most ${MAX_TASK_ID_CHARS} characters.` }], details: { error: "invalid-goal-id" }, isError: true };
+			}
 			const source = authoritativeWorkstream(ctx);
 			if (params.action === "pin") {
 				if (params.clear !== true && typeof params.pinned_block !== "string") {
@@ -9116,7 +9154,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	registerSessionTasks(pi, tasksRuntimeDeps);
+	const sessionAsks = registerSessionTasks(pi, tasksRuntimeDeps);
 
 	pi.registerCommand("sessions", {
 		description: "List durable workstream sessions and their bounded overlap, lifecycle, and optional terminal projections.",
@@ -9181,7 +9219,7 @@ export default function (pi: ExtensionAPI) {
 		// them again at the first session boundary so both package and -e loading
 		// paths observe the same effective runtime configuration.
 		applyCliConfigOverrides(pi, { finalAttempt: true });
-		modesController.start(ctx);
+		modesController.start(ctx, event.reason);
 		policyController.start(ctx);
 		refreshCompactionBlocker(pi, ctx);
 		ownerClaimCtx = ctx;
@@ -9279,6 +9317,10 @@ export default function (pi: ExtensionAPI) {
 			);
 		}
 		warnForCompactionOwnership(ctx, { refreshPiSetting: true });
+		// Questions blocked tasks put to the user are raised again: Fabric cancels
+		// a session's decisions when it shuts down. Not awaited, so a slow Fabric
+		// never holds up the session start.
+		void sessionAsks.replay(ctx).catch((err: unknown) => debugLog(`asks: replay failed: ${String(err)}`));
 		// Cache files are surfaced via the <context-cache> system prompt block
 		// on every turn — no need for a session_start display message which
 		// would be noisy across unrelated sessions sharing the same project dir.
@@ -9288,6 +9330,9 @@ export default function (pi: ExtensionAPI) {
 		modesController.restore(ctx);
 		policyController.sync(ctx, "branch");
 		refreshStatus(ctx);
+		// The selected branch decides which asks are open: requests raised for
+		// another branch are aborted and this branch's open asks raised again.
+		void sessionAsks.replay(ctx).catch((err: unknown) => debugLog(`asks: replay failed: ${String(err)}`));
 	});
 	// Image stripping (issue #163): the protocol comes from the
 	// request body, because a logical or alias model api names no wire format.
@@ -9310,6 +9355,12 @@ export default function (pi: ExtensionAPI) {
 	});
 	// Observe bcp's context transform before our outgoing-history repair below.
 	const foldEngine = registerFoldEngine(pi);
+	compactionPreflightEnvironments.set(pi, {
+		// A host without getSettings() throws here, and the preflight then leaves the decision to Pi.
+		getSettings: () => pi.getSettings(),
+		pendingFolds: (ctx) => foldEngine.pending(ctx),
+	});
+	const contextFoldSurface = createContextFoldSurface(pi, foldEngine);
 	// From this module: `dist/folds/` beside the bundled `dist/extension.js`, and
 	// beside `dist/index.js` for the unbundled build.
 	const foldsDir = fileURLToPath(new URL("./folds/", import.meta.url));
@@ -9480,6 +9531,7 @@ export default function (pi: ExtensionAPI) {
 		// Withdraw first, so Fabric's engine compacts again even if later shutdown work fails.
 		claimController.shutdown();
 		ownerClaimCtx = undefined;
+		sessionAsks.shutdown();
 		modesController.shutdown(ctx);
 		const sessionKey = sessionMetadataKey(ctx);
 		pendingCheckins.delete(sessionKey);
@@ -9582,6 +9634,8 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("before_agent_start", async (event, ctx): Promise<BeforeAgentStartEventResult> => {
 		const sessionKey = sessionMetadataKey(ctx);
+		// A pinned mode layer can be entered only before the session's first agent run.
+		modesController.agentStart();
 		ownerClaimCtx = ctx;
 		claimController.sync(ctx);
 		// Only user starts carry prompt/images; custom starts carry their message.
@@ -9653,7 +9707,12 @@ export default function (pi: ExtensionAPI) {
 		const tasksContextMessage = renderReachableToolInvocation(buildTasksContextEnvelope(tasksSnapshot, {
 			audience,
 			toolAvailable: tasksTool.available,
+			asks: sessionAsks.openQuestions(ctx),
 		}), "session_tasks", tasksTool);
+		// The brief is replayed from the branch every turn and rides next to the
+		// task list, outside the system prompt, so replacing it leaves the cached
+		// prompt prefix intact.
+		const briefMessage = buildBriefContextBlock(currentBrief(ctx));
 		// Branch-derived metadata is stable between requests until a compaction
 		// changes the current branch, so its section changes only then.
 		let compactionCountPrompt: string | null = null;
@@ -9691,7 +9750,7 @@ export default function (pi: ExtensionAPI) {
 				});
 			result.message = {
 				customType: "context-aware-usage-marker",
-				content: [tasksContextMessage, restartMessage, usageMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
+				content: [tasksContextMessage, briefMessage, restartMessage, usageMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
 				display: false,
 				details: sizeUnmeasured
 					? { band: "UNKNOWN", percent: null, headroom: null }
@@ -9701,10 +9760,10 @@ export default function (pi: ExtensionAPI) {
 						headroom: u.headroom,
 					},
 			};
-		} else if (restartMessage || tasksContextMessage) {
+		} else if (restartMessage || tasksContextMessage || briefMessage) {
 			result.message = {
 				customType: restartMessage ? "context-aware-restart-notice" : "context-aware-task-state",
-				content: [tasksContextMessage, restartMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
+				content: [tasksContextMessage, briefMessage, restartMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
 				display: false,
 			};
 		}
@@ -10327,7 +10386,7 @@ export default function (pi: ExtensionAPI) {
 				.join("\n");
 			return seedPreviewComponent(text, () => options.expanded);
 		},
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const rawSeed = params.seed_prompt.trim();
 			if (!rawSeed) {
 				// Throw instead of returning isError — pi-agent-core ignores the
@@ -10338,6 +10397,20 @@ export default function (pi: ExtensionAPI) {
 			const compactionConfig = readConfig(ctx);
 			if (!contextAwareCompactionAvailable(compactionConfig)) {
 				throw new Error(compactionUnavailableMessage(compactionConfig));
+			}
+
+			const queuedTextPrefix = "Compaction queued. This tool result ends the current agent run automatically; once the agent is settled, the session will compact and the next phase will begin with this expanded prompt:\n\n";
+			const refusal = predictedCompactionRefusal(pi, ctx, {
+				kind: "tool-call",
+				toolCallId,
+				resultText: `${queuedTextPrefix}${rawSeed}`,
+			});
+			if (refusal) {
+				// No terminate: the run goes on, because nothing will compact it.
+				return {
+					content: [{ type: "text", text: refusal.toolMessage }],
+					details: { status: refusal.serviceStatus },
+				};
 			}
 
 			// Guard: if a prior call sent a clarification to the user and the
@@ -10398,23 +10471,11 @@ export default function (pi: ExtensionAPI) {
 			const focus = params.summary_focus?.trim() || null;
 			const usageBefore = readUsage(ctx);
 			const { seed, metadata, summaryFocusHints } = prepared.prepared;
-			const scheduled = queueCompactionAfterCurrentTurn(ctx, seed, focus, metadata, summaryFocusHints);
-			if (!scheduled.ok) {
-				if (scheduled.reason === "nothing-to-compact") {
-					return {
-						content: [{ type: "text", text: scheduled.toolMessage }],
-						details: { status: scheduled.serviceStatus },
-					};
-				}
-			}
+			const queuedText = `${queuedTextPrefix}${seed}`;
+			queueCompactionAfterCurrentTurn(ctx, seed, focus, metadata, summaryFocusHints);
 
 			return {
-				content: [
-					{
-						type: "text",
-						text: `Compaction queued. This tool result ends the current agent run automatically; once the agent is settled, the session will compact and the next phase will begin with this expanded prompt:\n\n${seed}`,
-					},
-				],
+				content: [{ type: "text", text: queuedText }],
 				details: {
 					seed_prompt: seed,
 					raw_seed_prompt: rawSeed,
@@ -10441,8 +10502,10 @@ export default function (pi: ExtensionAPI) {
 		home: () => os.homedir(),
 	});
 	registerContextRecallSurface = (ctx: ExtensionContext): void => {
-		const tools = registeredToolViews(pi);
-		contextRecallSurface.apply(decideContextToolSurface(tools, sessionCompactionBlocker(ctx)), isBillionContextPiLoaded(tools));
+		const tools = foldToolViews(registeredToolViews(pi));
+		const surface = decideContextToolSurface(tools, sessionCompactionBlocker(ctx));
+		contextRecallSurface.apply(surface, isBillionContextPiLoaded(tools));
+		contextFoldSurface.apply(surface);
 	};
 
 	// -- Tool: session_compaction_history ----------------------------------
@@ -10493,6 +10556,13 @@ export default function (pi: ExtensionAPI) {
 			const modelResolution = await resolveCompactThenModel(ctx, requestedModelRef);
 			if (!modelResolution.ok) return;
 			const handoffModel = modelResolution.model;
+			// Before seed generation, which costs a model call: the command waited for
+			// idle, so this is Pi's answer for the session as the user typed it.
+			const refusal = predictedCompactionRefusal(pi, ctx, { kind: "idle" });
+			if (refusal) {
+				ctx.ui.notify(refusal.toolMessage, "info");
+				return;
+			}
 			const cfg = readConfig(ctx);
 			let promptTemplateResolution: ResolvedPromptTemplateSeed | null = null;
 
@@ -10614,7 +10684,7 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify(`Expanded seed:\n${seed.slice(0, 200)}${seed.length > 200 ? "…" : ""}`, "info");
 				});
 			}
-			const scheduled = runCompaction(
+			runCompaction(
 				pi,
 				ctx,
 				seed,
@@ -10625,9 +10695,6 @@ export default function (pi: ExtensionAPI) {
 				undefined,
 				handoffModel,
 			);
-			if (!scheduled.ok && scheduled.reason === "nothing-to-compact") {
-				ctx.ui.notify(scheduled.toolMessage, "info");
-			}
 		},
 	});
 

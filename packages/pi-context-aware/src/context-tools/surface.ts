@@ -8,9 +8,10 @@
  * reports the second as a conflict.
  *
  * Decide at `session_start`: `pi.getAllTools()` throws while extensions load.
- * `context_fold`, and with it a working `compress`, comes with the engine batch
- * (pi-context-aware#189); `acp_cache` gets no alias, because cache numbers move
- * to a user command.
+ * `context_fold` and its `compress` alias register only while billion-context-pi
+ * is not loaded: with it loaded the native fold engine is in shadow mode and
+ * writes nothing (pi-context-aware#189). `acp_cache` gets no alias, because
+ * cache numbers move to a user command.
  */
 
 import type { ToolExposure } from "@earendil-works/pi-coding-agent";
@@ -67,9 +68,10 @@ export function decideContextToolSurface(
 	tools: readonly RegisteredToolView[],
 	blocker: CompactionBlocker | undefined,
 ): ContextToolSurfaceEntry[] {
-	const aliases = isBillionContextPiLoaded(tools) ? OWN_ALIASES : [...OWN_ALIASES, ...BILLION_CONTEXT_PI_ALIASES];
+	const loaded = isBillionContextPiLoaded(tools);
+	const aliases = loaded ? OWN_ALIASES : [...OWN_ALIASES, ...BILLION_CONTEXT_PI_ALIASES];
 	const entries: ContextToolSurfaceEntry[] = [
-		...NEW_TOOLS.map((name) => ({ name, exposure: "direct" as const })),
+		...[...NEW_TOOLS, ...(loaded ? [] : ["context_fold" as const])].map((name) => ({ name, exposure: "direct" as const })),
 		...aliases.map(([name, aliasOf]) => ({ name, exposure: "deferred" as const, aliasOf })),
 	];
 	if (!blocker) return entries;

@@ -137,7 +137,9 @@ test("a call in a session without a session file is left out of the 500-call win
 	assert.equal(report.count, 500);
 	assert.deepEqual(report.counts, { match: 500, explained: 0, diff: 0, inconclusive: 0 });
 	assert.equal(report.ready, true);
-	assert.match(report.text, /count 500\/500 \(window 500\)\nnot comparable 1 \(session has no file\)\n/u);
+	assert.equal(report.window?.calls, 500);
+	assert.equal(report.notComparable, 1);
+	assert.match(report.text, /Not counted: 1 call in a session with no file/u);
 });
 
 test("a session whose side file is missing or unreadable stays inconclusive", () => {
@@ -147,7 +149,8 @@ test("a session whose side file is missing or unreadable stays inconclusive", ()
 	assert.equal(report.count, 501);
 	assert.equal(report.counts.inconclusive, 1);
 	assert.equal(report.ready, false);
-	assert.doesNotMatch(report.text, /not comparable/u);
+	assert.equal(report.notComparable, 0);
+	assert.doesNotMatch(report.text, /session with no file/u);
 });
 
 test("the recorder's records for an in-memory session are classed not comparable", async () => {
@@ -170,6 +173,7 @@ test("the recorder's records for an in-memory session are classed not comparable
 		const report = buildFoldParityReport(records, PARITY_REGISTER, records[0]!.fingerprint);
 		assert.equal(report.count, 0);
 		assert.deepEqual(report.counts, { match: 0, explained: 0, diff: 0, inconclusive: 0 });
-		assert.match(report.text, /not comparable 1 \(session has no file\)/u);
+		assert.equal(report.notComparable, 1);
+		assert.match(report.text, /Not counted: 1 call in a session with no file/u);
 	} finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

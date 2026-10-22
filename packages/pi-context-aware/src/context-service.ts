@@ -343,7 +343,9 @@ export type ContextAwareModeRefusalCodeV1 =
 	| "STALE_RUNTIME"
 	| "CONFIRMATION_REQUIRED"
 	| "CONFIRMATION_DECLINED"
-	| "STATE_CHANGED";
+	| "STATE_CHANGED"
+	| "PINNED_LAYER"
+	| "RUN_ENDED";
 
 export type ContextAwareModeResultV1 =
 	| { status: "ok" }
@@ -395,6 +397,27 @@ export interface ContextAwareModeUiV1 {
 	label?: string;
 }
 
+/** The layer a mode definition without `layer` sits on, at rank 0. No definition may name it. */
+export const CONTEXT_AWARE_MODE_DEFAULT_LAYER_V1 = "default" as const;
+
+/**
+ * Where a mode sits. One mode is active per layer, and the modes on different
+ * layers are active together. The runtime knows no layer names; it orders
+ * layers by `rank`, then by name.
+ */
+export interface ContextAwareModeLayerV1 {
+	/** Layer name, 1 to 64 characters. `default` is reserved. */
+	name: string;
+	/** An integer from -1000000 to 1000000. A higher rank is drawn later and left first by `/mode exit`. */
+	rank: number;
+	/**
+	 * A pinned layer is entered only through the handle, in a new session before
+	 * its first agent run. Every later enter or exit on it is refused; only the
+	 * user can clear it, with `/mode exit <layer>`, once its definition is gone.
+	 */
+	pinned?: true;
+}
+
 export interface ContextAwareModeDefinitionV1 {
 	id: string;
 	/** Display metadata only. It is never an authorization credential. */
@@ -408,9 +431,21 @@ export interface ContextAwareModeDefinitionV1 {
 	toolPolicy?: ContextAwareModeToolPolicyV1;
 	/** Indicator color and label. Check `supportsContextAwareModeUiV1` first; older runtimes ignore it. */
 	ui?: ContextAwareModeUiV1;
+	/** The layer this mode sits on. Absent means the `default` layer at rank 0. Check `supportsContextAwareModeLayersV1` first; older runtimes ignore it. */
+	layer?: ContextAwareModeLayerV1;
 }
 
-export interface ContextAwareModeSuggestionV1 {
+export interface ContextAwareModeEnterOptionsV1 {
+	/**
+	 * Enter the mode for one run: when this signal aborts, the mode leaves its
+	 * layer, unless another mode has replaced it there. A run-scoped mode is not
+	 * restored on resume. Refused with `RUN_ENDED` when the signal has already
+	 * aborted, and with `INVALID_REQUEST` on a pinned layer.
+	 */
+	until?: AbortSignal;
+}
+
+export interface ContextAwareModeSuggestionV1 extends ContextAwareModeEnterOptionsV1 {
 	suggestedBy: "model";
 	/** Model suggestions must opt in to confirmation explicitly. */
 	confirm?: true;
@@ -433,10 +468,18 @@ export interface ContextAwareModeSnapshotV1 {
 	readonly outer?: ContextAwareModeSnapshotV1;
 	/** The definition's indicator color and label. Present only while the mode is available and its definition set `ui`. */
 	readonly ui?: Readonly<ContextAwareModeUiV1>;
+	/** The layer the mode sits on. Present when `ContextAwareModesV1.layered` is true. */
+	readonly layer?: string;
+	/** The layer's rank. Present when `ContextAwareModesV1.layered` is true. */
+	readonly rank?: number;
+	/** True when the layer is pinned. */
+	readonly pinned?: true;
+	/** True when the mode was entered with `until` and ends with that run. */
+	readonly runScoped?: true;
 }
 
 export interface ContextAwareModeHandleV1 {
-	readonly enter: (suggestion?: ContextAwareModeSuggestionV1) => Promise<ContextAwareModeResultV1>;
+	readonly enter: (options?: ContextAwareModeSuggestionV1 | ContextAwareModeEnterOptionsV1) => Promise<ContextAwareModeResultV1>;
 	readonly exit: () => ContextAwareModeResultV1;
 	readonly commandAllowed: (name: string) => boolean;
 }
@@ -458,8 +501,23 @@ export interface ContextAwareModesV1 {
 	readonly toolPolicies?: true;
 	/** True when the runtime accepts `ContextAwareModeDefinitionV1.ui` and shows the mode indicator widget. */
 	readonly ui?: true;
+	/** True when the runtime accepts `ContextAwareModeDefinitionV1.layer` and provides `layers` and `setTrail`. */
+	readonly layered?: true;
 	defineMode(definition: ContextAwareModeDefinitionV1): ContextAwareModeDefinitionResultV1;
+	/**
+	 * The mode on the highest-ranked active layer. With layers, `outer` is the
+	 * mode on the next layer down; read `layers()` for all of them.
+	 */
 	current(): ContextAwareModeSnapshotV1 | null;
+	/** Every active layer's mode, lowest rank first. Present when `layered` is true. */
+	layers?(): readonly ContextAwareModeSnapshotV1[];
+	/**
+	 * Show a short step trail after the mode chips in the indicator, or clear it
+	 * with `undefined`. At most 64 characters with no control or format
+	 * characters. Display only: held in process memory, never persisted, and any
+	 * extension may replace it. Present when `layered` is true.
+	 */
+	setTrail?(text: string | undefined): ContextAwareModeResultV1;
 	setSuggestionConfirmer(confirmer: ContextAwareModeConfirmerV1 | undefined): void;
 }
 
@@ -569,6 +627,14 @@ export function supportsContextAwareModeInstanceIdsV1(service: ContextAwareServi
 /** Return true when the modes capability enforces a mode's `toolPolicy`. */
 export function supportsContextAwareModeToolPoliciesV1(service: ContextAwareServiceV1 | undefined): boolean {
 	return supportsContextAwareModesV1(service) && service.modes.toolPolicies === true;
+}
+
+/** Return true when the modes capability accepts a mode's `layer` and provides `layers` and `setTrail`. */
+export function supportsContextAwareModeLayersV1(service: ContextAwareServiceV1 | undefined): boolean {
+	return supportsContextAwareModesV1(service)
+		&& service.modes.layered === true
+		&& typeof service.modes.layers === "function"
+		&& typeof service.modes.setTrail === "function";
 }
 
 /** Return true when the modes capability accepts a mode's `ui` color and label. */

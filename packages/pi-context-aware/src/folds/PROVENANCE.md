@@ -1,7 +1,7 @@
 # Fold kernel verification coverage
 
 This supplements `kernel/PROVENANCE.md` without changing the copied engine.
-The copy is acp-kernel 0.0.98 at the commit recorded there.
+The copy is acp-kernel 0.0.101 at the commit recorded there.
 
 `scripts/sync-acp-kernel.mjs` checks 55 of the 60 reachable modules byte for
 byte against the published tarball's embedded source-map content. These five

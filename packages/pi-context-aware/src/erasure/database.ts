@@ -195,7 +195,7 @@ export function erasedSessionIds(agentDir: string): ReadonlySet<string> {
 	// lstat, not existsSync: a dangling symlink must refuse, not read as "nothing erased".
 	try { fs.lstatSync(file); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Set(); throw error; }
 	assertSafeDatabaseFile(file, false);
-	const db = new DatabaseSync(file, { readOnly: true });
+	const db = new DatabaseSync(file, { readOnly: true, timeout: 5_000 });
 	try {
 		return new Set(db.prepare("SELECT session_id FROM erased_sessions ORDER BY session_id").all().map((row) => String(row.session_id)));
 	} finally { db.close(); }

@@ -328,7 +328,8 @@ test("a mixed-schema JSONL file is read without its legacy records, and a legacy
 		const report = buildFoldParityReport(records, [], "probe");
 		assert.equal(report.count, 2);
 		assert.deepEqual(report.counts, { match: 1, explained: 0, diff: 0, inconclusive: 1 });
-		assert.match(report.text, /call-1 nested=false next-request-pending/u);
+		assert.deepEqual(report.blocking.map((blocked) => [blocked.toolCallId, blocked.nested, blocked.kinds]), [["call-1", false, ["next-request-pending"]]]);
+		assert.equal(report.inconclusiveKindCalls["next-request-pending"], 1);
 		// The report filter holds on its own too: the legacy request still cannot answer call-1.
 		const direct = buildFoldParityReport([...records, legacyRequest as unknown as ParityRecord], [], "probe");
 		assert.deepEqual(direct.counts, report.counts);

@@ -36,6 +36,12 @@ Structured task snapshots and version-1 seeds preserve valid refs, and delegated
 
 Changing a ref is a task edit. Agent-origin tasks may be edited by the agent; user- and spec-origin tasks retain their origin lock, while the user can still change them.
 
+### Linking a task to a goal
+
+A task may carry an optional `goal`: the id of a goal set with `session_focus` (see [goals](commands-and-concepts.md#goals-and-the-session-brief)). A goal id follows the same rules as a ref: at most 32 characters matching `^[A-Za-z0-9][A-Za-z0-9._-]*$`. A malformed id is refused with a reason and changes nothing. An id that names no current goal is accepted, so a focus change never invalidates the task list.
+
+`plan` and `add` accept `goal`; `update` sets it, and `update` with `goal: ""` clears it. Linking classifies a task without changing what it commits to, so the agent may link a task of any origin. The per-turn `<session-tasks>` envelope shows a linked task as `<task id="t1" goal="g1" …>`, and `/tasks` shows `[goal=g1]`.
+
 ### Who may change what
 
 `origin` decides. It mirrors the pinned-objective rule focus already has: an agent may report progress on work it was given, but may not quietly rewrite or delete it.
@@ -52,9 +58,9 @@ Changing a ref is a task edit. Agent-origin tasks may be edited by the agent; us
 
 | action | what it does |
 |---|---|
-| `plan` | replaces the whole list; accepts tasks with `title`, optional `status`, `note`, `ref`, and one level of `subtasks`; the normal way to start |
-| `add` | one task with optional `ref`, optionally under a `parent` or `after`/`before` a sibling |
-| `update` | takes an **array** of `{id, status?, title?, note?, ref?}` |
+| `plan` | replaces the whole list; accepts tasks with `title`, optional `status`, `note`, `ref`, `goal`, and one level of `subtasks`; the normal way to start |
+| `add` | one task with optional `ref` and `goal`, optionally under a `parent` or `after`/`before` a sibling |
+| `update` | takes an **array** of `{id, status?, title?, note?, ref?, goal?, ask?, answer?}`; `goal: ""` clears the link; see [asking the user](#asking-the-user) for `ask` and `answer` |
 | `remove` | agent-origin tasks only |
 | `reorder` | the full id sequence |
 | `list` | rarely needed; the list is in the prompt already |
@@ -72,7 +78,40 @@ Changing a ref is a task edit. Agent-origin tasks may be edited by the agent; us
 /tasks export [path]        markdown checklist; prints when no path is given
 /tasks import <path>        replaces the list from a markdown checklist
 /tasks on|off
+/answer                     list open questions
+/answer <id> <text>         answer a blocked task's question; an option id or label picks that option
 ```
+
+### Asking the user
+
+When only the user can unblock a task, the agent blocks it with a question:
+
+```
+session_tasks({ action: "update", updates: [{ id: "t2", status: "blocked", ask: { question: "Which database?", options: [{ id: "pg", label: "Postgres" }] } }] })
+```
+
+`ask` needs `status: "blocked"`. A blocked task still needs a note; without one the note defaults to the question. Limits: a question of at most 500 characters, at most 8 options, each label at most 80 characters, and an answer of at most 500 characters. Longer input is refused with a reason; an over-long answer from Fabric is not recorded and the ask stays open for `/answer` or chat. An update batch that names a task more than once, when one of those updates carries `ask` or `answer`, is refused and changes nothing. Question, labels and answers are redacted before they are stored, and only the named fields are kept.
+
+Session entries are the source of truth, so replay, reload and `/tree` follow them:
+
+| entry | data |
+|---|---|
+| `context-aware.ask.v1` | `{schemaVersion: 1, askId, taskId, goal?, question, options?, createdAt}` |
+| `context-aware.ask-raised.v1` | `{askId, decisionId}`: the Fabric decision that carries the question |
+| `context-aware.answer.v1` | `{askId, answer, route: "fabric" \| "command" \| "agent", answeredAt}` |
+| `context-aware.ask-closed.v1` | `{askId, reason: "task-removed" \| "task-replaced", closedAt}`: the ask's task was removed, cleared, or replaced by `plan` or `/tasks import` |
+
+An ask is open while it has no answer or close entry, its task still exists, and no later ask on the same task replaced it. A plan reuses task ids, so an ask is closed, and its Fabric decision cancelled, before the change that drops or recreates its task is written; it never attaches to a new task with the same id. Every answer route checks that the ask is still its task's open ask before recording anything. The `<session-tasks>` envelope marks a blocked task with an open ask as `waiting-on="user"` and shows the question.
+
+The user answers in one of three ways, and the first answer wins:
+
+- **Fabric.** When pi-fabric offers durable decisions, the question is raised in Fabric's decision list through its public `pi-fabric:decisions:*` events, titled with the session name and task id. Without Fabric, nobody claims those events and the question stays in-session. A cancelled or expired decision does not answer the ask.
+- **`/answer <id> <text>`.**
+- **Chat.** The agent records the reply with `session_tasks update {id, answer}`.
+
+The answer is recorded, the task returns to `pending` with the answer as its note, and a pending Fabric decision is cancelled. A Fabric or `/answer` answer also sends the agent a follow-up message, labelled as the user's answer relayed by the extension, that starts a turn; an answer the agent records needs no wake-up. Later answers to the same question change nothing.
+
+When the session starts, every open ask is raised again as a new decision, because Fabric cancels a session's decisions when it shuts down. Navigating with `/tree` cancels every pending decision and raises the open asks of the selected branch the same way. While a session is closed its question is not in Fabric's list.
 
 ### Where it shows
 

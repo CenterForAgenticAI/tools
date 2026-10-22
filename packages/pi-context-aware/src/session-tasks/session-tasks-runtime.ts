@@ -44,6 +44,35 @@ import {
 	tasksWidgetLine,
 } from "./session-tasks-view.js";
 import {
+	ANSWER_ENTRY_TYPE,
+	ASK_CLOSED_ENTRY_TYPE,
+	ASK_ANSWER_DELIVERY,
+	ASK_ENTRY_TYPE,
+	ASK_RAISED_ENTRY_TYPE,
+	MAX_ASK_ANSWER_CHARS,
+	MAX_ASK_OPTION_LABEL_CHARS,
+	MAX_ASK_OPTIONS,
+	MAX_ASK_QUESTION_CHARS,
+	askAnswerMessage,
+	createAskTransport,
+	newAskEntry,
+	noteText,
+	openAskForTask,
+	openAskQuestions,
+	openAsks,
+	prepareAnswer,
+	prepareAsk,
+	replayAsks,
+	resolveAnswerText,
+	type AnswerEntry,
+	type AnswerRoute,
+	type AskClosedEntry,
+	type AskCloseReason,
+	type AskEntry,
+	type AskState,
+	type PreparedAsk,
+} from "./session-asks.js";
+import {
 	TASKS_CHANGED_EVENT,
 	buildTasksChangedEvent,
 	parseDelegationProgressFields,
@@ -395,7 +424,8 @@ function renderTaskLine(task: Task, indent: string): string {
 	const note = task.note === undefined ? "" : ` — ${task.note}`;
 	const origin = task.origin === "agent" ? "" : ` [${task.origin}]`;
 	const ref = task.ref === undefined ? "" : ` [ref=${task.ref}]`;
-	return `${indent}${STATUS_GLYPH[task.status]} ${task.id}  ${task.title}${origin}${ref}${note}`;
+	const goal = task.goal === undefined ? "" : ` [goal=${task.goal}]`;
+	return `${indent}${STATUS_GLYPH[task.status]} ${task.id}  ${task.title}${origin}${ref}${goal}${note}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +439,12 @@ function renderTaskLine(task: Task, indent: string): string {
 const taskRefSchema = Type.String({
 	maxLength: MAX_TASK_ID_CHARS,
 	pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+});
+
+/** update: a goal id, or "" to clear the link. */
+const taskGoalUpdateSchema = Type.String({
+	maxLength: MAX_TASK_ID_CHARS,
+	pattern: "^([A-Za-z0-9][A-Za-z0-9._-]*)?$",
 });
 
 const taskIdSchema = Type.String({ maxLength: MAX_TASK_ID_CHARS });
@@ -426,11 +462,13 @@ const tasksSchema = Type.Object({
 	action: stringEnum(SESSION_TASKS_ACTIONS, { description: "plan replaces the whole list; update batches status changes." }),
 	tasks: Type.Optional(Type.Array(Type.Object({
 		...seedTaskFields,
+		goal: Type.Optional(taskRefSchema),
 		subtasks: Type.Optional(Type.Array(seedTaskSchema, { maxItems: 50 })),
 	}), { description: "plan: the whole list, in order.", maxItems: 100 })),
 	title: Type.Optional(Type.String({ description: "add: the new task.", maxLength: MAX_TASK_TITLE_CHARS })),
 	note: Type.Optional(Type.String({ maxLength: MAX_TASK_NOTE_CHARS })),
 	ref: Type.Optional(taskRefSchema),
+	goal: Type.Optional(taskRefSchema),
 	parent: Type.Optional(taskIdSchema),
 	after: Type.Optional(taskIdSchema),
 	before: Type.Optional(taskIdSchema),
@@ -439,7 +477,16 @@ const tasksSchema = Type.Object({
 		status: Type.Optional(taskStatusSchema),
 		title: Type.Optional(Type.String({ maxLength: MAX_TASK_TITLE_CHARS })),
 		ref: Type.Optional(taskRefSchema),
+		goal: Type.Optional(taskGoalUpdateSchema),
 		note: Type.Optional(Type.String({ maxLength: MAX_TASK_NOTE_CHARS })),
+		ask: Type.Optional(Type.Object({
+			question: Type.String({ maxLength: MAX_ASK_QUESTION_CHARS }),
+			options: Type.Optional(Type.Array(Type.Object({
+				id: Type.String({ maxLength: MAX_TASK_ID_CHARS }),
+				label: Type.String({ maxLength: MAX_ASK_OPTION_LABEL_CHARS }),
+			}), { maxItems: MAX_ASK_OPTIONS })),
+		})),
+		answer: Type.Optional(Type.String({ maxLength: MAX_ASK_ANSWER_CHARS })),
 	}), { description: "update: one entry per task, all in one call.", maxItems: 100 })),
 	ids: Type.Optional(Type.Array(taskIdSchema, { description: "remove: tasks to drop; reorder: every id in order.", maxItems: 100 })),
 });
@@ -451,13 +498,28 @@ const TOOL_PROMPT_SNIPPET = [
 	"Lay the whole list out in one plan call, then batch transitions through update — one call can flip several tasks.",
 	"Keep one task active where you can. Mark blocked or deferred only with a written reason; both need one.",
 	"A parent's status follows its sub-tasks and cannot be set directly.",
+	"When only the user can unblock a task, block it with ask: {question}; their answer reopens it. Record a reply they give in chat with answer.",
 ].join(" ");
 
 function toolFailure(reason: string) {
 	return { content: [{ type: "text" as const, text: reason }], details: { error: reason }, isError: true };
 }
 
-export function registerSessionTasks(pi: ExtensionAPI, deps: TasksRuntimeDeps): void {
+/** The ask lifecycle hooks the extension's session handlers drive. */
+export interface SessionAsksHandle {
+	/**
+	 * Abort every in-flight Fabric request, then raise each open ask on the
+	 * current branch as a new decision (session_start and session_tree).
+	 */
+	replay(ctx: ExtensionContext): Promise<void>;
+	/** Abort every in-flight Fabric request (session_shutdown). */
+	shutdown(): void;
+	/** Task id to question for each open ask, for the per-turn envelope. */
+	openQuestions(ctx: ExtensionContext): ReadonlyMap<string, string>;
+}
+
+export function registerSessionTasks(pi: ExtensionAPI, deps: TasksRuntimeDeps): SessionAsksHandle {
+	const asks = createAsksRuntime(pi, deps);
 	pi.registerTool({
 		name: "session_tasks",
 		label: "Session Tasks",
@@ -489,14 +551,52 @@ export function registerSessionTasks(pi: ExtensionAPI, deps: TasksRuntimeDeps): 
 				};
 			}
 
-			const outcome = applyAction(params, existing, "agent");
+			let askWork: AskUpdateWork | undefined;
+			let effective: ToolParams = params;
+			if (params.action === "update" && params.updates !== undefined && params.updates.some(hasAskFields)) {
+				const prepared = prepareAskUpdates(deps.entries(ctx), existing, params.updates);
+				if (!prepared.ok) return toolFailure(prepared.reason);
+				askWork = prepared.value;
+				effective = { ...params, updates: prepared.value.updates };
+			}
+
+			const outcome = applyAction(effective, existing, "agent");
 			if (!outcome.ok) return toolFailure(outcome.reason);
 
-			const changed = describeChange(params, outcome.value);
+			const now = new Date();
+			// A plan recreates every task id and remove drops tasks: their asks are
+			// closed before the snapshot, so no branch point shows them open on a
+			// new task that reuses the id.
+			asks.closeDropped(ctx, existing, outcome.value, params.action === "plan", now);
+			// Entries before the snapshot: the answer is recorded before the task moves.
+			for (const { state, answer } of askWork?.answers ?? []) appendAnswerEntry(pi, state.ask, answer, "agent", now);
+			const raised: AskEntry[] = [];
+			for (const { taskId, goal, ask } of askWork?.asks ?? []) {
+				const entry = newAskEntry(taskId, goal, ask, now);
+				pi.appendEntry(ASK_ENTRY_TYPE, entry);
+				raised.push(entry);
+			}
+
+			const changed = describeChange(effective, outcome.value);
 			const snapshot = persist(pi, deps, ctx, previous, outcome.value, changed === undefined ? {} : { changed });
+			// The chat answer replaces the Fabric decision, so withdraw it; the agent
+			// is already in a turn, so nothing is sent to wake it.
+			for (const { state } of askWork?.answers ?? []) asks.abort(state.ask.askId);
+			for (const superseded of askWork?.superseded ?? []) asks.abort(superseded);
+			for (const entry of raised) void asks.raise(ctx, entry);
+			const askLines = [
+				...raised.map((entry) => `Asked the user on ${entry.taskId}: ${entry.question}`),
+				...(askWork?.answers ?? []).map(({ state }) => `Recorded the user's answer on ${state.ask.taskId}.`),
+			];
 			return {
-				content: [{ type: "text", text: renderTaskList(snapshot) }],
-				details: { tasks: snapshot.tasks, counts: countTasks(snapshot.tasks), revision: snapshot.revision },
+				content: [{ type: "text", text: [renderTaskList(snapshot), ...askLines].join("\n") }],
+				details: {
+					tasks: snapshot.tasks,
+					counts: countTasks(snapshot.tasks),
+					revision: snapshot.revision,
+					...(raised.length === 0 ? {} : { asks: raised.map((entry) => ({ askId: entry.askId, taskId: entry.taskId })) }),
+					...(askWork === undefined || askWork.answers.length === 0 ? {} : { answered: askWork.answers.map(({ state }) => state.ask.askId) }),
+				},
 			};
 		},
 	});
@@ -504,21 +604,295 @@ export function registerSessionTasks(pi: ExtensionAPI, deps: TasksRuntimeDeps): 
 	pi.registerCommand("tasks", {
 		description: "Show or edit this session's task list: add, done, block, defer, reopen, clear, export, import, on/off.",
 		handler: async (args, ctx) => {
-			await handleTasksCommand(pi, deps, ctx, args.trim());
+			await handleTasksCommand(pi, deps, asks, ctx, args.trim());
 		},
 	});
+
+	pi.registerCommand("answer", {
+		description: "Answer a blocked task's question: /answer <taskId> <text>. An option id or label picks that option.",
+		handler: async (args, ctx) => {
+			handleAnswerCommand(deps, asks, ctx, args.trim());
+		},
+	});
+
+	return {
+		replay: (ctx) => asks.replay(ctx),
+		shutdown: () => asks.shutdown(),
+		openQuestions: (ctx) => asks.openQuestions(ctx),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Asks: a blocked task's question for the user
+// ---------------------------------------------------------------------------
+
+type ToolUpdate = TaskUpdate & { readonly ask?: unknown; readonly answer?: unknown };
+
+function hasAskFields(update: ToolUpdate): boolean {
+	return update.ask !== undefined || update.answer !== undefined;
+}
+
+interface AskUpdateWork {
+	/** The updates with ask and answer turned into status and note changes. */
+	readonly updates: readonly TaskUpdate[];
+	readonly asks: readonly { readonly taskId: string; readonly goal?: string; readonly ask: PreparedAsk }[];
+	readonly answers: readonly { readonly state: AskState; readonly answer: string }[];
+	/** Open asks replaced by a new ask on the same task. */
+	readonly superseded: readonly string[];
+}
+
+/** Copy only the task-update fields; ask and answer never reach the task list. */
+function taskUpdateFields(update: ToolUpdate): TaskUpdate {
+	return {
+		id: update.id,
+		...(update.status === undefined ? {} : { status: update.status }),
+		...(update.title === undefined ? {} : { title: update.title }),
+		...(update.note === undefined ? {} : { note: update.note }),
+		...(update.ref === undefined ? {} : { ref: update.ref }),
+		...(update.goal === undefined ? {} : { goal: update.goal }),
+	};
+}
+
+/**
+ * Turn ask and answer fields into ordinary task updates plus the entries to
+ * record. Validation is all-or-nothing, like the rest of an update batch.
+ */
+function prepareAskUpdates(entries: readonly unknown[], tasks: readonly Task[], updates: readonly ToolUpdate[]): MutationResult<AskUpdateWork> {
+	const fail = (reason: string): MutationResult<AskUpdateWork> => ({ ok: false, reason });
+	const next: TaskUpdate[] = [];
+	const asked: { taskId: string; goal?: string; ask: PreparedAsk }[] = [];
+	const answers: { state: AskState; answer: string }[] = [];
+	const superseded: string[] = [];
+	const touched = new Set<string>();
+	// An id named twice, once with ask or answer, would let the other update
+	// undo the ask's or answer's transition, so the whole batch is refused.
+	const counts = new Map<string, number>();
+	for (const update of updates) counts.set(update.id, (counts.get(update.id) ?? 0) + 1);
+	for (const update of updates) {
+		if (hasAskFields(update) && (counts.get(update.id) ?? 0) > 1) return fail(`${update.id} appears more than once in a batch with ask or answer; send one update for it`);
+	}
+	for (const update of updates) {
+		const base = taskUpdateFields(update);
+		if (!hasAskFields(update)) {
+			next.push(base);
+			continue;
+		}
+		if (touched.has(update.id)) return fail(`${update.id} appears twice with ask or answer; send one`);
+		touched.add(update.id);
+		if (update.ask !== undefined && update.answer !== undefined) return fail(`${update.id}: send either ask or answer, not both`);
+		const found = findTask(tasks, update.id);
+		if (found === null) return fail(`no task ${update.id}`);
+		if (update.ask !== undefined) {
+			if (base.status !== "blocked") return fail(`ask on ${update.id} needs status: "blocked"`);
+			const prepared = prepareAsk(update.ask);
+			if (!prepared.ok) return fail(`${update.id}: ${prepared.reason}`);
+			const note = base.note !== undefined && base.note.trim().length > 0 ? base.note : noteText(prepared.value.question, MAX_TASK_NOTE_CHARS);
+			next.push({ ...base, note });
+			const goal = base.goal === undefined ? found.task.goal : base.goal.length === 0 ? undefined : base.goal;
+			asked.push({ taskId: found.task.id, ...(goal === undefined ? {} : { goal }), ask: prepared.value });
+			const previous = openAskForTask(entries, tasks, found.task.id);
+			if (previous !== undefined) superseded.push(previous.ask.askId);
+			continue;
+		}
+		if (base.status !== undefined && base.status !== "pending") return fail(`answer on ${update.id} reopens the task as pending; leave status out`);
+		const state = openAskForTask(entries, tasks, found.task.id);
+		if (state === undefined) return fail(`${update.id} has no open question to answer`);
+		const prepared = prepareAnswer(update.answer);
+		if (!prepared.ok) return fail(`${update.id}: ${prepared.reason}`);
+		next.push({
+			...base,
+			...(found.task.status === "blocked" ? { status: "pending" as const } : {}),
+			note: noteText(prepared.value, MAX_TASK_NOTE_CHARS),
+		});
+		answers.push({ state, answer: prepared.value });
+	}
+	return { ok: true, value: { updates: next, asks: asked, answers, superseded } };
+}
+
+function appendAnswerEntry(pi: ExtensionAPI, ask: AskEntry, answer: string, route: AnswerRoute, now: Date): void {
+	const entry: AnswerEntry = { askId: ask.askId, answer, route, answeredAt: now.toISOString() };
+	pi.appendEntry(ANSWER_ENTRY_TYPE, entry);
+}
+
+function sessionNameOf(pi: ExtensionAPI): string | undefined {
+	try {
+		const name = (pi as unknown as { getSessionName?: () => string | undefined }).getSessionName?.();
+		return typeof name === "string" && name.trim().length > 0 ? name : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+interface AsksRuntime {
+	raise(ctx: ExtensionContext, ask: AskEntry): Promise<void>;
+	abort(askId: string): void;
+	/**
+	 * Close the open asks whose task the change drops, or every open ask when
+	 * the change recreates the task ids (a plan or an import), and abort their
+	 * Fabric requests.
+	 */
+	closeDropped(ctx: ExtensionContext, previous: readonly Task[], next: readonly Task[], replaced: boolean, now: Date): void;
+	/** The first answer wins; later answers change nothing. */
+	answer(ctx: ExtensionContext, askId: string, text: string, route: Exclude<AnswerRoute, "agent">): MutationResult<{ ask: AskEntry; answer: string }>;
+	replay(ctx: ExtensionContext): Promise<void>;
+	shutdown(): void;
+	openQuestions(ctx: ExtensionContext): ReadonlyMap<string, string>;
+}
+
+function createAsksRuntime(pi: ExtensionAPI, deps: TasksRuntimeDeps): AsksRuntime {
+	const transport = createAskTransport(
+		() => (pi as unknown as { events?: { emit?: (channel: string, data: unknown) => void } }).events,
+		deps.debugLog,
+	);
+	const isOpen = (ctx: ExtensionContext, askId: string): boolean => {
+		const tasks = currentTasks(deps, ctx)?.tasks ?? [];
+		return openAsks(deps.entries(ctx), tasks).some((state) => state.ask.askId === askId);
+	};
+
+	const runtime: AsksRuntime = {
+		async raise(ctx, ask) {
+			try {
+				const outcome = await transport.raise(ctx, ask, sessionNameOf(pi), {
+					stillOpen: () => isOpen(ctx, ask.askId),
+					onRaised: (decisionId) => pi.appendEntry(ASK_RAISED_ENTRY_TYPE, { askId: ask.askId, decisionId }),
+					onAnswer: (text) => {
+						const result = runtime.answer(ctx, ask.askId, text, "fabric");
+						if (!result.ok) deps.debugLog(`asks: Fabric answer for ${ask.askId} ignored: ${result.reason}`);
+					},
+				});
+				deps.debugLog(`asks: ${ask.askId} on ${ask.taskId}: ${outcome}`);
+			} catch (err) {
+				deps.debugLog(`asks: raising ${ask.askId} failed: ${String(err)}`);
+			}
+		},
+		abort(askId) {
+			transport.abort(askId);
+		},
+		closeDropped(ctx, previous, next, replaced, now) {
+			let open: AskState[];
+			try {
+				open = openAsks(deps.entries(ctx), previous);
+			} catch (err) {
+				deps.debugLog(`asks: could not read open asks: ${String(err)}`);
+				return;
+			}
+			for (const state of open) {
+				const dropped = findTask(next, state.ask.taskId) === null;
+				if (!replaced && !dropped) continue;
+				const reason: AskCloseReason = replaced ? "task-replaced" : "task-removed";
+				const entry: AskClosedEntry = { askId: state.ask.askId, reason, closedAt: now.toISOString() };
+				pi.appendEntry(ASK_CLOSED_ENTRY_TYPE, entry);
+				transport.abort(state.ask.askId);
+			}
+		},
+		answer(ctx, askId, text, route) {
+			if (!deps.enabled(ctx)) return { ok: false, reason: "The session task list is disabled for this session." };
+			const entries = deps.entries(ctx);
+			const state = replayAsks(entries).find((candidate) => candidate.ask.askId === askId);
+			if (state === undefined) return { ok: false, reason: `no question ${askId}` };
+			if (state.answer !== undefined) return { ok: false, reason: `the question on ${state.ask.taskId} was already answered` };
+			if (state.closed !== undefined) return { ok: false, reason: `the question on ${state.ask.taskId} was closed when its task was ${state.closed.reason === "task-replaced" ? "replaced" : "removed"}` };
+			const previous = currentTasks(deps, ctx);
+			const found = previous === null ? null : findTask(previous.tasks, state.ask.taskId);
+			if (previous === null || found === null) return { ok: false, reason: `task ${state.ask.taskId} no longer exists` };
+			// Only the task's current open ask may be answered: not one replaced by a later ask.
+			if (!openAsks(entries, previous.tasks).some((candidate) => candidate.ask.askId === askId)) {
+				return { ok: false, reason: `the question ${askId} is no longer open on ${state.ask.taskId}` };
+			}
+			// Every route has the same limit: an over-long answer is refused, never cut.
+			const prepared = prepareAnswer(text);
+			if (!prepared.ok) return { ok: false, reason: prepared.reason };
+			const answer = prepared.value;
+			appendAnswerEntry(pi, state.ask, answer, route, new Date());
+			const update: TaskUpdate = {
+				id: found.task.id,
+				...(found.task.status === "blocked" ? { status: "pending" as const } : {}),
+				note: noteText(answer, MAX_TASK_NOTE_CHARS),
+			};
+			const moved = applyUpdates(previous.tasks, [update], "user");
+			if (moved.ok) {
+				const task = findTask(moved.value, found.task.id)?.task;
+				persist(pi, deps, ctx, previous, moved.value, task === undefined ? {} : { changed: { id: task.id, status: task.status, title: task.title } });
+			} else {
+				deps.debugLog(`asks: answer recorded but ${found.task.id} not reopened: ${moved.reason}`);
+			}
+			// /answer replaces the Fabric decision; a Fabric answer has already settled it.
+			transport.abort(askId);
+			try {
+				pi.sendMessage(askAnswerMessage(state.ask, answer, route), ASK_ANSWER_DELIVERY);
+			} catch (err) {
+				deps.debugLog(`asks: answer message not sent: ${String(err)}`);
+			}
+			return { ok: true, value: { ask: state.ask, answer } };
+		},
+		async replay(ctx) {
+			transport.abortAll();
+			if (!deps.enabled(ctx)) return;
+			let open: AskState[];
+			try {
+				open = openAsks(deps.entries(ctx), currentTasks(deps, ctx)?.tasks ?? []);
+			} catch (err) {
+				deps.debugLog(`asks: replay failed: ${String(err)}`);
+				return;
+			}
+			// Fabric cancels a session's decisions at shutdown, so each open ask is raised as a new one.
+			await Promise.all(open.map((state) => runtime.raise(ctx, state.ask)));
+		},
+		shutdown() {
+			transport.abortAll();
+		},
+		openQuestions(ctx) {
+			if (!deps.enabled(ctx)) return new Map();
+			try {
+				return openAskQuestions(openAsks(deps.entries(ctx), currentTasks(deps, ctx)?.tasks ?? []));
+			} catch {
+				return new Map();
+			}
+		},
+	};
+	return runtime;
+}
+
+const ANSWER_USAGE = "Usage: /answer <taskId> <text>";
+
+function handleAnswerCommand(deps: TasksRuntimeDeps, asks: AsksRuntime, ctx: ExtensionContext, text: string): void {
+	const tasks = currentTasks(deps, ctx)?.tasks ?? [];
+	const open = deps.enabled(ctx) ? openAsks(deps.entries(ctx), tasks) : [];
+	const [taskId = ""] = text.split(/\s+/).filter((part) => part.length > 0);
+	if (taskId.length === 0) {
+		const lines = open.map((state) => `${state.ask.taskId}: ${state.ask.question}${state.ask.options === undefined ? "" : ` [${state.ask.options.map((option) => `${option.id}=${option.label}`).join(", ")}]`}`);
+		ctx.ui.notify(lines.length === 0 ? `No open questions. ${ANSWER_USAGE}` : [`Open questions (${ANSWER_USAGE}):`, ...lines].join("\n"), "info");
+		return;
+	}
+	const reply = text.slice(text.indexOf(taskId) + taskId.length).trim();
+	if (reply.length === 0) {
+		ctx.ui.notify(ANSWER_USAGE, "warning");
+		return;
+	}
+	const state = open.find((candidate) => candidate.ask.taskId === taskId);
+	if (state === undefined) {
+		ctx.ui.notify(`Task ${taskId} has no open question.`, "warning");
+		return;
+	}
+	const result = asks.answer(ctx, state.ask.askId, resolveAnswerText(state.ask, reply), "command");
+	if (!result.ok) {
+		ctx.ui.notify(result.reason, "warning");
+		return;
+	}
+	ctx.ui.notify(`Answered ${taskId}; the agent will continue.\n${renderTaskList(currentTasks(deps, ctx))}`, "info");
 }
 
 type ToolParams = {
 	action: "plan" | "add" | "update" | "remove" | "reorder" | "list" | "subtree";
-	tasks?: readonly { title: string; note?: string; ref?: string; status?: TaskStatus; subtasks?: readonly { title: string; note?: string; ref?: string; status?: TaskStatus }[] }[];
+	tasks?: readonly { title: string; note?: string; ref?: string; goal?: string; status?: TaskStatus; subtasks?: readonly { title: string; note?: string; ref?: string; status?: TaskStatus }[] }[];
 	title?: string;
 	note?: string;
 	ref?: string;
+	goal?: string;
 	parent?: string;
 	after?: string;
 	before?: string;
-	updates?: readonly TaskUpdate[];
+	updates?: readonly ToolUpdate[];
 	ids?: readonly string[];
 };
 
@@ -534,6 +908,7 @@ function applyAction(params: ToolParams, existing: readonly Task[], actor: TaskA
 				title: params.title,
 				...(params.note === undefined ? {} : { note: params.note }),
 				...(params.ref === undefined ? {} : { ref: params.ref }),
+				...(params.goal === undefined ? {} : { goal: params.goal }),
 				...(params.parent === undefined ? {} : { parent: params.parent }),
 				...(params.after === undefined ? {} : { after: params.after }),
 				...(params.before === undefined ? {} : { before: params.before }),
@@ -572,7 +947,7 @@ function describeChange(params: ToolParams, tasks: readonly Task[]): { id: strin
 
 const USAGE = "Usage: /tasks [add <title>|done <id>|block <id> <reason>|defer <id> <reason>|reopen <id>|clear|export [path]|import <path>|on|off]";
 
-async function handleTasksCommand(pi: ExtensionAPI, deps: TasksRuntimeDeps, ctx: ExtensionContext, text: string): Promise<void> {
+async function handleTasksCommand(pi: ExtensionAPI, deps: TasksRuntimeDeps, asks: AsksRuntime, ctx: ExtensionContext, text: string): Promise<void> {
 	const [verb = "", ...rest] = text.split(/\s+/).filter((part) => part.length > 0);
 	const remainder = text.slice(verb.length).trim();
 	const previous = currentTasks(deps, ctx);
@@ -631,6 +1006,7 @@ async function handleTasksCommand(pi: ExtensionAPI, deps: TasksRuntimeDeps, ctx:
 			ctx.ui.notify(planned.reason, "warning");
 			return;
 		}
+		asks.closeDropped(ctx, existing, planned.value, true, new Date());
 		const snapshot = persist(pi, deps, ctx, previous, planned.value);
 		ctx.ui.notify(`Imported ${planned.value.length} tasks from ${remainder}.\n${renderTaskList(snapshot)}`, "info");
 		return;
@@ -640,6 +1016,7 @@ async function handleTasksCommand(pi: ExtensionAPI, deps: TasksRuntimeDeps, ctx:
 			ctx.ui.notify("No task list to clear.", "info");
 			return;
 		}
+		asks.closeDropped(ctx, existing, [], false, new Date());
 		const snapshot = persist(pi, deps, ctx, previous, []);
 		deps.debugLog(`tasks: cleared at revision ${snapshot.revision}`);
 		ctx.ui.notify("Cleared the task list.", "info");
@@ -655,6 +1032,7 @@ async function handleTasksCommand(pi: ExtensionAPI, deps: TasksRuntimeDeps, ctx:
 		ctx.ui.notify(result.reason, "warning");
 		return;
 	}
+	asks.closeDropped(ctx, existing, result.value, false, new Date());
 	const snapshot = persist(pi, deps, ctx, previous, result.value);
 	ctx.ui.notify(renderTaskList(snapshot), "info");
 }

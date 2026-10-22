@@ -81,6 +81,15 @@ export function outcomeEvidenceFault(value: unknown): string | undefined {
 	return undefined;
 }
 
+/** A nudge-fix note: a known cause, at least one nudge hash, and the two hashes differ. */
+function isNudgeFix(value: unknown): boolean {
+	if (!isFields(value) || (value.cause !== "tier-trigger" && value.cause !== "emergency-defer")) return false;
+	const { sent, compatible } = value;
+	if (!isOptional(sent, isText) || !isOptional(compatible, isText) || sent === compatible) return false;
+	// Deferring the emergency nudge sends none where billion-context-pi sends one.
+	return value.cause === "emergency-defer" ? sent === undefined && compatible !== undefined : true;
+}
+
 /** The first unusable RequestHashes field. Message hashes are capped at MAX_MESSAGE_HASHES; `total` is not. */
 export function requestHashesFault(value: unknown): string | undefined {
 	if (!isFields(value)) return "missing";
@@ -96,6 +105,7 @@ export function requestHashesFault(value: unknown): string | undefined {
 	}
 	if (!isOptional(value.firstUserFolded, isMessageHash)) return "firstUserFolded";
 	if (!isOptional(value.firstUserReplacementHash, isText)) return "firstUserReplacementHash";
+	if (!isOptional(value.nudgeFix, isNudgeFix)) return "nudgeFix";
 	return undefined;
 }
 

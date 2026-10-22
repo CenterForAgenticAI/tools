@@ -736,8 +736,9 @@ export function createCore(ports: Ports = {}): CompressionCore {
   function retrieve(
     store: MessageContentStore,
     ref: string,
+    opts?: { exportDir?: string; inlineTokenLimit?: number },
   ): ApplyRetrieveResult {
-    return applyRetrieve({ store, ref });
+    return applyRetrieve({ store, ref, ...opts });
   }
 
   function decompress(blockId: string, state: CompressionState) {
@@ -996,6 +997,7 @@ const nudgeNode: PipelineNode = {
     });
 
     const baseline = io.state.nudge.lastPerMessageNudgeTokens;
+    const shownAtDecision = io.state.nudge.lastNudgeShownTokens;
     const nudgeGrowthTokens = resolveAdaptiveGrowth(
       ctx.config.modelContextLimit,
       ctx.config.nudge,
@@ -1003,7 +1005,11 @@ const nudgeNode: PipelineNode = {
 
     let stamped = { ...io.state.nudge };
 
-    if (baseline > 0 && ctx.tokenCount < baseline - nudgeGrowthTokens) {
+    if (
+      (baseline > 0 && ctx.tokenCount < baseline - nudgeGrowthTokens) ||
+      (shownAtDecision > 0 &&
+        ctx.tokenCount < shownAtDecision - nudgeGrowthTokens)
+    ) {
       stamped.lastPerMessageNudgeTokens = ctx.tokenCount;
       stamped.lastNudgeShownTokens = 0;
       // The context shrank dramatically — host compaction, or a tokenCount
@@ -1014,6 +1020,11 @@ const nudgeNode: PipelineNode = {
       // suppressing mid-band nudges until the absolute overLimit band fires.
       // Restart tier cadence from the new baseline, mirroring the full stamp
       // reset a successful applyCompression performs.
+      // The second clause is load-bearing (#478): decideNudge keys growth to
+      // lastNudgeShownTokens whenever it is non-zero, so an estimate-grade
+      // overshoot pinned far above the baseline dead-zones every growth-gated
+      // inject in [baseline - interval, shown + floor) unless a sustained
+      // real drop below the shown reference re-anchors the cadence here.
       stamped.lastShownByTier = {};
     }
 

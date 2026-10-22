@@ -6,13 +6,18 @@ the adapter in `src/folds/`, or sync a new upstream version.
 
 | Field | Value |
 | --- | --- |
-| Package | `acp-kernel@0.0.98` |
+| Package | `acp-kernel@0.0.101` |
 | Repository | https://github.com/ranxianglei/acp-kernel.git |
-| Commit | `5d7b5380df0aef87d9c96f2993dc8e2368dddb91` |
-| Tarball integrity | `sha512-TjaKxTSnDLjOsiIiWYMVNMdkzZR7XdHl6M3XvvQV43gPSDlAMKC0FEvJwGtcf3Di2uJtFKN25oA5fD4JwpxEaQ==` |
+| Commit | `4d38906e004e7fd9fe4b0c06cbd8c661694f506f` |
+| Tarball integrity | `sha512-zKqi1mW+oTcpSY79lKkQXdz9AXFrmRj7JL6Mfpuo6JXM0WqRebXHBkQUZz9VGGi1SsOOjK0D9NghZ1/mIakdAA==` |
 | Files copied | 60 |
 | Files checked against the published source maps | 55 |
 | Local changes | none |
+
+Source-map verification covers only files embedded in `sourcesContent`.
+Unmapped modules are pinned to the recorded source commit and type-checked,
+but are not byte-compared with the tarball. See `src/folds/PROVENANCE.md`
+for the coverage of the unmapped modules in this version.
 
 Copied: every module reachable from the upstream root entrypoint `src/index.ts`.
 Not copied: the separate `wire`, `panel` and `persist` entrypoints and any

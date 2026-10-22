@@ -59,6 +59,12 @@ export interface Task {
 	readonly status: TaskStatus;
 	/** An optional bounded opaque reference supplied by the task's caller. */
 	readonly ref?: string;
+	/**
+	 * The id of the session focus goal this task serves. A goal id follows the
+	 * task-id rules. An id that names no current goal is kept, not rejected, so a
+	 * focus change can never invalidate the task list.
+	 */
+	readonly goal?: string;
 	readonly note?: string;
 	readonly origin: TaskOrigin;
 	readonly delegation?: TaskDelegation;
@@ -160,6 +166,7 @@ function parseTask(value: unknown): Task | null {
 	if (!TASK_STATUSES.includes(value.status as TaskStatus)) return null;
 	if (!TASK_ORIGINS.includes(value.origin as TaskOrigin)) return null;
 	if (value.ref !== undefined && !isValidTaskRef(value.ref)) return null;
+	if (value.goal !== undefined && !isValidTaskRef(value.goal)) return null;
 	if (value.note !== undefined && !boundedString(value.note, MAX_TASK_NOTE_CHARS)) return null;
 	if (/[\r\n]/.test(value.title)) return null;
 
@@ -183,6 +190,7 @@ function parseTask(value: unknown): Task | null {
 		title: value.title,
 		status: value.status as TaskStatus,
 		...(value.ref === undefined ? {} : { ref: value.ref }),
+		...(value.goal === undefined ? {} : { goal: value.goal }),
 		...(value.note === undefined ? {} : { note: value.note }),
 		origin: value.origin as TaskOrigin,
 		...(delegation === null ? {} : { delegation }),
@@ -444,6 +452,8 @@ export interface TaskUpdate {
 	readonly title?: string;
 	readonly note?: string;
 	readonly ref?: string;
+	/** A goal id links the task; an empty string clears the link. */
+	readonly goal?: string;
 	readonly delegation?: TaskDelegation | null;
 	readonly lastAttempt?: TaskLastAttempt | null;
 }
@@ -474,6 +484,9 @@ export function applyUpdates(tasks: readonly Task[], updates: readonly TaskUpdat
 				return fail(`ref for ${task.id} must be a non-empty task-safe value of at most ${MAX_TASK_ID_CHARS} characters`);
 			}
 		}
+		if (update.goal !== undefined && update.goal.length > 0 && !isValidTaskRef(update.goal)) {
+			return fail(goalIdProblem(task.id));
+		}
 		if (update.title !== undefined) {
 			if (actor === "agent" && !mayAgentEdit(task)) {
 				return fail(`${task.id} is ${task.origin}-origin, so it can be transitioned but not retitled`);
@@ -499,6 +512,9 @@ export function applyUpdates(tasks: readonly Task[], updates: readonly TaskUpdat
 			...current,
 			...(update.title === undefined ? {} : { title: update.title }),
 			...(update.ref === undefined ? {} : { ref: update.ref }),
+			// Linking a task to a goal classifies it without changing what it
+			// commits to, so it is allowed on any origin. An empty goal clears it.
+			...(update.goal === undefined ? {} : { goal: update.goal.length === 0 ? undefined : update.goal }),
 			...(update.status === undefined ? {} : { status: update.status }),
 			...(update.note === undefined ? {} : update.note.trim().length === 0 ? {} : { note: update.note }),
 			// An explicitly emptied note clears the field rather than storing "".
@@ -516,6 +532,7 @@ export function applyUpdates(tasks: readonly Task[], updates: readonly TaskUpdat
 function stripUndefined(task: Task): Task {
 	const result: Record<string, unknown> = { id: task.id, title: task.title, status: task.status, origin: task.origin };
 	if (task.ref !== undefined) result.ref = task.ref;
+	if (task.goal !== undefined) result.goal = task.goal;
 	if (task.note !== undefined) result.note = task.note;
 	if (task.delegation !== undefined) result.delegation = task.delegation;
 	if (task.lastAttempt !== undefined) result.lastAttempt = task.lastAttempt;
@@ -528,6 +545,7 @@ export interface NewTask {
 	readonly note?: string;
 	readonly status?: TaskStatus;
 	readonly ref?: string;
+	readonly goal?: string;
 	readonly delegation?: TaskDelegation;
 	readonly lastAttempt?: TaskLastAttempt;
 	readonly subtasks?: readonly NewTask[];
@@ -549,6 +567,16 @@ function taskPlanExceedsDepth(item: NewTask, depth: number, allowed: number): bo
 	return (item.subtasks ?? []).some((child) => taskPlanExceedsDepth(child, depth + 1, allowed));
 }
 
+function taskPlanHasInvalidGoal(item: NewTask): boolean {
+	return (item.goal !== undefined && !isValidTaskRef(item.goal))
+		|| (item.subtasks ?? []).some(taskPlanHasInvalidGoal);
+}
+
+/** The refusal for a goal id that breaks the task-id rules. */
+function goalIdProblem(taskId?: string): string {
+	return `goal${taskId === undefined ? "" : ` for ${taskId}`} must be a goal id: letters, digits, ".", "_" or "-", starting with a letter or digit, at most ${MAX_TASK_ID_CHARS} characters`;
+}
+
 function taskPlanHasInvalidRef(item: NewTask): boolean {
 	return (item.ref !== undefined && !isValidTaskRef(item.ref))
 		|| (item.subtasks ?? []).some(taskPlanHasInvalidRef);
@@ -568,6 +596,7 @@ function buildPlannedTask(item: NewTask, id: string, origin: TaskOrigin): Task {
 		title: item.title,
 		status: item.status ?? "pending",
 		...(item.ref === undefined ? {} : { ref: item.ref }),
+		...(item.goal === undefined ? {} : { goal: item.goal }),
 		...(item.note === undefined ? {} : { note: item.note }),
 		origin,
 		...(item.delegation === undefined ? {} : { delegation: item.delegation }),
@@ -586,6 +615,7 @@ export function planTasks(plan: readonly NewTask[], origin: TaskOrigin, context:
 		if (taskPlanHasInvalidRef(item)) {
 			return fail(`ref must be a non-empty task-safe value of at most ${MAX_TASK_ID_CHARS} characters`);
 		}
+		if (taskPlanHasInvalidGoal(item)) return fail(goalIdProblem());
 		if (taskPlanExceedsDepth(item, 0, allowed)) {
 			return fail(`task nesting exceeds the delegation depth budget (maximum depth ${allowed})`);
 		}
@@ -608,6 +638,7 @@ export interface AddTaskOptions {
 	readonly title: string;
 	readonly note?: string;
 	readonly ref?: string;
+	readonly goal?: string;
 	readonly parent?: string;
 	readonly after?: string;
 	readonly before?: string;
@@ -634,6 +665,7 @@ export function addTask(tasks: readonly Task[], options: AddTaskOptions): Mutati
 	if (options.ref !== undefined && !isValidTaskRef(options.ref)) {
 		return fail(`ref must be a non-empty task-safe value of at most ${MAX_TASK_ID_CHARS} characters`);
 	}
+	if (options.goal !== undefined && !isValidTaskRef(options.goal)) return fail(goalIdProblem());
 
 	if (options.parent !== undefined) {
 		const found = findTask(tasks, options.parent);
@@ -652,6 +684,7 @@ export function addTask(tasks: readonly Task[], options: AddTaskOptions): Mutati
 			title: options.title,
 			status: "pending",
 			...(options.ref === undefined ? {} : { ref: options.ref }),
+			...(options.goal === undefined ? {} : { goal: options.goal }),
 			...(options.note === undefined ? {} : { note: options.note }),
 			origin: options.origin,
 		};
@@ -670,6 +703,7 @@ export function addTask(tasks: readonly Task[], options: AddTaskOptions): Mutati
 		title: options.title,
 		status: "pending",
 		...(options.ref === undefined ? {} : { ref: options.ref }),
+		...(options.goal === undefined ? {} : { goal: options.goal }),
 		...(options.note === undefined ? {} : { note: options.note }),
 		origin: options.origin,
 	};

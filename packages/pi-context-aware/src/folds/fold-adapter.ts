@@ -442,7 +442,9 @@ export function planFold(input: FoldPlanInput): FoldPlan {
 			carrierId,
 			hiddenIds,
 			range: { startId: carrierId, endId: covered[covered.length - 1] ?? carrierId },
-			refs: { start: block.startRef ?? input.startRef, end: block.endRef ?? input.endRef },
+			// The refs the request named, as billion-context-pi records them: its block map and the
+			// kept-call rewrite read these, not the range widened to whole entries and tool pairs.
+			refs: boundaryKind === "message" ? { start: input.startRef, end: input.endRef } : { start: block.startRef ?? input.startRef, end: block.endRef ?? input.endRef },
 			directBlockIds: [...block.directBlockIds],
 			compressedTokens: hiddenTokens,
 			createdAt: block.createdAt,

@@ -49,7 +49,7 @@ For seeded automatic handoffs, let context-aware own automatic compaction and tu
 
 Manual `/compact`, `/compact-then`, and `compact_session` remain available. See [configuration](docs/configuration.md) for ownership warnings and the complete settings.
 
-When `billion-context-pi` is loaded, it cancels every compaction. Context-aware detects it at session start, stops offering `compact_session`, turns proactive compaction off, and tells the agent to use `compress` instead. See [compaction blocked by another extension](docs/commands-and-concepts.md#compaction-blocked-by-another-extension). `/fold-parity` reports read-only shadow comparisons of its `compress` calls, including nested calls, and progress toward the 500-call cut-over gate. See [fold parity](docs/fold-parity.md).
+When `billion-context-pi` is loaded, it cancels every compaction. Context-aware detects it at session start, stops offering `compact_session`, turns proactive compaction off, and tells the agent to use `compress` instead. See [compaction blocked by another extension](docs/commands-and-concepts.md#compaction-blocked-by-another-extension). `/fold-parity` reports read-only shadow comparisons of its `compress` calls, including nested calls, and progress toward the 500-call cut-over gate; `/fold-parity all` lists every call that blocks it. See [fold parity](docs/fold-parity.md).
 
 ## Surface
 

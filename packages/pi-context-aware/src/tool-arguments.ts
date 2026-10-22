@@ -19,7 +19,8 @@
  */
 
 import { Type } from "typebox";
-import { TASK_STATUSES } from "./session-tasks/session-tasks.js";
+import { isValidTaskRef, MAX_TASK_ID_CHARS, TASK_STATUSES } from "./session-tasks/session-tasks.js";
+import { MAX_BRIEF_CHARS } from "./workstream/session-brief.js";
 import { REF_KINDS, WORKSTREAM_STATUSES } from "./workstream/workstream-schema.js";
 
 /**
@@ -118,14 +119,15 @@ export function prepareSessionTasksArguments<T>(input: unknown): T {
 	return args as T;
 }
 
-export const SESSION_FOCUS_ACTIONS = ["get", "start", "edit", "ref", "boundary", "status", "detach", "activity", "pin"] as const;
+export const SESSION_FOCUS_ACTIONS = ["get", "start", "edit", "ref", "boundary", "status", "detach", "activity", "pin", "goal", "brief"] as const;
 export const SESSION_FOCUS_STATUSES = WORKSTREAM_STATUSES;
+export const SESSION_FOCUS_GOAL_STATUSES = ["pending", "active", "blocked", "done"] as const;
 export const SESSION_FOCUS_REF_KINDS = REF_KINDS;
 /** Bound on a reference value, shared by the schema and the legacy flat form. */
 export const MAX_FOCUS_REF_VALUE_CHARS = 512;
 
 /** Field names models have used for the objective. They are reported, never accepted. */
-const OBJECTIVE_LOOKALIKES = ["focus", "purpose", "text", "goal", "description"] as const;
+const OBJECTIVE_LOOKALIKES = ["focus", "purpose", "text", "description"] as const;
 
 /**
  * The actions other than start and edit that need a field of their own. Only an
@@ -138,6 +140,12 @@ function missingFieldMessage(action: string, args: Record<string, unknown>): str
 	}
 	if (action === "boundary" && args.boundary == null) {
 		return 'session_focus boundary requires the field boundary: one lasting constraint, e.g. {"action":"boundary","boundary":"<constraint>"}. Add remove: true to drop it.';
+	}
+	if (action === "goal" && args.goal == null) {
+		return 'session_focus goal requires the field goal with id and text, e.g. {"action":"goal","goal":{"id":"g1","text":"<durable sub-objective>","status":"active"}}. Add remove: true to drop it.';
+	}
+	if (action === "brief" && typeof args.brief !== "string" && args.clear !== true) {
+		return 'session_focus brief requires the field brief, e.g. {"action":"brief","brief":"<where the session stands>"}, or clear: true to remove it.';
 	}
 	if (action === "ref" && args.ref == null && (args.refKind == null || !("refValue" in args))) {
 		return 'session_focus ref requires the field ref with kind and value, e.g. {"action":"ref","ref":{"kind":"gitlab-mr","value":"group/project!12"}}. Add remove: true to drop it.';
@@ -158,6 +166,8 @@ export function prepareSessionFocusArguments<T>(input: unknown): T {
 	if (args.refValue === null) delete args.refValue;
 	const ref = parsedAs(args.ref, isRecord);
 	if (ref !== undefined) args.ref = ref;
+	const goal = parsedAs(args.goal, isRecord);
+	if (goal !== undefined) args.goal = goal;
 
 	const action = args.action;
 	const known = typeof action === "string" && (SESSION_FOCUS_ACTIONS as readonly string[]).includes(action);
@@ -193,6 +203,21 @@ export function prepareSessionFocusArguments<T>(input: unknown): T {
 function invalidFocusValue(args: Record<string, unknown>): string | undefined {
 	if (typeof args.status === "string" && !(SESSION_FOCUS_STATUSES as readonly string[]).includes(args.status)) {
 		return notValid("session_focus", "status", args.status, "statuses", SESSION_FOCUS_STATUSES);
+	}
+	if (args.action === "goal" && isRecord(args.goal)) {
+		const { id, status } = args.goal;
+		if (typeof id === "string" && !isValidTaskRef(id.trim())) {
+			return `session_focus: goal id ${JSON.stringify(id)} is not valid. A goal id uses letters, digits, ".", "_" or "-", starts with a letter or digit, and is at most ${MAX_TASK_ID_CHARS} characters.`;
+		}
+		if (typeof status === "string" && !(SESSION_FOCUS_GOAL_STATUSES as readonly string[]).includes(status)) {
+			return notValid("session_focus", "goal status", status, "goal statuses", SESSION_FOCUS_GOAL_STATUSES);
+		}
+	}
+	if (args.action === "brief") {
+		if (typeof args.brief === "string" && args.clear === true) return "session_focus brief takes either brief or clear: true, not both.";
+		if (typeof args.brief === "string" && args.brief.length > MAX_BRIEF_CHARS) {
+			return `session_focus: brief is ${args.brief.length} characters; the limit is ${MAX_BRIEF_CHARS}. Shorten it; it is never truncated.`;
+		}
 	}
 	const kinds = [isRecord(args.ref) ? args.ref.kind : undefined, args.refKind];
 	for (const kind of kinds) {

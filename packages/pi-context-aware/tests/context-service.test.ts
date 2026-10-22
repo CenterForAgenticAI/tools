@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { EventBus } from "@earendil-works/pi-coding-agent";
 import {
@@ -12,9 +13,11 @@ import {
 	validateContextAwareArtifactPromotionRequestV1,
 	validateContextAwareHandoffRequestV1,
 	type ContextAwareHandoffNothingToCompactV1,
+	type ContextAwareHandoffRequestV1,
 	type ContextAwareServiceV1,
 	type ContextAwareSnapshotV1,
 } from "../src/context-service.js";
+import { compactionStarts, largeHistory, NOTHING_TO_COMPACT, SEED, settle, smallHistory, waitFor, withSession } from "./compaction-preflight-harness.js";
 
 function createEventBus(): EventBus {
 	const handlers = new Map<string, Set<(data: unknown) => void>>();
@@ -345,15 +348,105 @@ test("older protocol-v1 producers remain discoverable without promotion capabili
 	dispose();
 });
 
-test("nothing-to-compact is a documented non-failure service result", () => {
-	const result: ContextAwareHandoffNothingToCompactV1 = {
-		status: "nothing-to-compact",
-		requestId: "handoff-small",
-		message: "Nothing to compact (session too small); the conversation is unchanged.",
-	};
-	assert.equal(result.status, "nothing-to-compact");
-	assert.match(result.message, /Nothing to compact/);
-	assert.match(result.message, /conversation is unchanged/);
+// The compaction preflight, through a real Pi session: a handoff Pi would
+// refuse gets this documented non-failure status at once, and nothing is queued.
+
+function handoffRequest(requestId: string): ContextAwareHandoffRequestV1 {
+	return { requestId, purpose: "Start the next phase", nextPhaseSeed: SEED, rewriteSeed: false, interactionMode: "non-interactive" };
+}
+
+test("requestHandoff answers nothing-to-compact for a session too small to compact, as Pi does", async () => {
+	await withSession(smallHistory, [], async ({ session, events, preparations, service }) => {
+		const result = await service.requestHandoff(handoffRequest("handoff-small"));
+		if (result.status === "nothing-to-compact") {
+			const refusal: ContextAwareHandoffNothingToCompactV1 = result;
+			assert.equal(refusal.requestId, "handoff-small");
+			assert.equal(refusal.message, "Nothing to compact (session too small); the conversation is unchanged.");
+		} else {
+			assert.fail(`expected nothing-to-compact, got ${JSON.stringify(result)}`);
+		}
+		await settle(session);
+		assert.equal(compactionStarts(events), 0);
+		assert.equal(preparations.length, 0);
+
+		await assert.rejects(session.compact(), { message: NOTHING_TO_COMPACT });
+	});
+});
+
+test("requestHandoff lets an already-aborted caller take precedence over nothing-to-compact", async () => {
+	await withSession(smallHistory, [], async ({ session, events, preparations, service }) => {
+		const caller = new AbortController();
+		caller.abort();
+
+		const result = await service.requestHandoff(handoffRequest("handoff-small-cancelled"), { signal: caller.signal });
+
+		assert.equal(result.status, "cancelled", JSON.stringify(result));
+		assert.equal(result.requestId, "handoff-small-cancelled");
+		assert.equal(result.stage, "preparation");
+		await settle(session);
+		assert.equal(compactionStarts(events), 0);
+		assert.equal(preparations.length, 0);
+	});
+});
+
+test("requestHandoff checks a refused session before default user-approved seed rewriting", async () => {
+	await withSession(smallHistory, [], async ({ session, faux, events, notifications, preparations, service }) => {
+		fs.writeFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, "context-aware.json"), `${JSON.stringify({
+			seedMode: "user-approve",
+			seedRewrite: true,
+			contextCache: { enabled: false },
+			sessionNaming: { scope: "off" },
+			workstream: { enabled: false },
+			proactiveCompaction: { enabled: false },
+		})}\n`);
+
+		const result = await service.requestHandoff({
+			requestId: "handoff-small-default-rewrite",
+			purpose: "Start the next phase",
+			nextPhaseSeed: SEED,
+			interactionMode: "non-interactive",
+		});
+
+		assert.equal(result.status, "nothing-to-compact", JSON.stringify(result));
+		assert.equal(
+			(result as { message?: unknown }).message,
+			"Nothing to compact (session too small); the conversation is unchanged.",
+		);
+		assert.equal(faux.state.callCount, 0, "a refused snapshot must not rewrite the seed");
+		assert.deepEqual(notifications, [], "a refused snapshot must not ask for clarification");
+		await settle(session);
+		assert.equal(compactionStarts(events), 0);
+		assert.equal(preparations.length, 0);
+	});
+});
+
+test("requestHandoff answers nothing-to-compact for a session whose newest entry is a compaction, as Pi does", async () => {
+	await withSession(largeHistory, [], async ({ session, events, service }) => {
+		// Appended once the session exists: creating it records the thinking level
+		// after the history, and a compaction that is not newest does not count.
+		const kept = session.sessionManager.getBranch().at(-1)!.id;
+		session.sessionManager.appendCompaction("Earlier work, summarized.", kept, 30_000);
+		const result = await service.requestHandoff(handoffRequest("handoff-compacted"));
+		if (result.status === "nothing-to-compact") {
+			assert.equal(result.message, "Already compacted; the conversation is unchanged.");
+		} else {
+			assert.fail(`expected nothing-to-compact, got ${JSON.stringify(result)}`);
+		}
+		await settle(session);
+		assert.equal(compactionStarts(events), 0);
+
+		await assert.rejects(session.compact(), { message: "Already compacted" });
+	});
+});
+
+test("requestHandoff hands a session Pi compacts to Pi", async () => {
+	await withSession(largeHistory, [], async ({ events, preparations, service }) => {
+		const result = await service.requestHandoff(handoffRequest("handoff-large"));
+		assert.match(result.status, /^(queued|running)$/u, JSON.stringify(result));
+		await waitFor(() => preparations.length > 0, "Pi's compaction");
+		assert.equal(compactionStarts(events), 1);
+		assert.ok(preparations[0]!.messagesToSummarize.length > 0, "Pi found history to summarize");
+	});
 });
 
 test("handoff validation enforces explicit purpose, seed, and bounded input", () => {
