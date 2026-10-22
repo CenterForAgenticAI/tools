@@ -34,6 +34,7 @@ export interface FocusFixtureOptions {
 	readonly events?: FixtureEventBus;
 	/** What pi.getSessionName returns. */
 	readonly sessionName?: string;
+	readonly activeTools?: readonly string[];
 }
 
 export interface SentMessage {
@@ -53,9 +54,12 @@ export interface FocusFixture {
 	callUnprepared(tool: "session_focus" | "session_tasks", params: Record<string, unknown>): Promise<ToolResult>;
 	command(name: string, args: string): Promise<void>;
 	/** The hidden per-turn message content the next provider request carries. */
-	turnMessage(): Promise<string>;
+	/** "legacy-user" is a Pi 1.0.x prompt event, which carries no messageType. */
+	turnMessage(messageType?: "user" | "custom" | "legacy-user"): Promise<string>;
+	/** Provider request without a new outer run (automatic compaction retry). */
+	continueRequest(): Promise<string>;
 	/** The next provider request: hidden per-turn message and system prompt. */
-	turn(): Promise<{ message: string; systemPrompt: string }>;
+	turn(messageType?: "user" | "custom" | "legacy-user"): Promise<{ message: string; systemPrompt: string }>;
 	/** Run the session_shutdown handlers. */
 	shutdown(): Promise<void>;
 	/** Navigate with /tree: make `branch` the session's entries, then run the session_tree handlers. */
@@ -92,8 +96,11 @@ export async function focusFixture(entries: unknown[] = [], options: FocusFixtur
 		registerCommand(name: string, definition: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) { commands.set(name, definition); },
 		sendMessage(message: SentMessage["message"], sendOptions?: SentMessage["options"]) { sent.push({ message, options: sendOptions }); },
 		sendUserMessage() {},
-		getActiveTools() { return ["read", "session_tasks", "session_focus"]; },
-		getAllTools() { return [...tools.values()].map((tool) => ({ name: tool.name, description: "test tool", parameters: {} })); },
+		getActiveTools() { return options.activeTools ?? ["read", "session_tasks", "session_focus"]; },
+		getAllTools() { return [
+			...[...tools.values()].map((tool) => ({ name: tool.name, description: "test tool", parameters: {} })),
+			...(options.activeTools?.includes("fabric_exec") ? [{ name: "fabric_exec", description: "executor", parameters: {}, sourceInfo: { origin: "package", source: "npm:pi-fabric" } }] : []),
+		]; },
 		setActiveTools() {},
 		appendEntry(customType: string, data: unknown) {
 			counter += 1;
@@ -126,13 +133,25 @@ export async function focusFixture(entries: unknown[] = [], options: FocusFixtur
 			getSessionId: () => "focus-session",
 		},
 	} as unknown as ExtensionContext;
-	await events.get("session_start")?.[0]?.({}, ctx);
+	await events.get("session_start")?.[0]?.({ reason: entries.length > 0 ? "resume" : "new" }, ctx);
 
-	async function turn(): Promise<{ message: string; systemPrompt: string }> {
+	async function continueRequest(): Promise<string> {
+		let messages: Array<{ content?: unknown }> = [];
+		for (const handler of events.get("context") ?? []) {
+			const result = await handler({ type: "context", messages }, ctx) as { messages?: typeof messages } | undefined;
+			if (result?.messages) messages = result.messages;
+		}
+		return messages.map((message) => typeof message.content === "string" ? message.content : "").join("\n");
+	}
+
+	async function turn(messageType: "user" | "custom" | "legacy-user" = "user"): Promise<{ message: string; systemPrompt: string }> {
 		const handler = events.get("before_agent_start")?.[0];
 		assert.ok(handler, "expected a before_agent_start handler");
-		const result = await handler({ prompt: "continue", systemPrompt: "base prompt" }, ctx) as { message?: { content?: string }; systemPrompt: string };
-		return { message: result.message?.content ?? "", systemPrompt: result.systemPrompt };
+		const trigger = messageType === "legacy-user" ? { prompt: "continue" } : messageType === "user" ? { messageType, prompt: "continue" } : { messageType, message: { role: "custom", customType: "test", content: "continue" } };
+		const result = await handler({ ...trigger, systemPrompt: "base prompt" }, ctx) as { message?: { content?: string }; systemPrompt: string };
+		// Pi builds and persists the incoming user only after before_agent_start.
+		if (messageType !== "custom") entries.push({ type: "message", message: { role: "user", content: "continue" } });
+		return { message: [result.message?.content ?? "", await continueRequest()].join("\n"), systemPrompt: result.systemPrompt };
 	}
 
 	return {
@@ -164,8 +183,9 @@ export async function focusFixture(entries: unknown[] = [], options: FocusFixtur
 			entries.splice(0, entries.length, ...branch);
 			for (const handler of events.get("session_tree") ?? []) await handler({}, ctx);
 		},
-		async turnMessage() {
-			return (await turn()).message;
+		continueRequest,
+		async turnMessage(messageType) {
+			return (await turn(messageType)).message;
 		},
 		cleanup() {
 			if (previousHome === undefined) delete process.env.HOME;

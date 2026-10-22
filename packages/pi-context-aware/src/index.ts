@@ -231,7 +231,7 @@ import {
 } from "./workstream/workstream-context.js";
 import { replayWorkstreamEntries } from "./workstream/workstream-replay.js";
 import { MAX_FOCUS_REF_VALUE_CHARS, prepareSessionFocusArguments, SESSION_FOCUS_ACTIONS, SESSION_FOCUS_GOAL_STATUSES, SESSION_FOCUS_REF_KINDS, SESSION_FOCUS_STATUSES, stringEnum } from "./tool-arguments.js";
-import { BRIEF_ENTRY_TYPE, briefViewText, buildBriefContextBlock, changeBrief, MAX_BRIEF_CHARS, replayBrief, type SessionBrief } from "./workstream/session-brief.js";
+import { BRIEF_ENTRY_TYPE, BRIEF_DELIVERY_ENTRY_TYPE, briefViewText, planBriefDelivery, planBriefRecovery, changeBrief, MAX_BRIEF_CHARS, replayBrief, type SessionBrief } from "./workstream/session-brief.js";
 import { isValidTaskRef, MAX_TASK_ID_CHARS } from "./session-tasks/session-tasks.js";
 import { redactPinnedVerbatimBlock, redactText } from "./workstream/workstream-safety.js";
 import { appendWorkstreamSnapshot } from "./workstream/workstream-state.js";
@@ -534,6 +534,15 @@ function compactError(err: unknown): string {
 	} catch {
 		return String(err);
 	}
+}
+
+/**
+ * Whether a run was started by a user prompt. Pi 1.3 tags the event with
+ * `messageType`; older supported Pi versions (1.0.x) omit the field and fire
+ * before_agent_start only for prompts, so a missing tag means a user prompt.
+ */
+function isUserTriggeredAgentStart(event: object): boolean {
+	return (event as { messageType?: unknown }).messageType !== "custom";
 }
 
 function messageContentChars(message: Message): number {
@@ -2384,6 +2393,7 @@ A self-contained answer, routine one-file edit, or task expected to finish in th
 session_focus holds one overall purpose, not a checklist. For enumerable work use ${checklist}, which is the durable to-do list; session_focus is still not a progress tracker, activity log, or implementation ledger. Do not add refs merely to record transient branches, worktrees, commits, or paths, and do not update focus after each phase, tool call, test result, commit, or routine status change.
 When focus is justified, state one concise overall purpose instead of copying the user's prompt. Use a ref only when it is needed to resume the work, and a boundary only for a lasting constraint.
 Mutate it only for a durable semantic change needed after context loss: the objective materially changes, the user establishes or changes a lasting constraint, a resumable external reference becomes essential, or the lifecycle truly pauses, completes, or detaches. Otherwise do not call session_focus.
+Write a session brief with session_focus {action: "brief", brief: "..."} when decisions and next steps need to survive context loss; each brief replaces the last.
 A pinned user objective is user-owned: agent mutations cannot replace it.
 </durable-focus-guidance>`;
 }
@@ -4409,6 +4419,8 @@ function discardSessionCompaction(
 const pendingClarification = new Map<string, { reason: string }>();
 const pendingCheckins = new Map<string, { prompt: string }>();
 const pendingRestartNotices = new Map<string, PendingRestartNotice>();
+// Lifecycle signal only; cadence and compaction delivery are replayed from the branch.
+const pendingBriefResumes = new WeakSet<object>();
 
 let compactionRunCounter = 0;
 
@@ -9219,6 +9231,7 @@ export default function (pi: ExtensionAPI) {
 		// them again at the first session boundary so both package and -e loading
 		// paths observe the same effective runtime configuration.
 		applyCliConfigOverrides(pi, { finalAttempt: true });
+		if (event.reason !== "new" && ctx.sessionManager.getBranch().length > 0) pendingBriefResumes.add(ctx.sessionManager);
 		modesController.start(ctx, event.reason);
 		policyController.start(ctx);
 		refreshCompactionBlocker(pi, ctx);
@@ -9380,7 +9393,15 @@ export default function (pi: ExtensionAPI) {
 				}],
 			};
 		}
-		return repairOutgoingHistory(ctx, sessionKey, event.messages);
+		const repaired = repairOutgoingHistory(ctx, sessionKey, event.messages);
+		const recovery = planBriefRecovery(workstreamTranscriptEntries(ctx), pendingBriefResumes.has(ctx.sessionManager));
+		pendingBriefResumes.delete(ctx.sessionManager);
+		if (recovery === null) return repaired;
+		// Metadata only: no user message or recovery text is persisted. Consume even
+		// an empty opportunity so a brief written later cannot revive it.
+		pi.appendEntry(BRIEF_DELIVERY_ENTRY_TYPE, recovery.receipt);
+		if (!recovery.text) return repaired;
+		return { messages: [...(repaired?.messages ?? event.messages), { role: "custom" as const, customType: "context-aware.brief-recovery", content: recovery.text, display: false, timestamp: Date.now() }] };
 	});
 	pi.on("message_end", async (event, ctx) => {
 		if (event.message.role !== "assistant") return;
@@ -9712,7 +9733,11 @@ export default function (pi: ExtensionAPI) {
 		// The brief is replayed from the branch every turn and rides next to the
 		// task list, outside the system prompt, so replacing it leaves the cached
 		// prompt prefix intact.
-		const briefMessage = buildBriefContextBlock(currentBrief(ctx));
+		const briefEntries = workstreamTranscriptEntries(ctx);
+		const recoveringBrief = planBriefRecovery(briefEntries, pendingBriefResumes.has(ctx.sessionManager));
+		const briefDelivery = recoveringBrief?.text ? null : planBriefDelivery(briefEntries, isUserTriggeredAgentStart(event), audience !== "worker" && focusTool.available);
+		const briefMessage = briefDelivery === null ? null : renderReachableToolInvocation(briefDelivery.text, "session_focus", focusTool);
+		if (briefDelivery !== null) pi.appendEntry(BRIEF_DELIVERY_ENTRY_TYPE, briefDelivery.receipt);
 		// Branch-derived metadata is stable between requests until a compaction
 		// changes the current branch, so its section changes only then.
 		let compactionCountPrompt: string | null = null;
