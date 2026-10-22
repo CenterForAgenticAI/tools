@@ -58,6 +58,10 @@ export interface FocusFixture {
 	turnMessage(messageType?: "user" | "custom" | "legacy-user"): Promise<string>;
 	/** Provider request without a new outer run (automatic compaction retry). */
 	continueRequest(): Promise<string>;
+	/** Run the agent_end handlers: one attempt is over, and Pi may retry it. */
+	endAttempt(): Promise<void>;
+	/** Run agent_end then agent_settled: the whole run is over. */
+	endRun(): Promise<void>;
 	/** The next provider request: hidden per-turn message and system prompt. */
 	turn(messageType?: "user" | "custom" | "legacy-user"): Promise<{ message: string; systemPrompt: string }>;
 	/** Run the session_shutdown handlers. */
@@ -144,6 +148,15 @@ export async function focusFixture(entries: unknown[] = [], options: FocusFixtur
 		return messages.map((message) => typeof message.content === "string" ? message.content : "").join("\n");
 	}
 
+	async function endAttempt(): Promise<void> {
+		for (const handler of events.get("agent_end") ?? []) await handler({ type: "agent_end", messages: [] }, ctx);
+	}
+
+	async function endRun(): Promise<void> {
+		await endAttempt();
+		for (const handler of events.get("agent_settled") ?? []) await handler({ type: "agent_settled", aborted: false }, ctx);
+	}
+
 	async function turn(messageType: "user" | "custom" | "legacy-user" = "user"): Promise<{ message: string; systemPrompt: string }> {
 		const handler = events.get("before_agent_start")?.[0];
 		assert.ok(handler, "expected a before_agent_start handler");
@@ -151,7 +164,10 @@ export async function focusFixture(entries: unknown[] = [], options: FocusFixtur
 		const result = await handler({ ...trigger, systemPrompt: "base prompt" }, ctx) as { message?: { content?: string }; systemPrompt: string };
 		// Pi builds and persists the incoming user only after before_agent_start.
 		if (messageType !== "custom") entries.push({ type: "message", message: { role: "user", content: "continue" } });
-		return { message: [result.message?.content ?? "", await continueRequest()].join("\n"), systemPrompt: result.systemPrompt };
+		const message = [result.message?.content ?? "", await continueRequest()].join("\n");
+		// Each turn is one whole agent run with a single provider request.
+		await endRun();
+		return { message, systemPrompt: result.systemPrompt };
 	}
 
 	return {
@@ -184,6 +200,8 @@ export async function focusFixture(entries: unknown[] = [], options: FocusFixtur
 			for (const handler of events.get("session_tree") ?? []) await handler({}, ctx);
 		},
 		continueRequest,
+		endAttempt,
+		endRun,
 		async turnMessage(messageType) {
 			return (await turn(messageType)).message;
 		},

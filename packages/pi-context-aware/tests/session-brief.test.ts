@@ -98,6 +98,7 @@ test("automatic post-compaction continuation recovers once without an outer hook
 		const receipts = () => fixture.entries.filter((entry) => (entry as { customType?: string }).customType === BRIEF_DELIVERY_ENTRY_TYPE).length;
 		assert.equal(receipts(), 0);
 		assert.match(briefBlocks(await fixture.continueRequest())[0] ?? "", /retry recovery state/);
+		await fixture.endRun();
 		assert.deepEqual(briefBlocks(await fixture.continueRequest()), []);
 		assert.deepEqual(fixture.entries.filter((entry) => (entry as { type: string }).type === "message"), before, "request-only recovery never persists a user message");
 		assert.deepEqual(briefBlocks(await fixture.turnMessage()), []);
@@ -105,6 +106,48 @@ test("automatic post-compaction continuation recovers once without an outer hook
 		fixture.entries.push({ type: "compaction" });
 		assert.match(briefBlocks(await fixture.continueRequest())[0] ?? "", /retry recovery state/);
 		assert.equal(receipts(), 2, "a newer compaction gets its own opportunity");
+	});
+});
+
+test("recovery rides every provider request of its run, then ends with the run", async () => {
+	await withFixture(async (fixture) => {
+		await fixture.call("session_focus", { action: "brief", brief: "tool loop state" });
+		await fixture.turn();
+		fixture.entries.push({ type: "compaction" });
+		const receipts = () => fixture.entries.filter((entry) => (entry as { customType?: string }).customType === BRIEF_DELIVERY_ENTRY_TYPE).length;
+		// One run: the first request, then one request after each tool result.
+		for (let request = 1; request <= 3; request += 1) {
+			assert.equal(briefBlocks(await fixture.continueRequest()).filter((block) => /tool loop state/.test(block)).length, 1, `request ${request} carries the brief once`);
+		}
+		assert.equal(receipts(), 1, "one context loss writes one receipt however many requests the run makes");
+		await fixture.endRun();
+		assert.deepEqual(briefBlocks(await fixture.continueRequest()), []);
+		assert.equal(receipts(), 1);
+	});
+});
+
+test("an automatic retry after a failed attempt keeps the recovery", async () => {
+	await withFixture(async (fixture) => {
+		await fixture.call("session_focus", { action: "brief", brief: "retry attempt state" });
+		await fixture.turn();
+		fixture.entries.push({ type: "compaction" });
+		assert.match(briefBlocks(await fixture.continueRequest())[0] ?? "", /retry attempt state/);
+		// A provider error ends the attempt; Pi retries with agent.continue() and writes no compaction.
+		await fixture.endAttempt();
+		assert.match(briefBlocks(await fixture.continueRequest())[0] ?? "", /retry attempt state/);
+		await fixture.endRun();
+		assert.deepEqual(briefBlocks(await fixture.continueRequest()), []);
+	});
+});
+
+test("navigating the tree drops the recovery of the branch left behind", async () => {
+	await withFixture(async (fixture) => {
+		await fixture.call("session_focus", { action: "brief", brief: "old branch state" });
+		await fixture.turn();
+		fixture.entries.push({ type: "compaction" });
+		assert.match(briefBlocks(await fixture.continueRequest())[0] ?? "", /old branch state/);
+		await fixture.navigate(fixture.entries.filter((entry) => (entry as { type: string }).type !== "compaction"));
+		assert.deepEqual(briefBlocks(await fixture.continueRequest()), []);
 	});
 });
 

@@ -4421,6 +4421,10 @@ const pendingCheckins = new Map<string, { prompt: string }>();
 const pendingRestartNotices = new Map<string, PendingRestartNotice>();
 // Lifecycle signal only; cadence and compaction delivery are replayed from the branch.
 const pendingBriefResumes = new WeakSet<object>();
+// Recovery text for the agent run in progress. Pi calls `context` once per
+// provider request, so a run with tool calls makes several requests; each one
+// rebuilds the message list from the branch and must carry the recovery again.
+const activeBriefRecoveries = new WeakMap<object, string>();
 
 let compactionRunCounter = 0;
 
@@ -9339,6 +9343,7 @@ export default function (pi: ExtensionAPI) {
 		// would be noisy across unrelated sessions sharing the same project dir.
 	});
 	pi.on("session_tree", async (_event, ctx) => {
+		activeBriefRecoveries.delete(ctx.sessionManager);
 		claimController.sync(ctx);
 		modesController.restore(ctx);
 		policyController.sync(ctx, "branch");
@@ -9396,12 +9401,16 @@ export default function (pi: ExtensionAPI) {
 		const repaired = repairOutgoingHistory(ctx, sessionKey, event.messages);
 		const recovery = planBriefRecovery(workstreamTranscriptEntries(ctx), pendingBriefResumes.has(ctx.sessionManager));
 		pendingBriefResumes.delete(ctx.sessionManager);
-		if (recovery === null) return repaired;
-		// Metadata only: no user message or recovery text is persisted. Consume even
-		// an empty opportunity so a brief written later cannot revive it.
-		pi.appendEntry(BRIEF_DELIVERY_ENTRY_TYPE, recovery.receipt);
-		if (!recovery.text) return repaired;
-		return { messages: [...(repaired?.messages ?? event.messages), { role: "custom" as const, customType: "context-aware.brief-recovery", content: recovery.text, display: false, timestamp: Date.now() }] };
+		if (recovery !== null) {
+			// Metadata only: no user message or recovery text is persisted. Consume even
+			// an empty opportunity so a brief written later cannot revive it.
+			pi.appendEntry(BRIEF_DELIVERY_ENTRY_TYPE, recovery.receipt);
+			if (recovery.text) activeBriefRecoveries.set(ctx.sessionManager, recovery.text);
+			else activeBriefRecoveries.delete(ctx.sessionManager);
+		}
+		const recoveryText = activeBriefRecoveries.get(ctx.sessionManager);
+		if (!recoveryText) return repaired;
+		return { messages: [...(repaired?.messages ?? event.messages), { role: "custom" as const, customType: "context-aware.brief-recovery", content: recoveryText, display: false, timestamp: Date.now() }] };
 	});
 	pi.on("message_end", async (event, ctx) => {
 		if (event.message.role !== "assistant") return;
@@ -9518,6 +9527,10 @@ export default function (pi: ExtensionAPI) {
 		ensureSessionNamingController(pi, ctx, runtime)?.handleInfoChanged(event.name);
 	});
 	pi.on("agent_settled", async (_event, ctx) => {
+		// Brief recovery lasts until the agent settles. agent_end marks one attempt,
+		// and Pi retries a failed attempt with agent.continue() and no compaction,
+		// so no new recovery opportunity would replace the text if it ended there.
+		activeBriefRecoveries.delete(ctx.sessionManager);
 		const sessionKey = sessionMetadataKey(ctx);
 		if (shuttingDownSessions.has(sessionKey)) return;
 		ownerClaimCtx = ctx;
@@ -9549,6 +9562,7 @@ export default function (pi: ExtensionAPI) {
 		if (cfg.enabled) await remindOfOpenTasks(pi, ctx);
 	});
 	pi.on("session_shutdown", async (_event, ctx) => {
+		activeBriefRecoveries.delete(ctx.sessionManager);
 		// Withdraw first, so Fabric's engine compacts again even if later shutdown work fails.
 		claimController.shutdown();
 		ownerClaimCtx = undefined;
