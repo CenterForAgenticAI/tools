@@ -12,7 +12,8 @@ export interface Manifest {
 	name: string;
 	description?: string;
 	color?: string;
-	auth: { mode: AuthMode };
+	/** `pushKeys`: also sync API keys automatically (default off, L20). Shared and pooled profiles, and the default profile, always sync OAuth logins on their own (L21, L30). */
+	auth: { mode: AuthMode; pushKeys?: boolean };
 	multiAccount?: { group: string; members?: string[] };
 	sessions?: { store: string };
 	env?: Record<string, string>;
@@ -120,9 +121,9 @@ export function parseManifest(raw: unknown, profileDir: string): Result<Manifest
 	}
 	const auth = raw["auth"];
 	if (auth !== undefined) {
-		if (!isRecord(auth) || !isAuthMode(auth["mode"]) || Object.keys(auth).some((k) => k !== "mode"))
-			errors.push('auth must be { "mode": "shared" | "separate" | "pooled" }');
-		else m.auth = { mode: auth["mode"] };
+		if (!isRecord(auth) || !isAuthMode(auth["mode"]) || Object.keys(auth).some((k) => k !== "mode" && k !== "pushKeys") || (auth["pushKeys"] !== undefined && typeof auth["pushKeys"] !== "boolean"))
+			errors.push('auth must be { "mode": "shared" | "separate" | "pooled", "pushKeys": true | false }');
+		else m.auth = { mode: auth["mode"], ...(auth["pushKeys"] === undefined ? {} : { pushKeys: auth["pushKeys"] }) };
 	}
 	const ma = raw["multiAccount"];
 	if (ma !== undefined) {

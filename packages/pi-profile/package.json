@@ -1,5 +1,5 @@
 {
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Named, isolated Pi profiles: create, switch and check profile directories, with a colour badge in the Pi status bar.",
   "keywords": [
     "pi-package"

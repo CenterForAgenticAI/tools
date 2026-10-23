@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 import { basename } from "node:path";
 import { isatty } from "node:tty";
 import { isColor } from "../core/color.ts";
@@ -13,8 +14,9 @@ import type { ArchiveKind, ArchiveResult } from "../core/archive.ts";
 import { archiveFolders, archiveRun, homeOf, installSchedule, resolveRestoreTarget, restoreOne, sessionFolders } from "../core/archivecli.ts";
 import { DEFAULT_PROFILE } from "../core/names.ts";
 import { pullSessions } from "../core/pull.ts";
-import { exportAuth, parsePayload, payloadText, processSshRunner, pullAuth, pushAuth, readStdinPayload, receiveAuth, type Outcome, type SshRunner } from "../core/authsync.ts";
-import { authSyncStatus, syncPooled } from "../core/authpool.ts";
+import { exportAuth, MAX_PAYLOAD_BYTES, parsePayloadFull, payloadText, processSshRunner, pullAuth, pushAuth, readStdinPayload, receiveAuth, type Outcome, type SshRunner } from "../core/authsync.ts";
+import { receiveConfig } from "../core/authconfig.ts";
+import { authSyncStatus, pullPeers, syncPooled } from "../core/authpool.ts";
 import { advertise, discover, loadAdvertised, localHost, printable, processDiscoverRunner, type DiscoverRunner } from "../core/repo.ts";
 import { addReplica, describeReplica, loadReplicaState, removeReplica, runBackup, type BackupResult, type ToolRunner } from "../core/backup.ts";
 import { runAutoBackup } from "../core/autobackup.ts";
@@ -77,7 +79,7 @@ export const HELP = `Usage: pi-profile <command>
   create NAME [--from P] [--auth shared|separate|pooled] [--copy-auth]
               [--color C] [--group G] [--description TEXT]
   edit NAME --set KEY=VALUE... [--copy-auth]
-                               Keys: description, color, auth.mode,
+                               Keys: description, color, auth.mode, auth.pushKeys,
                                multiAccount.group, sessions.store, env.NAME
                                (an empty value removes the key)
   delete NAME --yes            Move a profile to ~/.pi/profiles/.trash
@@ -169,10 +171,19 @@ export const HELP = `Usage: pi-profile <command>
                                Print credentials as a payload (used by pull);
                                refuses a terminal
   auth sync [--profile NAME] [--quiet]
-                               Push changed OAuth logins of a pooled profile
-                               to authSync.peers (run after each session)
-  auth status [--profile NAME] Show pooled peers that wait for entries and
-                               their last error
+                               Push changed OAuth logins and the
+                               pi-multi-account config of the default,
+                               a shared or a pooled profile to
+                               authSync.peers (API keys only with
+                               auth.pushKeys)
+  auth pull-peers [--profile NAME] [--quiet]
+                               Take newer OAuth logins from authSync.peers
+                               (run before a refresh)
+  auth config-receive [--profile NAME]
+                               Apply a pi-multi-account config from stdin
+                               (used by auth sync)
+  auth status [--profile NAME] Show auth-sync peers that wait for entries
+                               and their last error
   enrol HOST [--hub NAME] [--remote REMOTE] [--host-id ID]
              [--session-store PATH] [--auth pull] [--dry-run]
                                Set up another of your hosts over ssh: check
@@ -321,7 +332,11 @@ export function setKey(m: Manifest, assignment: string): Manifest {
 		else next.color = value;
 	} else if (key === "auth.mode") {
 		if (!isAuthMode(value)) throw new Refusal("auth.mode must be shared, separate or pooled");
-		next.auth = { mode: value };
+		next.auth = { mode: value, ...(next.auth.pushKeys === undefined ? {} : { pushKeys: next.auth.pushKeys }) };
+	} else if (key === "auth.pushKeys") {
+		if (clear) delete next.auth.pushKeys;
+		else if (value !== "true" && value !== "false") throw new Refusal("auth.pushKeys must be true or false");
+		else next.auth = { ...next.auth, pushKeys: value === "true" };
 	} else if (key === "multiAccount.group") {
 		if (clear) delete next.multiAccount;
 		else if (!isGroupName(value)) throw new Refusal(`not a group name: ${value}`);
@@ -1113,10 +1128,31 @@ function authCommand(l: Layout, args: string[], io: Io): number {
 		const force = takeFlag(args, "--force");
 		const allowCommandKeys = takeFlag(args, "--allow-command-keys");
 		noExtra(args, usage);
-		const incoming = parsePayload((io.readStdin ?? readStdinPayload)());
-		const r = receiveAuth(l, profile, incoming, { force, allowCommandKeys });
+		const { entries: incoming, writes } = parsePayloadFull((io.readStdin ?? readStdinPayload)());
+		const r = receiveAuth(l, profile, incoming, { force, allowCommandKeys, writes });
 		printOutcomes(io, r.outcomes);
 		return 0;
+	}
+	if (sub === "config-receive") {
+		const profile = profileOf();
+		noExtra(args, "pi-profile auth config-receive [--profile NAME]");
+		const home = io.env["HOME"] ?? homedir();
+		io.out(`${receiveConfig(l, profile, (io.readStdin ?? (() => readStdinPayload(MAX_PAYLOAD_BYTES)))(), { home })}\n`);
+		return 0;
+	}
+	if (sub === "pull-peers") {
+		const usage = "pi-profile auth pull-peers [--profile NAME] [--quiet]";
+		const profile = profileOf();
+		const quiet = takeFlag(args, "--quiet");
+		noExtra(args, usage);
+		let failed = 0;
+		for (const p of pullPeers(l, profile, { env: io.env, run: ssh() }).peers) {
+			if (p.error !== undefined) {
+				failed++;
+				io.err(`${p.peer}: failed: ${p.error}\n`);
+			} else if (!quiet) for (const o of p.outcomes) io.out(`${p.peer}: ${o}\n`);
+		}
+		return failed === 0 ? 0 : 1;
 	}
 	if (sub === "export") {
 		const usage = "pi-profile auth export [--provider P]... [--profile NAME]";
@@ -1127,7 +1163,7 @@ function authCommand(l: Layout, args: string[], io: Io): number {
 		if (io.stdoutIsTty?.() === true) throw new Refusal("auth export prints credentials; pipe its output instead of printing it to a terminal");
 		const r = exportAuth(l, profile, providers);
 		for (const p of r.skipped) io.err(`pi-profile: ${p}: skipped: pi-profile cannot read this entry\n`);
-		io.out(payloadText(r.entries));
+		io.out(payloadText(r.entries, r.writes));
 		return 0;
 	}
 	if (sub === "push" || sub === "pull") {
@@ -1159,6 +1195,7 @@ function authCommand(l: Layout, args: string[], io: Io): number {
 		if (r.baseline && !quiet) io.out(`${profile}: recorded the current logins; later changes will be pushed\n`);
 		let failed = 0;
 		for (const p of r.peers) {
+			if (p.config !== undefined && !quiet) io.out(`${p.peer}: multi-account config ${p.config}\n`);
 			if (p.retryAt !== undefined) {
 				failed++;
 				io.err(`${p.peer}: not tried: waiting until ${new Date(p.retryAt).toISOString()} after a failure: ${p.error ?? ""}\n`);
@@ -1176,7 +1213,7 @@ function authCommand(l: Layout, args: string[], io: Io): number {
 		for (const line of authSyncStatus(l, profile, io.env)) io.out(`${line}\n`);
 		return 0;
 	}
-	throw new Refusal("usage: pi-profile auth push, auth pull, auth receive, auth export, auth sync or auth status");
+	throw new Refusal("usage: pi-profile auth push, auth pull, auth receive, auth export, auth sync, auth pull-peers, auth config-receive or auth status");
 }
 
 /** The line each shell's startup file needs, and the file. */

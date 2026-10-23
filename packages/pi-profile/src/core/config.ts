@@ -18,7 +18,7 @@ export interface AutoBackup {
 	readonly onSessionEnd: boolean;
 	readonly minIntervalSeconds: number;
 }
-/** Peers that pooled-mode profiles push refreshed OAuth logins to, by Tailscale short name. */
+/** Peers that the default, shared and pooled profiles push refreshed OAuth logins to, by Tailscale short name. */
 export interface AuthSync {
 	readonly peers: readonly string[];
 }

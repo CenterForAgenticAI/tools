@@ -232,7 +232,7 @@ Back up this host's sessions to a disk, a device or S3:
 ```sh
 pi-profile sessions store add main /absolute/path            # once: the store to back up
 pi-profile backup add usb local /media/usb/pi-sessions
-pi-profile backup add studio ssh atlas-studio sessions   # a repository the device advertises
+pi-profile backup add studio ssh atlas-studio sessions       # a repository the device advertises
 pi-profile backup add cloud s3 s3://my-bucket/pi --encrypt-to age1...
 pi-profile backup run                                        # or --replica ID
 pi-profile backup list                                       # last run of each
@@ -305,7 +305,7 @@ it, with the path quoted for the shell; run it only when no pi-profile is runnin
 Read other devices' sessions from a replica:
 
 ```sh
-pi-profile sessions pull usb                # every other host
+pi-profile sessions pull usb                 # every other host
 pi-profile sessions pull studio --host atlas # one host
 pi-profile sessions pull s3 --identity ~/.config/age/pi.key # encrypted replica
 pi --fork ~/.pi/pi-profile/remote/atlas/sessions/<folder>/<file>.jsonl
@@ -424,6 +424,14 @@ Each profile has one of three auth modes:
 | `separate` | The profile's own file; log in again inside the profile |
 | `pooled` | The profile's own file; refreshed OAuth logins are pushed to your other devices |
 
+A `shared` or `pooled` profile pushes changed OAuth logins to your other devices
+on its own (see "Pooled and shared profiles" below). So does the `default`
+profile (Pi's own `~/.pi/agent`): it owns the shared `auth.json`, so it syncs
+like a shared profile, although its mode stays `separate`. Any other
+`separate` profile never pushes. API keys are not pushed on their own unless the profile sets
+`"pushKeys": true` in `auth` (`pi-profile edit NAME --set auth.pushKeys=true`);
+the flag is off by default.
+
 A new `separate` or `pooled` profile starts with no credentials. Add
 `--copy-auth` to start from a copy of the shared file. Switching a profile to
 `shared` keeps its old file as `auth.json.bak-<time>-<random>`. pi-profile never
@@ -435,9 +443,9 @@ Log in on one device, then copy the login to another of your devices over
 Tailscale SSH:
 
 ```sh
-pi-profile auth push atlas-studio                      # every entry of this profile
-pi-profile auth push atlas-studio --provider anthropic # only these providers
-pi-profile auth pull atlas-studio --profile work       # fetch and merge here
+pi-profile auth push atlas-studio                          # every entry of this profile
+pi-profile auth push atlas-studio --provider anthropic     # only these providers
+pi-profile auth pull atlas-studio --profile work           # fetch and merge here
 ```
 
 `auth export` prints credentials, so it refuses to print to a terminal; pipe
@@ -455,9 +463,19 @@ The receiver merges by provider. Other providers are left alone.
 | none | any | added |
 | API key | anything | kept |
 | OAuth login | API key | kept |
-| OAuth login | OAuth login | the one with the later `expires` |
+| OAuth login | OAuth login | the one written later (L26); equal write times, or no write time on either side, use the later `expires`; a full tie keeps the local login |
 
-`--force` takes the incoming entry in every case. An entry that is not an
+The newest login wins (L26): a login written later replaces an older copy
+whatever either expiry says, so a fresh login on another machine is never
+undone by a stale copy that happens to expire later. Each host keeps, per
+login, when it last wrote it (machine-local, hashes and times only), and a push
+or pull carries that time in an optional `writes` field of the payload. When
+the times are equal, or either side has none (a sender without the field, or a
+local login that has already expired, whose file time proves nothing), the
+login that expires later wins. A full tie keeps the local login. A peer that
+is older than the `writes` field refuses the payload; `auth push` and
+`auth sync` then send it again without the field, and that peer merges by the
+later expiry. `--force` takes the incoming entry in every case. An entry that is not an
 `api_key` or `oauth` entry, or has fields pi-profile does not know, is
 refused, never merged; a payload larger than 1 MiB is refused. An OAuth
 login whose `expires` is more than a year away is refused: it would win every
@@ -498,28 +516,71 @@ changes. Backups hold credentials: like `auth.json`, they never go to a
 session backup or a migration. Neither do `auth.json.aside-*` and
 `auth.json.new-*`, which a crash can leave; these names match in any case.
 
-### Pooled profiles
+### Pooled and shared profiles
 
-A `pooled` profile pushes refreshed OAuth logins to the devices listed in
-`authSync.peers` in `~/.pi/pi-profile/config.json`:
+A `pooled` or `shared` profile, and the `default` profile, push refreshed OAuth
+logins to the devices listed in `authSync.peers` in
+`~/.pi/pi-profile/config.json`:
 
 ```json
 { "schemaVersion": 1, "hostId": "my-laptop", "sessionStores": {}, "authSync": { "peers": ["atlas-studio"] } }
 ```
 
-When a session in a pooled profile starts, the extension records the size,
+The `default` profile owns the shared `~/.pi/agent/auth.json`, so it syncs
+like a shared profile (L30). Its `auth.mode` stays `separate` in
+`profile.json`; pi-profile still refuses any other mode for it.
+
+When a session in a profile that syncs on its own starts, the extension records the size,
 time and SHA-256 of `auth.json` and of each entry in
 `~/.pi/pi-profile/state/authsync/` (hashes only; never leaves the host). When
 the session ends, if the file changed, it starts `pi-profile auth sync` in
 the background, as auto-backup does. That run sends only OAuth entries that
-changed, never an API key, to the same profile on each peer, which keeps the
+changed, to the same profile on each peer, which keeps the
 later login. A peer that fails gets the same entries again after a wait of
 5 minutes, doubling after each failure, at most 24 hours. A saved wait that
 is damaged is dropped, and one longer than 24 hours (for example after a
 clock was far ahead) is cut to 24 hours. `pi-profile auth
 status` shows each peer, the entries it waits for, and its last error (ssh's
-last stderr line; never a credential). `shared` and `separate` profiles
-never push on their own.
+last stderr line; never a credential). A `separate` profile other than
+`default` never pushes on its own.
+
+Any machine may refresh a shared login and push it: no machine owns a login, so
+a changed OAuth login goes out whether this machine ran `/login` or received
+the login from a peer. The receiver takes the login that was written later
+(L26), so a stale copy never overwrites a fresh login. An API key goes out on its own only when the
+profile sets `auth.pushKeys` (off by default); the receiver still keeps its
+own key.
+
+#### Automatic sync (`default`, `pooled` and `shared` profiles)
+
+A profile that syncs on its own does four things, all through `authSync.peers`:
+
+- **Newest login wins.** Automatic pushes and pulls never pass `--force`, so
+  a receiver takes the OAuth login that was written later (L26), whatever
+  either expiry says. The same rule applies to `auth push` and `auth pull`.
+- **Events.** pi-multi-account may emit `pi-multi-account:credential-changed`
+  on Pi's event bus with `{ provider, kind }` (`kind` is `refresh`, `login` or
+  `invalidated`). The extension waits 30 seconds after the last event, then
+  starts a detached `pi-profile auth sync`. Only `provider` and `kind` are read;
+  the payload is not passed on, so no token can reach argv or a log. A poll of
+  the `auth.json` hash every minute covers changes nobody announced. The emit
+  side lives in pi-multi-account and is not part of this package.
+- **Config.** `auth sync` also sends `pi-multi-account/config.json` when it
+  changes, through `auth config-receive` on the peer. Paths in
+  `accountGroupCwdDefaults` that start with the sender's home directory are
+  rewritten to the receiver's; other paths are kept. The receiver keeps a
+  backup of its old file, and keeps its own file when that was written later
+  than the sender's (`auth status` says so).
+- **Pull before refresh.** At session start, and on
+  `pi-multi-account:credential-refresh-due`, the extension runs
+  `pi-profile auth pull-peers`: it takes OAuth logins written later than
+  this host's copy (an API key only when the profile sets `auth.pushKeys`),
+  so a refresh does not spend a token a peer already rotated. An unreachable peer is skipped; a host that cannot be
+  reached can pull from one that can.
+
+`pi-profile doctor` warns about entries and configs a peer has not received,
+and about expiry drift against what each peer held at the last
+`auth pull-peers` (times only; `doctor` makes no network call).
 
 Providers that rotate refresh tokens invalidate the old token on refresh, so
 two devices that refresh the same login at the same time can log one out.
@@ -814,9 +875,9 @@ stays schema 1.
 `enrol` sets up another of your hosts from this one, over SSH:
 
 ```sh
-pi-profile enrol atlas-laptop                       # hub default, as this host has it
+pi-profile enrol atlas-laptop                           # hub default, as this host has it
 pi-profile enrol atlas-laptop --session-store /srv/pi/sessions --auth pull
-pi-profile enrol atlas-laptop --dry-run             # print what it would do
+pi-profile enrol atlas-laptop --dry-run                 # print what it would do
 ```
 
 It runs these steps on `HOST`, a Tailscale short name:

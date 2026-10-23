@@ -318,6 +318,36 @@ def autoPush(m: N.AuthMode, pushKeys: Bool, s: LoginSource, c: Cred) -> Bool:
     case N.Pooled{}:
       pushesCred(pushKeys, c)
 
+# Which profile a process runs in. The default profile is Pi's own
+# ~/.pi/agent and owns the shared auth.json; every other profile is named.
+type ProfileKind is Data:
+  DefaultProfile{}
+  NamedProfile{}
+
+# Whether a profile pushes and pulls logins on its own. The default profile
+# always does: its auth.json is the shared one, so it syncs like a shared
+# profile, although its stored mode stays separate. A named profile follows
+# its mode: shared and pooled sync, separate does not.
+def syncsOnItsOwn(k: ProfileKind, m: N.AuthMode) -> Bool:
+  match k:
+    case DefaultProfile{}:
+      True{}
+    case NamedProfile{}:
+      match m:
+        case N.Shared{}:
+          True{}
+        case N.Separate{}:
+          False{}
+        case N.Pooled{}:
+          True{}
+
+# Whether a profile of kind k and stored mode m pushes an entry on its own
+# when it changes: only a profile that syncs on its own, and then by the same
+# rule for each entry as autoPush (OAuth logins always, API keys behind
+# pushKeys).
+def profilePush(k: ProfileKind, m: N.AuthMode, pushKeys: Bool, s: LoginSource, c: Cred) -> Bool:
+  Bool.and(syncsOnItsOwn(k, m), pushesCred(pushKeys, c))
+
 # ---------------------------------------------------------------- pi-multi-account
 
 # The profile's pi-multi-account config: the group table, the default group,

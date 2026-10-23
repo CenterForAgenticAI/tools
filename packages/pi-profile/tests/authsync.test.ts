@@ -113,7 +113,7 @@ describe("mergeEntry mirrors D.merge", () => {
 		const local = login(1);
 		assert.equal(mergeEntry(local, key("b"), false), local);
 	});
-	it("OAuth: the later expires wins; a tie keeps the local login", () => {
+	it("L26 without write times: the login that expires later wins; a tie keeps the local login", () => {
 		const early = login(100);
 		const late = login(200);
 		assert.equal(mergeEntry(early, late, false), late);
@@ -432,7 +432,7 @@ describe("pooled mode", () => {
 		return { ...f, env: { ...f.env, PI_PROFILE_LABEL: "pool", PI_CODING_AGENT_DIR: join(s.home, "profiles", "pool") }, auth, remoteAuth: join(remote.home, "profiles", "pool", "auth.json") };
 	}
 
-	it("pushes only the OAuth entries that changed (L20); never an API key", () => {
+	it("pushes only the OAuth entries that changed (L20, L21); an API key stays home while auth.pushKeys is off", () => {
 		const { env, log, auth, remoteAuth } = setup("pooled");
 		writeAuth(auth, { anthropic: apiKey("sk-local-API-SECRET"), codex: oauth(1000, "OLD"), gemini: oauth(1000, "OLD") });
 		assert.equal(authPoolOnSessionStart(env), true);
@@ -477,12 +477,12 @@ describe("pooled mode", () => {
 		assert.deepEqual(readJsonFile(remoteAuth).codex, oauth(2000, "NEW"));
 	});
 
-	it("shared and separate profiles never push (L21)", () => {
-		for (const mode of ["shared", "separate"] as const) {
+	it("a separate profile never pushes (L21)", () => {
+		for (const mode of ["separate"] as const) {
 			const { env, log } = setup(mode);
 			const r = cli(["auth", "sync", "--profile", "pool"], env);
 			assert.equal(r.status, 2);
-			assert.match(r.stderr, /not in pooled auth mode/);
+			assert.match(r.stderr, /separate auth mode/);
 			assert.equal(authPoolOnSessionStart(env), false);
 			const calls: unknown[] = [];
 			const spawn: Spawn = (...a) => { calls.push(a); return { on: () => undefined, unref: () => undefined }; };

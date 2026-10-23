@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { beforeSwitch, startupNotice } from "./core/archivehook.ts";
-import { authPoolOnSessionEnd, authPoolOnSessionStart } from "./core/authpool.ts";
+import { authPoolOnSessionEnd, authPoolOnSessionStart, type AutoSyncDeps, CREDENTIAL_CHANGED_CHANNEL, CREDENTIAL_REFRESH_CHANNEL, startAutoSync, type AutoSync } from "./core/authpool.ts";
 import { autoBackupOnSessionEnd, currentRuntime, nodeExecPath, startBackupRun, startCliRun, type AttachedSpawn, type BackupRunOutcome, type CliRun, type Runtime } from "./core/autobackup.ts";
 import type { BackupResult } from "./core/backup.ts";
 import { ansiFg } from "./core/color.ts";
@@ -249,12 +249,22 @@ export interface Deps {
 	readonly env?: Env;
 	readonly spawn?: AttachedSpawn;
 	readonly runtime?: Runtime;
+	/** Test seam: the detached-spawn, debounce and poll settings of auto-sync. */
+	readonly autoSync?: AutoSyncDeps;
 }
 
 export default function piProfile(pi: ExtensionAPI, deps: Deps = {}): void {
 	const env = (): Env => deps.env ?? process.env;
 	let session = 0;
 	let backupRunning = false;
+	let autoSync: AutoSync | undefined;
+	let unsubscribe: Array<() => void> = [];
+	const stopAutoSync = (): void => {
+		for (const off of unsubscribe) off();
+		unsubscribe = [];
+		autoSync?.stop();
+		autoSync = undefined;
+	};
 	pi.on("session_start", (_event, ctx) => {
 		show(ctx, env());
 		// Interactive Pi writes its own title once session_start and every
@@ -271,8 +281,22 @@ export default function piProfile(pi: ExtensionAPI, deps: Deps = {}): void {
 		// A stub of an archived session is not a live session: a tag would add a
 		// line to it, and a restore keeps a stub with added lines beside the full one.
 		if (!archivedNotice(ctx)) tag(pi, ctx, env());
-		// Pooled auth: note the logins as the session starts, so the end can tell what changed. Never throws.
+		// Auth sync: note the logins as the session starts, so the end can tell what changed. Never throws.
 		authPoolOnSessionStart(env());
+		// Auto-sync, for the default profile and for shared and pooled profiles with authSync.peers (L21, L30; a
+		// separate profile that is not the default never syncs): listen for pi-multi-account's credential events,
+		// and take newer logins from peers now.
+		stopAutoSync();
+		try {
+			autoSync = startAutoSync(env(), { ...(deps.runtime === undefined ? {} : { runtime: deps.runtime }), ...(deps.autoSync ?? {}) });
+			const sync = autoSync;
+			if (sync !== undefined && pi.events !== undefined) {
+				unsubscribe = [pi.events.on(CREDENTIAL_CHANGED_CHANNEL, (payload) => void sync.onChange(payload)), pi.events.on(CREDENTIAL_REFRESH_CHANNEL, () => void sync.pullNow())];
+				sync.pullNow();
+			}
+		} catch {
+			// Auto-sync is best effort; `pi-profile auth status` shows what is pending.
+		}
 	});
 	// /resume (and session import) name the file before Pi opens it: restore an archived session first.
 	pi.on("session_before_switch", (event, ctx) => {
@@ -288,6 +312,7 @@ export default function piProfile(pi: ExtensionAPI, deps: Deps = {}): void {
 	pi.on("session_shutdown", (event) => {
 		// A reload keeps the session; every other reason ends it. Never throws.
 		if (event.reason !== "reload") {
+			stopAutoSync();
 			autoBackupOnSessionEnd(env());
 			authPoolOnSessionEnd(env());
 		}

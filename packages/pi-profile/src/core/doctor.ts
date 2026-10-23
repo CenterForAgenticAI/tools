@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { inspectAuth } from "./auth.ts";
+import { driftFindings } from "./authpool.ts";
 import { readMultiAccount } from "./multi-account.ts";
 import { DEFAULT_PROFILE } from "./names.ts";
 import { profilesRoot, sharedAuthPath, type Layout } from "./paths.ts";
@@ -31,7 +32,7 @@ export interface Finding {
  */
 export const HOME_SCOPED_CONFIG: ReadonlyArray<{ file: string; pkg: string }> = [{ file: "acp.json", pkg: "billion-context-pi" }];
 
-function checkProfile(l: Layout, name: string, out: Finding[]): void {
+function checkProfile(l: Layout, name: string, out: Finding[], env: Readonly<Record<string, string | undefined>>): void {
 	const info = loadProfile(l, name);
 	const add = (level: Level, message: string): void => {
 		out.push({ level, profile: name, message });
@@ -68,6 +69,11 @@ function checkProfile(l: Layout, name: string, out: Finding[]): void {
 		if (existsSync(join(info.dir, file))) add("warn", `${file} here is ignored: ${pkg} reads ${join(l.piHome, file)}, which every profile shares`);
 	}
 	checkSyncManifest(l, name, add);
+	try {
+		for (const message of driftFindings(l, name, env)) add("warn", message);
+	} catch {
+		// Drift is read from machine-local state; a damaged state file is rebuilt by the next sync.
+	}
 }
 
 const UNKNOWN_SHOWN = 10;
@@ -132,7 +138,7 @@ export function doctor(l: Layout, env: Readonly<Record<string, string | undefine
 	} catch (error) { out.push({ level: "error", message: (error as Error).message }); }
 	for (const name of listProfiles(l)) {
 		try {
-			checkProfile(l, name, out);
+			checkProfile(l, name, out, env);
 			const m = loadProfile(l, name).manifest;
 			const actual = settingsSessionDir(l, name);
 			const choice = storeChoice(m, config);

@@ -141,7 +141,7 @@ law api_keys_pushed_only_with_flag:
 # L21: any machine may refresh a shared login and push it. A shared or pooled
 # profile pushes a changed OAuth login whether this machine logged in or
 # received the login from a peer: no machine owns a login. A separate profile
-# never pushes.
+# never pushes. The default profile is the one exception: see L30.
 law shared_pushes_logins:
   for +f: Bool
   for +s: D.LoginSource
@@ -194,6 +194,41 @@ law full_tie_keeps_local:
   for +w: Nat
   for +e: Nat
   {D.takeIncoming(w, e, w, e) == False{} : Bool}
+
+# L30 proposed on 2026-10-23 (Chris's decision on issue 67); pending review.
+# The default profile owns the shared auth.json, so it syncs on its own like
+# a shared profile: its OAuth logins are pushed and pulled automatically. Its
+# stored auth mode stays separate (L16 still names its file). Any other
+# profile follows its mode, so a separate profile that is not the default
+# never pushes (L21). An API key from the default profile is pushed only with
+# its flag (L20). profilePush(kind, mode, pushKeys, source, entry) is autoPush
+# for the profile a process runs in.
+law default_syncs_on_its_own:
+  for +m: N.AuthMode
+  {D.syncsOnItsOwn(D.DefaultProfile{}, m) == True{} : Bool}
+
+law default_pushes_logins:
+  for +m: N.AuthMode
+  for +f: Bool
+  for +s: D.LoginSource
+  for +e: Nat
+  {D.profilePush(D.DefaultProfile{}, m, f, s, D.OAuth{e}) == True{} : Bool}
+
+law default_keys_need_flag:
+  for +m: N.AuthMode
+  for +s: D.LoginSource
+  for +k: Nat
+  {D.profilePush(D.DefaultProfile{}, m, False{}, s, D.ApiKey{k}) == False{} : Bool}
+
+law named_separate_never_syncs:
+  {D.syncsOnItsOwn(D.NamedProfile{}, N.Separate{}) == False{} : Bool}
+
+law named_push_follows_mode:
+  for +m: N.AuthMode
+  for +f: Bool
+  for +s: D.LoginSource
+  for +c: D.Cred
+  {D.profilePush(D.NamedProfile{}, m, f, s, c) == D.autoPush(m, f, s, c) : Bool}
 
 # ---------------------------------------------------------------- pi-multi-account
 

@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import { authFiles, authTarget, autoPush, readableEntries, readAuthSnapshot, sendEntries, withPiAuthLocks, type AuthEntry, type AuthSnapshot, type SshRunner, entryObject } from "./authsync.ts";
+import { configPayloadText, readConfigView, sendConfig, type ConfigView } from "./authconfig.ts";
+import { stampEntries } from "./authtime.ts";
+import { authFiles, authTarget, entryHash, profilePush, isCommandKey, pullAuth, readableEntries, readAuthSnapshot, sendEntries, withPiAuthLocks, type AuthEntry, type AuthSnapshot, type SshRunner } from "./authsync.ts";
 import { currentRuntime, launchCli, nodeExecPath, type Runtime, type Spawn } from "./autobackup.ts";
 import { loadConfig } from "./config.ts";
 import { readJson, writeJsonAtomic } from "./fsutil.ts";
@@ -14,12 +17,17 @@ import { printable } from "./repo.ts";
 import { Refusal } from "./result.ts";
 
 /**
- * Pooled auth mode (design: "Cross-device auth"). After a session, the
- * extension checks whether a pooled profile's auth.json changed (its SHA-256
- * against machine-local state, L10) and, if so, starts
- * `pi-profile auth sync` detached. That run pushes only OAuth entries that
- * changed (L20) to the peers in `authSync.peers`, and only for a pooled
- * profile (L21). A peer that fails gets the same entries again, after an
+ * Automatic sync for the default profile and for pooled and shared profiles
+ * (design: "Cross-device auth"). After a session, the extension checks whether
+ * such a profile's auth.json changed (its SHA-256 against machine-local
+ * state, L10) and, if so, starts `pi-profile auth sync` detached. That run
+ * pushes the OAuth entries that changed to the peers in `authSync.peers`,
+ * whichever machine logged in (L21; the default profile syncs although its
+ * stored mode is separate, L30; any other separate profile pushes nothing),
+ * and an API key only when the profile sets `auth.pushKeys` (L20). Pushes never pass --force, so a peer
+ * takes the login that was written later (L26). It also pushes the
+ * profile's pi-multi-account config, and `auth pull-peers` pulls newer
+ * logins before this host spends a rotated refresh token. A peer that fails gets the same entries again, after an
  * exponential backoff (RETRY_BASE_MS, doubling, capped at RETRY_MAX_MS).
  */
 
@@ -52,8 +60,22 @@ export interface PoolState {
 	readonly pending: Readonly<Record<string, readonly string[]>>;
 	/** Peers whose last push failed: when to try again and why. No credentials. */
 	readonly failing: Readonly<Record<string, PeerFailure>>;
+	/** SHA-256 of pi-multi-account/config.json at the last check; undefined when there was none. */
+	readonly config?: string;
+	/** Peers that have not received the current config yet. */
+	readonly configPending: readonly string[];
+	/** Peers that kept their own, newer config. */
+	readonly configKept: readonly string[];
+	/** What each peer held at the last `auth pull-peers`: expiry times only. */
+	readonly peerSeen: Readonly<Record<string, PeerSeen>>;
 	/** Set when a saved time had to be clamped on reading; never saved. A sync then saves the clamped times. */
 	readonly clamped?: boolean;
+}
+
+/** What a peer held when last asked: expiry time of each OAuth login. Never a token. */
+export interface PeerSeen {
+	readonly at: number;
+	readonly expires: Readonly<Record<string, number>>;
 }
 
 /** A failing peer. `lastError` is ssh's printable last stderr line or a fixed message, never a payload. */
@@ -95,9 +117,6 @@ function readFailure(v: unknown, now: number): { failure: PeerFailure; clamped: 
 function sha(text: string): string {
 	return createHash("sha256").update(text).digest("hex");
 }
-function entryHash(e: AuthEntry): string {
-	return sha(JSON.stringify(entryObject(e)));
-}
 
 function record(v: unknown): v is Record<string, unknown> {
 	return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -126,16 +145,54 @@ export function readPoolState(l: Layout, profile: string, now: number = Date.now
 				clamped ||= checked.clamped;
 			}
 		}
-		return { mtimeMs: raw.mtimeMs, size: raw.size, sha256: raw.sha256, entries, pending, failing, ...(clamped ? { clamped } : {}) };
+		const names = (v: unknown): string[] => (Array.isArray(v) ? v.filter((p): p is string => typeof p === "string" && NAME.test(p)) : []);
+		const peerSeen: Record<string, PeerSeen> = {};
+		if (record(raw.peerSeen)) {
+			for (const [peer, v] of Object.entries(raw.peerSeen)) {
+				if (!NAME.test(peer) || !record(v) || typeof v.at !== "number" || !Number.isFinite(v.at) || !record(v.expires)) continue;
+				const expires: Record<string, number> = {};
+				for (const [p, e] of Object.entries(v.expires)) if (NAME.test(p) && typeof e === "number" && Number.isFinite(e)) expires[p] = e;
+				peerSeen[peer] = { at: v.at, expires };
+			}
+		}
+		const config = typeof raw.config === "string" && HEX.test(raw.config) ? raw.config : undefined;
+		return { mtimeMs: raw.mtimeMs, size: raw.size, sha256: raw.sha256, entries, pending, failing, ...(config === undefined ? {} : { config }), configPending: names(raw.configPending), configKept: names(raw.configKept), peerSeen, ...(clamped ? { clamped } : {}) };
 	} catch {
 		return undefined;
 	}
 }
 
-function stateFor(snap: AuthSnapshot | undefined, entries: ReadonlyMap<string, AuthEntry>, pending: Readonly<Record<string, readonly string[]>>, failing: Readonly<Record<string, PeerFailure>> = {}): PoolState {
+interface Extra {
+	readonly config?: string | undefined;
+	readonly configPending?: readonly string[];
+	readonly configKept?: readonly string[];
+	readonly peerSeen?: Readonly<Record<string, PeerSeen>>;
+}
+
+function stateFor(snap: AuthSnapshot | undefined, entries: ReadonlyMap<string, AuthEntry>, pending: Readonly<Record<string, readonly string[]>>, failing: Readonly<Record<string, PeerFailure>> = {}, extra: Extra = {}): PoolState {
 	const hashes: Record<string, string> = {};
 	for (const [p, e] of entries) hashes[p] = entryHash(e);
-	return { mtimeMs: snap?.mtimeMs ?? 0, size: snap?.size ?? 0, sha256: sha(snap?.text ?? ""), entries: hashes, pending, failing };
+	return {
+		mtimeMs: snap?.mtimeMs ?? 0,
+		size: snap?.size ?? 0,
+		sha256: sha(snap?.text ?? ""),
+		entries: hashes,
+		pending,
+		failing,
+		...(extra.config === undefined ? {} : { config: extra.config }),
+		configPending: extra.configPending ?? [],
+		configKept: extra.configKept ?? [],
+		peerSeen: extra.peerSeen ?? {},
+	};
+}
+
+/** The multi-account config as it is now, or undefined when there is none or it cannot be read. */
+function currentConfig(l: Layout, profile: string): ConfigView | undefined {
+	try {
+		return readConfigView(l, profile);
+	} catch {
+		return undefined;
+	}
 }
 
 function savePoolState(l: Layout, profile: string, s: PoolState): void {
@@ -145,15 +202,32 @@ function savePoolState(l: Layout, profile: string, s: PoolState): void {
 
 /** True when a peer waits for entries and its backoff has passed. */
 function duePending(s: PoolState, now: number): boolean {
-	return Object.entries(s.pending).some(([peer, list]) => list.length > 0 && (s.failing[peer]?.nextAttemptAt ?? 0) <= now);
+	const waiting = (peer: string): boolean => (s.pending[peer]?.length ?? 0) > 0 || s.configPending.includes(peer);
+	const peers = new Set([...Object.keys(s.pending), ...s.configPending]);
+	return [...peers].some((peer) => waiting(peer) && (s.failing[peer]?.nextAttemptAt ?? 0) <= now);
 }
 
-/** The pooled profile this process runs in, with its peers; undefined when there is nothing to do. */
+/**
+ * True when the profile pushes and pulls on its own. Mirrors
+ * `D.syncsOnItsOwn`: the default profile always does, because its auth.json
+ * is the shared one (L30), although its stored mode stays separate; any other
+ * profile does when it is shared or pooled, and a separate one never does (L21).
+ */
+export function syncsOnItsOwn(profile: string, auth: { readonly mode: string }): boolean {
+	return profile === DEFAULT_PROFILE || auth.mode === "pooled" || auth.mode === "shared";
+}
+
+/** Why a profile does not sync on its own, for a refusal or a status line. */
+function noSyncReason(profile: string, mode: string, what: string): string {
+	return `profile ${profile} is in ${mode} auth mode; only the default profile and shared and pooled profiles ${what} on their own`;
+}
+
+/** The profile this process runs in when it pushes on its own, with its peers; undefined when there is nothing to do. */
 export function pooledProfile(l: Layout, env: Env): { profile: string; peers: readonly string[] } | undefined {
 	const name = currentProfile(l, env).name;
 	if (name !== DEFAULT_PROFILE && !isProfileName(name)) return undefined;
 	const info = loadProfile(l, name);
-	if (info.manifestErrors.length > 0 || info.manifest.auth.mode !== "pooled") return undefined;
+	if (info.manifestErrors.length > 0 || !syncsOnItsOwn(name, info.manifest.auth)) return undefined;
 	const peers = loadConfig(l, env).authSync?.peers ?? [];
 	return peers.length === 0 ? undefined : { profile: name, peers };
 }
@@ -167,6 +241,7 @@ export function poolChanged(l: Layout, profile: string, now: number = Date.now()
 	const s = readPoolState(l, profile, now);
 	// A clamped time is saved by the next sync, so the bound stops moving with the clock.
 	if (s === undefined || s.clamped === true || duePending(s, now)) return true;
+	if (currentConfig(l, profile)?.sha256 !== s.config) return true;
 	const snap = readAuthSnapshot(authTarget(l, profile));
 	if (snap === undefined) return s.size !== 0 || s.sha256 !== sha("");
 	return sha(snap.text) !== s.sha256;
@@ -175,6 +250,8 @@ export function poolChanged(l: Layout, profile: string, now: number = Date.now()
 export interface PeerOutcome {
 	readonly peer: string;
 	readonly sent: readonly string[];
+	/** What the peer did with the multi-account config, when one was sent. */
+	readonly config?: "added" | "replaced" | "kept" | "unchanged";
 	readonly error?: string;
 	/** Set when the peer is failing and its backoff has not passed: nothing was tried. */
 	readonly retryAt?: number;
@@ -188,21 +265,26 @@ export interface SyncResult {
 export interface SyncOptions {
 	readonly env: Env;
 	readonly run: SshRunner;
+	/** The home directory pushed paths are rewritten from; HOME or the OS home when absent. */
+	readonly home?: string;
 	/** The clock; Date.now when absent. */
 	readonly now?: () => number;
 }
 
 /**
- * `pi-profile auth sync`: push the OAuth entries of a pooled profile that
- * changed since the saved state to every configured peer. The peer merges by
- * later expiry, never with --force. The first run records a baseline and
+ * `pi-profile auth sync`: push the OAuth entries of a profile that syncs on
+ * its own (`syncsOnItsOwn`) that changed since the saved state to every
+ * configured peer. The peer merges by
+ * newest login (L26), never with --force. The first run records a baseline and
  * sends nothing, so turning pooled mode on does not copy every login at once.
  */
 export function syncPooled(l: Layout, profile: string, opts: SyncOptions): SyncResult {
 	const info = loadProfile(l, profile);
 	const mode = info.manifest.auth.mode;
-	if (info.manifestErrors.length > 0 || mode !== "pooled") throw new Refusal(`profile ${profile} is not in pooled auth mode; only pooled profiles push credentials on their own`);
+	const pushKeys = info.manifest.auth.pushKeys === true;
+	if (info.manifestErrors.length > 0 || !syncsOnItsOwn(profile, info.manifest.auth)) throw new Refusal(noSyncReason(profile, mode, "push credentials"));
 	const peers = loadConfig(l, opts.env).authSync?.peers ?? [];
+	const home = opts.home ?? opts.env["HOME"] ?? homedir();
 	const dir = authPoolStateDir(l);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	const now = opts.now ?? Date.now;
@@ -211,52 +293,79 @@ export function syncPooled(l: Layout, profile: string, opts: SyncOptions): SyncR
 		// Read-only: waits for Pi, never breaks its lock.
 		const snap = withPiAuthLocks(locks, () => readAuthSnapshot(path));
 		const entries = readableEntries(snap?.text ?? "", path);
+		const view = currentConfig(l, profile);
 		const before = readPoolState(l, profile, now());
+		const hashes = new Map([...entries].filter(([, e]) => e.type === "oauth").map(([p, e]) => [p, entryHash(e)] as const));
+		// Dates each login by when it was last written here (the file's mtime for one Pi just wrote).
+		const writes = stampEntries(l, profile, hashes, snap?.mtimeMs ?? now());
 		if (before === undefined) {
-			savePoolState(l, profile, stateFor(snap, entries, {}));
+			savePoolState(l, profile, stateFor(snap, entries, {}, {}, { config: view?.sha256 }));
 			return { baseline: true, peers: [] };
 		}
 		const changed = [...entries].filter(([p, e]) => before.entries[p] !== entryHash(e)).map(([p]) => p);
+		const configChanged = view !== undefined && view.sha256 !== before.config;
 		const pending: Record<string, string[]> = {};
 		const failing: Record<string, PeerFailure> = {};
+		const configPending: string[] = [];
+		const configKept = new Set(before.configKept);
 		const outcomes: PeerOutcome[] = [];
 		for (const peer of peers) {
 			const names = [...new Set([...changed, ...(before.pending[peer] ?? [])])].sort();
 			const send = new Map<string, AuthEntry>();
 			for (const p of names) {
 				const e = entries.get(p);
-				if (e !== undefined && autoPush(mode, e)) send.set(p, e);
+				// A key Pi would run as a shell command is never sent on its own: the peer refuses it, and the whole push with it.
+				if (e !== undefined && profilePush(profile, mode, pushKeys, e) && !isCommandKey(e)) send.set(p, e);
 			}
 			const was = before.failing[peer];
-			if (send.size === 0) {
+			const sendConfigNow = view !== undefined && (configChanged || before.configPending.includes(peer));
+			if (send.size === 0 && !sendConfigNow) {
 				outcomes.push({ peer, sent: [] });
 				continue;
 			}
 			const t = now();
 			if (was !== undefined && t < was.nextAttemptAt) {
 				// Still backing off: keep the entries and the failure for a later run.
-				pending[peer] = [...send.keys()];
+				if (send.size > 0) pending[peer] = [...send.keys()];
+				if (sendConfigNow) configPending.push(peer);
 				failing[peer] = was;
 				outcomes.push({ peer, sent: [], error: was.lastError, retryAt: was.nextAttemptAt });
 				continue;
 			}
-			try {
-				sendEntries(peer, profile, send, false, opts.run);
-				outcomes.push({ peer, sent: [...send.keys()] });
-			} catch (error) {
-				const message = printable((error as Error).message).slice(0, MAX_ERROR);
-				const failures = (was?.failures ?? 0) + 1;
-				pending[peer] = [...send.keys()];
-				failing[peer] = { failures, lastFailedAt: t, nextAttemptAt: t + retryDelay(failures), lastError: message };
-				outcomes.push({ peer, sent: [], error: message });
+			let error: string | undefined;
+			let sent: string[] = [];
+			if (send.size > 0) {
+				try {
+					sendEntries(peer, profile, send, false, opts.run, false, new Map(Object.entries(writes)));
+					sent = [...send.keys()];
+				} catch (e) {
+					error = printable((e as Error).message).slice(0, MAX_ERROR);
+					pending[peer] = [...send.keys()];
+				}
 			}
+			let config: PeerOutcome["config"];
+			if (sendConfigNow) {
+				try {
+					config = sendConfig(peer, profile, configPayloadText(view, home), opts.run);
+					if (config === "kept") configKept.add(peer);
+					else configKept.delete(peer);
+				} catch (e) {
+					error ??= printable((e as Error).message).slice(0, MAX_ERROR);
+					configPending.push(peer);
+				}
+			}
+			if (error !== undefined) {
+				const failures = (was?.failures ?? 0) + 1;
+				failing[peer] = { failures, lastFailedAt: t, nextAttemptAt: t + retryDelay(failures), lastError: error };
+				outcomes.push({ peer, sent: [], ...(config === undefined ? {} : { config }), error });
+			} else outcomes.push({ peer, sent, ...(config === undefined ? {} : { config }) });
 		}
-		savePoolState(l, profile, stateFor(snap, entries, pending, failing));
+		savePoolState(l, profile, stateFor(snap, entries, pending, failing, { config: view?.sha256, configPending, configKept: [...configKept].filter((p) => peers.includes(p)), peerSeen: before.peerSeen }));
 		return { baseline: false, peers: outcomes };
 	});
 }
 
-/** Record the first baseline for a pooled profile, if none is saved. `lockWaitMs` bounds the wait for a Pi holding auth.json's lock. */
+/** Record the first baseline for a profile that syncs on its own, if none is saved. `lockWaitMs` bounds the wait for a Pi holding auth.json's lock. */
 export function recordBaseline(l: Layout, profile: string, lockWaitMs?: number): boolean {
 	if (readPoolState(l, profile) !== undefined) return false;
 	const dir = authPoolStateDir(l);
@@ -266,28 +375,28 @@ export function recordBaseline(l: Layout, profile: string, lockWaitMs?: number):
 		const { path, locks } = authFiles(l, profile);
 		// Read-only, and run from session_start: waits briefly, never breaks Pi's lock.
 		const snap = withPiAuthLocks(locks, () => readAuthSnapshot(path), { waitMs: lockWaitMs });
-		savePoolState(l, profile, stateFor(snap, readableEntries(snap?.text ?? "", path), {}));
+		savePoolState(l, profile, stateFor(snap, readableEntries(snap?.text ?? "", path), {}, {}, { config: currentConfig(l, profile)?.sha256 }));
 		return true;
 	});
 }
 
 /**
- * `pi-profile auth status`: one line per configured peer of a pooled
- * profile, with entries waiting for it and its last error. Names and
+ * `pi-profile auth status`: one line per configured peer of a profile that
+ * syncs on its own, with entries waiting for it and its last error. Names and
  * times only; the state holds no credentials.
  */
 export function authSyncStatus(l: Layout, profile: string, env: Env): string[] {
 	const info = loadProfile(l, profile);
 	const mode = info.manifest.auth.mode;
-	if (info.manifestErrors.length > 0 || mode !== "pooled") return [`${profile}: ${mode} auth mode; only pooled profiles sync on their own`];
+	if (info.manifestErrors.length > 0 || !syncsOnItsOwn(profile, info.manifest.auth)) return [`${profile}: ${mode} auth mode; only the default profile and shared and pooled profiles sync on their own`];
 	const peers = loadConfig(l, env).authSync?.peers ?? [];
 	if (peers.length === 0) return [`${profile}: no peers; add authSync.peers to config.json`];
 	const s = readPoolState(l, profile);
 	if (s === undefined) return [`${profile}: no sync yet`];
 	return peers.map((peer) => {
-		const waiting = s.pending[peer] ?? [];
+		const waiting = [...(s.pending[peer] ?? []), ...(s.configPending.includes(peer) ? ["multi-account config"] : [])];
 		const f = s.failing[peer];
-		if (f === undefined) return waiting.length === 0 ? `${peer}: up to date` : `${peer}: waiting for ${waiting.join(", ")}`;
+		if (f === undefined) return waiting.length === 0 ? `${peer}: up to date${s.configKept.includes(peer) ? " (it kept its own, newer multi-account config)" : ""}` : `${peer}: waiting for ${waiting.join(", ")}`;
 		const when = (t: number): string => new Date(t).toISOString();
 		return `${peer}: failing (${String(f.failures)} in a row, last at ${when(f.lastFailedAt)}); next try after ${when(f.nextAttemptAt)}; waiting for ${waiting.join(", ") || "nothing"}; last error: ${f.lastError}`;
 	});
@@ -295,6 +404,78 @@ export function authSyncStatus(l: Layout, profile: string, env: Env): string[] {
 
 export function syncArgs(profile: string): string[] {
 	return ["auth", "sync", "--profile", profile, "--quiet"];
+}
+
+export function pullPeersArgs(profile: string): string[] {
+	return ["auth", "pull-peers", "--profile", profile, "--quiet"];
+}
+
+export interface PullPeersResult {
+	readonly peers: ReadonlyArray<{ readonly peer: string; readonly outcomes: readonly string[]; readonly error?: string }>;
+}
+
+/**
+ * `pi-profile auth pull-peers`: before this host spends a refresh token, take
+ * any login that was written later from each peer (the merge takes the
+ * newest login, L26). An API key is taken only when the profile sets `auth.pushKeys`. Records the expiry
+ * times the peers hold, for `doctor`. A peer that cannot be reached is skipped.
+ */
+export function pullPeers(l: Layout, profile: string, opts: { env: Env; run: SshRunner; now?: () => number }): PullPeersResult {
+	const info = loadProfile(l, profile);
+	if (info.manifestErrors.length > 0 || !syncsOnItsOwn(profile, info.manifest.auth)) throw new Refusal(noSyncReason(profile, info.manifest.auth.mode, "pull from peers"));
+	const peers = loadConfig(l, opts.env).authSync?.peers ?? [];
+	const now = opts.now ?? Date.now;
+	const seen: Record<string, PeerSeen> = {};
+	const results: Array<{ peer: string; outcomes: string[]; error?: string }> = [];
+	for (const peer of peers) {
+		try {
+			const r = pullAuth(l, peer, { profile, oauthOnly: info.manifest.auth.pushKeys !== true, run: opts.run });
+			seen[peer] = { at: now(), expires: r.seen };
+			results.push({ peer, outcomes: r.outcomes.map((o) => `${o.provider}: ${o.outcome}`) });
+		} catch (error) {
+			results.push({ peer, outcomes: [], error: printable((error as Error).message).slice(0, MAX_ERROR) });
+		}
+	}
+	const dir = authPoolStateDir(l);
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	withProfileLock(dir, () => {
+		const s = readPoolState(l, profile, now());
+		if (s !== undefined) savePoolState(l, profile, { ...s, peerSeen: { ...s.peerSeen, ...seen } });
+	});
+	return { peers: results };
+}
+
+/** What `doctor` says about a profile that syncs on its own: pending pushes and drift against the peers at the last check. Offline: reads state only. */
+export function driftFindings(l: Layout, profile: string, env: Env): string[] {
+	const info = loadProfile(l, profile);
+	if (info.manifestErrors.length > 0 || !syncsOnItsOwn(profile, info.manifest.auth)) return [];
+	const peers = loadConfig(l, env).authSync?.peers ?? [];
+	const s = readPoolState(l, profile);
+	if (peers.length === 0 || s === undefined) return [];
+	const out: string[] = [];
+	let local = new Map<string, AuthEntry>();
+	try {
+		const path = authTarget(l, profile);
+		local = readableEntries(readAuthSnapshot(path)?.text ?? "", path);
+	} catch {
+		// An unreadable auth file is reported by the other checks.
+	}
+	for (const peer of peers) {
+		const waiting = s.pending[peer] ?? [];
+		if (waiting.length > 0) out.push(`auth sync: ${peer} has not received ${waiting.join(", ")}${s.failing[peer] === undefined ? "" : ` (${s.failing[peer].lastError})`}`);
+		if (s.configPending.includes(peer)) out.push(`auth sync: ${peer} has not received pi-multi-account/config.json`);
+		if (s.configKept.includes(peer)) out.push(`config drift: ${peer} kept its own, newer pi-multi-account/config.json; the two differ`);
+		const seen = s.peerSeen[peer];
+		if (seen === undefined) continue;
+		const when = new Date(seen.at).toISOString();
+		for (const [p, expires] of Object.entries(seen.expires)) {
+			const mine = local.get(p);
+			if (mine === undefined) out.push(`expiry drift: ${peer} holds a login for ${p} that this host lacks (checked ${when})`);
+			else if (mine.type === "oauth" && mine.expires < expires) out.push(`expiry drift: ${peer} holds a ${p} login that expires later than this host's (checked ${when}); run: pi-profile auth pull ${peer} --profile ${profile}`);
+			else if (mine.type === "oauth" && mine.expires > expires) out.push(`expiry drift: ${peer} holds a ${p} login that expires earlier than this host's (checked ${when})`);
+		}
+	}
+	return out.map((m) => printable(m));
 }
 
 export interface PoolDeps {
@@ -305,7 +486,7 @@ export interface PoolDeps {
 /** How long session start waits for Pi's auth.json lock before skipping; the sync records a baseline later. */
 const START_LOCK_WAIT_MS = 250;
 
-/** The extension's `session_start` work: a pooled profile's first baseline. Never throws and never waits long. */
+/** The extension's `session_start` work: the first baseline of a profile that syncs on its own. Never throws and never waits long. */
 export function authPoolOnSessionStart(env: Env): boolean {
 	try {
 		const l = layoutFromEnv(env);
@@ -316,9 +497,96 @@ export function authPoolOnSessionStart(env: Env): boolean {
 	}
 }
 
+/** Pi event-bus channels pi-multi-account emits on. Payload: `{ provider, kind }` only; never a token. */
+export const CREDENTIAL_CHANGED_CHANNEL = "pi-multi-account:credential-changed";
+/** Emitted just before pi-multi-account refreshes a login: take any newer login from the peers first. */
+export const CREDENTIAL_REFRESH_CHANNEL = "pi-multi-account:credential-refresh-due";
+export const CHANGE_KINDS: readonly string[] = ["refresh", "login", "invalidated"];
+
+/** Wait this long after the last change before pushing, so a burst of refreshes is one push. */
+export const DEBOUNCE_MS = 30_000;
+/** How often the `auth.json` hash is checked for changes pi-multi-account did not announce. */
+export const POLL_MS = 60_000;
+
+export interface AutoSyncDeps extends PoolDeps {
+	readonly debounceMs?: number;
+	readonly pollMs?: number;
+}
+
+export interface AutoSync {
+	/** An event-bus payload. Only a known `kind` and a valid `provider` count; nothing else is read or kept. */
+	readonly onChange: (payload: unknown) => boolean;
+	/** Take newer logins from the peers (detached `auth pull-peers`). */
+	readonly pullNow: () => boolean;
+	readonly stop: () => void;
+}
+
 /**
- * The extension's `session_shutdown` work. When this is a pooled profile with
- * peers and its auth.json changed, start `pi-profile auth sync` detached, as
+ * The extension's live auto-sync for a profile that syncs on its own (the
+ * default profile, or a shared or pooled one):
+ * a change event starts a debounced detached `auth sync`, and a fallback poll
+ * of the `auth.json` hash covers changes made outside pi-multi-account. The
+ * detached run finds what changed by hash, so the event's payload is not
+ * passed on: no token can reach argv, a log or a diagnostic through it.
+ * Never throws and never blocks.
+ */
+export function startAutoSync(env: Env, deps: AutoSyncDeps = {}): AutoSync | undefined {
+	let l: Layout;
+	let p: ReturnType<typeof pooledProfile>;
+	try {
+		l = layoutFromEnv(env);
+		p = pooledProfile(l, env);
+	} catch {
+		return undefined;
+	}
+	if (p === undefined) return undefined;
+	const profile = p.profile;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const launch = (args: readonly string[]): boolean => {
+		try {
+			const node = nodeExecPath(deps.runtime ?? currentRuntime());
+			if (node === undefined) return false;
+			launchCli(l, env, node, args, deps.spawn);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const schedule = (): void => {
+		if (timer !== undefined) return;
+		timer = setTimeout(() => {
+			timer = undefined;
+			launch(syncArgs(profile));
+		}, deps.debounceMs ?? DEBOUNCE_MS);
+		timer.unref();
+	};
+	const poll = setInterval(() => {
+		try {
+			if (poolChanged(l, profile)) schedule();
+		} catch {
+			// A held lock or a damaged file: the next poll tries again.
+		}
+	}, deps.pollMs ?? POLL_MS);
+	poll.unref();
+	return {
+		onChange: (payload) => {
+			const v = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : {};
+			if (typeof v["provider"] !== "string" || !NAME.test(v["provider"]) || typeof v["kind"] !== "string" || !CHANGE_KINDS.includes(v["kind"])) return false;
+			schedule();
+			return true;
+		},
+		pullNow: () => launch(pullPeersArgs(profile)),
+		stop: () => {
+			if (timer !== undefined) clearTimeout(timer);
+			timer = undefined;
+			clearInterval(poll);
+		},
+	};
+}
+
+/**
+ * The extension's `session_shutdown` work. When this profile syncs on its own,
+ * has peers, and its auth.json changed, start `pi-profile auth sync` detached, as
  * auto-backup does. Never throws and never waits: a broken config, a held
  * lock or a failed spawn must not stop Pi. Returns whether a sync started.
  */

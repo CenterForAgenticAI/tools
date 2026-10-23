@@ -119,6 +119,27 @@ def Laws.pooled_pushes_logins(f, s, e):
 def Laws.separate_never_auto_pushes(f, s, c):
   {==}
 
+def Laws.default_syncs_on_its_own(m):
+  {==}
+
+def Laws.default_pushes_logins(m, f, s, e):
+  {==}
+
+def Laws.default_keys_need_flag(m, s, k):
+  {==}
+
+def Laws.named_separate_never_syncs():
+  {==}
+
+def Laws.named_push_follows_mode(m, f, s, c):
+  match m:
+    case N.Shared{}:
+      {==}
+    case N.Separate{}:
+      {==}
+    case N.Pooled{}:
+      {==}
+
 # Lemma for L26: no number is before itself.
 law lt_irrefl:
   for n: Nat

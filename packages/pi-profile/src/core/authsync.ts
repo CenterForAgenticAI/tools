@@ -1,8 +1,10 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { isatty } from "node:tty";
 import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readdirSync, readlinkSync, readSync, realpathSync, rmdirSync, unlinkSync, writeSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { authPath, inspectAuth } from "./auth.ts";
+import { clampWriteTime, recordWrite, stampEntries } from "./authtime.ts";
 import { stamp } from "./fsutil.ts";
 import { clearBreakerIfUnchanged, withProfileLock } from "./lock.ts";
 import type { AuthMode } from "./manifest.ts";
@@ -136,6 +138,11 @@ export function entryObject(e: AuthEntry): Record<string, unknown> {
 	return Object.fromEntries(pairs);
 }
 
+/** SHA-256 of an entry's canonical JSON. Hashes are kept in state; the entry itself never is. */
+export function entryHash(e: AuthEntry): string {
+	return createHash("sha256").update(JSON.stringify(entryObject(e))).digest("hex");
+}
+
 function sameEntry(a: AuthEntry, b: AuthEntry): boolean {
 	return JSON.stringify(entryObject(a)) === JSON.stringify(entryObject(b));
 }
@@ -149,12 +156,29 @@ function parseJson(source: string, what: string): unknown {
 	}
 }
 
+export interface Payload {
+	readonly entries: Map<string, AuthEntry>;
+	/** When the sender last wrote each OAuth entry (ms); absent from an older sender. */
+	readonly writes: Map<string, number>;
+}
+
+const OLD_PAYLOAD_SHAPE = "auth payload must be { schemaVersion: 1, entries: { PROVIDER: entry } }";
+
 /** Parse a transfer payload `{ schemaVersion: 1, entries: { PROVIDER: entry } }`, checking every entry. */
 export function parsePayload(source: string, now: number = Date.now()): Map<string, AuthEntry> {
+	return parsePayloadFull(source, now).entries;
+}
+
+/**
+ * Like parsePayload, and also the optional `writes: { PROVIDER: ms }` the sender
+ * adds. A time is cut back to now plus 5 minutes, so a
+ * sender with a far-ahead clock cannot win every later merge.
+ */
+export function parsePayloadFull(source: string, now: number = Date.now()): Payload {
 	if (Buffer.byteLength(source) > MAX_PAYLOAD_BYTES) throw new Refusal(`auth payload is larger than ${String(MAX_PAYLOAD_BYTES)} bytes`);
 	const raw = parseJson(source, "auth payload");
-	const shape = "auth payload must be { schemaVersion: 1, entries: { PROVIDER: entry } }";
-	if (!isRecord(raw) || raw.schemaVersion !== 1 || Object.keys(raw).some((k) => k !== "schemaVersion" && k !== "entries")) throw new Refusal(shape);
+	const shape = OLD_PAYLOAD_SHAPE;
+	if (!isRecord(raw) || raw.schemaVersion !== 1 || Object.keys(raw).some((k) => k !== "schemaVersion" && k !== "entries" && k !== "writes")) throw new Refusal(shape);
 	const entries = raw.entries;
 	if (!isRecord(entries)) throw new Refusal(shape);
 	const keys = Object.keys(entries);
@@ -166,7 +190,16 @@ export function parsePayload(source: string, now: number = Date.now()): Map<stri
 		if (e.type === "oauth" && e.expires > now + MAX_EXPIRES_AHEAD_MS) throw new Refusal(`auth payload: ${p}: expires is more than a year away`);
 		out.set(p, e);
 	}
-	return out;
+	const writes = new Map<string, number>();
+	if (raw.writes !== undefined) {
+		if (!isRecord(raw.writes)) throw new Refusal("auth payload: writes must be an object of times");
+		for (const [p, v] of Object.entries(raw.writes)) {
+			const at = clampWriteTime(v, now);
+			if (!PROVIDER.test(p) || at === undefined) throw new Refusal("auth payload: writes must be an object of times");
+			if (out.get(p)?.type === "oauth") writes.set(p, at);
+		}
+	}
+	return { entries: out, writes };
 }
 
 /**
@@ -186,21 +219,40 @@ export function checkCommandKeys(incoming: Entries, allow: boolean): void {
 	}
 }
 
-export function payloadText(entries: Entries): string {
-	return `${JSON.stringify({ schemaVersion: 1, entries: Object.fromEntries([...entries].map(([p, e]) => [p, entryObject(e)])) })}\n`;
+export function payloadText(entries: Entries, writes?: ReadonlyMap<string, number>): string {
+	const times = writes === undefined ? [] : [...writes].filter(([p]) => entries.get(p)?.type === "oauth");
+	return `${JSON.stringify({ schemaVersion: 1, entries: Object.fromEntries([...entries].map(([p, e]) => [p, entryObject(e)])), ...(times.length === 0 ? {} : { writes: Object.fromEntries(times) }) })}\n`;
 }
 
 // ---------------------------------------------------------------- the rules (mirror model/Domain.bend)
+
+/** When each side's copy was written, if known. Both must be known for the newest write to decide. */
+export interface WriteTimes {
+	readonly local?: number | undefined;
+	readonly incoming?: number | undefined;
+}
+
+/** Mirrors `D.takeIncoming` (L26): the later write wins whatever either expiry says; equal writes fall back to the later expiry; a full tie keeps the local copy. */
+export function takeIncoming(lw: number, le: number, iw: number, ie: number): boolean {
+	if (lw < iw) return true;
+	if (iw < lw) return false;
+	return le < ie;
+}
 
 /**
  * Merge an incoming entry into the local one. Mirrors `D.merge`: --force
  * takes the incoming entry (L19); otherwise a local API key is never
  * replaced (L17), an API key never replaces a local OAuth login (L18), and an
- * OAuth login is replaced only by one that expires later.
+ * OAuth login is replaced by the newest login (L26): the one written later,
+ * whatever either expiry says. With equal write times, or when either side has
+ * no write time, the one that expires later; a full tie keeps the local login.
  */
-export function mergeEntry(local: AuthEntry, incoming: AuthEntry, force: boolean): AuthEntry {
+export function mergeEntry(local: AuthEntry, incoming: AuthEntry, force: boolean, times: WriteTimes = {}): AuthEntry {
 	if (force) return incoming;
-	if (local.type === "oauth" && incoming.type === "oauth") return local.expires < incoming.expires ? incoming : local;
+	if (local.type === "oauth" && incoming.type === "oauth") {
+		if (times.local !== undefined && times.incoming !== undefined) return takeIncoming(times.local, local.expires, times.incoming, incoming.expires) ? incoming : local;
+		return local.expires < incoming.expires ? incoming : local;
+	}
 	// An API key on either side: the local entry stays (L17 for a local key, L18 for a local login).
 	return local;
 }
@@ -210,9 +262,29 @@ export function authFileFor(mode: AuthMode): "shared" | "profile" {
 	return mode === "shared" ? "shared" : "profile";
 }
 
-/** Whether pooled auto-push sends an entry. Mirrors `D.autoPush`: OAuth only (L20), pooled mode only (L21). */
-export function autoPush(mode: AuthMode, e: AuthEntry): boolean {
-	return mode === "pooled" && e.type === "oauth";
+/**
+ * Whether automatic push sends an entry. Mirrors `D.autoPush` and
+ * `D.pushesCred`. A shared or pooled profile pushes a changed OAuth login (L21)
+ * whichever machine logged in or refreshed it: no machine owns a login. A
+ * separate profile pushes nothing (L21). An API key goes only when the
+ * profile's `auth.pushKeys` flag is on (L20). Pushes never pass --force, so the
+ * receiver takes the login that was written later (L26).
+ */
+export function autoPush(mode: AuthMode, pushKeys: boolean, e: AuthEntry): boolean {
+	if (mode === "separate") return false;
+	return e.type === "oauth" || pushKeys;
+}
+
+/**
+ * Whether automatic push sends an entry of this profile. Mirrors
+ * `D.profilePush` (L30): the default profile owns the shared auth.json, so it
+ * pushes like a shared profile whatever its stored mode (always separate): an
+ * OAuth login always, an API key only with `auth.pushKeys` (L20). Any other
+ * profile follows its mode (`autoPush`), so a named separate profile pushes
+ * nothing (L21).
+ */
+export function profilePush(profile: string, mode: AuthMode, pushKeys: boolean, e: AuthEntry): boolean {
+	return profile === DEFAULT_PROFILE ? autoPush("shared", pushKeys, e) : autoPush(mode, pushKeys, e);
 }
 
 // ---------------------------------------------------------------- the file
@@ -549,15 +621,27 @@ export interface Outcome {
 	readonly outcome: OutcomeKind;
 }
 
+/**
+ * When the local login was written, as far as the merge may trust it. A local
+ * login that has already expired has no trusted write time (a fresh file time
+ * on a dead copy only says it was copied or touched), so the merge falls back
+ * to the later expiry and a live incoming login replaces it (CR-MTIME-DATING).
+ */
+function writtenAt(local: AuthEntry, at: number | undefined, now: number): number | undefined {
+	return local.type === "oauth" && local.expires <= now ? undefined : at;
+}
+
 /** Merge incoming entries by provider key. Local entries for other providers stay as they are. */
-function mergeInto(local: Map<string, unknown>, incoming: Entries, force: boolean, path: string): { next: Map<string, unknown>; outcomes: Outcome[]; changed: boolean } {
+function mergeInto(local: Map<string, unknown>, incoming: Entries, force: boolean, path: string, times: { local: Readonly<Record<string, number>>; incoming: ReadonlyMap<string, number>; now: number }): { next: Map<string, unknown>; outcomes: Outcome[]; changed: boolean; written: string[] } {
 	const next = new Map(local);
 	const outcomes: Outcome[] = [];
+	const written: string[] = [];
 	let changed = false;
 	for (const [provider, inc] of incoming) {
 		if (!local.has(provider)) {
 			next.set(provider, entryObject(inc));
 			outcomes.push({ provider, outcome: "added" });
+			written.push(provider);
 			changed = true;
 			continue;
 		}
@@ -565,15 +649,16 @@ function mergeInto(local: Map<string, unknown>, incoming: Entries, force: boolea
 		const current = parseEntry(local.get(provider), provider, path);
 		if (sameEntry(current, inc)) {
 			outcomes.push({ provider, outcome: "unchanged" });
-		} else if (mergeEntry(current, inc, force) === inc) {
+		} else if (mergeEntry(current, inc, force, { local: writtenAt(current, times.local[provider], times.now), incoming: times.incoming.get(provider) }) === inc) {
 			next.set(provider, entryObject(inc));
 			outcomes.push({ provider, outcome: "replaced" });
+			written.push(provider);
 			changed = true;
 		} else {
 			outcomes.push({ provider, outcome: "kept" });
 		}
 	}
-	return { next, outcomes, changed };
+	return { next, outcomes, changed, written };
 }
 
 function writeAll(fd: number, data: string, position: number | null): void {
@@ -664,6 +749,10 @@ export interface ReceiveOptions {
 	readonly lockWaitMs?: number;
 	/** Accept an api_key whose key Pi would run as a shell command. */
 	readonly allowCommandKeys?: boolean;
+	/** When the sender wrote each incoming OAuth entry; the newest write wins a merge. */
+	readonly writes?: ReadonlyMap<string, number>;
+	/** The clock; Date.now when absent. */
+	readonly now?: () => number;
 	/** Test seam: see PiLockOptions. */
 	readonly afterStaleRead?: (lock: string) => void;
 }
@@ -691,13 +780,21 @@ export function receiveAuth(l: Layout, profile: string, incoming: Entries, opts:
 				let fd = openExisting(path, constants.O_RDWR);
 				try {
 					const before = fd === undefined ? "" : readFd(fd, path);
-					const { next, outcomes, changed } = mergeInto(parseLocal(before, path), incoming, force, path);
+					const t = (opts.now ?? Date.now)();
+					const localHashes = new Map([...readableEntries(before, path)].filter(([, e]) => e.type === "oauth").map(([p, e]) => [p, entryHash(e)] as const));
+					const localTimes = stampEntries(l, profile, localHashes, fd === undefined ? t : fstatSync(fd).mtimeMs);
+					const incomingTimes = new Map([...(opts.writes ?? [])].map(([p, v]) => [p, clampWriteTime(v, t)] as const).filter((x): x is [string, number] => x[1] !== undefined));
+					const { next, outcomes, changed, written } = mergeInto(parseLocal(before, path), incoming, force, path, { local: localTimes, incoming: incomingTimes, now: t });
 					if (!changed) return { path, outcomes };
 					const after = `${JSON.stringify(Object.fromEntries(next), null, 2)}\n`;
 					let backup: string | undefined;
 					if (fd === undefined) fd = openNoFollow(path, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL, 0o600);
 					else backup = keepBackup(path, before);
 					overwrite(fd, after);
+					for (const p of written) {
+						const e = incoming.get(p);
+						if (e !== undefined && e.type === "oauth") recordWrite(l, profile, p, entryHash(e), incomingTimes.get(p) ?? t);
+					}
 					if (backup !== undefined) pruneBackups(path);
 					return { path, outcomes, ...(backup === undefined ? {} : { backup }) };
 				} finally {
@@ -715,6 +812,8 @@ function checkProviders(providers: readonly string[] | undefined): void {
 
 export interface ExportResult {
 	readonly entries: Map<string, AuthEntry>;
+	/** When this host last wrote each OAuth entry. */
+	readonly writes: Map<string, number>;
 	/** Providers left out because pi-profile cannot read their entries. */
 	readonly skipped: readonly string[];
 }
@@ -732,12 +831,13 @@ export function exportAuth(l: Layout, profile: string, providers?: readonly stri
 	const local = parseLocal(snap?.text ?? "", path);
 	const entries = new Map<string, AuthEntry>();
 	const skipped: string[] = [];
+	const done = (): ExportResult => ({ entries, skipped, writes: exportWrites(l, profile, snap, path, entries) });
 	if (providers !== undefined && providers.length > 0) {
 		for (const p of providers) {
 			if (!local.has(p)) throw new Refusal(`profile ${profile} has no ${p} entry`);
 			entries.set(p, parseEntry(local.get(p), p, path));
 		}
-		return { entries, skipped };
+		return done();
 	}
 	for (const [p, raw] of local) {
 		try {
@@ -748,7 +848,15 @@ export function exportAuth(l: Layout, profile: string, providers?: readonly stri
 			skipped.push(PROVIDER.test(p) ? p : "(an entry with an unusual name)");
 		}
 	}
-	return { entries, skipped };
+	return done();
+}
+
+/** The write time of each OAuth entry in `entries`, dated from the saved records or the auth file's mtime. */
+function exportWrites(l: Layout, profile: string, snap: AuthSnapshot | undefined, path: string, entries: Entries): Map<string, number> {
+	const all = readableEntries(snap?.text ?? "", path);
+	const hashes = new Map([...all].filter(([, e]) => e.type === "oauth").map(([p, e]) => [p, entryHash(e)] as const));
+	const times = stampEntries(l, profile, hashes, snap?.mtimeMs ?? Date.now());
+	return new Map(Object.entries(times).filter(([p]) => entries.get(p)?.type === "oauth"));
 }
 
 // ---------------------------------------------------------------- transport
@@ -815,6 +923,8 @@ export interface TransferOptions {
 	readonly force?: boolean;
 	/** Accept (pull) or let the peer accept (push) an api_key Pi would run as a shell command. */
 	readonly allowCommandKeys?: boolean;
+	/** Pull only OAuth logins; anything else the peer sends is dropped (automatic pulls never take API keys). */
+	readonly oauthOnly?: boolean;
 	readonly run: SshRunner;
 }
 
@@ -825,9 +935,11 @@ export interface PushResult {
 }
 
 /** Send entries to `host`'s profile, which merges them with `auth receive`. Returns the receiver's report lines. */
-export function sendEntries(host: string, profile: string, entries: Entries, force: boolean, run: SshRunner, allowCommandKeys = false): string[] {
+export function sendEntries(host: string, profile: string, entries: Entries, force: boolean, run: SshRunner, allowCommandKeys = false, writes?: ReadonlyMap<string, number>): string[] {
 	const args = authSshArgs(host, ["receive", "--profile", profile, ...(force ? ["--force"] : []), ...(allowCommandKeys ? ["--allow-command-keys"] : [])]);
-	const r = run(args, payloadText(entries));
+	let r = run(args, payloadText(entries, writes));
+	// A pi-profile older than the write times refuses a payload with a `writes` field: send it again without, and the peer merges by expiry.
+	if (writes !== undefined && writes.size > 0 && r.status !== 0 && r.stderr.includes(OLD_PAYLOAD_SHAPE)) r = run(args, payloadText(entries));
 	const why = failure(r);
 	if (why !== undefined) throw new Error(`${host}: auth receive failed: ${why}`);
 	return lines(r.stdout);
@@ -836,14 +948,16 @@ export function sendEntries(host: string, profile: string, entries: Entries, for
 /** Send this profile's entries to `host`, which merges them with `auth receive` (`auth push`). */
 export function pushAuth(l: Layout, host: string, opts: TransferOptions): PushResult {
 	checkHost(host);
-	const { entries, skipped } = exportAuth(l, opts.profile, opts.providers);
+	const { entries, skipped, writes } = exportAuth(l, opts.profile, opts.providers);
 	if (entries.size === 0) throw new Refusal(`profile ${opts.profile} has no credentials to push`);
-	return { lines: sendEntries(host, opts.profile, entries, opts.force ?? false, opts.run, opts.allowCommandKeys ?? false), skipped };
+	return { lines: sendEntries(host, opts.profile, entries, opts.force ?? false, opts.run, opts.allowCommandKeys ?? false, writes), skipped };
 }
 
 export interface PullResult extends ReceiveResult {
 	/** The peer's warnings, printable. */
 	readonly warnings: readonly string[];
+	/** The expiry time of each OAuth login the peer holds; times only, never a token. */
+	readonly seen: Readonly<Record<string, number>>;
 }
 
 /**
@@ -861,8 +975,9 @@ export function pullAuth(l: Layout, host: string, opts: TransferOptions): PullRe
 	const why = failure(r);
 	if (why !== undefined) throw new Error(`${host}: auth export failed: ${why}`);
 	let incoming: Map<string, AuthEntry>;
+	let writes: Map<string, number>;
 	try {
-		incoming = parsePayload(r.stdout);
+		({ entries: incoming, writes } = parsePayloadFull(r.stdout));
 	} catch (error) {
 		throw new Refusal(`${host}: ${(error as Error).message}`);
 	}
@@ -875,10 +990,19 @@ export function pullAuth(l: Layout, host: string, opts: TransferOptions): PullRe
 			warnings.push(`${p}: ignored: not requested`);
 		}
 	}
+	const seen: Record<string, number> = {};
+	for (const [p, e] of incoming) if (e.type === "oauth") seen[p] = e.expires;
+	if (opts.oauthOnly === true) {
+		for (const [p, e] of [...incoming]) {
+			if (e.type === "oauth") continue;
+			incoming.delete(p);
+			warnings.push(`${p}: ignored: not an OAuth login`);
+		}
+	}
 	try {
 		checkCommandKeys(incoming, opts.allowCommandKeys ?? false);
 	} catch (error) {
 		throw new Refusal(`${host}: ${(error as Error).message}`);
 	}
-	return { ...receiveAuth(l, opts.profile, incoming, { force: opts.force ?? false, allowCommandKeys: opts.allowCommandKeys ?? false }), warnings };
+	return { ...receiveAuth(l, opts.profile, incoming, { force: opts.force ?? false, allowCommandKeys: opts.allowCommandKeys ?? false, writes }), warnings, seen };
 }
