@@ -1,0 +1,44 @@
+{
+  "version": "0.1.0",
+  "description": "Kleya server runtime that runs beside pi-durable. Skeleton (WP-0): subpaths only, no root barrel.",
+  "type": "module",
+  "exports": {
+    "./grants": "./src/grants.ts",
+    "./context": "./src/context.ts",
+    "./feed": "./src/feed.ts",
+    "./host": "./src/host.ts",
+    "./host/chord": "./src/host/chord.ts",
+    "./tools": "./src/tools.ts",
+    "./tools/openapi": "./src/tools/openapi.ts",
+    "./interaction": "./src/interaction.ts",
+    "./exec": "./src/exec.ts",
+    "./egress": "./src/egress.ts",
+    "./events": "./src/events.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "name": "@centerforagenticai/kleya-server",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/kleya-server"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/kleya-server#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@centerforagenticai/kleya-client": "0.1.0",
+    "@earendil-works/chord": "1.3.0",
+    "@earendil-works/pi-durable": "1.3.0"
+  }
+}
