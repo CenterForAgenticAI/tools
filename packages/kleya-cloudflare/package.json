@@ -1,0 +1,34 @@
+{
+  "version": "0.1.0",
+  "description": "Kleya host for Cloudflare Workers and Durable Objects (WP-14): one direct Durable Object per root conversation.",
+  "type": "module",
+  "exports": {
+    "./object": "./src/object.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "name": "@centerforagenticai/kleya-cloudflare",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/kleya-cloudflare"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/kleya-cloudflare#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@centerforagenticai/kleya-client": "0.1.0",
+    "@centerforagenticai/kleya-server": "0.1.0",
+    "@earendil-works/chord": "1.3.0",
+    "@earendil-works/pi-durable": "1.3.0"
+  }
+}
