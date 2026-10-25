@@ -21,6 +21,9 @@ body:
         - "@centerforagenticai/pi-intent"
         - "@centerforagenticai/agent-definitions"
         - "@centerforagenticai/pi-profile"
+        - "@centerforagenticai/kleya-client"
+        - "@centerforagenticai/kleya-server"
+        - "@centerforagenticai/kleya-cloudflare"
     validations:
       required: true
   - type: input

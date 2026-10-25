@@ -7,6 +7,9 @@ Public releases of [Pi](https://github.com/earendil-works/pi) extensions, servic
 | Package | Kind | Status | What it does |
 | --- | --- | --- | --- |
 | [agent-definitions](packages/agent-definitions) | library | experimental | A portable file format for coding-agent definitions, with its schema, parser, validation, discovery rules and conformance suite. |
+| [kleya-client](packages/kleya-client) | library | experimental | Kleya client for browsers and product frontends: Feed catch-up by cursor and the wire protocol types. |
+| [kleya-cloudflare](packages/kleya-cloudflare) | library | experimental | Kleya host for Cloudflare Workers and Durable Objects: one Durable Object per root conversation. |
+| [kleya-server](packages/kleya-server) | library | experimental | Kleya server runtime that runs beside pi-durable: Feed, context binding, grants and tool contracts. |
 | [pi-adaptive-thinking](packages/pi-adaptive-thinking) | extension | experimental | Lets the agent raise or lower its own thinking effort within configured bounds, with status and bounds commands. |
 | [pi-artifacts](packages/pi-artifacts) | extension | experimental | Cross-device registry and viewer for session documents and browser-viewable media, with a lightweight applet host. |
 | [pi-callbacks](packages/pi-callbacks) | extension | stable | Persistent reminders, polling checks, background scripts, and token-based external callbacks that wake a Pi agent. |

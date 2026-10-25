@@ -1,0 +1,30 @@
+{
+  "version": "0.1.0",
+  "description": "Kleya client: Feed catch-up and protocol types for browsers and product frontends. Skeleton (WP-0).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./protocol": "./src/protocol.ts",
+    "./indexeddb": "./src/indexeddb.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "name": "@centerforagenticai/kleya-client",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CenterForAgenticAI/tools.git",
+    "directory": "packages/kleya-client"
+  },
+  "homepage": "https://github.com/CenterForAgenticAI/tools/tree/main/packages/kleya-client#readme",
+  "bugs": {
+    "url": "https://github.com/CenterForAgenticAI/tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
