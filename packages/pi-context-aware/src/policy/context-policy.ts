@@ -232,7 +232,7 @@ export function createContextPolicyController(
 					}
 					if (parsed.kind === "status") {
 						const resolved = options.resolve(ctx);
-					const folds = ["folds.firstUserMessage", "folds.firstUserMessageMaxTokens"].map((path) => {
+					const folds = ["folds.firstUserMessage", "folds.firstUserMessageMaxTokens", "folds.condensedSkills"].map((path) => {
 						const entry = resolved.byPath.get(path);
 						return `${path}: ${String(entry?.value)} (source: ${entry?.layer ?? "default"})`;
 					});

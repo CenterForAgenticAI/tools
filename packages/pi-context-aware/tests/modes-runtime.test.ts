@@ -802,6 +802,69 @@ test("after resume, a definition naming a restored layer with another rank or pi
 	assert.equal(resumed.runtime.userExit("role").status, "refused");
 });
 
+test("a conflicting definition accepted before restore brings back a pinned layer does not stop its owner re-arming it", async () => {
+	const first = harness();
+	const roleDefinition = definition("overseer", "a", { blockedTools: ["bash"], layer: { name: "role", rank: 0, pinned: true } });
+	const role = first.runtime.defineMode(roleDefinition);
+	assert.ok(role.status === "ok");
+	first.runtime.openPinnedWindow();
+	assert.deepEqual(await role.handle.enter(), { status: "ok" });
+	first.runtime.closePinnedWindow();
+	const switched = harness([]);
+	const squatter = switched.runtime.defineMode(definition("squatter", "b", { layer: { name: "role", rank: 5 } }));
+	assert.ok(squatter.status === "ok", "with no layer restored, another mode may name the layer");
+	switched.runtime.restore(first.entries.slice());
+	assert.equal(switched.runtime.defineMode(roleDefinition).status, "ok", "the owner re-arms the restored pinned layer");
+	assert.deepEqual(switched.runtime.handleToolCall("bash", { command: "ls" }), { block: true, reason: "Tool bash is blocked by mode overseer." });
+	assert.deepEqual(await squatter.handle.enter(), { status: "refused", code: "PINNED_LAYER", message: "The layer holds a pinned mode." });
+	assert.equal(switched.runtime.userExit("role").status, "refused", "the pinned layer cannot be exited while its owner defines it");
+	assert.deepEqual(switched.runtime.defineMode(definition("other", "c", { layer: { name: "role", rank: 0, pinned: true } })), {
+		status: "refused",
+		code: "INVALID_REQUEST",
+		message: "Another mode names this layer with a different rank or pin.",
+	}, "only the restored mode's own definition skips the layer-shape check");
+	assert.deepEqual(switched.runtime.defineMode(definition("overseer", "z", { blockedTools: ["bash"], layer: { name: "role", rank: 0, pinned: true } })), {
+		status: "refused",
+		code: "DUPLICATE_ID",
+		message: "The mode id is already defined in this runtime.",
+	});
+});
+
+test("a definition that copies a restored pinned mode's id but not its owner label cannot re-arm it past a conflicting definition", async () => {
+	const first = harness();
+	const role = first.runtime.defineMode(definition("overseer", "a", { blockedTools: ["bash"], layer: { name: "role", rank: 0, pinned: true } }));
+	assert.ok(role.status === "ok");
+	first.runtime.openPinnedWindow();
+	assert.deepEqual(await role.handle.enter(), { status: "ok" });
+	first.runtime.closePinnedWindow();
+	const switched = harness([]);
+	assert.equal(switched.runtime.defineMode(definition("squatter", "b", { layer: { name: "role", rank: 5 } })).status, "ok");
+	switched.runtime.restore(first.entries.slice());
+	assert.deepEqual(switched.runtime.defineMode(definition("overseer", "z", { blockedTools: ["bash"], layer: { name: "role", rank: 0, pinned: true } })), {
+		status: "refused",
+		code: "OWNER_MISMATCH",
+		message: "The restored mode's owner label or layer does not match.",
+	});
+	assert.equal(switched.runtime.handleToolCall("bash", { command: "ls" }), undefined, "the restored layer stays unarmed");
+});
+
+test("the owner of a restored unpinned layer cannot re-arm it past a conflicting definition, so that mode can still replace it", async () => {
+	const first = harness();
+	const stage = first.runtime.defineMode(definition("build", "a", { blockedTools: ["bash"], layer: { name: "stage", rank: 1 } }));
+	assert.ok(stage.status === "ok");
+	assert.deepEqual(await stage.handle.enter(), { status: "ok" });
+	const switched = harness([]);
+	const deploy = switched.runtime.defineMode(definition("deploy", "b", { layer: { name: "stage", rank: 2 } }));
+	assert.ok(deploy.status === "ok");
+	switched.runtime.restore(first.entries.slice());
+	assert.deepEqual(switched.runtime.defineMode(definition("build", "a", { blockedTools: ["bash"], layer: { name: "stage", rank: 1 } })), {
+		status: "refused",
+		code: "INVALID_REQUEST",
+		message: "Another mode names this layer with a different rank or pin.",
+	});
+	assert.equal(switched.runtime.userExit("stage").status, "ok", "the user can clear the leftover");
+});
+
 test("after resume, an unpinned leftover layer does not stop another mode defining that layer with another rank", async () => {
 	const first = harness();
 	const stage = first.runtime.defineMode(definition("build", "a", { layer: { name: "stage", rank: 1 } }));
@@ -822,3 +885,107 @@ test("supportsContextAwareModeToolPoliciesV1 needs the toolPolicies flag on a mo
 	assert.equal(supportsContextAwareModeToolPoliciesV1({ protocolVersion: 1, modes: { toolPolicies: true } } as unknown as ContextAwareServiceV1), false, "the flag alone is not a modes capability");
 	assert.equal(supportsContextAwareModeToolPoliciesV1(undefined), false);
 });
+
+test("a layer name is one token that /mode exit can type", () => {
+	const h = harness();
+	for (const name of ["my role", "tab\tname", "zero\u200bwidth", "bidi\u202estage", "nb\u00a0sp", "ünïcode", "-lead", ".lead", "x".repeat(65)]) {
+		assert.deepEqual(h.runtime.defineMode(definition(`bad-${h.runtime.layers?.().length ?? 0}-${encodeURIComponent(name)}`, "a", { layer: { name, rank: 1 } })), {
+			status: "refused",
+			code: "INVALID_REQUEST",
+			message: "Mode definition is invalid or exceeds its bounds.",
+		}, JSON.stringify(name));
+	}
+	for (const name of ["stage", "Stage_2", "review.stance", "a-b", "x".repeat(64), "  padded  "]) {
+		assert.equal(h.runtime.defineMode(definition(`ok-${encodeURIComponent(name)}`, "a", { layer: { name, rank: 1 } })).status, "ok", JSON.stringify(name));
+	}
+});
+
+test("replay refuses a state entry whose layer name /mode exit could not type, and keeps the last accepted one", () => {
+	const mode = (id: string, instanceId: string) => ({ id, owner: "a", enteredAt: "2026-10-09T00:00:00.000Z", updatedAt: "2026-10-09T00:00:00.000Z", instanceId });
+	const entry = (layer: string, id: string, instanceId: string) => ({
+		type: "custom",
+		customType: MODE_STATE_ENTRY_TYPE,
+		data: { schemaVersion: 2, layers: [{ layer, rank: 0, pinned: true, mode: mode(id, instanceId) }], updatedAt: "2026-10-09T00:00:00.000Z" },
+	});
+	for (const layer of ["my role", "zero\u200bwidth", "tab\trole"]) {
+		const h = harness([entry("role", "kept", "i-1"), entry(layer, "stuck", "i-2")]);
+		assert.deepEqual(h.runtime.layers?.().map((slot) => [slot.layer, slot.id]), [["role", "kept"]], JSON.stringify(layer));
+	}
+	const padded = harness([entry("  role  ", "trimmed", "i-3")]);
+	assert.deepEqual(padded.runtime.layers?.().map((slot) => slot.layer), ["role"]);
+});
+
+
+test("enter refuses a new layer past the 16-layer cap that replay enforces, and a layer already held may still be replaced", async () => {
+	const h = harness();
+	for (let index = 0; index < 16; index += 1) {
+		const defined = h.runtime.defineMode(definition(`mode-${index}`, "a", { layer: { name: `layer-${index}`, rank: index } }));
+		assert.ok(defined.status === "ok");
+		assert.deepEqual(await defined.handle.enter(), { status: "ok" });
+	}
+	const extra = h.runtime.defineMode(definition("mode-16", "a", { layer: { name: "layer-16", rank: 16 } }));
+	assert.ok(extra.status === "ok");
+	const refusal = await extra.handle.enter();
+	assert.equal(refusal.status, "refused");
+	assert.equal(refusal.status === "refused" ? refusal.code : undefined, "NESTING_LIMIT");
+	assert.equal(h.runtime.layers?.().length, 16);
+	const swap = h.runtime.defineMode(definition("swap", "a", { layer: { name: "layer-3", rank: 3 } }));
+	assert.ok(swap.status === "ok");
+	assert.deepEqual(await swap.handle.enter(), { status: "ok" }, "replacing the mode on a held layer adds no layer");
+	const resumed = harness(h.entries.slice());
+	assert.deepEqual(resumed.runtime.layers?.().map((slot) => slot.id), h.runtime.layers?.().map((slot) => slot.id), "the live state replays unchanged");
+});
+
+test("replay refuses a default layer that a definition could not create, and keeps the last accepted state", () => {
+	const mode = (id: string, instanceId: string) => ({ id, owner: "a", enteredAt: "2026-10-09T00:00:00.000Z", updatedAt: "2026-10-09T00:00:00.000Z", instanceId });
+	const entry = (slot: Record<string, unknown>, id: string, instanceId: string) => ({
+		type: "custom",
+		customType: MODE_STATE_ENTRY_TYPE,
+		data: { schemaVersion: 2, layers: [{ ...slot, mode: mode(id, instanceId) }], updatedAt: "2026-10-09T00:00:00.000Z" },
+	});
+	for (const bad of [{ layer: "default", rank: 0, pinned: true }, { layer: "default", rank: 5 }, { layer: "default", rank: -1 }]) {
+		const h = harness([entry({ layer: "default", rank: 0 }, "kept", "i-1"), entry(bad, "stuck", "i-2")]);
+		assert.deepEqual(h.runtime.layers?.().map((slot) => [slot.layer, slot.id]), [["default", "kept"]], JSON.stringify(bad));
+		assert.equal(h.runtime.defineMode(definition("plain", "b")).status, "ok", "a layerless definition is not blocked");
+	}
+});
+
+
+test("a run that ends while its enter is being committed still ends the run-scoped layer", async () => {
+	for (const hook of ["appendEntry", "sendMessage", "onChange"] as const) {
+		const entries: unknown[] = [];
+		const messages: Message[] = [];
+		const run = new AbortController();
+		let armed = false;
+		const fire = (point: typeof hook): void => {
+			if (armed && point === hook) {
+				armed = false;
+				run.abort();
+			}
+		};
+		const runtime = createContextAwareModesV1({
+			appendEntry: (customType, data) => {
+				entries.push({ type: "custom", customType, data });
+				fire("appendEntry");
+			},
+			sendMessage: (customType, content, details) => {
+				messages.push({ customType, content, details });
+				fire("sendMessage");
+			},
+			entries: () => entries,
+			onChange: () => fire("onChange"),
+		});
+		const stage = runtime.defineMode(definition("build", "a", { layer: { name: "stage", rank: 1 } }));
+		const stance = runtime.defineMode(definition("review", "a", { layer: { name: "stance", rank: 2 } }));
+		assert.ok(stage.status === "ok" && stance.status === "ok");
+		await stage.handle.enter();
+		armed = true;
+		assert.deepEqual(await stance.handle.enter({ until: run.signal }), { status: "ok" }, hook);
+		assert.equal(run.signal.aborted, true, hook);
+		assert.deepEqual(runtime.layers().map((snapshot) => snapshot.id), ["build"], `the run-scoped layer ends when the run aborts inside ${hook}`);
+		assert.deepEqual(messages.slice(-2).map((message) => (message.details as { action: string }).action), ["enter", "exit"], hook);
+		const resumed = createContextAwareModesV1({ appendEntry: () => {}, sendMessage: () => {}, entries: () => entries.slice() });
+		assert.deepEqual(resumed.layers().map((snapshot) => snapshot.id), ["build"], `the stored state ends without the run-scoped layer (${hook})`);
+	}
+});
+

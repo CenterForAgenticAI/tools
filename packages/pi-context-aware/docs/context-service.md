@@ -304,7 +304,9 @@ Each accepted enter or exit appends one `context-aware/mode@2` state entry and s
 
 Modes sit on layers, and one mode is active per layer; see [Layers](#layers). `/mode` lists the active layers, `/mode exit` leaves the highest-ranked layer that is not pinned, and `/mode exit <layer>` leaves the named layer. The active mode is shown in the qualified footer status `caair.context-aware/mode` and in the indicator widget described in [Mode indicator](#mode-indicator).
 
-Modes replay from the active session branch after resume, fork, replacement, and tree navigation. A replayed mode is unavailable until its owner defines the same id, owner label, layer, rank and pin again; redefinition re-arms it without adding a transition. An orphan does not block tools and can always be cleared with `/mode exit <layer>`, even on a pinned layer. A run-scoped mode is not restored. Replay also reads the older `context-aware/mode@1` entry: its current mode lands on the `default` layer.
+Modes replay from the active session branch after resume, fork, replacement, and tree navigation. A replayed mode is unavailable until its owner defines the same id, owner label, layer, rank and pin again; redefinition re-arms it without adding a transition. The owner label is not authenticated: a definition that copies a replayed mode's id and owner label re-arms it, and the real owner's definition then gets `DUPLICATE_ID`. A pinned layer protects against the model and the user, not against another loaded extension. An orphan does not block tools and can always be cleared with `/mode exit <layer>`, even on a pinned layer. A run-scoped mode is not restored. Replay also reads the older `context-aware/mode@1` entry: its current mode lands on the `default` layer. Its nested-away `outer` mode is dropped; it is not restored on any layer.
+
+Downgrade after the first `context-aware/mode@2` write is unsupported. An older runtime reads only `context-aware/mode@1`, so it replays the last such entry on the branch: a mode the user exited after the upgrade comes back, and if its owner defines it again at session start, its tool rules apply. No shadow `mode@1` entry is written.
 
 Each enter gets a random `instanceId`, shown on the snapshot and its `outer`. Use it, not `enteredAt`, to tell one enter from another: `enteredAt` has millisecond precision, so an exit and re-enter can share it. Entering a mode on one layer keeps every other layer's `instanceId`, and replay keeps the persisted one. An entry written before `instanceId` existed gets a stable `legacy-` id, derived from the session entry id of the first state entry of that enter on the branch, so every replay gives the same value; such an entry with no session entry id is refused. Replay also refuses a state entry that reuses an `instanceId` that ended earlier on the branch, gives one `instanceId` to a different enter, or puts one `instanceId` on two layers, and falls back to the last accepted entry, as it does for a malformed field. Transition text is recovered only from the message whose `details.transitionId` matches the accepted state entry, so the message of a refused entry is never resent, and a message Pi delivers at the end of a turn, after later state entries, is still found. For an entry written before `transitionId` existed, replay reads messages without one between that entry and the next state entry. Check `supportsContextAwareModeInstanceIdsV1(service)` to learn, with no mode active, that the producer sets `instanceId`; older producers omit it. Compaction sends one message through the existing successful-compaction owner. It joins every active layer's transition, lowest rank first, without repeating a text two layers share.
 
@@ -330,9 +332,10 @@ if (supportsContextAwareModeLayersV1(service)) {
 }
 ```
 
-- `name` is 1 to 64 characters. `default` is reserved: a definition without `layer` sits on the `default` layer at rank 0, so two such modes replace each other instead of nesting.
+- `name` is 1 to 64 ASCII letters, digits, `_`, `.` or `-`, and starts with a letter or digit, so a user can type it after `/mode exit`. Another name is refused with `INVALID_REQUEST`, and replay refuses a state entry that holds one. `default` is reserved: a definition without `layer` sits on the `default` layer at rank 0, so two such modes replace each other instead of nesting.
 - `rank` is an integer from -1000000 to 1000000. Layers are ordered by rank, then by name. The runtime knows no layer names.
-- Every definition on one layer must name the same rank and `pinned`; another is refused with `INVALID_REQUEST`.
+- Every definition on one layer must name the same rank and `pinned`; another is refused with `INVALID_REQUEST`. One exception: the restored mode of a replayed pinned layer, defined again with its own id, owner label, layer, rank and pin, re-arms the layer even when an earlier definition names it differently; that earlier mode then cannot enter the layer.
+- At most 16 layers are active at once. Entering a mode on a seventeenth layer is refused with `NESTING_LIMIT`; replacing the mode on a layer that is already active is not. Replay refuses a state entry with more than 16 layers, or a `default` layer with a rank other than 0 or a pin, because no definition could create either.
 - Entering a mode on a layer that holds one replaces it with one state entry and one transition message. The other layers keep their modes and `instanceId`s.
 - A tool call must pass every active layer. See [Tool policies](#tool-policies).
 - `layers()` returns every active layer's snapshot, lowest rank first, each with `layer`, `rank`, `pinned` and `runScoped`. `current()` returns the highest-ranked one, with the next layer down as `outer`.
@@ -477,6 +480,57 @@ pi.events.on(CONTEXT_AWARE_POLICY_CHANGED_EVENT, (data) => {
 `context-aware:policy:v1:changed` fires when the resolved policy differs from the last one this session saw: after `/context-policy` records a value (`command`), after `/tree` moves to a branch with a different policy (`branch`), and at the next turn end after another writer appended a policy entry (`session-entry`). Starting or resuming a session does not fire it; call `policy.current()` instead.
 
 The capability cannot change the policy, and readers may ignore it. The policy is not a mode: `/mode` and the modes capability never change it. See [`contextPolicy`](configuration.md#contextpolicy) for how a user sets it.
+
+## Loaded skills
+
+`ContextAwareServiceV1.skills` is an additive, read-only capability. Check it with `supportsContextAwareLoadedSkillsV1`; older protocol-v1 producers remain valid without it.
+
+```ts
+import {
+	discoverContextAwareServiceV1,
+	supportsContextAwareLoadedSkillsV1,
+} from "@centerforagenticai/pi-context-aware/context-service";
+
+const service = discoverContextAwareServiceV1(pi.events, "my-extension");
+if (supportsContextAwareLoadedSkillsV1(service)) {
+	for (const skill of service.skills.loaded()) {
+		// skill.name, skill.path, skill.bytes, skill.state, skill.ref, skill.blockId, skill.loadedAt
+	}
+}
+```
+
+`skills.loaded()` reads the current branch each time it is called and returns the newest `load_skill` load of each skill path. `state` is `visible` (full result in context, at `ref`), `compressed` (a native fold covers it; restore it from `blockId`), `partial` (another tool made the load, or the result was edited after delivery) or `gone` (no longer in context, for example after a compaction). See [skills.md](skills.md) for the pointer contract these states drive.
+
+### Condensed skill registration
+
+An extension that injects skill text into a message, as pi-stack does with a verb's `<pinned-skills>`, can register a condensed version of each skill. When a native fold covers that message, the engine replaces the skill's `<skill>` block with the condensed text instead of letting the fold model summarize it. Check the capability with `supportsContextAwareCondensedSkillsV1`; producers without it remain valid.
+
+```ts
+import {
+	discoverContextAwareServiceV1,
+	supportsContextAwareCondensedSkillsV1,
+} from "@centerforagenticai/pi-context-aware/context-service";
+
+const service = discoverContextAwareServiceV1(pi.events, "my-extension");
+if (supportsContextAwareCondensedSkillsV1(service)) {
+	const result = service.skills.register({
+		name: "delivering-work",
+		location: "/path/to/skills/delivering-work/SKILL.md",
+		digest: "sha256-tree/1:<64 hex>",
+		condensed: "<the skill's condensed rules>",
+		ownerKey: runId,
+	});
+	// result: { ok: true, stored } or { ok: false, error }
+	// When the run ends:
+	service.skills.endOwner(runId);
+}
+```
+
+- The engine matches a block by its `location` attribute, and by its `digest` attribute when the registration gives one. A block with a different digest is left alone.
+- `register` copies only the named fields. It refuses a digest that is not `sha256-tree/1:` plus 64 hex characters, an empty owner key, and condensed text over 32,000 characters. `stored: false` means the same text was already registered.
+- `endOwner(ownerKey)` returns `true` when it recorded the end. At the next fold, every skill registered under that key shows as a one-line stub.
+- While `folds.condensedSkills` is off (the default), `register` returns `{ ok: false, error: "folds.condensedSkills is off" }`. See [configuration.md](configuration.md#folds).
+- Context-aware never reads a file named only in message text. The condensed text comes from this call, from `load_skill`'s own read, or from a skill Pi loaded for the run. See [skills.md](skills.md#condensed-skills).
 
 ## What is not an integration API
 

@@ -10,6 +10,12 @@
  * The message shapes below mirror the protocol Fabric publishes
  * (`FabricCompactionOwnerClaimV1` and its handle). A claim lasts until the
  * owner withdraws it, its lifetime signal aborts, or Fabric shuts down.
+ *
+ * Fabric may answer during `emit` or later: it loads its claim code on the first claim,
+ * so the first reply of a process normally comes after `emit` returned. The claim is
+ * pending until the reply, for at most `COMPACTION_OWNER_CLAIM_REPLY_TIMEOUT_MS`. A claim
+ * that is given up (timeout, release, shutdown, a new session) has its signal aborted, so
+ * Fabric refuses it or withdraws it; a grant that still arrives is withdrawn at once.
  */
 
 import type { CompactionResult, ExtensionContext, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
@@ -17,6 +23,9 @@ import { OwnerCallRefused } from "./owner-input.js";
 import { OWNER_HANDLER_TIMEOUT_MS, ownerResultError } from "./owner-result.js";
 
 export const COMPACTION_OWNER_EVENT = "pi-fabric:compaction-owner:v1" as const;
+
+/** How long a claim waits for Fabric's reply before Fabric counts as not loaded. */
+export const COMPACTION_OWNER_CLAIM_REPLY_TIMEOUT_MS = 5_000;
 
 export const COMPACTION_OWNER_REQUEST_FIELDS = ["reason", "instructions", "preserve", "requestedBy", "seed"] as const;
 export const COMPACTION_OWNER_CARRY_FIELDS = ["items", "add", "remove", "clear"] as const;
@@ -114,7 +123,9 @@ export type ClaimAttempt =
 	| { readonly kind: "claimed"; readonly carry?: readonly string[] }
 	/** The claim was already held; nothing was sent. */
 	| { readonly kind: "held" }
-	/** Nobody answered: Fabric is not loaded. */
+	/** The claim was sent and Fabric has not answered yet. It is not held; the outcome arrives later. */
+	| { readonly kind: "pending" }
+	/** Nobody answered within the reply timeout: Fabric is not loaded. */
 	| { readonly kind: "no-fabric" }
 	/** Fabric answered that another owner holds the claim. */
 	| { readonly kind: "refused"; readonly error: string };
@@ -129,14 +140,26 @@ export interface CompactionOwnerClaimOptions {
 	 * made under an earlier claim reports nothing once that claim has been released.
 	 */
 	readonly onFault?: (action: string, error: unknown) => void;
+	/** How long to wait for Fabric's reply. Defaults to `COMPACTION_OWNER_CLAIM_REPLY_TIMEOUT_MS`. */
+	readonly replyTimeoutMs?: number;
+	/**
+	 * Called with the outcome (`claimed`, `refused` or `no-fabric`) of a claim that was pending
+	 * when `claim()` returned. A reply during `emit` is returned by `claim()` instead, and a
+	 * claim given up by `release()` or `cancelPending()` reports nothing.
+	 */
+	readonly onSettled?: (attempt: ClaimAttempt) => void;
 }
 
 export interface CompactionOwnerClaim {
 	/** True while Fabric still honours the claim. */
 	readonly active: boolean;
-	/** Send the claim unless it is already held. */
+	/** True while a claim was sent and Fabric has not answered. */
+	readonly pending: boolean;
+	/** Send the claim unless it is already held or pending. */
 	claim(): ClaimAttempt;
-	/** Withdraw the claim and abort its lifetime signal. Returns whether one was held. */
+	/** Give up a pending claim: abort its signal so Fabric refuses or withdraws it. Returns whether one was pending. */
+	cancelPending(): boolean;
+	/** Withdraw the claim and abort its lifetime signal; a pending claim is given up too. Returns whether one was held. */
 	release(): boolean;
 	/** Fabric's deterministic summary, while the claim is held. */
 	fallback(
@@ -292,8 +315,29 @@ function publishedActions(actions: CompactionOwnerActions, scope: GuardScope): C
 	return Object.freeze(published);
 }
 
+/** A claim that was sent and not yet answered. */
+interface PendingClaim {
+	readonly lifetime: AbortController;
+	timer: ReturnType<typeof setTimeout> | undefined;
+	/** Only the first reply counts. */
+	answered: boolean;
+}
+
 export function createCompactionOwnerClaim(options: CompactionOwnerClaimOptions): CompactionOwnerClaim {
 	let current: ClaimGeneration | undefined;
+	let pending: PendingClaim | undefined;
+	const replyTimeoutMs = options.replyTimeoutMs ?? COMPACTION_OWNER_CLAIM_REPLY_TIMEOUT_MS;
+
+	/** Stop waiting: clear the timer and abort the signal, so Fabric refuses the claim or withdraws it. */
+	const cancelPending = (): boolean => {
+		const attempt = pending;
+		if (attempt === undefined) return false;
+		pending = undefined;
+		if (attempt.timer !== undefined) clearTimeout(attempt.timer);
+		attempt.timer = undefined;
+		attempt.lifetime.abort();
+		return true;
+	};
 
 	/** Withdraw `generation` if it is still the claim held. */
 	const releaseGeneration = (generation: ClaimGeneration | undefined): boolean => {
@@ -308,7 +352,10 @@ export function createCompactionOwnerClaim(options: CompactionOwnerClaimOptions)
 		return true;
 	};
 
-	const release = (): boolean => releaseGeneration(current);
+	const release = (): boolean => {
+		cancelPending();
+		return releaseGeneration(current);
+	};
 
 	const actions = publishedActions(options.actions, {
 		current: () => current,
@@ -329,35 +376,79 @@ export function createCompactionOwnerClaim(options: CompactionOwnerClaimOptions)
 		get active(): boolean {
 			return current?.handle.active === true;
 		},
+		get pending(): boolean {
+			return pending !== undefined;
+		},
 		claim(): ClaimAttempt {
 			if (current?.handle.active === true) return { kind: "held" };
+			// One claim at a time: a second would be refused as a rival, or hold two grants.
+			if (pending !== undefined) return { kind: "pending" };
 			// A handle Fabric already cleared (its shutdown, a withdrawn token) is stale.
 			current?.lifetime.abort();
 			current = undefined;
 			const controller = new AbortController();
-			let answer: CompactionOwnerClaimReply | undefined;
+			const attempt: PendingClaim = { lifetime: controller, timer: undefined, answered: false };
+			pending = attempt;
+			let emitting = true;
+			let early: ClaimAttempt | undefined;
+			const reply = (result: CompactionOwnerClaimReply): void => {
+				if (attempt.answered) return;
+				attempt.answered = true;
+				// The claim was given up (timeout, release, shutdown, a new session) before this reply.
+				if (pending !== attempt) {
+					if (result.ok) {
+						try {
+							result.handle.withdraw();
+						} finally {
+							controller.abort();
+						}
+					}
+					return;
+				}
+				pending = undefined;
+				if (attempt.timer !== undefined) clearTimeout(attempt.timer);
+				attempt.timer = undefined;
+				let outcome: ClaimAttempt;
+				if (result.ok) {
+					current = { handle: result.handle, lifetime: controller };
+					outcome = { kind: "claimed", ...(result.carry === undefined ? {} : { carry: result.carry }) };
+				} else {
+					controller.abort();
+					outcome = { kind: "refused", error: result.error };
+				}
+				if (emitting) early = outcome;
+				else options.onSettled?.(outcome);
+			};
 			const message: CompactionOwnerClaimMessage = {
 				version: 1,
 				type: "claim",
 				owner: { ...options.owner },
 				actions,
 				signal: controller.signal,
-				reply: (result) => {
-					answer ??= result;
-				},
+				reply,
 			};
-			options.events.emit(COMPACTION_OWNER_EVENT, message);
-			if (answer === undefined) {
-				controller.abort();
-				return { kind: "no-fabric" };
+			try {
+				options.events.emit(COMPACTION_OWNER_EVENT, message);
+			} catch (error) {
+				if (pending === attempt) cancelPending();
+				throw error;
+			} finally {
+				emitting = false;
 			}
-			if (!answer.ok) {
+			if (early !== undefined) return early;
+			if (pending !== attempt) return { kind: "pending" };
+			const timer = setTimeout(() => {
+				if (pending !== attempt) return;
+				pending = undefined;
+				attempt.timer = undefined;
 				controller.abort();
-				return { kind: "refused", error: answer.error };
-			}
-			current = { handle: answer.handle, lifetime: controller };
-			return { kind: "claimed", ...(answer.carry === undefined ? {} : { carry: answer.carry }) };
+				options.onSettled?.({ kind: "no-fabric" });
+			}, replyTimeoutMs);
+			(timer as { unref?: () => void }).unref?.();
+			attempt.timer = timer;
+			return { kind: "pending" };
 		},
+		cancelPending,
 		release,
 		fallback(event, context, fallbackOptions) {
 			const held = current?.handle;
@@ -383,7 +474,9 @@ export interface ClaimControllerOptions extends CompactionOwnerClaimOptions {
 
 export interface ClaimController {
 	readonly active: boolean;
-	/** A new session: forget earlier answers, then make the claim if it is wanted. */
+	/** True while a claim was sent and Fabric has not answered; it counts as not held. */
+	readonly pending: boolean;
+	/** A new session: give up a pending claim, forget earlier answers, then make the claim if it is wanted. */
 	start(ctx: ExtensionContext): void;
 	/**
 	 * Claim when wanted and not held; withdraw when no longer wanted. `wanted` lets a caller
@@ -399,9 +492,24 @@ export function createClaimController(options: ClaimControllerOptions): ClaimCon
 	// Fabric answers or does not, and a refusal names another holder. Neither changes
 	// within a session, so ask again only after the next start. After a handler failure the
 	// claim was withdrawn; Fabric's engine keeps compaction for the rest of the session.
+	// While a claim waits for Fabric's reply it is pending: not held, and not asked again.
 	let settled: "no-fabric" | "refused" | "faulted" | undefined;
+	const report = (attempt: ClaimAttempt): void => {
+		if (attempt.kind === "claimed") options.debug("compaction owner claim held");
+		else if (attempt.kind === "no-fabric") {
+			settled = "no-fabric";
+			options.debug("compaction owner claim not sent to anyone: Fabric is not loaded");
+		} else if (attempt.kind === "refused") {
+			settled = "refused";
+			options.debug(`compaction owner claim refused: ${attempt.error}`);
+		}
+	};
 	const claim = createCompactionOwnerClaim({
 		...options,
+		onSettled: (attempt) => {
+			report(attempt);
+			options.onSettled?.(attempt);
+		},
 		onFault: (action, error) => {
 			settled = "faulted";
 			options.debug(`compaction owner claim withdrawn: compact.${action} failed (${error instanceof Error ? error.message : String(error)}); Fabric's engine compacts until the next session`);
@@ -415,23 +523,21 @@ export function createClaimController(options: ClaimControllerOptions): ClaimCon
 			if (claim.release()) options.debug("compaction owner claim withdrawn: the setting is off or compaction is unavailable here");
 			return;
 		}
-		if (claim.active || settled !== undefined) return;
-		const attempt = claim.claim();
-		if (attempt.kind === "claimed") options.debug("compaction owner claim held");
-		else if (attempt.kind === "no-fabric") {
-			settled = "no-fabric";
-			options.debug("compaction owner claim not sent to anyone: Fabric is not loaded");
-		} else if (attempt.kind === "refused") {
-			settled = "refused";
-			options.debug(`compaction owner claim refused: ${attempt.error}`);
-		}
+		if (claim.active || claim.pending || settled !== undefined) return;
+		// A reply during the emit is returned here; a later one reaches `report` through onSettled.
+		report(claim.claim());
 	};
 
 	return {
 		get active() {
 			return claim.active;
 		},
+		get pending() {
+			return claim.pending;
+		},
 		start(ctx) {
+			// A claim still waiting belongs to the session that sent it: Fabric refuses or withdraws it.
+			claim.cancelPending();
 			settled = undefined;
 			sync(ctx);
 		},

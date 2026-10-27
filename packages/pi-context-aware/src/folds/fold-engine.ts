@@ -52,7 +52,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { isBillionContextPiLoaded, type RegisteredToolView } from "../compaction/compaction-blocker.js";
-import { foldStateFromBranch, planFold, summaryLimitOf, validFoldRefs } from "./fold-adapter.js";
+import { foldStateFromBranch, planFold, summaryLimitOf, validFoldRefs, type FoldCondenser } from "./fold-adapter.js";
 import { renderEarlierFoldCalls } from "./fold-call-render.js";
 import { cloneFoldTurnMemory, createFoldTurnMemory, prepareFoldTurn, type FoldTurnMemory } from "./fold-turn.js";
 import {
@@ -161,6 +161,11 @@ export interface FoldEngineOptions {
 	readonly config?: Partial<Config>;
 	/** Context window used for the engine's limits when the model does not report one. */
 	readonly fallbackContextWindow?: number;
+	/**
+	 * Condensed skill swaps (pi-context-aware#181). Returns the condenser
+	 * for a branch, or `undefined` when the feature is off or nothing condenses.
+	 */
+	readonly condenser?: (ctx: ExtensionContext, branch: readonly SessionEntry[]) => FoldCondenser | undefined;
 }
 
 export interface DroppedFold {
@@ -220,6 +225,11 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 	const contextWindow = (ctx: ExtensionContext): number =>
 		ctx.model?.contextWindow && ctx.model.contextWindow > 0 ? ctx.model.contextWindow : (options.fallbackContextWindow ?? 200_000);
 
+	const condenserFor = (ctx: ExtensionContext): ((branch: readonly SessionEntry[]) => FoldCondenser | undefined) | undefined => {
+		const make = options.condenser;
+		return make ? (branch) => make(ctx, branch) : undefined;
+	};
+
 	/**
 	 * Drop the queue and read it again from the records on the branch that is
 	 * current now. Shadow mode never queues. In live mode, accepted requests that
@@ -250,7 +260,7 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 		const queued = queues.get(ctx.sessionManager);
 		queues.delete(ctx.sessionManager);
 		if (!queued || queued.length === 0 || modeOf(ctx) !== "live") return undefined;
-		const planned = planQueuedFolds(ctx.sessionManager, queued, contextWindow(ctx), options.config, resolveFoldConfig(ctx));
+		const planned = planQueuedFolds(ctx.sessionManager, queued, contextWindow(ctx), options.config, resolveFoldConfig(ctx), condenserFor(ctx));
 		dropped.set(ctx.sessionManager, planned.dropped);
 		return planned.drafts.length > 0 ? { entries: [...entries, ...planned.drafts] } : undefined;
 	};
@@ -335,6 +345,7 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 			contextEntries,
 			modelContextLimit: contextWindow(ctx),
 			folds: resolveFoldConfig(ctx),
+			...condenserField(condenserFor(ctx)?.(branch)),
 			...(options.config ? { config: options.config } : {}),
 		});
 		if (!plan.ok) {
@@ -394,6 +405,7 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 				contextEntries,
 				modelContextLimit: contextWindow(ctx),
 				folds: resolveFoldConfig(ctx),
+				...condenserField(condenserFor(ctx)?.(branch)),
 				...(options.config ? { config: options.config } : {}),
 			});
 			if (!plan.ok) return plan;
@@ -488,6 +500,7 @@ export function planQueuedFolds(
 	modelContextLimit: number,
 	config?: Partial<Config>,
 	folds?: FoldsConfig,
+	condenserFor?: (branch: readonly SessionEntry[]) => FoldCondenser | undefined,
 ): QueuedFoldPlan {
 	const header = manager.getHeader();
 	if (!header) return { drafts: [], dropped: requests.map((request) => ({
@@ -529,6 +542,7 @@ export function planQueuedFolds(
 					contextEntries: preview.buildContextEntries(),
 					modelContextLimit,
 					...(folds ? { folds } : {}),
+					...condenserField(condenserFor?.(preview.getBranch())),
 					...(config ? { config } : {}),
 				});
 				if (!replanned.ok) {
@@ -548,6 +562,7 @@ export function planQueuedFolds(
 					contextEntries: preview.buildContextEntries(),
 					modelContextLimit,
 					...(folds ? { folds } : {}),
+					...condenserField(condenserFor?.(preview.getBranch())),
 					...(config ? { config } : {}),
 				});
 				if (!plan.ok) {
@@ -570,6 +585,10 @@ export function planQueuedFolds(
 		}
 	}
 	return { drafts, dropped };
+}
+
+function condenserField(condenser: FoldCondenser | undefined): { condenser?: FoldCondenser } {
+	return condenser ? { condenser } : {};
 }
 
 function optionalId(requestId: string | undefined): { requestId?: string } {

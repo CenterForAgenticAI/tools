@@ -70,6 +70,9 @@ function registerExtension(): RegisteredHandlers {
 		},
 		registerCommand() {},
 		registerTool() {},
+		getActiveTools() {
+			return ["compact_session", "context_recall"];
+		},
 		sendMessage() {},
 		sendUserMessage() {},
 	};

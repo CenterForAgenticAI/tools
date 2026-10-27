@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildContextTelemetry } from "../src/platform/context-telemetry.js";
+import { buildContextTelemetry, buildUnknownContextTelemetry } from "../src/platform/context-telemetry.js";
 
 const continuationInstruction =
 	"This is extension telemetry, not user input. No response or acknowledgement is expected. It does not supersede the preceding user request or tool result. Continue the current agent loop without acknowledging this telemetry, using the pressure data only for context-management decisions.";
@@ -54,4 +54,41 @@ test("includes compact-before-tool action in URGENT telemetry", () => {
 
 	assert.match(telemetry, /<pressure band="URGENT" usage-percent="92" approximate-headroom="16k" action="compact-before-tool" \/>/);
 	assert.match(telemetry, /Continue the current agent loop without acknowledging this telemetry/);
+});
+
+test("pressure telemetry modes render the exact WARN envelope or no envelope", () => {
+	const usage = { fraction: 0.635, headroom: 98_400 };
+	assert.equal(
+		buildContextTelemetry(usage, { mode: "full" }),
+		`<context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">
+  <pressure band="WARN" usage-percent="64" approximate-headroom="98k" action="gate-broad-work" />
+  <instruction>${continuationInstruction}</instruction>
+</context-telemetry>`,
+	);
+	assert.equal(
+		buildContextTelemetry(usage, { mode: "band" }),
+		`<context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">
+  <pressure band="WARN" action="gate-broad-work" />
+  <instruction>${continuationInstruction}</instruction>
+</context-telemetry>`,
+	);
+	assert.equal(buildContextTelemetry(usage, { mode: "off" }), undefined);
+});
+
+test("UNKNOWN pressure telemetry follows full, band, and off modes exactly", () => {
+	assert.equal(
+		buildUnknownContextTelemetry("full"),
+		`<context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">
+  <pressure band="UNKNOWN" usage-percent="unknown" approximate-headroom="unknown" />
+  <instruction>${continuationInstruction}</instruction>
+</context-telemetry>`,
+	);
+	assert.equal(
+		buildUnknownContextTelemetry("band"),
+		`<context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">
+  <pressure band="UNKNOWN" />
+  <instruction>${continuationInstruction}</instruction>
+</context-telemetry>`,
+	);
+	assert.equal(buildUnknownContextTelemetry("off"), undefined);
 });

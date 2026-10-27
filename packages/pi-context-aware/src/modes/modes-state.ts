@@ -40,6 +40,16 @@ export function modeDisplayText(text: string): string {
 	return text.replace(MODE_DISPLAY_UNSAFE, "\uFFFD");
 }
 
+// `/mode exit <layer>` splits on whitespace, and a user cannot type a format
+// character, so a layer name is one token of ASCII letters, digits, `_`, `.`
+// and `-`, starting with a letter or digit.
+const MODE_LAYER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/u;
+
+/** True for a trimmed layer name that `/mode exit <layer>` can type: one token of at most MAX_MODE_LAYER_LENGTH characters. */
+export function isModeLayerName(value: string): boolean {
+	return value.length <= MAX_MODE_LAYER_LENGTH && MODE_LAYER_NAME.test(value);
+}
+
 /** True for a layer rank: an integer from -MAX_MODE_RANK to MAX_MODE_RANK. */
 export function isModeRank(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && Math.abs(value) <= MAX_MODE_RANK;
@@ -239,10 +249,12 @@ function parseV2Entry(value: unknown): StoredEntryData | null {
 	if (!Array.isArray(data.layers) || data.layers.length > MAX_MODE_LAYERS) return null;
 	const layers: StoredSlot[] = [];
 	for (const raw of data.layers) {
-		if (!isRecord(raw) || !boundedString(raw.layer, MAX_MODE_LAYER_LENGTH) || !isModeRank(raw.rank)) return null;
+		if (!isRecord(raw) || !boundedString(raw.layer, MAX_MODE_LAYER_LENGTH) || !isModeLayerName(raw.layer.trim()) || !isModeRank(raw.rank)) return null;
 		if (raw.pinned !== undefined && raw.pinned !== true) return null;
 		if (raw.scope !== undefined && raw.scope !== "run") return null;
 		if (raw.pinned === true && raw.scope === "run") return null;
+		// The default layer is what a definition without `layer` gets: rank 0, never pinned.
+		if (raw.layer.trim() === MODE_DEFAULT_LAYER && (raw.rank !== 0 || raw.pinned === true)) return null;
 		const mode = parseReference(raw.mode);
 		if (mode === null || mode.instanceId === undefined) return null;
 		layers.push({

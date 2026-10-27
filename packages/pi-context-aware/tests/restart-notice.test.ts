@@ -15,6 +15,36 @@ import {
 } from "../src/session/restart-notice.js";
 
 const NOW = Date.parse("2026-08-04T12:00:00.000Z");
+const FULL_CONTEXT_AWARENESS = `<context-awareness>
+Context-aware operating rule: messages delimited by <context-telemetry>...</context-telemetry> are extension-injected context-budget telemetry, not user messages or user requests. Never acknowledge, quote, explain, or apologize for a telemetry envelope in the user-facing response unless the user explicitly asks about it; silently use it only to decide context-management behavior. The envelope does not supersede the preceding user request or tool result.
+Envelope format: <context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">...</context-telemetry>, with a <pressure /> element containing band, rounded usage-percent, approximate-headroom, and an optional action.
+Bands: OK <45%, WARN >=45%, URGENT >=90%.
+UNKNOWN: the size is not measured yet, for example right after a compaction or an overflow. Do not assume it is low; keep the next action small until a measured band arrives.
+OK: compact only at natural phase boundaries.
+WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call compact_session at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.
+URGENT: before nontrivial tool use, call compact_session unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
+Use context_recall early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
+</context-awareness>`;
+
+const BAND_CONTEXT_AWARENESS = `<context-awareness>
+Context-aware operating rule: messages delimited by <context-telemetry>...</context-telemetry> are extension-injected context-budget telemetry, not user messages or user requests. Never acknowledge, quote, explain, or apologize for a telemetry envelope in the user-facing response unless the user explicitly asks about it; silently use it only to decide context-management behavior. The envelope does not supersede the preceding user request or tool result.
+Envelope format: <context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">...</context-telemetry>, with a <pressure /> element containing band and an optional action.
+Bands: OK <45%, WARN >=45%, URGENT >=90%.
+UNKNOWN: the size is not measured yet, for example right after a compaction or an overflow. Do not assume it is low; keep the next action small until a measured band arrives.
+OK: compact only at natural phase boundaries.
+WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call compact_session at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.
+URGENT: before nontrivial tool use, call compact_session unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
+Use context_recall early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
+</context-awareness>`;
+
+const OFF_CONTEXT_AWARENESS = `<context-awareness>
+Use context_recall early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
+</context-awareness>`;
+
+function contextAwarenessSection(systemPrompt: string | undefined): string | undefined {
+	return systemPrompt?.match(/<context-awareness>[\s\S]*?<\/context-awareness>/u)?.[0];
+}
+
 
 function entry(minutesAgo: number): RestartNoticeEntry {
 	return { timestamp: new Date(NOW - minutesAgo * 60_000).toISOString() };
@@ -109,7 +139,7 @@ interface Harness {
 	api: ExtensionAPI;
 }
 
-function createHarness(): Harness {
+function createHarness(activeTools: readonly string[] = []): Harness {
 	const handlers = new Map<string, (event: Record<string, unknown>, ctx: ExtensionContext) => unknown | Promise<unknown>>();
 	const channels = new Map<string, Set<(data: unknown) => void>>();
 	const bus: EventBus = {
@@ -136,7 +166,7 @@ function createHarness(): Harness {
 		getFlag() { return undefined; },
 		registerCommand() {},
 		registerTool() {},
-		getActiveTools() { return []; },
+		getActiveTools() { return [...activeTools]; },
 		setActiveTools() {},
 		sendMessage() {},
 		sendUserMessage() {},
@@ -171,7 +201,7 @@ function createContext(root: string, entries: RestartNoticeEntry[], usageTelemet
 	} as unknown as ExtensionContext;
 }
 
-async function loadExtension(config: Record<string, unknown>, entryMinutesAgo = 2, usageTelemetry = true): Promise<{ harness: Harness; ctx: ExtensionContext; root: string }> {
+async function loadExtension(config: Record<string, unknown>, entryMinutesAgo = 2, usageTelemetry = true, activeTools: readonly string[] = []): Promise<{ harness: Harness; ctx: ExtensionContext; root: string }> {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-restart-notice-"));
 	const agentDir = path.join(root, "agent");
 	fs.mkdirSync(agentDir, { recursive: true });
@@ -192,7 +222,7 @@ async function loadExtension(config: Record<string, unknown>, entryMinutesAgo = 
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 	try {
 		const extension = await import(`../src/index.js?restart-notice=${config.restartNotice && JSON.stringify(config.restartNotice)}`);
-		const harness = createHarness();
+		const harness = createHarness(activeTools);
 		extension.default(harness.api);
 		return { harness, ctx: createContext(root, [entry(entryMinutesAgo)], usageTelemetry), root };
 	} finally {
@@ -203,27 +233,75 @@ async function loadExtension(config: Record<string, unknown>, entryMinutesAgo = 
 	}
 }
 
-async function runWiringCase(config: Record<string, unknown>, entryMinutesAgo = 2, injectionNow = NOW, usageTelemetry = true): Promise<{ first: Record<string, unknown> | undefined; second: Record<string, unknown> | undefined; root: string }> {
+async function runWiringCase(config: Record<string, unknown>, entryMinutesAgo = 2, injectionNow = NOW, usageTelemetry = true, activeTools: readonly string[] = []): Promise<{ first: Record<string, unknown> | undefined; second: Record<string, unknown> | undefined; firstSystemPrompt: string | undefined; root: string }> {
 	const originalNow = Date.now;
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	Date.now = () => NOW;
 	try {
-		const { harness, ctx, root } = await loadExtension(config, entryMinutesAgo, usageTelemetry);
+		const { harness, ctx, root } = await loadExtension(config, entryMinutesAgo, usageTelemetry, activeTools);
 		// Runtime handlers resolve config too; retain this fixture's directory
 		// through injection rather than falling back to the worker's profile.
 		process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
 		await harness.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
 		Date.now = () => injectionNow;
 		const event = { type: "before_agent_start", prompt: "continue", systemPrompt: "base", systemPromptOptions: {} };
-		const first = await harness.handlers.get("before_agent_start")?.(event, ctx) as { message?: Record<string, unknown> } | undefined;
+		const first = await harness.handlers.get("before_agent_start")?.(event, ctx) as { systemPrompt?: string; message?: Record<string, unknown> } | undefined;
 		const second = await harness.handlers.get("before_agent_start")?.(event, ctx) as { message?: Record<string, unknown> } | undefined;
-		return { first: first?.message, second: second?.message, root };
+		return { first: first?.message, second: second?.message, firstSystemPrompt: first?.systemPrompt, root };
 	} finally {
 		Date.now = originalNow;
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 	}
 }
+
+test("pressure telemetry modes install the exact model-visible context-awareness section", async () => {
+	for (const [mode, expected] of [["full", FULL_CONTEXT_AWARENESS], ["band", BAND_CONTEXT_AWARENESS], ["off", OFF_CONTEXT_AWARENESS]] as const) {
+		const result = await runWiringCase({ pressureTelemetry: { mode } }, 2, NOW, true, ["compact_session", "context_recall"]);
+		try {
+			assert.equal(contextAwarenessSection(result.firstSystemPrompt), expected, mode);
+			if (mode === "off") assert.equal(result.second, undefined, "off mode emits no empty usage marker");
+		} finally {
+			fs.rmSync(result.root, { recursive: true, force: true });
+		}
+	}
+});
+
+test("off mode omits pressure telemetry while preserving task and restart text", async () => {
+	const originalNow = Date.now;
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	Date.now = () => NOW;
+	const { harness, ctx, root } = await loadExtension({ pressureTelemetry: { mode: "off" }, workstream: { enabled: true } });
+	process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
+	try {
+		const planned = planTasks([{ title: "keep the task text", status: "active" }], "agent");
+		if (!planned.ok) assert.fail(planned.reason);
+		const timestamp = new Date(NOW - 2 * 60_000).toISOString();
+		(ctx.sessionManager.getEntries() as unknown[]).push({
+			type: "custom",
+			customType: TASKS_ENTRY_TYPE,
+			data: createTasksSnapshot({ piSessionId: "restart-notice-test", tasks: planned.value, eventId: "off-task", now: timestamp }),
+			timestamp,
+		});
+		await harness.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+		const event = { type: "before_agent_start", prompt: "continue", systemPrompt: "base", systemPromptOptions: {} };
+		const first = await harness.handlers.get("before_agent_start")?.(event, ctx) as { message?: Record<string, unknown> } | undefined;
+		const second = await harness.handlers.get("before_agent_start")?.(event, ctx) as { message?: Record<string, unknown> } | undefined;
+		const content = String(first?.message?.content);
+		assert.equal(first?.message?.customType, "context-aware-restart-notice");
+		assert.match(content, /keep the task text/u);
+		assert.match(content, /pi process was restarted/u);
+		assert.doesNotMatch(content, /<pressure\b/u);
+		assert.equal(second?.message?.customType, "context-aware-task-state");
+		assert.match(String(second?.message?.content), /keep the task text/u);
+		assert.doesNotMatch(String(second?.message?.content), /<pressure\b/u);
+	} finally {
+		Date.now = originalNow;
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
 
 test("wires one hidden restart notice into the first agent start only", async () => {
 	const result = await runWiringCase({});

@@ -94,9 +94,9 @@ async function fixture(options: {
 		host,
 		session,
 		fabric,
-		start: async () => { await host.handler("session_start")({ reason: "startup" }, session.ctx); },
+		start: async () => { await host.handler("session_start")({ reason: "startup" }, session.ctx); await fabric?.flush(); },
 		beforeCompact: (overrides) => host.handler("session_before_compact")(compactionEvent(overrides), session.ctx),
-		settle: async () => { await host.handler("agent_settled")({}, session.ctx); },
+		settle: async () => { await host.handler("agent_settled")({}, session.ctx); await fabric?.flush(); },
 		shutdown: async () => { await host.handler("session_shutdown")({}, session.ctx); },
 		dispose: () => env.restore(),
 	};
@@ -294,6 +294,7 @@ test("REQ-CLAIM-001: a refused claim leaves the other holder alone and is not re
 			actions: {},
 			reply: () => {},
 		});
+		await f.fabric!.flush();
 		assert.equal(f.fabric!.claim!.owner.name, "other-owner");
 		await f.start();
 		await f.settle();
@@ -1160,7 +1161,7 @@ test("CR-003: request, status, pressure and cancel results report ids and counts
 });
 
 /** A claim made with the given actions, through the owner side, on a bus the stand-in answers. */
-function claimWith(actions: Record<string, unknown>): { fabric: FakeFabric; claim: ReturnType<typeof createCompactionOwnerClaim>; faults: string[] } {
+async function claimWith(actions: Record<string, unknown>): Promise<{ fabric: FakeFabric; claim: ReturnType<typeof createCompactionOwnerClaim>; faults: string[] }> {
 	const host = createHostPi();
 	const fabric = new FakeFabric(host.bus);
 	const faults: string[] = [];
@@ -1170,7 +1171,9 @@ function claimWith(actions: Record<string, unknown>): { fabric: FakeFabric; clai
 		actions: actions as never,
 		onFault: (action, error) => { faults.push(`${action}: ${error instanceof Error ? error.message : String(error)}`); },
 	});
-	assert.equal(claim.claim().kind, "claimed");
+	assert.equal(claim.claim().kind, "pending");
+	await fabric.flush();
+	assert.equal(claim.claim().kind, "held");
 	return { fabric, claim, faults };
 }
 
@@ -1185,7 +1188,7 @@ test("CR-003: a result Fabric would reject after the handler returns fails insid
 		["carry", { carry: { fields: ["items"], handler: () => ({ items: [1] }) } }, /must return \{ items: string\[\] \}/u],
 	];
 	for (const [action, actions, message] of cases) {
-		const { fabric, claim, faults } = claimWith(actions);
+		const { fabric, claim, faults } = await claimWith(actions);
 		const signal = fabric.claim!.signal!;
 		await assert.rejects((fabric.invoke as (a: string, b: unknown, c: undefined) => Promise<unknown>)(action, action === "request" || action === "carry" ? {} : undefined, undefined), message, `${action} ${message}`);
 		assert.equal(fabric.engineActive, true, `${action}: the claim was withdrawn, so Fabric compacts again`);
@@ -1207,7 +1210,7 @@ const stuck = (): Promise<never> => new Promise(() => {});
 
 test("CR-005: a program cancelled while the owner's handler runs fails at once, and the claim stays held", async () => {
 	for (const handler of [abortable, stuck]) {
-		const { fabric, claim, faults } = claimWith({ status: { handler } });
+		const { fabric, claim, faults } = await claimWith({ status: { handler } });
 		const program = new AbortController();
 		const pending = fabric.invoke("status", undefined, undefined, program.signal);
 		program.abort();
@@ -1225,7 +1228,7 @@ test("CR-005: an owner handler past Fabric's 30 s bound fails the call, and the 
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	try {
 		for (const handler of [abortable, stuck]) {
-			const { fabric, claim, faults } = claimWith({ status: { handler } });
+			const { fabric, claim, faults } = await claimWith({ status: { handler } });
 			const signal = fabric.claim!.signal!;
 			const pending = fabric.invoke("status", undefined, undefined);
 			const outcome = pending.then(() => "resolved", (error: Error) => error.message);
@@ -1295,6 +1298,7 @@ test("CR-005: the stand-in rejects an unguarded owner's result over 16 KiB after
 		actions: { carry: { fields: ["items"], handler: (update: { items?: string[] }) => { writes++; return { items: update.items ?? [] }; } } },
 		reply: () => {},
 	});
+	await fabric.flush();
 	await assert.rejects(fabric.invoke("carry", { items: [...REVIEW_ITEMS] }, undefined), /compact\.carry returned more than 16384 bytes/u);
 	assert.equal(writes, 1, "the handler ran to completion first");
 	assert.equal(fabric.engineActive, false, "Fabric keeps the claim");
@@ -1326,7 +1330,7 @@ test("CR-006: a cancellation keeps the claim at any moment before Fabric's bound
 			for (const [label, at] of cases) {
 				const name = `${handler.name}, ${label}`;
 				const timedOut = at === "timeout";
-				const { fabric, claim, faults } = claimWith({ status: { handler } });
+				const { fabric, claim, faults } = await claimWith({ status: { handler } });
 				const program = new AbortController();
 				const pending = fabric.invoke("status", undefined, undefined, program.signal);
 				await Promise.resolve();
@@ -1358,7 +1362,7 @@ test("CR-006: called directly, a caller's own abort keeps the claim even past th
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	try {
 		{
-			const { fabric, claim, faults } = claimWith({ status: { handler: abortable } });
+			const { fabric, claim, faults } = await claimWith({ status: { handler: abortable } });
 			const caller = new AbortController();
 			const pending = fabric.direct("status", undefined, undefined, caller.signal);
 			await Promise.resolve();
@@ -1373,7 +1377,7 @@ test("CR-006: called directly, a caller's own abort keeps the claim even past th
 			claim.release();
 		}
 		{
-			const { fabric, claim, faults } = claimWith({ status: { handler: stuck } });
+			const { fabric, claim, faults } = await claimWith({ status: { handler: stuck } });
 			void fabric.direct("status", undefined, undefined, new AbortController().signal);
 			await Promise.resolve();
 			t.mock.timers.tick(OWNER_HANDLER_TIMEOUT_MS + 999);
@@ -1429,56 +1433,63 @@ function controllers() {
 }
 
 /** The new claim is held, and its controller was not marked faulted: it claims again after a withdrawal. */
-function assertNewClaimUnharmed(env: ReturnType<typeof controllers>, controller: ReturnType<typeof createClaimController>, label: string): void {
+async function assertNewClaimUnharmed(env: ReturnType<typeof controllers>, controller: ReturnType<typeof createClaimController>, label: string): Promise<void> {
 	assert.equal(controller.active, true, `${label}: the new claim is held`);
 	assert.equal(env.fabric.engineActive, false, `${label}: Fabric still yields`);
 	assert.deepEqual(env.faults, [], `${label}: no fault reported`);
 	assert.deepEqual(env.debug.filter((line) => line.includes("failed")), [], `${label}: no withdrawal logged`);
 	controller.sync(env.ctx, false);
 	controller.sync(env.ctx, true);
+	assert.equal(controller.pending, true, `${label}: a replacement claim waits for Fabric's reply`);
+	await env.fabric.flush();
 	assert.equal(controller.active, true, `${label}: not marked faulted, so it claims again`);
 }
 
 /** The two ways a claim is released and a new one made while an old call is still running. */
-const REPLACEMENTS: Array<[string, (env: ReturnType<typeof controllers>, old: ReturnType<typeof createClaimController>) => ReturnType<typeof createClaimController>]> = [
-	["session replacement", (env, old) => { old.shutdown(); old.start(env.ctx); return old; }],
-	["extension reload", (env, old) => { old.shutdown(); const next = env.make(); next.start(env.ctx); return next; }],
+const REPLACEMENTS: Array<[string, (env: ReturnType<typeof controllers>, old: ReturnType<typeof createClaimController>) => Promise<ReturnType<typeof createClaimController>>]> = [
+	["session replacement", async (env, old) => { old.shutdown(); old.start(env.ctx); await env.fabric.flush(); return old; }],
+	["extension reload", async (env, old) => { old.shutdown(); const next = env.make(); next.start(env.ctx); await env.fabric.flush(); return next; }],
 ];
 
 test("CR-007: a call made under an earlier claim that fails late leaves the new claim held and unfaulted", async () => {
+	assert.equal(REPLACEMENTS.length, 2, "both replacement paths are exercised");
 	for (const [label, replace] of REPLACEMENTS) {
 		const env = controllers();
 		const old = env.make();
 		old.start(env.ctx);
+		await env.fabric.flush();
 		const call = deferred();
 		env.queued.push(call);
 		const pending = env.status()({ context: undefined, signal: new AbortController().signal });
-		const current = replace(env, old);
+		const current = await replace(env, old);
 		assert.equal(current.active, true, `${label}: re-claimed`);
 		call.reject(new Error("the old session's store is gone"));
 		await assert.rejects(pending, /the old session's store is gone/u, `${label}: the caller still sees the failure`);
 		await drain();
-		assertNewClaimUnharmed(env, current, label);
+		await assertNewClaimUnharmed(env, current, label);
 	}
 });
 
 test("CR-007: a call made under an earlier claim whose result fails Fabric's checks late leaves the new claim held and unfaulted", async () => {
+	assert.equal(REPLACEMENTS.length, 2, "both replacement paths are exercised");
 	for (const [label, replace] of REPLACEMENTS) {
 		const env = controllers();
 		const old = env.make();
 		old.start(env.ctx);
+		await env.fabric.flush();
 		const call = deferred();
 		env.queued.push(call);
 		const pending = env.status()({ context: undefined, signal: new AbortController().signal });
-		const current = replace(env, old);
+		const current = await replace(env, old);
 		call.resolve({ blob: "x".repeat(MAX_OWNER_RESULT_BYTES) });
 		await assert.rejects(pending, /compact\.status returned more than 16384 bytes/u, `${label}: the caller still sees the failure`);
 		await drain();
-		assertNewClaimUnharmed(env, current, label);
+		await assertNewClaimUnharmed(env, current, label);
 	}
 });
 
 test("CR-007: the timer of a call made under an earlier claim ends with that claim and never reaches the new one", async (t) => {
+	assert.equal(REPLACEMENTS.length, 2, "both replacement paths are exercised");
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	// Count the guard's live timers: the calls below are direct, so no stand-in timer runs.
 	const live = new Set<unknown>();
@@ -1495,17 +1506,18 @@ test("CR-007: the timer of a call made under an earlier claim ends with that cla
 			const env = controllers();
 			const old = env.make();
 			old.start(env.ctx);
+			await env.fabric.flush();
 			const call = deferred();
 			env.queued.push(call);
 			void env.status()({ context: undefined, signal: new AbortController().signal }).catch(() => {});
 			await Promise.resolve();
 			assert.equal(live.size, 1, `${label}: the call's timer runs`);
 			t.mock.timers.tick(OWNER_HANDLER_TIMEOUT_MS / 2);
-			const current = replace(env, old);
+			const current = await replace(env, old);
 			assert.equal(live.size, 0, `${label}: no timer outlives the claim it was started under`);
 			t.mock.timers.tick(OWNER_HANDLER_TIMEOUT_MS * 2);
 			await drain();
-			assertNewClaimUnharmed(env, current, label);
+			await assertNewClaimUnharmed(env, current, label);
 			current.shutdown();
 		}
 	} finally {
@@ -1513,4 +1525,364 @@ test("CR-007: the timer of a call made under an earlier claim ends with that cla
 		globalThis.clearTimeout = mockedClear;
 		t.mock.timers.reset();
 	}
+});
+
+// ---------------------------------------------------------------------------
+// ASYNC-CLAIM: Fabric may answer the claim after `emit` returned.
+// ---------------------------------------------------------------------------
+
+/** A claim controller over a bus whose Fabric answers after `emit` by default. */
+function asyncEnv(options: { synchronous?: boolean } = {}) {
+	const host = createHostPi();
+	const fabric = new FakeFabric(host.bus, options);
+	const debug: string[] = [];
+	const ctx = {} as never;
+	const make = () => createClaimController({
+		events: host.bus,
+		owner: { name: "pi-context-aware", version: "0.0.0-test" },
+		actions: { status: { handler: () => ({ ok: true }) } },
+		wanted: () => true,
+		debug: (message) => debug.push(message),
+	});
+	return { host, fabric, debug, ctx, make };
+}
+
+type ClaimMessage = { signal: AbortSignal; reply: (result: unknown) => void };
+
+/** The claim message the claimant published last, read the way a listener on the bus would. */
+function lastClaim(fabric: FakeFabric): ClaimMessage {
+	const message = fabric.claims[fabric.claims.length - 1] as ClaimMessage | undefined;
+	assert.ok(message, "a claim was published");
+	return message;
+}
+
+/** A grant as Fabric would send it, counting withdrawals. */
+function fakeGrant(): { handle: unknown; withdrawn: () => number } {
+	let withdrawn = 0;
+	const handle = { token: "late-token", active: true, withdraw: () => { withdrawn++; return true; }, fallback: () => ({ ok: false, reason: "unused" }) };
+	return { handle, withdrawn: () => withdrawn };
+}
+
+const NOT_LOADED = "compaction owner claim not sent to anyone: Fabric is not loaded";
+
+type Controller = ReturnType<typeof createClaimController>;
+
+/** What ends a pending claim from the extension's side. */
+const GIVE_UP: Array<[string, (controller: Controller, ctx: never) => void]> = [
+	["setting turned off", (controller, ctx) => controller.sync(ctx, false)],
+	["shutdown", (controller) => controller.shutdown()],
+	["new session", (controller, ctx) => controller.start(ctx)],
+];
+
+test("ASYNC-CLAIM: a reply during emit still settles the claim at once", () => {
+	const env = asyncEnv({ synchronous: true });
+	const controller = env.make();
+	controller.start(env.ctx);
+	assert.equal(controller.active, true);
+	assert.equal(controller.pending, false);
+	assert.equal(env.fabric.engineActive, false);
+	assert.deepEqual(env.debug, ["compaction owner claim held"]);
+});
+
+test("ASYNC-CLAIM: FakeFabric answers the first and later messages after emit, in emit order", async () => {
+	const host = createHostPi();
+	const fabric = new FakeFabric(host.bus);
+	const replies: Array<[string, boolean]> = [];
+	const send = (name: string): void => {
+		host.bus.emit("pi-fabric:compaction-owner:v1", {
+			version: 1,
+			type: "claim",
+			owner: { name, version: "1.0.0" },
+			actions: {},
+			reply: (result: { ok: boolean }) => { replies.push([name, result.ok]); },
+		});
+	};
+	send("first");
+	send("later");
+	assert.deepEqual(replies, [], "neither message is answered during emit");
+	assert.equal(fabric.engineActive, true);
+	await fabric.flush();
+	assert.deepEqual(replies, [["first", true], ["later", false]]);
+	assert.equal(fabric.claim!.owner.name, "first", "the first emitted claim wins");
+	fabric.shutdown();
+});
+
+test("ASYNC-CLAIM: a reply after emit makes the claim active, and only then", async () => {
+	const env = asyncEnv();
+	const controller = env.make();
+	controller.start(env.ctx);
+	assert.equal(env.fabric.claims.length, 1);
+	assert.equal(controller.pending, true);
+	assert.equal(controller.active, false, "pending is not held");
+	assert.equal(env.fabric.engineActive, true, "Fabric's engine still compacts until it grants the claim");
+	assert.deepEqual(env.debug, []);
+	await env.fabric.flush();
+	assert.equal(controller.pending, false);
+	assert.equal(controller.active, true);
+	assert.equal(env.fabric.engineActive, false);
+	assert.deepEqual(env.debug, ["compaction owner claim held"], "the outcome is reported when it arrives");
+	assert.equal(env.fabric.claims.length, 1);
+});
+
+test("ASYNC-CLAIM: the claim is not sent again while one is pending", async () => {
+	const env = asyncEnv();
+	const controller = env.make();
+	controller.start(env.ctx);
+	controller.sync(env.ctx);
+	controller.sync(env.ctx, true);
+	controller.sync(env.ctx);
+	assert.equal(env.fabric.claims.length, 1);
+	await env.fabric.flush();
+	controller.sync(env.ctx);
+	assert.equal(env.fabric.claims.length, 1, "nor once it is held");
+	assert.equal(controller.active, true);
+});
+
+test("ASYNC-CLAIM: the lower-level claim reports pending, then the outcome through onSettled", async () => {
+	const host = createHostPi();
+	const fabric = new FakeFabric(host.bus, { carry: ["Carried"] });
+	const settled: unknown[] = [];
+	const claim = createCompactionOwnerClaim({
+		events: host.bus,
+		owner: { name: "pi-context-aware", version: "0.0.0-test" },
+		actions: {},
+		onSettled: (attempt) => settled.push(attempt),
+	});
+	assert.deepEqual(claim.claim(), { kind: "pending" });
+	assert.deepEqual(claim.claim(), { kind: "pending" }, "a second call neither sends nor changes the state");
+	assert.equal(fabric.claims.length, 1);
+	assert.deepEqual(settled, []);
+	await fabric.flush();
+	assert.deepEqual(settled, [{ kind: "claimed", carry: ["Carried"] }]);
+	assert.deepEqual(claim.claim(), { kind: "held" });
+	claim.release();
+});
+
+test("ASYNC-CLAIM: a refusal that arrives after emit settles as refused for the session", async () => {
+	const env = asyncEnv();
+	// Another owner holds the claim already.
+	env.host.bus.emit("pi-fabric:compaction-owner:v1", { version: 1, type: "claim", owner: { name: "other-owner", version: "1.0.0" }, actions: {}, reply: () => {} });
+	await env.fabric.flush();
+	assert.equal(env.fabric.claim!.owner.name, "other-owner");
+	const controller = env.make();
+	controller.start(env.ctx);
+	assert.equal(controller.pending, true);
+	await env.fabric.flush();
+	assert.equal(controller.pending, false);
+	assert.equal(controller.active, false);
+	assert.equal(env.fabric.claim!.owner.name, "other-owner");
+	assert.equal(env.debug.length, 1);
+	assert.match(env.debug[0]!, /^compaction owner claim refused: .*other-owner@1\.0\.0 already owns compaction/u);
+	controller.sync(env.ctx);
+	assert.equal(env.fabric.claims.length, 2, "not asked again in the session");
+	controller.start(env.ctx);
+	assert.equal(env.fabric.claims.length, 3, "asked again in the next session");
+});
+
+test("ASYNC-CLAIM: only the first reply counts", () => {
+	for (const [first, second, held] of [["ok", "refused", true], ["refused", "ok", false]] as const) {
+		const env = asyncEnv();
+		const controller = env.make();
+		controller.start(env.ctx);
+		const message = lastClaim(env.fabric);
+		const grant = fakeGrant();
+		const replies = { ok: { ok: true, handle: grant.handle }, refused: { ok: false, error: "no" } };
+		message.reply(replies[first]);
+		message.reply(replies[second]);
+		assert.equal(controller.active, held, `${first} then ${second}`);
+		assert.equal(env.debug.length, 1, "one outcome reported");
+	}
+});
+
+test("ASYNC-CLAIM: no reply within 5 s aborts the signal and settles as no Fabric for the session", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const env = asyncEnv();
+	const controller = env.make();
+	controller.start(env.ctx);
+	const { signal } = lastClaim(env.fabric);
+	t.mock.timers.tick(4_999);
+	assert.equal(signal.aborted, false, "still waiting one millisecond before the bound");
+	assert.equal(controller.pending, true);
+	assert.deepEqual(env.debug, []);
+	t.mock.timers.tick(1);
+	assert.equal(signal.aborted, true);
+	assert.equal(controller.pending, false);
+	assert.equal(controller.active, false);
+	assert.deepEqual(env.debug, [NOT_LOADED]);
+	controller.sync(env.ctx);
+	assert.equal(env.fabric.claims.length, 1, "not asked again in the session");
+	// Fabric handles the queued claim after all: its signal is already aborted, so it refuses.
+	await env.fabric.flush();
+	assert.equal(env.fabric.engineActive, true);
+	controller.start(env.ctx);
+	assert.equal(env.fabric.claims.length, 2, "asked again in the next session");
+});
+
+test("ASYNC-CLAIM: the reply timeout can be set", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const host = createHostPi();
+	const settled: unknown[] = [];
+	const claim = createCompactionOwnerClaim({ events: host.bus, owner: { name: "pi-context-aware", version: "0.0.0-test" }, actions: {}, replyTimeoutMs: 40, onSettled: (a) => settled.push(a) });
+	claim.claim();
+	t.mock.timers.tick(39);
+	assert.deepEqual(settled, []);
+	t.mock.timers.tick(1);
+	assert.deepEqual(settled, [{ kind: "no-fabric" }]);
+});
+
+test("ASYNC-CLAIM: a grant that arrives after the timeout is withdrawn at once and never held", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const env = asyncEnv();
+	const controller = env.make();
+	controller.start(env.ctx);
+	const message = lastClaim(env.fabric);
+	t.mock.timers.tick(5_000);
+	const grant = fakeGrant();
+	message.reply({ ok: true, handle: grant.handle });
+	assert.equal(grant.withdrawn(), 1);
+	assert.equal(message.signal.aborted, true);
+	assert.equal(controller.active, false);
+	assert.equal(controller.pending, false);
+	assert.deepEqual(env.debug, [NOT_LOADED], "no second outcome is reported");
+	message.reply({ ok: true, handle: grant.handle });
+	assert.equal(grant.withdrawn(), 1, "only the first reply counts");
+});
+
+test("ASYNC-CLAIM: a grant that arrives after release, shutdown or a new session is withdrawn and never held", () => {
+	assert.equal(GIVE_UP.length, 3, "every pending-claim shutdown path is exercised");
+	for (const [label, give] of GIVE_UP) {
+		const env = asyncEnv();
+		const controller = env.make();
+		controller.start(env.ctx);
+		const first = lastClaim(env.fabric);
+		give(controller, env.ctx);
+		const grant = fakeGrant();
+		first.reply({ ok: true, handle: grant.handle });
+		assert.equal(grant.withdrawn(), 1, `${label}: withdrawn at once`);
+		assert.equal(controller.active, false, `${label}: the abandoned claim is not held`);
+		assert.equal(env.debug.includes("compaction owner claim held"), false, `${label}: not reported as held`);
+	}
+});
+
+test("ASYNC-CLAIM: release, shutdown and a new session while pending abort the signal, so Fabric refuses the claim", async () => {
+	assert.equal(GIVE_UP.length, 3, "every pending-claim shutdown path is exercised");
+	for (const [label, give] of GIVE_UP) {
+		const env = asyncEnv();
+		const controller = env.make();
+		controller.start(env.ctx);
+		const first = lastClaim(env.fabric);
+		assert.equal(first.signal.aborted, false);
+		give(controller, env.ctx);
+		assert.equal(first.signal.aborted, true, label);
+		// Fabric handles what is queued, in order; a new session also queued its own claim.
+		await env.fabric.flush();
+		const fresh = label === "new session";
+		assert.equal(env.fabric.claims.length, fresh ? 2 : 1, label);
+		assert.equal(controller.pending, false, `${label}: nothing is left pending`);
+		assert.equal(controller.active, fresh, `${label}: only a new session's own claim can be held`);
+		controller.shutdown();
+		assert.equal(env.fabric.engineActive, true, `${label}: Fabric compacts again`);
+	}
+});
+
+test("ASYNC-CLAIM: a new session's pending claim is not answered by the earlier session's reply", () => {
+	const env = asyncEnv();
+	const controller = env.make();
+	controller.start(env.ctx);
+	const first = lastClaim(env.fabric);
+	controller.start(env.ctx);
+	assert.equal(env.fabric.claims.length, 2);
+	const grant = fakeGrant();
+	first.reply({ ok: true, handle: grant.handle });
+	assert.equal(grant.withdrawn(), 1);
+	assert.equal(controller.pending, true, "the new session's claim still waits");
+	assert.equal(controller.active, false);
+});
+
+test("ASYNC-CLAIM: the timer does not keep the process alive and every path clears it", async (t) => {
+	const realSet = globalThis.setTimeout;
+	const realClear = globalThis.clearTimeout;
+	const timers: Array<ReturnType<typeof setTimeout>> = [];
+	const clearedTimers: unknown[] = [];
+	t.mock.method(globalThis, "setTimeout", ((...args: Parameters<typeof setTimeout>) => {
+		const timer = realSet(...args);
+		timers.push(timer);
+		return timer;
+	}) as never);
+	t.mock.method(globalThis, "clearTimeout", ((timer?: Parameters<typeof clearTimeout>[0]) => {
+		clearedTimers.push(timer);
+		realClear(timer);
+	}) as never);
+	const ways: Array<[string, (env: ReturnType<typeof asyncEnv>, controller: Controller) => void | Promise<void>]> = [
+		["a reply", (env) => env.fabric.flush()],
+		["release", (env, controller) => controller.sync(env.ctx, false)],
+		["shutdown", (_env, controller) => controller.shutdown()],
+		["a new session", (env, controller) => controller.start(env.ctx)],
+	];
+	assert.equal(ways.length, 4, "every timer-ending path is exercised");
+	for (const [label, end] of ways) {
+		const before = timers.length;
+		const env = asyncEnv();
+		const controller = env.make();
+		controller.start(env.ctx);
+		const timer = timers[before]!;
+		assert.ok(timer, `${label}: a timer was set`);
+		assert.equal(timer.hasRef(), false, `${label}: unref'd`);
+		await end(env, controller);
+		assert.ok(clearedTimers.includes(timer), `${label}: the timer was cleared`);
+		controller.shutdown();
+	}
+});
+
+test("ASYNC-CLAIM: with the claim pending the extension acts as if no claim existed, and holds it when Fabric grants it", async () => {
+	await withFixture({ config: CLAIM_ON }, async (f) => {
+		let beforePending: Promise<unknown> | undefined;
+		let firstSettle: Promise<void> | undefined;
+		let secondSettle: Promise<void> | undefined;
+		let statusWhilePending: Promise<unknown> | undefined;
+		let claimsWhilePending = 0;
+		let engineWhilePending = false;
+		let claimsAfterSettlesStarted = 0;
+		f.host.bus.on("pi-fabric:compaction-owner:v1", () => {
+			claimsWhilePending = f.fabric!.claims.length;
+			engineWhilePending = f.fabric!.engineActive;
+			beforePending = f.beforeCompact();
+			firstSettle = f.settle();
+			secondSettle = f.settle();
+			claimsAfterSettlesStarted = f.fabric!.claims.length;
+			statusWhilePending = f.fabric!.call("status", undefined, f.session.ctx);
+			void statusWhilePending.catch(() => {});
+		});
+		await f.start();
+		assert.equal(claimsWhilePending, 1);
+		assert.equal(engineWhilePending, true, "Fabric's engine still compacts while the claim is pending");
+		assert.equal(claimsAfterSettlesStarted, 1, "no second claim while one is pending");
+		assert.ok(statusWhilePending);
+		await assert.rejects(statusWhilePending, /./u, "no claim is held, so there is nothing to call");
+		assert.equal(await beforePending, undefined, "the hook is main's: nothing to add, so Pi's summarizer runs");
+		await Promise.all([firstSettle, secondSettle]);
+		assert.equal(f.fabric!.engineActive, false);
+		assert.ok(await f.fabric!.call("status", undefined, f.session.ctx), "the owner answers status once the claim is held");
+		await f.shutdown();
+		assert.equal(f.fabric!.engineActive, true);
+	});
+});
+
+test("ASYNC-CLAIM: a session shutdown while the claim is pending leaves Fabric's engine in charge", async () => {
+	await withFixture({ config: CLAIM_ON }, async (f) => {
+		let signal: AbortSignal | undefined;
+		let shuttingDown: Promise<void> | undefined;
+		let engineWhenShutdownStarted = false;
+		f.host.bus.on("pi-fabric:compaction-owner:v1", () => {
+			signal = lastClaim(f.fabric!).signal;
+			engineWhenShutdownStarted = f.fabric!.engineActive;
+			shuttingDown = f.shutdown();
+		});
+		await f.start();
+		await shuttingDown;
+		await f.fabric!.flush();
+		assert.equal(engineWhenShutdownStarted, true, "shutdown started while the claim was pending");
+		assert.equal(signal?.aborted, true);
+		assert.equal(f.fabric!.engineActive, true, "Fabric refused the abandoned claim");
+	});
 });

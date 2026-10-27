@@ -16,7 +16,7 @@ const PI_AGENT_CORE = "@earendil-works/pi-agent-core";
 
 function manifestFixture() {
 	return {
-		devDependencies: { [PI_AI]: "1.0.4", [PI_CODING_AGENT]: "1.0.4", typebox: "1.3.35" },
+		devDependencies: { [PI_AI]: "1.4.0", [PI_CODING_AGENT]: "1.4.0", typebox: "1.3.35" },
 		overrides: {
 			[PI_AGENT_CORE]: `$${PI_CODING_AGENT}`,
 			[PI_AI]: `$${PI_AI}`,
@@ -29,9 +29,9 @@ function lockfileFixture() {
 	return {
 		packages: {
 			"": {},
-			[`node_modules/${PI_AGENT_CORE}`]: { version: "1.0.4" },
-			[`node_modules/${PI_AI}`]: { version: "1.0.4" },
-			[`node_modules/${PI_CODING_AGENT}`]: { version: "1.0.4" },
+			[`node_modules/${PI_AGENT_CORE}`]: { version: "1.4.0" },
+			[`node_modules/${PI_AI}`]: { version: "1.4.0" },
+			[`node_modules/${PI_CODING_AGENT}`]: { version: "1.4.0" },
 			["node_modules/typebox"]: { version: "1.3.35" },
 			[`node_modules/${PI_AI}/node_modules/typebox`]: { version: "1.3.27" },
 		},
@@ -46,7 +46,7 @@ function writePackage(root, location, version) {
 function installedFixture(t) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "sdk-graph-"));
 	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-	for (const name of [PI_AGENT_CORE, PI_AI, PI_CODING_AGENT]) writePackage(root, `node_modules/${name}`, "1.0.4");
+	for (const name of [PI_AGENT_CORE, PI_AI, PI_CODING_AGENT]) writePackage(root, `node_modules/${name}`, "1.4.0");
 	writePackage(root, "node_modules/typebox", "1.3.35");
 	writePackage(root, `node_modules/${PI_AI}/node_modules/typebox`, "1.3.27");
 	return root;
@@ -54,17 +54,17 @@ function installedFixture(t) {
 
 test("overrides resolve through development pins, so the whole SDK follows them", () => {
 	const manifest = manifestFixture();
-	manifest.devDependencies[PI_AI] = "1.0.3";
-	manifest.devDependencies[PI_CODING_AGENT] = "1.0.3";
+	manifest.devDependencies[PI_AI] = "1.4.1";
+	manifest.devDependencies[PI_CODING_AGENT] = "1.4.1";
 	const { expected, errors } = expectedSdkVersions(manifest);
 	assert.deepEqual(errors, []);
-	assert.deepEqual(Object.fromEntries(expected), { [PI_AGENT_CORE]: "1.0.3", [PI_AI]: "1.0.3", [PI_CODING_AGENT]: "1.0.3" });
+	assert.deepEqual(Object.fromEntries(expected), { [PI_AGENT_CORE]: "1.4.1", [PI_AI]: "1.4.1", [PI_CODING_AGENT]: "1.4.1" });
 });
 
 test("rejects overrides that would not follow the development pin", async (t) => {
 	await t.test("a literal version", () => {
 		const manifest = manifestFixture();
-		manifest.overrides[PI_AGENT_CORE] = "1.0.4";
+		manifest.overrides[PI_AGENT_CORE] = "1.4.0";
 		assert.match(expectedSdkVersions(manifest).errors.join("\n"), /pi-agent-core override must reference a development pin with "\$"/);
 	});
 
@@ -82,7 +82,7 @@ test("rejects overrides that would not follow the development pin", async (t) =>
 
 	await t.test("a reference to a range rather than an exact pin", () => {
 		const manifest = manifestFixture();
-		manifest.devDependencies[PI_CODING_AGENT] = "^1.0.4";
+		manifest.devDependencies[PI_CODING_AGENT] = "^1.4.0";
 		assert.match(expectedSdkVersions(manifest).errors.join("\n"), /references @earendil-works\/pi-coding-agent, which is not an exact development pin/);
 	});
 });
@@ -94,23 +94,23 @@ test("accepts a lockfile with one top-level copy of each SDK package at the pinn
 test("rejects lockfile SDK drift from the overrides", async (t) => {
 	await t.test("a nested duplicate pi-ai, the TS2322 private 'queue' failure", () => {
 		const lockfile = lockfileFixture();
-		lockfile.packages[`node_modules/${PI_AGENT_CORE}/node_modules/${PI_AI}`] = { version: "1.0.5" };
+		lockfile.packages[`node_modules/${PI_AGENT_CORE}/node_modules/${PI_AI}`] = { version: "1.4.1" };
 		assert.match(
 			validateLockfileSdkGraph(manifestFixture(), lockfile).join("\n"),
-			/nested SDK copy at node_modules\/@earendil-works\/pi-agent-core\/node_modules\/@earendil-works\/pi-ai \(1\.0\.5\)/,
+			/nested SDK copy at node_modules\/@earendil-works\/pi-agent-core\/node_modules\/@earendil-works\/pi-ai \(1\.4\.1\)/,
 		);
 	});
 
 	await t.test("a top-level version that differs from the pin", () => {
 		const lockfile = lockfileFixture();
-		lockfile.packages[`node_modules/${PI_AGENT_CORE}`].version = "1.0.5";
-		assert.match(validateLockfileSdkGraph(manifestFixture(), lockfile).join("\n"), /resolves @earendil-works\/pi-agent-core@1\.0\.5; the overrides pin 1\.0\.4/);
+		lockfile.packages[`node_modules/${PI_AGENT_CORE}`].version = "1.4.1";
+		assert.match(validateLockfileSdkGraph(manifestFixture(), lockfile).join("\n"), /resolves @earendil-works\/pi-agent-core@1\.4\.1; the overrides pin 1\.4\.0/);
 	});
 
 	await t.test("an SDK package with no override", () => {
 		const lockfile = lockfileFixture();
-		lockfile.packages["node_modules/@earendil-works/pi-tui"] = { version: "1.0.5" };
-		assert.match(validateLockfileSdkGraph(manifestFixture(), lockfile).join("\n"), /contains @earendil-works\/pi-tui@1\.0\.5 without an override/);
+		lockfile.packages["node_modules/@earendil-works/pi-tui"] = { version: "1.4.1" };
+		assert.match(validateLockfileSdkGraph(manifestFixture(), lockfile).join("\n"), /contains @earendil-works\/pi-tui@1\.4\.1 without an override/);
 	});
 
 	await t.test("a development pin the lockfile no longer has", () => {
@@ -133,17 +133,17 @@ test("accepts an installed tree with one top-level copy of each SDK package", (t
 test("rejects installed SDK drift from the overrides", async (t) => {
 	await t.test("a nested duplicate pi-ai", (st) => {
 		const root = installedFixture(st);
-		writePackage(root, `node_modules/${PI_AGENT_CORE}/node_modules/${PI_AI}`, "1.0.5");
+		writePackage(root, `node_modules/${PI_AGENT_CORE}/node_modules/${PI_AI}`, "1.4.1");
 		assert.match(
 			validateInstalledSdkGraph(manifestFixture(), root).join("\n"),
-			/nested SDK copy at node_modules\/@earendil-works\/pi-agent-core\/node_modules\/@earendil-works\/pi-ai \(1\.0\.5\)/,
+			/nested SDK copy at node_modules\/@earendil-works\/pi-agent-core\/node_modules\/@earendil-works\/pi-ai \(1\.4\.1\)/,
 		);
 	});
 
 	await t.test("a newer top-level patch", (st) => {
 		const root = installedFixture(st);
-		writePackage(root, `node_modules/${PI_AGENT_CORE}`, "1.0.5");
-		assert.match(validateInstalledSdkGraph(manifestFixture(), root).join("\n"), /resolves @earendil-works\/pi-agent-core@1\.0\.5; the overrides pin 1\.0\.4/);
+		writePackage(root, `node_modules/${PI_AGENT_CORE}`, "1.4.1");
+		assert.match(validateInstalledSdkGraph(manifestFixture(), root).join("\n"), /resolves @earendil-works\/pi-agent-core@1\.4\.1; the overrides pin 1\.4\.0/);
 	});
 
 	await t.test("no installed tree", (st) => {

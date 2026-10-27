@@ -3,8 +3,10 @@
  *
  * Query mode runs two engines and returns one labelled section from each:
  *
- * - transcripts: the substring or regex snippet search that `search_prior_sessions`
- *   ran, with erased sessions skipped and every snippet redacted;
+ * - transcripts: a literal, every-word or regex snippet search (see
+ *   transcript-match.ts) over chat text and, for non-regex queries, tool calls,
+ *   tool results and fold and compaction summaries (see transcript-text.ts),
+ *   with erased sessions skipped and every snippet redacted;
  * - cache documents: `answerRecall` over this project's context-cache documents
  *   only, so transcripts are never searched twice.
  *
@@ -23,6 +25,16 @@ import { Type, type Static } from "typebox";
 
 import { answerRecall, recallSchema, type RecallCachePool, type RecallDetails, type RecallRequest } from "../cache/recall.js";
 import { stringEnum } from "../tool-arguments.js";
+import { matchRank, matchText, planQuery, type MatchKind, type QueryPlan, type TextMatch } from "./transcript-match.js";
+import {
+	createTranscriptFileReadBudget,
+	entriesSearchText,
+	SESSION_SEARCH_CHARACTERS,
+	sessionFileSearchText,
+	TOOL_CALL_CHARACTERS,
+	TOOL_RESULT_CHARACTERS,
+	type TranscriptFileReadBudget,
+} from "./transcript-text.js";
 import { redactText } from "../workstream/workstream-safety.js";
 import {
 	decompressRequest,
@@ -39,7 +51,7 @@ export const CONTEXT_RECALL_SCOPES = ["session", "prior", "all-projects"] as con
 export type ContextRecallScope = (typeof CONTEXT_RECALL_SCOPES)[number];
 
 export const contextRecallSchema = Type.Object({
-	query: Type.Optional(Type.String({ minLength: 1, description: "Text to find: a substring, or a JavaScript regular expression source when `regex: true`. Give query or ref." })),
+	query: Type.Optional(Type.String({ minLength: 1, description: "Text to find. One word (an issue reference, SHA or path) matches as a substring. Several words match a session that holds every word, in any order; the exact phrase ranks first. With `regex: true`, a JavaScript regular expression source. Give query or ref." })),
 	ref: Type.Optional(Type.String({ minLength: 1, description: "A fold block id such as \"b5\": returns the original entries behind that fold, read from the session. The fold stays in place. Give query or ref." })),
 	offset: Type.Optional(Type.Number({ description: "ref: character offset of the page to return. Default: 0." })),
 	scope: Type.Optional(stringEnum(CONTEXT_RECALL_SCOPES, {
@@ -55,7 +67,7 @@ export type ContextRecallInput = Static<typeof contextRecallSchema>;
 
 /** `search_prior_sessions` parameters, unchanged so existing callers keep working. */
 export const searchPriorSessionsSchema = Type.Object({
-	query: Type.String({ description: "Substring to search for, or a JS regex source if `regex: true`." }),
+	query: Type.String({ description: "One word matches as a substring; several words match a session holding every word, in any order. A JS regex source if `regex: true`." }),
 	regex: Type.Optional(
 		Type.Boolean({ description: "Treat `query` as a JavaScript regular expression. Default: false." }),
 	),
@@ -129,6 +141,8 @@ export interface SearchHit {
 	cwd: string;
 	modified: string;
 	messageCount: number;
+	/** How the session matched: literal substring, regex, the exact phrase, or every word of the query. */
+	match: MatchKind;
 	snippets: string[];
 }
 
@@ -141,7 +155,24 @@ export interface TranscriptSectionDetails {
 	readonly scanned: number;
 	readonly hits: number;
 	readonly scanned_cwds: readonly string[];
+	/** literal and regex match one pattern; terms needs every listed word somewhere in the session. */
+	readonly matching: QueryPlan["kind"];
+	readonly terms?: readonly string[];
 	readonly results: readonly SearchHit[];
+	readonly wider_search?: {
+		readonly session_limit: number;
+		readonly byte_limit: number;
+		readonly sessions_read: number;
+		readonly files_read: number;
+		readonly bytes_read: number;
+		/** Files over their per-file size limit, missing, unreadable or malformed, whose text was not searched. */
+		readonly files_skipped: number;
+		/** Session-file lines holding a query word that were not valid JSON. */
+		readonly lines_skipped: number;
+		/** Sessions whose text ran past the per-session search limit; the rest was not searched. */
+		readonly sessions_truncated: number;
+		readonly exhausted: boolean;
+	};
 	readonly error?: "list failed";
 }
 
@@ -168,6 +199,13 @@ const MAX_SNIPPETS_PER_SESSION = 3;
 const MAX_SNIPPET_CHARACTERS = 2 * SNIPPET_RADIUS + 240;
 const DEFAULT_MAX_SESSIONS = 20;
 const MOST_SESSIONS = 100;
+/**
+ * The 102-candidate replay took 6,457.6 ms without a cap. Eight sessions scales
+ * that observed work to about 507 ms, below the pre-change 703.4 ms maximum.
+ * The byte cap also limits one call even when those first sessions are large.
+ */
+export const WIDER_SEARCH_SESSION_LIMIT = 8;
+export const WIDER_SEARCH_BYTE_LIMIT = 8 * 1024 * 1024;
 
 const TRANSCRIPTS_HEADING = "## Transcripts";
 const CACHE_HEADING = "## Cache documents";
@@ -215,29 +253,6 @@ export function searchContextRequest(params: SearchContextParams): ContextRecall
 
 // -- Query mode ------------------------------------------------------------------
 
-function makeMatcher(query: string, regex: boolean, caseSensitive: boolean): RegExp {
-	if (regex) return new RegExp(query, caseSensitive ? "g" : "gi");
-	const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	return new RegExp(escaped, caseSensitive ? "g" : "gi");
-}
-
-function extractSnippets(haystack: string, matcher: RegExp, maxSnippets: number, radius: number): string[] {
-	const out: string[] = [];
-	matcher.lastIndex = 0;
-	let m: RegExpExecArray | null;
-	while ((m = matcher.exec(haystack)) !== null) {
-		const start = Math.max(0, m.index - radius);
-		const end = Math.min(haystack.length, m.index + m[0].length + radius);
-		const prefix = start > 0 ? "…" : "";
-		const suffix = end < haystack.length ? "…" : "";
-		const snippet = `${prefix}${haystack.slice(start, end)}${suffix}`.replace(/\s+/g, " ").trim();
-		out.push(snippet);
-		if (out.length >= maxSnippets) break;
-		if (m[0].length === 0) matcher.lastIndex++;
-	}
-	return out;
-}
-
 function messageText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -284,13 +299,36 @@ function currentTranscript(ctx: Pick<ExtensionContext, "cwd" | "sessionManager">
 	};
 }
 
+/**
+ * The wider search text for a non-regex query: tool calls and results, fold and
+ * compaction summaries as well as chat text. The current session is read from
+ * its manager, so unsaved entries count; other sessions are read from their file.
+ */
+function widerSearchText(
+	session: TranscriptSession,
+	plan: QueryPlan,
+	ctx: ExtensionContext,
+	currentFile: string | undefined,
+	readBudget: TranscriptFileReadBudget,
+): string | undefined {
+	if (currentFile && session.path === currentFile) return entriesSearchText(ctx.sessionManager.getEntries(), currentFile, readBudget);
+	if (session.path === "(unsaved session)") return entriesSearchText(ctx.sessionManager.getEntries(), undefined, readBudget);
+	return sessionFileSearchText(session.path, plan.kind === "regex" ? undefined : plan, readBudget);
+}
+
+function yieldToEventLoop(): Promise<void> {
+	return new Promise((resolve) => setImmediate(resolve));
+}
+
 function sessionLimit(value: number | undefined): number {
 	const requested = typeof value === "number" && Number.isFinite(value) ? value : DEFAULT_MAX_SESSIONS;
 	return Math.max(1, Math.min(requested, MOST_SESSIONS));
 }
 
-function describeQuery(query: string, regex: boolean): string {
-	return regex ? `regex /${query}/` : `"${query}"`;
+function describeQuery(query: string, plan: QueryPlan): string {
+	if (plan.kind === "regex") return `regex /${query}/`;
+	if (plan.kind === "literal") return `"${query}"`;
+	return `all of the words ${plan.terms.map((term) => `"${term}"`).join(", ")}`;
 }
 
 function notSearchedText(reason: "session scope" | "regex" | "invalid query"): string {
@@ -299,8 +337,8 @@ function notSearchedText(reason: "session scope" | "regex" | "invalid query"): s
 	return "Not searched.";
 }
 
-function emptyTranscripts(scopeLabel: string, includeCurrent: boolean, includeWorktrees: boolean): TranscriptSectionDetails {
-	return { scope_label: scopeLabel, include_current: includeCurrent, include_worktrees: includeWorktrees, scanned: 0, hits: 0, scanned_cwds: [], results: [] };
+function emptyTranscripts(scopeLabel: string, includeCurrent: boolean, includeWorktrees: boolean, matching: QueryPlan["kind"] = "literal"): TranscriptSectionDetails {
+	return { scope_label: scopeLabel, include_current: includeCurrent, include_worktrees: includeWorktrees, scanned: 0, hits: 0, scanned_cwds: [], matching, results: [] };
 }
 
 /** Run one query-mode request: the transcript section, then the cache-document section. */
@@ -327,14 +365,14 @@ export async function recallQuery(
 		isError: true,
 	});
 	if (query.trim().length === 0) return inputError("blank query", "context_recall needs a non-blank query. Nothing was searched.");
-	let matcher: RegExp;
+	let plan: QueryPlan;
 	try {
-		matcher = makeMatcher(query, regex, request.case_sensitive ?? false);
+		plan = planQuery(query, regex, request.case_sensitive ?? false);
 	} catch (err) {
 		return inputError("invalid regex", `Invalid regex: ${err instanceof Error ? err.message : String(err)}`);
 	}
 
-	const transcripts = await searchTranscripts(scope, query, regex, matcher, includeCurrent, includeWorktrees, sessionLimit(request.max_sessions), ctx, host);
+	const transcripts = await searchTranscripts(scope, query, plan, includeCurrent, includeWorktrees, sessionLimit(request.max_sessions), ctx, host);
 
 	let cacheDetails: CacheSectionDetails;
 	let cacheText: string;
@@ -367,8 +405,7 @@ export async function recallQuery(
 async function searchTranscripts(
 	scope: ContextRecallScope,
 	query: string,
-	regex: boolean,
-	matcher: RegExp,
+	plan: QueryPlan,
 	includeCurrent: boolean,
 	includeWorktrees: boolean,
 	maxSessions: number,
@@ -387,34 +424,58 @@ async function searchTranscripts(
 		const label = scope === "all-projects" ? "all projects" : "project";
 		return {
 			text: `Failed to list sessions: ${err instanceof Error ? err.message : String(err)}`,
-			details: { ...emptyTranscripts(label, includeCurrent, includeWorktrees), error: "list failed" },
+			details: { ...emptyTranscripts(label, includeCurrent, includeWorktrees, plan.kind), error: "list failed" },
 		};
 	}
 
 	const home = host.home();
-	const hits: SearchHit[] = [];
+	const matched: Array<{ session: TranscriptSession; match: TextMatch; order: number }> = [];
+	const widerReadBudget = createTranscriptFileReadBudget(WIDER_SEARCH_BYTE_LIMIT);
+	let widerSessionsRead = 0;
+	let widerExhausted = false;
 	let scanned = 0;
+	let topRanked = 0;
 	for (const session of listing.sessions) {
 		if (session.id !== undefined && erased.has(session.id)) continue;
 		if (scope !== "session" && !includeCurrent && currentFile && session.path === currentFile) continue;
 		scanned++;
-		const text = session.allMessagesText ?? "";
-		if (!text) continue;
-		const snippets = extractSnippets(text, matcher, MAX_SNIPPETS_PER_SESSION, SNIPPET_RADIUS)
-			.map((snippet) => redactText(snippet, { home, cwd: ctx.cwd, maxLength: MAX_SNIPPET_CHARACTERS }));
-		if (snippets.length === 0) continue;
+		// Chat text first: Pi's listing already holds it. Regex queries search chat text only, as before.
+		let match = matchText(plan, session.allMessagesText ?? "", MAX_SNIPPETS_PER_SESSION, SNIPPET_RADIUS);
+		const needsWiderSearch = plan.kind !== "regex" && (match === undefined || matchRank(match) > 0);
+		if (needsWiderSearch) {
+			if (widerSessionsRead >= WIDER_SEARCH_SESSION_LIMIT || widerReadBudget.exhausted) {
+				widerExhausted = true;
+			} else {
+				widerSessionsRead++;
+				const wider = widerSearchText(session, plan, ctx, currentFile, widerReadBudget);
+				const widerMatch = wider ? matchText(plan, wider, MAX_SNIPPETS_PER_SESSION, SNIPPET_RADIUS) : undefined;
+				if (widerMatch !== undefined && (match === undefined || matchRank(widerMatch) < matchRank(match))) match = widerMatch;
+				if (widerReadBudget.exhausted) widerExhausted = true;
+				// Reading a session file blocks; let other work run between files.
+				await yieldToEventLoop();
+			}
+		}
+		if (match === undefined) continue;
+		matched.push({ session, match, order: matched.length });
+		if (matchRank(match) === 0 && ++topRanked >= maxSessions) break;
+	}
+	// Best match first, then the newest session; the listing order breaks ties.
+	matched.sort((left, right) => matchRank(left.match) - matchRank(right.match)
+		|| right.session.modified.getTime() - left.session.modified.getTime()
+		|| left.order - right.order);
+	const hits: SearchHit[] = matched.slice(0, maxSessions).map(({ session, match }) => {
 		// A session without a name is labelled by its first message, which is transcript text too.
 		const label = session.name ?? session.firstMessage?.slice(0, 80);
-		hits.push({
+		return {
 			sessionPath: session.path,
 			sessionName: label ? redactText(label, { home, cwd: ctx.cwd, maxLength: 80 }) : "(unnamed)",
 			cwd: session.cwd || "(unknown cwd)",
 			modified: session.modified.toISOString(),
 			messageCount: session.messageCount,
-			snippets,
-		});
-		if (hits.length >= maxSessions) break;
-	}
+			match: match.kind,
+			snippets: match.snippets.map((snippet) => redactText(snippet, { home, cwd: ctx.cwd, maxLength: MAX_SNIPPET_CHARACTERS })),
+		};
+	});
 
 	const details: TranscriptSectionDetails = {
 		scope_label: listing.scopeLabel,
@@ -423,23 +484,49 @@ async function searchTranscripts(
 		scanned,
 		hits: hits.length,
 		scanned_cwds: [...listing.scannedCwds],
+		matching: plan.kind,
+		...(plan.kind === "terms" ? { terms: plan.terms } : {}),
+		...(plan.kind !== "regex" ? { wider_search: {
+			session_limit: WIDER_SEARCH_SESSION_LIMIT,
+			byte_limit: WIDER_SEARCH_BYTE_LIMIT,
+			sessions_read: widerSessionsRead,
+			files_read: widerReadBudget.filesRead,
+			bytes_read: widerReadBudget.bytesRead,
+			files_skipped: widerReadBudget.filesSkipped,
+			lines_skipped: widerReadBudget.linesSkipped,
+			sessions_truncated: widerReadBudget.sessionsTruncated,
+			exhausted: widerExhausted,
+		} } : {}),
 		results: hits,
 	};
-	const described = describeQuery(query, regex);
+	const described = describeQuery(query, plan);
+	const skipped = widerReadBudget.filesSkipped;
+	const truncated = widerReadBudget.sessionsTruncated;
+	const badLines = widerReadBudget.linesSkipped;
+	const widerNotices = [
+		...(widerExhausted ? ["Wider transcript budget reached; remaining sessions used chat text only."] : []),
+		...(skipped > 0 ? [`${skipped} transcript file${skipped === 1 ? "" : "s"} could not be searched (too large, missing, unreadable or malformed); ${skipped === 1 ? "its" : "their"} text was skipped.`] : []),
+		...(badLines > 0 ? [`${badLines} transcript line${badLines === 1 ? "" : "s"} could not be parsed; ${badLines === 1 ? "its" : "their"} text was not searched.`] : []),
+		...(truncated > 0 ? [`${truncated} session${truncated === 1 ? " had" : "s had"} more text than one search covers; text past the first ${SESSION_SEARCH_CHARACTERS.toLocaleString("en-US")} characters was not searched.`] : []),
+	];
+	const widerNotice = widerNotices.length > 0 ? widerNotices.join("\n") : undefined;
 	if (hits.length === 0) {
 		const excluded = scope !== "session" && currentFile && !includeCurrent ? " (current session excluded)" : "";
-		return { text: `No matches for ${described} across ${scanned} ${listing.scopeLabel} sessions${excluded}.`, details };
+		const text = `No matches for ${described} across ${scanned} ${listing.scopeLabel} sessions${excluded}.`;
+		return { text: widerNotice ? `${text}\n${widerNotice}` : text, details };
 	}
 	const lines = [
 		`Found ${hits.length} session${hits.length === 1 ? "" : "s"} with matches for ${described} (${listing.scopeLabel}, ${scanned} sessions scanned):`,
 		"",
 	];
+	if (widerNotice) lines.push(widerNotice, "");
 	for (const hit of hits) {
 		lines.push(`### ${hit.sessionName}`);
 		lines.push(`- path: ${hit.sessionPath}`);
 		lines.push(`- cwd: ${hit.cwd}`);
 		lines.push(`- modified: ${hit.modified}`);
 		lines.push(`- messages: ${hit.messageCount}`);
+		if (hit.match !== plan.kind) lines.push(`- match: ${hit.match === "phrase" ? "exact phrase" : hit.match}`);
 		for (const snippet of hit.snippets) lines.push(`  > ${snippet}`);
 		lines.push("");
 	}
@@ -449,7 +536,7 @@ async function searchTranscripts(
 // -- Tool definitions and registration -------------------------------------------
 
 const CONTEXT_RECALL_DESCRIPTION =
-	"Recall text that is no longer in context. With ref (a fold block id such as \"b5\"), returns the original entries behind that fold in pages; pass offset for the next page; the fold stays in place. With query, returns two labelled sections: transcript snippets, and cited excerpts from context-cache documents. scope: \"session\" searches this session's transcript only, including compacted-away and folded text; \"prior\" (default) searches earlier sessions of this project and its Git worktrees plus this project's cache documents (add include_current: true for this session); \"all-projects\" searches every project's sessions. regex: true searches transcripts only. Programs running in Fabric should call memory.recall instead.";
+	"Recall text that is no longer in context. With ref (a fold block id such as \"b5\"), returns the original entries behind that fold in pages; pass offset for the next page; the fold stays in place. With query, returns two labelled sections: transcript snippets, and cited excerpts from context-cache documents. A one-word query matches as a substring; a query of several words finds sessions holding every word in any order, searching chat text, tool calls and results, and fold and compaction summaries, and ranks the exact phrase first, then words close together, then newer sessions. Wider transcript sources are read within a per-call budget, and the result says when remaining sessions used chat text only. scope: \"session\" searches this session's transcript only, including compacted-away and folded text; \"prior\" (default) searches earlier sessions of this project and its Git worktrees plus this project's cache documents (add include_current: true for this session); \"all-projects\" searches every project's sessions. regex: true searches chat text of transcripts only. Programs running in Fabric should call memory.recall instead.";
 
 const CONTEXT_RECALL_SNIPPET =
 	"Use context_recall to recall transcript text from earlier sessions or this session (scope: \"session\", or include_current: true) and cited context-cache evidence; use session_compaction_history for current-branch boundary counts and identifiers.";
@@ -464,6 +551,7 @@ const SEARCH_PRIOR_SESSIONS_GUIDELINES: readonly string[] = [
 	"For compacted-away transcript text from the current session, set include_current: true; the default false is for cross-session recall.",
 	"Use session_compaction_history when you need the current branch's compaction count or boundary identifiers rather than transcript text.",
 	"Make this your first retrieval step when the user mentions prior/recent/earlier sessions, being away/coming back, where work was left off, lost/compacted context, a `Prior transcript:` path, or asks to recover previous work.",
+	`A query of several words finds sessions that contain every word, in any order, including tool calls and output (the first ${TOOL_CALL_CHARACTERS.toLocaleString("en-US")} characters of each call or command and ${TOOL_RESULT_CHARACTERS.toLocaleString("en-US")} of each result) and fold summaries; drop words you are unsure of, because one absent word excludes a session. A single word or identifier (issue number, SHA, path) matches as a substring.`,
 	"Use 2-4 focused searches with concrete terms from the user's memory instead of one vague query; inspect returned session paths/snippets before broad repo searches.",
 	"context_recall defaults to the current project plus same-repo worktrees. Set scope: \"all-projects\" only when you have reason to believe the answer lives in a different repo's session.",
 ];
@@ -484,7 +572,7 @@ const CONTEXT_RECALL_GUIDELINES: readonly string[] = [
 ];
 
 const SEARCH_PRIOR_SESSIONS_DESCRIPTION =
-	"Search across prior pi sessions for substrings or regex patterns. Sessions retain their FULL message history including pre-compaction content, so this can recover information that has been compacted out of the active context. To search compacted-away text from this session, set `include_current: true`; use `session_compaction_history` for current-branch compaction boundary counts and identifiers. Defaults to the current project plus same-repo Git worktrees; pass `all_projects: true` to search globally or `include_worktrees: false` for exact-cwd project search. Alias of context_recall.";
+	"Search across prior pi sessions for words, substrings or regex patterns. A query of several words finds sessions holding every word in any order, including tool output and fold summaries. Sessions retain their FULL message history including pre-compaction content, so this can recover information that has been compacted out of the active context. To search compacted-away text from this session, set `include_current: true`; use `session_compaction_history` for current-branch compaction boundary counts and identifiers. Defaults to the current project plus same-repo Git worktrees; pass `all_projects: true` to search globally or `include_worktrees: false` for exact-cwd project search. Alias of context_recall.";
 
 const SESSION_RECALL_DESCRIPTION =
 	"Search the local context cache and scoped prior-session transcripts for a bounded, extractive, non-authoritative reference answer. Defaults to this project plus same-repository worktrees; set all_projects: true for a local global search, include_current: true to include this transcript, or include_worktrees: false to restrict the project search to the exact cwd. Alias of context_recall.";
@@ -493,7 +581,7 @@ const DECOMPRESS_DESCRIPTION =
 	"Return the original entries behind one fold, read from the session, in pages. The fold stays in place. Alias of context_recall({ ref }).";
 
 const SEARCH_CONTEXT_DESCRIPTION =
-	"Search this session's transcript, including folded and compacted-away messages, for a substring. Alias of context_recall with scope \"session\".";
+	"Search this session's transcript, including folded and compacted-away messages and tool output, for a word, an identifier, or every word of a phrase. Alias of context_recall with scope \"session\".";
 
 /** The names this module registers: `context_recall` and the old names that stand for it. */
 export const CONTEXT_RECALL_TOOL_NAMES = ["context_recall", "search_prior_sessions", "session_recall", "search_context", "decompress"] as const;

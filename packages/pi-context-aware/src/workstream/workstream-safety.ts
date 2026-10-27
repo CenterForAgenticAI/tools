@@ -84,11 +84,27 @@ export function redactPath(value: string, roots: Pick<RedactionOptions, "home" |
 	return bounded(result, 240);
 }
 
+const SENSITIVE_NAME = String.raw`(?:api[_-]?key|token|password|passwd|secret|authorization|credential|credentials|cookie)`;
+
 const SECRET_PATTERNS: readonly RegExp[] = [
 	/(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16})/gi,
 	/(?:sk|pk)-[A-Za-z0-9_-]{8,}/gi,
-	/(?:api[_-]?key|token|password|passwd|secret|authorization|credential|credentials|cookie)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+	/\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,}/g,
+	/\bxox[abposr]-[A-Za-z0-9-]{10,}/g,
+	/\bAIza[0-9A-Za-z_-]{35}/g,
+	// A quoted key whose name holds a sensitive word, as JSON.stringify writes
+	// tool-call arguments: {"password":"…"}, {"access_token": "…"}.
+	new RegExp(String.raw`"[A-Za-z0-9_.-]*${SENSITIVE_NAME}[A-Za-z0-9_.-]*"\s*:\s*"(?:[^"\\]|\\.)*"`, "gi"),
+	// An environment name that holds a sensitive word: AWS_SECRET_ACCESS_KEY=…
+	/\b[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*\s*=\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/g,
+	new RegExp(String.raw`${SENSITIVE_NAME}\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)`, "gi"),
+	// User and password in a URL: postgres://user:pass@host
+	/\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/gi,
+	// curl -u user:pass, --user=user:pass
+	/(?<=^|\s)(?:-u|--user)(?:\s+|=)[^\s:]+:\S+/g,
 	/(?:Bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi,
+	// Basic credentials after a header name the key rule stops at.
+	/\bBasic\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2}/g,
 	/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi,
 ];
 

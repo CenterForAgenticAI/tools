@@ -35,7 +35,7 @@ Install the public package with Pi:
 pi install npm:@centerforagenticai/pi-context-aware
 ```
 
-Restart Pi or run `/reload`. The package declares Pi peer dependencies as `*`; its deterministic compatibility gate tests the supported minimum, Pi `1.0.3`, and the development pin. It needs Node `>=22.19.0`.
+Restart Pi or run `/reload`. The package declares Pi peer dependencies as `*`; its deterministic compatibility gate tests the supported minimum, Pi `1.4.0`, and the development pin. Pi `1.0.x` to `1.3.x` are no longer supported; release 0.5.14 is the last release that declares Pi `1.0.3` as its minimum. It needs Node `>=22.19.0`.
 
 For a local checkout, add its absolute path to the `packages` array in `~/.pi/agent/settings.json`, run `npm run build`, then restart Pi or run `/reload`. The manifest loads `./dist/extension.js`, which the build bundles into one file.
 
@@ -49,7 +49,7 @@ For seeded automatic handoffs, let context-aware own automatic compaction and tu
 
 Manual `/compact`, `/compact-then`, and `compact_session` remain available. See [configuration](docs/configuration.md) for ownership warnings and the complete settings.
 
-When `billion-context-pi` is loaded, it cancels every compaction. Context-aware detects it at session start, stops offering `compact_session`, turns proactive compaction off, and tells the agent to use `compress` instead. See [compaction blocked by another extension](docs/commands-and-concepts.md#compaction-blocked-by-another-extension). `/fold-parity` reports read-only shadow comparisons of its `compress` calls, including nested calls, and progress toward the 500-call cut-over gate; `/fold-parity all` lists every call that blocks it. See [fold parity](docs/fold-parity.md).
+When `billion-context-pi` is loaded, it cancels every compaction. Context-aware detects it at session start, stops offering `compact_session`, and turns proactive compaction off. It tells the agent to use `compress` only when the current session can reach that tool; otherwise its model guidance falls back to keep-small/delegate and finish-atomic-work advice without naming `compress`. See [compaction blocked by another extension](docs/commands-and-concepts.md#compaction-blocked-by-another-extension). `/fold-parity` reports read-only shadow comparisons of its `compress` calls, including nested calls, and progress toward the 500-call cut-over gate; `/fold-parity all` lists every call that blocks it. See [fold parity](docs/fold-parity.md).
 
 ## Surface
 
@@ -61,6 +61,7 @@ When `billion-context-pi` is loaded, it cancels every compaction. Context-aware 
 | Tool | `search_prior_sessions` | Search bounded transcript snippets from earlier sessions or compacted-away current history. |
 | Tool | `session_recall` | Search the context cache and session history together. |
 | Tool | `session_compaction_history` | Report current-branch compaction counts and boundary identifiers. |
+| Tool | `load_skill` | Load a skill by name; a repeat load of an unchanged skill returns a pointer to the earlier copy. |
 | Command | `/compact-then [seed] [--model provider/id]` | Run the seeded handoff flow. Available when `summarizer.enabled` is `true`; refuses with the reason while another extension cancels every compaction. |
 | Commands | `/context-status`, `/context-aware-*` | Inspect pressure and configure seed, model, ambiguity, and proactive behavior. |
 | Commands | `/focus`, `/sessions`, `/tasks`, `/checkin` | Inspect durable workstream state, task state, and session health. |
@@ -89,10 +90,13 @@ Settings come from built-in defaults, `~/.pi/agent/context-aware.json`, trusted 
 | `imageStripping.enabled` | `false` | Send only the newest `imageStripping.keepRecent` (default `5`) image-bearing messages with their images; older images become text placeholders. |
 | `contextCache.enabled` | `true` | Surface scoped cache documents; the default scope is `"worktree"`. |
 | `restartNotice.enabled` | `true` | Remind the agent to re-check volatile state after time away. |
+| `pressureTelemetry.mode` | `"full"` | How much context-pressure telemetry the model sees: `"full"`, `"band"` (band and action only) or `"off"`. |
 | `workstream.enabled` | `true` | Enable durable focus and bounded session projections. |
 | `sessionNaming.scope` | `"all"` | Name sessions with a bounded lightweight-model chain. |
 
 Read [configuration](docs/configuration.md) for the full JSON shape, every leaf, precedence details, runtime flags, defaults, and recovery behavior.
+
+The native fold engine also protects image-heavy requests without a setting. When the stored projection has more than 20 image parts, or its all-images estimate reaches the fold nudge ceiling, only the newest five image parts stay in the outgoing request. Older images become entry-addressed text placeholders, including older images in a partially elided boundary entry. The session file and original image bytes do not change. This automatic pass is inactive while `billion-context-pi` owns folding; the separate opt-in `imageStripping` hook keeps its existing behavior.
 
 ## When it runs
 
@@ -111,10 +115,11 @@ npm test
 ## Documentation
 
 - [docs/overview.md](docs/overview.md): the previous README's detailed product overview and installation reference, preserved verbatim.
-- [docs/roadmap.md](docs/roadmap.md): proposed context-management direction, milestones, evidence, and open decisions.
+- `docs/roadmap.md` (kept in the private source repository; not included in public releases): proposed context-management direction, milestones, evidence, and open decisions.
 - [docs/commands-and-concepts.md](docs/commands-and-concepts.md): workflows, commands, compaction concepts, model routing, and recovery.
 - [docs/configuration.md](docs/configuration.md): complete configuration reference, defaults, precedence, and runtime overrides.
 - [docs/session-tasks.md](docs/session-tasks.md): task-list statuses, tool actions, continuation, and delegation contract.
+- [docs/skills.md](docs/skills.md): `load_skill` resolution, the skill registry, and the pointer contract.
 - [docs/integration.md](docs/integration.md): cross-extension protocol overview.
 - [docs/development.md](docs/development.md): public install and test commands.
 - [docs/diagrams/](docs/diagrams/): generated architecture diagram and its JSON source.

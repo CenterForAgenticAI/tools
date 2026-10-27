@@ -73,11 +73,11 @@ test("fold settings read global, project and current session branch without writ
 		const manager = SessionManager.inMemory(root);
 		const leaf = manager.appendMessage({ role: "user", content: "opening", timestamp: 1 });
 		const ctx = { cwd: root, sessionManager: manager };
-		assert.deepEqual(resolveFoldConfig(ctx, agent), { firstUserMessage: "keep-under-tokens", firstUserMessageMaxTokens: 100 });
+		assert.deepEqual(resolveFoldConfig(ctx, agent), { firstUserMessage: "keep-under-tokens", firstUserMessageMaxTokens: 100, condensedSkills: false });
 		manager.appendCustomEntry(CONFIG_POLICY_ENTRY_TYPE, configPolicyEntry("session", { "folds.firstUserMessage": "keep", "folds.firstUserMessageMaxTokens": 42 }));
-		assert.deepEqual(resolveFoldConfig(ctx, agent), { firstUserMessage: "keep", firstUserMessageMaxTokens: 42 });
+		assert.deepEqual(resolveFoldConfig(ctx, agent), { firstUserMessage: "keep", firstUserMessageMaxTokens: 42, condensedSkills: false });
 		manager.branch(leaf);
-		assert.deepEqual(resolveFoldConfig(ctx, agent), { firstUserMessage: "keep-under-tokens", firstUserMessageMaxTokens: 100 });
+		assert.deepEqual(resolveFoldConfig(ctx, agent), { firstUserMessage: "keep-under-tokens", firstUserMessageMaxTokens: 100, condensedSkills: false });
 		assert.equal(fs.readFileSync(globalFile, "utf8"), '{"folds":{"firstUserMessage":"fold","firstUserMessageMaxTokens":100}}');
 		assert.equal(fs.readFileSync(projectFile, "utf8"), '{"folds":{"firstUserMessage":"keep-under-tokens"}}');
 	} finally { fs.rmSync(root, { recursive: true, force: true }); }

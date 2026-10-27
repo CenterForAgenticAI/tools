@@ -49,9 +49,11 @@ restarting Pi. The manifest loads `./dist/extension.js`, which the build bundles
 into one file; the `prepare` script builds
 `dist/` automatically during install and `npm pack`.
 
-The supported minimum host version is Pi 1.0.3
+The supported minimum host version is Pi 1.4.0
 (`@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai`) on Node 22.19
-or newer. The compatibility gate tests that minimum and the development pin. Pi 0.83.0 is not compatible with release 0.2.3 or later; consumers
+or newer. The compatibility gate tests that minimum and the development pin.
+Pi 1.0.x to 1.3.x are no longer supported; release 0.5.14 is the last release
+that declares Pi 1.0.3 as its minimum. Pi 0.83.0 is not compatible with release 0.2.3 or later; consumers
 must upgrade Pi. Release 0.2.0 remains the last release declaring Pi 0.80.6 or
 0.83.0. Earlier releases are not declared as compatible: Pi 0.80.6 could lose
 input queued during compaction, while the current lifecycle requires

@@ -153,6 +153,9 @@ Default shape:
     "seededCompactionFraction": 0.9,
     "recoverableHideFraction": 0.95
   },
+  "pressureTelemetry": {
+    "mode": "full"
+  },
   "contextCache": {
     "enabled": true,
     "maxTotalSizeMB": 5,
@@ -691,7 +694,7 @@ Controls whether context-aware claims compaction from pi-fabric, so that this ex
 
 `enabled` defaults to `false`. With it off, context-aware sends nothing to pi-fabric and compaction behaves exactly as it did before this setting existed. Leave it off while `billion-context-pi` is in the profile: that extension stays the only live context manager until it is removed, and the claim is meant to be turned on at that point. Turning it on while `billion-context-pi` is loaded does nothing, because context-aware cannot compact there. The setting, like `summarizer.enabled`, is ignored in an untrusted project's `.pi/context-aware.json`.
 
-With `enabled: true`, context-aware sends one claim on the `pi-fabric:compaction-owner:v1` channel at `session_start`. It names `pi-context-aware`, its version, and the actions it supports: `request`, `status`, `pressure`, `carry` and `cancel`. If pi-fabric is not loaded, nobody answers and nothing changes: Pi's own summarizer runs as usual. The claim does not take `/tree` branch summaries; pi-fabric keeps those.
+With `enabled: true`, context-aware sends one claim on the `pi-fabric:compaction-owner:v1` channel at `session_start`. It names `pi-context-aware`, its version, and the actions it supports: `request`, `status`, `pressure`, `carry` and `cancel`. pi-fabric may answer during the send or a little later, because it loads its claim code on the first claim. Until it answers, the claim is pending: it is not held, pi-fabric's own compactor keeps compacting, and no second claim is sent. If nobody answers within 5 seconds, context-aware cancels the claim, treats pi-fabric as not loaded for that session, and nothing changes: Pi's own summarizer runs as usual. A grant that arrives after that, or after the setting is turned off, the session ends or a new session starts, is withdrawn at once. The next session asks again. The claim does not take `/tree` branch summaries; pi-fabric keeps those.
 
 While the claim is held:
 
@@ -703,6 +706,8 @@ While the claim is held:
 - The model that writes the summary also sees an index of the active folds: each fold's topic, range and message refs, with a pointer to `context_recall` for the original text.
 
 `fabricFallback` decides what happens when the model summary fails or no model is available. With `true` (the default), the summary comes from pi-fabric's deterministic compactor, which also renders the carry list. With `false`, or when pi-fabric cannot produce one, context-aware returns no result and Pi's own summarizer runs. This also applies when overflow recovery or transient retries are exhausted: without the claim context-aware cancels the compaction in those cases, but while the claim is held pi-fabric has stood down, so a cancel would leave nobody to compact. Only if both fail is the last step of the [pressure ladder](#pressureladder), the recoverable hide at `recoverableHideFraction` (95%), left to act. That step is configured and reported but not yet acted on by this extension.
+
+After each committed compaction, context-aware reads the newest compaction entry on the active branch, the same source used by `/context-status`. Only a live held claim creates an expectation that context-aware writes: no-Fabric, refused, faulted, released, and other non-held states leave Fabric or Pi in charge and do not warn. While the claim is held, a summary written by Fabric's engine or another extension produces one warning per session. A named extension is shown only when its bounded metadata name contains no control, format, line/paragraph separator, surrogate, or private-use characters; otherwise it is reported as `another extension`. A `fromHook: true` entry with missing or non-object details is also a valid unnamed extension commit and warns. Context-aware's own summaries, Fabric fallbacks carrying `claimOwner: "pi-context-aware"`, Pi's intentional last-resort summary, and truly malformed metadata do not warn. `/context-status` and the typed context snapshot report the newest committed writer.
 
 The claim is withdrawn, and pi-fabric's compactor compacts again, when `enabled` becomes `false` (at the next turn or settled boundary), when the session shuts down, when the extension unloads, and when an action fails for a reason other than its input, returns a result pi-fabric would reject, or runs past pi-fabric's 30-second bound. A call that the calling program cancels keeps the claim. After such a failure context-aware does not claim again until the next session. Another extension that already holds the claim keeps it; context-aware does not take it over and does not ask again until the next session.
 
@@ -866,7 +871,8 @@ Controls whether a native fold can replace the session's first user message
 {
   "folds": {
     "firstUserMessage": "keep",
-    "firstUserMessageMaxTokens": 8000
+    "firstUserMessageMaxTokens": 8000,
+    "condensedSkills": false
   }
 }
 ```
@@ -878,19 +884,37 @@ Controls whether a native fold can replace the session's first user message
   `firstUserMessageMaxTokens`. Equality keeps it. The kernel's token estimate
   counts CJK characters individually and other characters at four per token.
 
+`condensedSkills` defaults to `false`. When `true`, a native fold replaces a
+skill block that has a captured `condensed.md` with that condensed text, and a
+compaction resends each skill still in use in condensed form. It stays off by
+default until a replay comparison shows agents still follow a skill's hard
+rules after the swap. See [skills.md](skills.md#condensed-skills).
+
 `firstUserMessageMaxTokens` defaults to `8000` and must be a positive whole
 number. It affects only `keep-under-tokens`. A folded opening is replaced by a
 user-role summary, so a user message still precedes the first assistant in the
 rendered request. The original remains in the session file.
 
-Both keys resolve independently through global, project, session, and host
+Each key resolves independently through global, project, session, and host
 layers. There is no CLI flag or setter command. For session policy entries,
-use the dotted keys `folds.firstUserMessage` and
-`folds.firstUserMessageMaxTokens`. `/context-policy status` shows their
-effective values and sources. A settings change affects subsequent plans;
-it does not undo folds already stored in the session. Each effective value
-participates in the parity fingerprint, so changing either starts a new
-500-call window.
+use the dotted keys `folds.firstUserMessage`,
+`folds.firstUserMessageMaxTokens` and `folds.condensedSkills`.
+`/context-policy status` shows their effective values and sources. A
+settings change affects subsequent plans; it does not undo folds already
+stored in the session. The first two keys' effective values participate in the
+parity fingerprint, so changing either starts a new 500-call window.
+`condensedSkills` joins the fingerprint only when it is `true`, so turning it
+on starts a new window and leaving it off keeps existing fingerprints.
+
+## `pressureTelemetry`
+
+`pressureTelemetry.mode` controls how much context-pressure telemetry the model sees. It exists so pilot runs can compare a band-only envelope with no telemetry. The default is `"full"`.
+
+- `"full"` keeps the existing envelope with the pressure band, rounded usage percentage, approximate headroom, and action.
+- `"band"` keeps only the pressure band and action.
+- `"off"` removes the pressure envelope and its pressure rules from the model-visible prompt. Task state, the session brief, restart notices, recall guidance, and footer status are unchanged. With no envelope, the turn's hidden message is the task-state or restart-notice message rather than the usage marker, so it carries no usage details.
+
+The leaf participates in global, trusted-project, session-policy, and host-policy precedence. Invalid values are ignored and the next lower layer supplies the value.
 
 ## `pressureLadder`
 
@@ -915,8 +939,8 @@ These are starting defaults and may change after pilot runs.
 | Below the ladder | — | under 45% | `OK` | none |
 | Fold nudges | `foldNudgeStartFraction` to `foldNudgeEndFraction` | 45% to 75% | `WARN`, from `foldNudgeStartFraction` | `gate-broad-work` |
 | Between the last fold nudge and compaction | — | 75% to 90% | `WARN` | `gate-broad-work` |
-| Seeded compaction | `seededCompactionFraction` | 90% | `URGENT`, from `seededCompactionFraction` | `compact-before-tool` |
-| Recoverable hide, only when compaction cannot run | `recoverableHideFraction` | 95% | `URGENT` | `compress-before-tool` or `finish-atomic-work` |
+| Seeded compaction | `seededCompactionFraction` | 90% | `URGENT`, from `seededCompactionFraction` | `compact-before-tool` when `compact_session` is reachable; otherwise `finish-atomic-work` |
+| Recoverable hide, only when compaction cannot run | `recoverableHideFraction` | 95% | `URGENT` | `compress-before-tool` when the replacement is reachable; otherwise `finish-atomic-work` |
 
 So the band edges are:
 
@@ -925,9 +949,11 @@ So the band edges are:
 
 When Pi has not measured the context size, for example right after a
 compaction or an overflow, the band is `UNKNOWN` and maps to no ladder step.
-The envelope then reports `usage-percent="unknown"` with no action, and the
-footer shows `size unknown`. The ladder applies again once a measured size
-arrives.
+The envelope then reports `band="UNKNOWN"` with no action. With
+`pressureTelemetry.mode` set to `"full"` it also reports
+`usage-percent="unknown"` and `approximate-headroom="unknown"`; with `"off"`
+there is no envelope. The footer shows `size unknown`. The ladder applies
+again once a measured size arrives.
 
 The same edges drive the `<context-telemetry>` envelope, the `Bands:` line in
 the context-awareness guidance, the footer icon, and the `band` field of the

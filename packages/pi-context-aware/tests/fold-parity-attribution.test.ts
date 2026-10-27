@@ -562,7 +562,7 @@ test("a refused fold whose carrier entry is absent from the counterfactual reque
 	assert.equal(report.ready, false);
 });
 
-// ---- Composition with main's register (FP-001 to FP-003): known differences outside the batch ----
+// ---- Composition with the request-difference register: known differences outside the batch ----
 
 const PRIOR = "An earlier batch folded these entries; keep their agreed decisions, file paths and values visible.";
 /** Longer than billion-context-pi's 200-character limit for summaries inside compress arguments. */

@@ -10,9 +10,9 @@ import { formatApproxBytes } from "./image-stripping.js";
  * what the model sees and leave the original entry in the session file, so the
  * bytes stay recoverable. That makes old media safe to fold:
  *
- * - `planMediaElision` replaces the images of all but the newest `keepRecent`
- *   image-bearing entries with a text placeholder that names the media type,
- *   the size, and the session entry that still holds the original.
+ * - `planMediaElision` replaces all but the newest `keepRecent` image parts
+ *   with a text placeholder that names the media type, the size, and the session
+ *   entry that still holds the original.
  * - `describeFoldedMedia` lists the media in a range that a fold summary
  *   replaces, so the summary can say what the range held.
  *
@@ -31,7 +31,7 @@ export interface ProjectedEntryView {
 		readonly content?: unknown;
 	};
 	/** What the model sees for this entry, after context edits. */
-	readonly messages: readonly unknown[];
+	readonly messages: readonly { readonly role: string; readonly content?: unknown }[];
 }
 
 export interface MediaRef {
@@ -40,16 +40,32 @@ export interface MediaRef {
 	readonly approxBytes: number;
 }
 
+export interface MediaElisionTarget {
+	readonly targetId: string;
+	/** How many of this entry's newest image parts remain in the request. */
+	readonly keepNewestImages: number;
+}
+
 export interface MediaElisionPlan {
 	/** One draft per entry whose images leave the context, oldest first. */
 	readonly drafts: readonly ContextEditEntryDraft[];
 	readonly removed: readonly MediaRef[];
+	/** Request rewrite instructions, including a partially elided boundary entry. */
+	readonly targets: readonly MediaElisionTarget[];
 }
 
 export interface MediaElisionOptions {
-	/** How many of the newest image-bearing entries keep their images. */
+	/** How many of the newest image parts keep their images. */
 	readonly keepRecent: number;
 }
+
+/**
+ * Native request guardrails. Providers cap image count and bytes independently
+ * of token windows; the observed failure was about 288k tokens against an
+ * 828k+ logical window, so a token-only trigger would not have fired.
+ */
+export const NATIVE_MEDIA_IMAGE_PART_TRIGGER = 20;
+export const NATIVE_MEDIA_KEEP_RECENT_IMAGES = 5;
 
 /** At most this many images are named in a fold notice. */
 export const FOLDED_MEDIA_LIST_LIMIT = 8;
@@ -91,6 +107,28 @@ function placeholderText(ref: MediaRef): string {
 	return `[${ref.mimeType}, ~${formatApproxBytes(ref.approxBytes)} image omitted from context; the original is in session entry ${ref.entryId}]`;
 }
 
+export interface ElidedImageParts {
+	readonly content: unknown;
+	readonly refs: readonly MediaRef[];
+}
+
+/** Replace old image parts, preserving the newest requested images and every part's position. */
+export function elideImageParts(content: unknown, entryId: string, keepNewestImages = 0): ElidedImageParts {
+	if (!Array.isArray(content)) return { content, refs: [] };
+	const keep = Number.isFinite(keepNewestImages) ? Math.max(0, Math.floor(keepNewestImages)) : 0;
+	const elideCount = Math.max(0, content.filter(isImageBlock).length - keep);
+	let imageIndex = 0;
+	const refs: MediaRef[] = [];
+	const elided = content.map((part) => {
+		if (!isImageBlock(part)) return part;
+		if (imageIndex++ >= elideCount) return part;
+		const ref = mediaRef(entryId, part);
+		refs.push(ref);
+		return { type: "text", text: placeholderText(ref) };
+	});
+	return refs.length > 0 ? { content: elided, refs } : { content, refs };
+}
+
 /** Only these entries project one editable message that can carry an image. */
 function isEditableMediaEntry(entry: ProjectedEntryView): boolean {
 	return entry.sourceEntry.type === "message" || entry.sourceEntry.type === "custom_message";
@@ -103,39 +141,65 @@ function projectedContent(entry: ProjectedEntryView): readonly unknown[] | null 
 }
 
 /**
- * Context edits that move every image older than the newest `keepRecent`
- * image-bearing entries out of the model context. The plan reads the projected
- * content, so an image an earlier edit already removed is not planned again.
+ * Context edits that move every image older than the newest `keepRecent` image
+ * parts out of the model context. The plan reads the projected content, so an
+ * image an earlier edit already removed is not planned again.
  */
 export function planMediaElision(entries: readonly ProjectedEntryView[], options: MediaElisionOptions): MediaElisionPlan {
 	const candidates = entries.flatMap((entry) => {
 		const content = projectedContent(entry);
-		return content && content.some(isImageBlock) ? [{ id: entry.sourceEntry.id, content }] : [];
+		const imageCount = content?.filter(isImageBlock).length ?? 0;
+		return content && imageCount > 0 ? [{ id: entry.sourceEntry.id, content, imageCount }] : [];
 	});
-	const keepRecent = Number.isFinite(options.keepRecent) ? Math.max(0, Math.floor(options.keepRecent)) : 0;
-	const elided = candidates.slice(0, Math.max(0, candidates.length - keepRecent));
+	let remaining = Number.isFinite(options.keepRecent) ? Math.max(0, Math.floor(options.keepRecent)) : 0;
+	const keepByCandidate = new Array<number>(candidates.length).fill(0);
+	for (let index = candidates.length - 1; index >= 0; index--) {
+		const keep = Math.min(remaining, candidates[index]!.imageCount);
+		keepByCandidate[index] = keep;
+		remaining -= keep;
+	}
 	const drafts: ContextEditEntryDraft[] = [];
 	const removed: MediaRef[] = [];
-	for (const candidate of elided) {
-		const refs: MediaRef[] = [];
-		const content = candidate.content.map((part) => {
-			if (!isImageBlock(part)) return part;
-			const ref = mediaRef(candidate.id, part);
-			refs.push(ref);
-			return { type: "text", text: placeholderText(ref) };
-		});
+	const targets: MediaElisionTarget[] = [];
+	for (let index = 0; index < candidates.length; index++) {
+		const candidate = candidates[index]!;
+		const keepNewestImages = keepByCandidate[index]!;
+		if (keepNewestImages >= candidate.imageCount) continue;
 		// Pi's image-bearing messages (user, tool result, custom) hold only text
-		// and images, so an elided entry holds only text. Any other part is a
-		// shape this plan does not know; that entry keeps its images.
-		if (!content.every(isTextPart)) continue;
+		// and images. Any other part is a shape this plan does not know; that entry
+		// keeps its images.
+		if (!candidate.content.every((part) => isTextPart(part) || isImageBlock(part))) continue;
+		const { content, refs } = elideImageParts(candidate.content, candidate.id, keepNewestImages);
+		if (!Array.isArray(content) || !content.every((part) => isTextPart(part) || isImageBlock(part)) || refs.length === 0) continue;
 		removed.push(...refs);
+		targets.push({ targetId: candidate.id, keepNewestImages });
 		drafts.push({
 			type: "context_edit",
 			targetId: candidate.id,
 			replacement: { content },
 		});
 	}
-	return { drafts, removed };
+	return { drafts, removed, targets };
+}
+
+function projectedImagePartCount(entries: readonly ProjectedEntryView[]): number {
+	return entries.reduce((total, entry) => total + entry.messages.reduce<number>((entryTotal, message) => {
+		const content = isRecord(message) && Array.isArray(message.content) ? message.content : [];
+		return entryTotal + content.filter(isImageBlock).length;
+	}, 0), 0);
+}
+
+/** Plan automatic, request-only elision for the native fold turn. */
+export function planNativeMediaElision(
+	entries: readonly ProjectedEntryView[],
+	requestTokensWithAllImages: number,
+	nudgeCeiling: number,
+): MediaElisionPlan {
+	const overImageLimit = projectedImagePartCount(entries) > NATIVE_MEDIA_IMAGE_PART_TRIGGER;
+	const atNudgeCeiling = requestTokensWithAllImages >= nudgeCeiling;
+	return overImageLimit || atNudgeCeiling
+		? planMediaElision(entries, { keepRecent: NATIVE_MEDIA_KEEP_RECENT_IMAGES })
+		: { drafts: [], removed: [], targets: [] };
 }
 
 /** The original content of an entry, before any context edit. */

@@ -88,6 +88,28 @@ test("pure comparison includes carrier and hidden ids without mutating the branc
 	assert.deepEqual(comparison.refContinuity, { same: 2, used: 2 });
 });
 
+test("accepted warning wording stays outside call parity while errors remain observable", () => {
+	const { input } = fixture();
+	const original = `${ACCEPTED}\nWarnings: Excluded protected messages — they stay visible outside the new block; do not target them in another compress call.`;
+	const rewritten = `${ACCEPTED}\nWarnings: Excluded protected messages — they stay visible for now and can be folded in a later call once newer messages push them out of the protected zone.`;
+	const originalComparison = compareCompressCall({ ...input, observed: classifyBcpResult(original, false) });
+	const rewrittenComparison = compareCompressCall({ ...input, observed: classifyBcpResult(rewritten, false) });
+	assert.deepEqual(rewrittenComparison, originalComparison);
+	assert.equal(rewrittenComparison.verdict, "match");
+
+	const withError = compareCompressCall({ ...input, observed: classifyBcpResult(`${ACCEPTED}\nErrors: Summary too short`, false) });
+	assert.equal(withError.verdict, "diff");
+	assert.deepEqual(withError.bcpOutcome, { type: "partial", reasons: ["summary-short"] });
+	assert.deepEqual(withError.diffs.map((diff) => diff.kind), ["outcome"]);
+});
+
+test("fold parity docs identify the warning comparison boundary", () => {
+	const docs = fs.readFileSync(path.join(process.cwd(), "docs/fold-parity.md"), "utf8");
+	assert.match(docs, /src\/parity\/outcome\.ts/u);
+	assert.match(docs, /src\/parity\/compare\.ts/u);
+	assert.match(docs, /resultHash.*diagnostic.*not.*difference/isu);
+});
+
 test("keep policy compares editable coverage without bcp's metadata-only pinned opening", () => {
 	const { input, ids } = fixture();
 	const comparison = compareCompressCall({ ...input, folds: { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000 } });

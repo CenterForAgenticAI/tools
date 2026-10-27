@@ -15,9 +15,11 @@ import {
 	compareModeLayers,
 	copyLayer,
 	createModeStateEntry,
+	isModeLayerName,
 	isModeRank,
 	MAX_MODE_ID_LENGTH,
 	MAX_MODE_LAYER_LENGTH,
+	MAX_MODE_LAYERS,
 	MAX_MODE_OWNER_LENGTH,
 	MAX_MODE_TOOL_LENGTH,
 	MAX_MODE_TRANSITION_LENGTH,
@@ -136,7 +138,7 @@ function normalizeLayer(value: unknown): { layer: string; rank: number; pinned: 
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
 	const { name, rank, pinned } = value as { name?: unknown; rank?: unknown; pinned?: unknown };
 	const layer = normalizeText(name, MAX_MODE_LAYER_LENGTH);
-	if (layer === null || layer === MODE_DEFAULT_LAYER || !isModeRank(rank)) return null;
+	if (layer === null || layer === MODE_DEFAULT_LAYER || !isModeLayerName(layer) || !isModeRank(rank)) return null;
 	if (pinned !== undefined && pinned !== true) return null;
 	return { layer, rank, pinned: pinned === true };
 }
@@ -355,6 +357,11 @@ export function createContextAwareModesV1(deps: ContextAwareModesRuntimeDeps): C
 			const held = slotOf(slot.layer);
 			if (held?.mode.instanceId === slot.mode.instanceId) leave(held);
 		};
+		// The run can end while the enter is committed: appendEntry, sendMessage or onChange may abort it.
+		if (signal.aborted) {
+			onAbort();
+			return;
+		}
 		signal.addEventListener("abort", onAbort, { once: true });
 		runListeners.set(slot.mode.instanceId, () => signal.removeEventListener("abort", onAbort));
 	};
@@ -371,6 +378,8 @@ export function createContextAwareModesV1(deps: ContextAwareModesRuntimeDeps): C
 		if (existing?.pinned === true) return refused("PINNED_LAYER", "The layer holds a pinned mode.");
 		if (existing !== undefined && available(existing) === undefined) return refused("UNAVAILABLE", "The layer's mode is unavailable until its owner redefines it.");
 		if (runEnded(request.until)) return refused("RUN_ENDED", "The run this mode was entered for has ended.");
+		// Replay refuses a state with more layers, so enter must not create one.
+		if (existing === undefined && layers.length >= MAX_MODE_LAYERS) return refused("NESTING_LIMIT", `At most ${MAX_MODE_LAYERS} layers can be active at once.`);
 		const expectedRevision = revision;
 		if (request.suggestion !== undefined) {
 			const confirmed = await checkSuggestion(definition.id, "enter", request.reason, expectedRevision);
@@ -445,8 +454,12 @@ export function createContextAwareModesV1(deps: ContextAwareModesRuntimeDeps): C
 		const definition = normalizeDefinition(value);
 		if (definition === null) return refused("INVALID_REQUEST", "Mode definition is invalid or exceeds its bounds.") as ContextAwareModeDefinitionResultV1;
 		if (definitions.has(definition.id)) return refused("DUPLICATE_ID", "The mode id is already defined in this runtime.") as ContextAwareModeDefinitionResultV1;
+		// The restored mode of a pinned layer re-arms it even when another definition,
+		// accepted before restore() brought the layer back, names the layer differently.
+		// The orphan check below still refuses it unless owner, layer, rank and pin match.
+		const restoresPinned = layers.some((slot) => slot.pinned === true && slot.mode.id === definition.id);
 		for (const other of definitions.values()) {
-			if (other.layer === definition.layer && (other.rank !== definition.rank || other.pinned !== definition.pinned)) {
+			if (!restoresPinned && other.layer === definition.layer && (other.rank !== definition.rank || other.pinned !== definition.pinned)) {
 				return refused("INVALID_REQUEST", "Another mode names this layer with a different rank or pin.") as ContextAwareModeDefinitionResultV1;
 			}
 		}

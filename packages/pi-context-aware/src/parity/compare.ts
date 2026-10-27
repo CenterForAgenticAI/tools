@@ -4,12 +4,12 @@ import { importAcpSideFile } from "../folds/acp-import.js";
 import { entryToCoreMessages, foldStateFromBranch, keptFirstUserId, planFold, summaryLimitOf, type BranchFoldState, type FoldRequest } from "../folds/fold-adapter.js";
 import type { FoldsConfig } from "../platform/config-layers.js";
 import { applyFoldDrafts } from "../folds/fold-engine.js";
-import { cloneFoldTurnMemory, createFoldTurnMemory, previewFoldTurnState, type FoldTurnMemory, type FoldTurnModel } from "../folds/fold-turn.js";
+import { cloneFoldTurnMemory, createFoldTurnMemory, previewFoldTurnState, type FoldTurnMemory, type FoldTurnModel, type FoldTurnResult } from "../folds/fold-turn.js";
 import { coveredEntryIds, foldDrafts, isEditableEntry, readFoldRecord, type FoldRecord } from "../folds/fold-entries.js";
 import { parseCompressArgs } from "../folds/kernel/parse-compress-input.js";
 import { baseIdOf, SUMMARY_HEADER } from "../folds/kernel/prune.js";
 import { bcpOutcome, compareOutcomes, nativeOutcome, rejectedUnknownRef, type ObservedResult } from "./outcome.js";
-import { verdictFor, type BlockEvidence, type Verdict, type OutcomeEvidence, type ParityDiff, type RefusalOutcome, type RefusedCall, type RequestDelta, type RequestDeltaReason, type RequestHashes, type ToolCallHash, type ToolResultHash, type MessageHash, type NudgeFixHashes } from "./records.js";
+import { verdictFor, type BlockEvidence, type Verdict, type OutcomeEvidence, type ParityDiff, type RefusalOutcome, type RefusedCall, type RequestDelta, type RequestDeltaReason, type RequestHashes, type ToolCallHash, type ToolResultHash, type MessageHash, type NudgeFixHashes, type MediaElisionHashes } from "./records.js";
 import type { SideSnapshot } from "./side-file.js";
 
 export const MAX_BRANCH_ENTRIES = 50_000;
@@ -459,7 +459,7 @@ const toolCallKeys = (request: RequestHashes) => request.messages.flatMap((messa
  * hash), so the whole answer stays bound to the call it answers. The call side (id, name, argument hash) is joined through the id, which
  * `toolPairing` checks and `duplicateCallIds` keeps unambiguous.
  */
-const toolResultKeys = (request: RequestHashes) => request.messages.flatMap((message) => message.toolResult ? [JSON.stringify([message.toolResult.toolCallId, message.toolResult.toolName, message.toolResult.isError, message.summary, message.topicHash ?? null, message.hash])] : []).sort();
+export const toolResultKeys = (request: RequestHashes) => request.messages.flatMap((message) => message.toolResult ? [JSON.stringify([message.toolResult.toolCallId, message.toolResult.toolName, message.toolResult.isError, message.summary, message.topicHash ?? null, message.hash])] : []).sort();
 /** Two calls sharing an id make the result-to-call binding ambiguous. */
 function duplicateCallIds(request: RequestHashes): boolean {
 	const ids = new Set<string>();
@@ -514,8 +514,10 @@ export function expectedSummariesMatch(request: RequestHashes): boolean {
  * read `bashExecution` as `user`: billion-context-pi keeps that role, and Pi sends the message to the
  * provider as different text from a user message with the same content.
  */
+export const contentKey = (message: Pick<MessageHash, "role" | "hash">): string => `${message.role === "custom" ? "user" : message.role}:${message.hash}`;
+
 export function contentKeys(request: RequestHashes): string[] {
-	return request.messages.filter((message) => !message.summary).map((message) => `${message.role === "custom" ? "user" : message.role}:${message.hash}`).sort();
+	return request.messages.filter((message) => !message.summary).map(contentKey).sort();
 }
 /** Summary order is significant; non-summary text order is not. Tool calls, results and their pairing are compared too. */
 export function compareNextRequest(ours: RequestHashes, bcp: RequestHashes, priorDiffs: readonly ParityDiff[] = []) {
@@ -568,7 +570,40 @@ interface PreviewedRequest {
 	/** False when the per-turn pass could not run and `turnMemory` is only the unchanged fallback. */
 	readonly turnMemoryKnown: boolean;
 }
-type Projection = { readonly entries: readonly { readonly sourceEntry: { readonly id: string }; readonly messages: readonly { readonly role: string }[] }[] };
+type Projection = { readonly entries: readonly { readonly sourceEntry: { readonly id: string }; readonly messages: readonly RequestMessage[] }[] };
+/**
+ * The exact text-hash substitutions caused by request-only media elision. Raw
+ * image bytes and message text never cross the parity normalization boundary.
+ */
+function mediaElisionHashes(result: FoldTurnResult): MediaElisionHashes | undefined {
+	if (!result.mediaElidedEntryIds?.length || !result.mediaElisionBefore?.length) return undefined;
+	const beforeByEntry = new Map(result.mediaElisionBefore.map((entry) => [entry.entryId, entry.message]));
+	const sent = new Map<string, RequestMessage[]>();
+	result.messages.slice(0, MAX_MESSAGE_HASHES).forEach((message, index) => {
+		const source = result.sources[index];
+		if (source === undefined) return;
+		const messages = sent.get(source);
+		if (messages) messages.push(message); else sent.set(source, [message]);
+	});
+	const originals: string[] = [];
+	const replacements: string[] = [];
+	const keyOf = (message: RequestMessage): string | undefined => {
+		const hash = hashRequestMessages([message]).messages[0];
+		return hash && !hash.summary ? contentKey(hash) : undefined;
+	};
+	for (const id of result.mediaElidedEntryIds) {
+		const before = beforeByEntry.get(id);
+		const after = sent.get(id);
+		if (after === undefined) continue;
+		if (before === undefined || after.length !== 1) return undefined;
+		const original = keyOf(before);
+		const replacement = keyOf(after[0]!);
+		if (!original || !replacement || original === replacement) return undefined;
+		originals.push(original);
+		replacements.push(replacement);
+	}
+	return originals.length > 0 ? { originals, replacements } : undefined;
+}
 /**
  * The entry each request message comes from, aligned with `hashRequestMessages`: system messages are
  * dropped and the list stops at the same bound. Undefined when the projection does not line up with
@@ -593,7 +628,7 @@ function withCompressCallId(drafts: readonly SessionBoundaryDraft[], compressCal
  * the per-turn pass (ref tags, hidden absorbed calls, nudge). Undefined when the pass cannot line
  * the request up with the preview's projection.
  */
-function liveRequest(preview: SessionManager, input: PreviewInput): { messages: RequestMessage[]; sources: string[]; turnMemory: FoldTurnMemory; nudgeFix?: NudgeFixHashes } | undefined {
+function liveRequest(preview: SessionManager, input: PreviewInput): { messages: RequestMessage[]; sources: string[]; turnMemory: FoldTurnMemory; nudgeFix?: NudgeFixHashes; mediaElision?: MediaElisionHashes } | undefined {
 	// Without its projection the request cannot be traced to entries; the caller fails closed.
 	if (typeof (preview as Partial<SessionManager>).buildSessionProjection !== "function") return undefined;
 	const turn = input.turn ?? {};
@@ -614,8 +649,15 @@ function liveRequest(preview: SessionManager, input: PreviewInput): { messages: 
 		...(fix.sent !== undefined ? { sent: nudgeHash(fix.sent).hash } : {}),
 		...(fix.compatible !== undefined ? { compatible: nudgeHash(fix.compatible).hash } : {}),
 	} : undefined;
+	const mediaElision = mediaElisionHashes(result);
 	// The nudge and a live-only tail have no entry; attribution reads them as the empty id.
-	return { messages: result.messages, sources: result.sources.slice(0, MAX_MESSAGE_HASHES).map((id) => id ?? ""), turnMemory: prepared.memory, ...(nudgeFix ? { nudgeFix } : {}) };
+	return {
+		messages: result.messages,
+		sources: result.sources.slice(0, MAX_MESSAGE_HASHES).map((id) => id ?? ""),
+		turnMemory: prepared.memory,
+		...(nudgeFix ? { nudgeFix } : {}),
+		...(mediaElision ? { mediaElision } : {}),
+	};
 }
 /** Hash one preview's request; the preview session is dropped when this returns. */
 function previewRequest(preview: typeof previewShadowCalls, input: PreviewInput, calls: readonly ShadowCall[], omit?: ReadonlySet<string>, seed?: SideSnapshot): PreviewedRequest {
@@ -624,7 +666,18 @@ function previewRequest(preview: typeof previewShadowCalls, input: PreviewInput,
 	const messages = live?.messages ?? planned.preview?.buildSessionContext().messages ?? [];
 	const sources = live?.sources ?? messageSources(planned.preview as { buildSessionProjection?: () => Projection } | undefined, messages);
 	const ours = requestEvidence(planned, messages);
-	return { ours: live?.nudgeFix ? { ...ours, nudgeFix: live.nudgeFix } : ours, diffs: planned.diffs, ...(sources ? { sources } : {}), folds: Array.isArray(planned.folds) ? planned.folds : [], turnMemory: live?.turnMemory ?? cloneFoldTurnMemory(input.turnMemory ?? createFoldTurnMemory()), turnMemoryKnown: live !== undefined };
+	return {
+		ours: {
+			...ours,
+			...(live?.nudgeFix ? { nudgeFix: live.nudgeFix } : {}),
+			...(live?.mediaElision ? { mediaElision: live.mediaElision } : {}),
+		},
+		diffs: planned.diffs,
+		...(sources ? { sources } : {}),
+		folds: Array.isArray(planned.folds) ? planned.folds : [],
+		turnMemory: live?.turnMemory ?? cloneFoldTurnMemory(input.turnMemory ?? createFoldTurnMemory()),
+		turnMemoryKnown: live !== undefined,
+	};
 }
 
 /** Advance hypothetical-live per-turn memory for a provider request with no compress batch. */

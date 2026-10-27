@@ -5,7 +5,9 @@ import type { FoldsConfig } from "../platform/config-layers.js";
 
 /** Effective values, not their sources: a policy change starts a fresh parity window. */
 export function configuredFoldFingerprint(engine: string, folds: FoldsConfig): string {
-	return createHash("sha256").update(JSON.stringify([engine, folds.firstUserMessage, folds.firstUserMessageMaxTokens])).digest("hex");
+	// condensedSkills joins the hash only when on, so fingerprints from before the setting stay the same.
+	const values = [engine, folds.firstUserMessage, folds.firstUserMessageMaxTokens, ...(folds.condensedSkills ? ["condensedSkills"] : [])];
+	return createHash("sha256").update(JSON.stringify(values)).digest("hex");
 }
 
 /**

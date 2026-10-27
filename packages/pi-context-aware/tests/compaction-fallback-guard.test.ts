@@ -1,123 +1,106 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-	BUILTIN_COMPACTION_RESERVE_TOKENS,
+	MIN_USEFUL_COMPACTION_OUTPUT_TOKENS,
+	PI_CONTEXT_SAFETY_TOKENS,
 	decideBuiltinCompactionFallback,
-	extrapolateBoundedInputTokens,
+	estimateBuiltinCompactionRequestTokens,
+	type BuiltinCompactionRequest,
 } from "../src/compaction/compaction-fallback-guard.js";
 
-test("allows the built-in fallback when every request fits within the window minus reserve", () => {
+const historyRequest = (conversationText: string): BuiltinCompactionRequest => ({
+	kind: "history",
+	conversationText,
+});
+
+test("allows the built-in fallback when every complete request leaves useful output room", () => {
 	const decision = decideBuiltinCompactionFallback({
-		requestTokens: [50_000, 10_000],
+		requests: [historyRequest("x".repeat(50_000)), { kind: "turn-prefix", conversationText: "x".repeat(10_000) }],
 		contextWindow: 200_000,
 	});
 	assert.deepEqual(decision, { fallback: true });
 });
 
-test("refuses the built-in fallback when the largest request cannot fit and would overflow", () => {
+test("does not subtract Pi's compaction reserve from a request that fits", () => {
+	const request = historyRequest("x".repeat(300_000));
+	const requestTokens = estimateBuiltinCompactionRequestTokens(request);
+	const contextWindow = 100_000;
+	const piDefaultReserveTokens = 16_384;
+	assert.ok(requestTokens > contextWindow - piDefaultReserveTokens);
+	assert.deepEqual(
+		decideBuiltinCompactionFallback({ requests: [request], contextWindow }),
+		{ fallback: true },
+	);
+});
+
+test("refuses the built-in fallback when the largest complete request would overflow", () => {
 	const decision = decideBuiltinCompactionFallback({
-		requestTokens: [1_040_000, 5_000],
+		requests: [historyRequest("x".repeat(4_000_000)), { kind: "turn-prefix", conversationText: "small" }],
 		contextWindow: 1_050_000,
 	});
 	assert.equal(decision.fallback, false);
-	assert.match(decision.fallback === false ? decision.reason : "", /exceeds/u);
+	assert.match(decision.fallback === false ? decision.reason : "", /at least 1024 are required/u);
 });
 
 test("judges each request separately, not their sum", () => {
-	// Two requests that each fit but whose sum would not: the built-in sends
-	// them separately, so this must be allowed.
-	const window = 200_000;
-	const each = window - BUILTIN_COMPACTION_RESERVE_TOKENS - 1;
-	const decision = decideBuiltinCompactionFallback({
-		requestTokens: [each, each],
-		contextWindow: window,
-	});
-	assert.deepEqual(decision, { fallback: true });
+	const request = historyRequest("x".repeat(300_000));
+	const requestTokens = estimateBuiltinCompactionRequestTokens(request);
+	const contextWindow = requestTokens + PI_CONTEXT_SAFETY_TOKENS + MIN_USEFUL_COMPACTION_OUTPUT_TOKENS;
+	assert.deepEqual(
+		decideBuiltinCompactionFallback({ requests: [request, request], contextWindow }),
+		{ fallback: true },
+	);
 });
 
-test("uses Pi's default reserve at the boundary", () => {
-	const window = 100_000;
-	const available = window - BUILTIN_COMPACTION_RESERVE_TOKENS;
+test("requires the named useful output budget after Pi's safety margin", () => {
+	const request = historyRequest("x".repeat(100_000));
+	const requestTokens = estimateBuiltinCompactionRequestTokens(request);
+	const exactMinimumWindow = requestTokens + PI_CONTEXT_SAFETY_TOKENS + MIN_USEFUL_COMPACTION_OUTPUT_TOKENS;
 	assert.deepEqual(
-		decideBuiltinCompactionFallback({ requestTokens: [available], contextWindow: window }),
+		decideBuiltinCompactionFallback({ requests: [request], contextWindow: exactMinimumWindow }),
 		{ fallback: true },
 	);
 	assert.equal(
-		decideBuiltinCompactionFallback({ requestTokens: [available + 1], contextWindow: window }).fallback,
+		decideBuiltinCompactionFallback({ requests: [request], contextWindow: exactMinimumWindow - 1 }).fallback,
 		false,
 	);
 });
 
-test("honours a configured reserve override", () => {
-	const decision = decideBuiltinCompactionFallback({
-		requestTokens: [85_000],
-		contextWindow: 100_000,
-		reserveTokens: 20_000,
-	});
-	assert.equal(decision.fallback, false);
-});
-
-test("does not block the fallback when the window or estimates are unknown", () => {
+test("does not block the fallback when the window or requests are unknown", () => {
 	assert.deepEqual(
-		decideBuiltinCompactionFallback({ requestTokens: [10_000_000], contextWindow: undefined }),
+		decideBuiltinCompactionFallback({ requests: [historyRequest("x".repeat(10_000_000))], contextWindow: undefined }),
 		{ fallback: true },
 	);
 	assert.deepEqual(
-		decideBuiltinCompactionFallback({ requestTokens: [0, 0], contextWindow: 100_000 }),
+		decideBuiltinCompactionFallback({ requests: [], contextWindow: 100_000 }),
 		{ fallback: true },
 	);
 });
 
-test("extrapolateBoundedInputTokens returns raw tokens for a complete estimate", () => {
+test("pins the local estimator's history request overhead and refuses the 90,000-in-100,000 regression", () => {
+	assert.equal(estimateBuiltinCompactionRequestTokens(historyRequest("")), 350);
+	// Pi's raw-message estimator sees 360,000 content characters as 90,000
+	// tokens. serializeConversation adds the user label before Pi wraps the
+	// conversation and appends its request instructions and system prompt.
+	const request = historyRequest(`[User]: ${"x".repeat(360_000)}`);
+	assert.equal(estimateBuiltinCompactionRequestTokens(request), 103_209);
 	assert.equal(
-		extrapolateBoundedInputTokens({
-			tokens: 40_000,
-			inputMessageCount: 300,
-			accountedInputMessageCount: 300,
-			bounded: false,
-		}),
-		40_000,
-	);
-});
-
-test("extrapolateBoundedInputTokens scales a bounded estimate up to the full message set", () => {
-	// The real failing session: 1613 messages, estimator capped at 512.
-	const scaled = extrapolateBoundedInputTokens({
-		tokens: 300_000,
-		inputMessageCount: 1613,
-		accountedInputMessageCount: 512,
-		bounded: true,
-	});
-	assert.equal(scaled, Math.round(300_000 * (1613 / 512)));
-	assert.ok(scaled > 900_000, "extrapolated estimate should reflect the full transcript");
-});
-
-test("a bounded estimate that would overflow the built-in is caught after extrapolation", () => {
-	const estimate = {
-		tokens: 300_000,
-		inputMessageCount: 1613,
-		accountedInputMessageCount: 512,
-		bounded: true,
-	};
-	const scaled = extrapolateBoundedInputTokens(estimate); // ~945k
-	// A window where the raw (un-extrapolated) 300k estimate would fit, but the
-	// extrapolated full-transcript estimate does not: extrapolation is what
-	// flips the verdict from an unsafe allow to a correct refusal.
-	const window = 950_000;
-	assert.equal(
-		decideBuiltinCompactionFallback({ requestTokens: [estimate.tokens], contextWindow: window }).fallback,
-		true,
-	);
-	assert.equal(
-		decideBuiltinCompactionFallback({ requestTokens: [scaled], contextWindow: window }).fallback,
+		decideBuiltinCompactionFallback({ requests: [request], contextWindow: 100_000 }).fallback,
 		false,
 	);
 });
 
-test("extrapolateBoundedInputTokens handles zero and unusable inputs", () => {
-	assert.equal(extrapolateBoundedInputTokens({ tokens: 0, inputMessageCount: 0, accountedInputMessageCount: 0, bounded: false }), 0);
-	assert.equal(
-		extrapolateBoundedInputTokens({ tokens: 100, inputMessageCount: 10, accountedInputMessageCount: 0, bounded: true }),
-		100,
-	);
+test("pins the local estimator's split-turn prefix request overhead", () => {
+	assert.equal(estimateBuiltinCompactionRequestTokens({ kind: "turn-prefix", conversationText: "" }), 288);
+});
+
+test("includes previous-summary and focus text in the history estimate", () => {
+	const plain = estimateBuiltinCompactionRequestTokens(historyRequest("conversation"));
+	const augmented = estimateBuiltinCompactionRequestTokens({
+		kind: "history",
+		conversationText: "conversation",
+		previousSummary: "prior checkpoint",
+		customInstructions: "preserve the requested focus",
+	});
+	assert.ok(augmented > plain);
 });

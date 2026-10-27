@@ -15,7 +15,7 @@
  * therefore refused as already folded (pi-context-aware#184).
  */
 
-import type { SessionBoundaryDraft, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ContextEditableContent, ContextEditEntryDraft, SessionBoundaryDraft, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import { assignRefs, baseIdOf, countMessageTokens, createCore, createInitialState, defaultConfig, defaultCountTokens, emptyRefMap } from "./kernel/index.js";
 import type { CompressionBlock, CompressionState, Config, CoreMessage } from "./kernel/index.js";
@@ -44,6 +44,14 @@ function partsOf(content: unknown): ContentPart[] {
 const REF_TAG_SOURCE = "(?:<acp\\s[^>]*>m\\d{5}</acp>|\\[m\\d{1,5}\\])";
 const REF_TAG = new RegExp(`^${REF_TAG_SOURCE}\\s?\\n?`, "u");
 const TRAILING_REF_TAG = new RegExp(`\\n*${REF_TAG_SOURCE}\\s*$`, "u");
+
+const PROTECTED_ZONE_WARNING_SUFFIX = " — they stay visible outside the new block; do not target them in another compress call.";
+const TEMPORARY_PROTECTED_ZONE_WARNING_SUFFIX = " — they stay visible for now and can be folded in a later call once newer messages push them out of the protected zone.";
+
+function adaptKernelWarning(warning: string): string {
+	if (!warning.endsWith(PROTECTED_ZONE_WARNING_SUFFIX)) return warning;
+	return `${warning.slice(0, -PROTECTED_ZONE_WARNING_SUFFIX.length)}${TEMPORARY_PROTECTED_ZONE_WARNING_SUFFIX}`;
+}
 
 /** The text parts of a message content, joined as billion-context-pi joins them. Images add no text. */
 function textOf(content: unknown): string {
@@ -265,8 +273,21 @@ export function summaryLimitOf(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+/**
+ * Condenses entries that carry skill text (pi-context-aware#181). An
+ * entry it returns content for is kept out of the fold, and the fold shows it
+ * with that content instead: the third kind of content, beside protected and
+ * summarized.
+ */
+export interface FoldCondenser {
+	/** Replacement content for an entry whose skill blocks condense; `undefined` leaves the entry to the fold. */
+	condense(entry: SessionEntry): ContextEditableContent | undefined;
+}
+
 export interface FoldPlanInput extends FoldRequest {
 	readonly folds?: FoldsConfig;
+	/** Set only when `folds.condensedSkills` is on. Every plan of one request must get the same condenser. */
+	readonly condenser?: FoldCondenser;
 	readonly branch: readonly SessionEntry[];
 	readonly contextEntries?: readonly SessionEntry[];
 	readonly modelContextLimit: number;
@@ -378,10 +399,11 @@ export function planFold(input: FoldPlanInput): FoldPlan {
 		config,
 	});
 	const created = result.state.blocks.filter((block) => !before.has(block.blockId));
+	const kernelWarnings = result.result.warnings.map(adaptKernelWarning);
 	if (result.result.errors.length > 0 || created.length === 0) {
 		// A consumed range below the size gate is skipped with a warning, not an error; that warning is the reason.
 		const errors = result.result.errors.length > 0 ? result.result.errors
-			: result.result.warnings.length > 0 ? [...result.result.warnings] : ["The engine created no fold for this range."];
+			: kernelWarnings.length > 0 ? kernelWarnings : ["The engine created no fold for this range."];
 		return { ok: false, errors, validRefs: validFoldRefs(state) };
 	}
 	const keptFirst = keptFirstUserId(input.branch, input.folds);
@@ -404,29 +426,42 @@ export function planFold(input: FoldPlanInput): FoldPlan {
 	}
 	const records: FoldRecord[] = [];
 	const drafts: SessionBoundaryDraft[] = [];
-	const warnings = [...result.result.warnings];
+	const warnings = [...kernelWarnings];
+	// An entry an earlier fold already hides stays hidden; a swap edit would show it again.
+	const alreadyFolded = new Set(state.active.flatMap(coveredEntryIds));
+	const swaps = new Map<string, ContextEditableContent>();
 	const messageById = new Map(state.messages.map((message) => [message.id, message]));
 	const summaryById = new Map(turn.state.blocks.map((block) => [block.blockId, block.summary]));
 	for (const block of created) {
 		const selected = withdrawSplitEntries(state.messages, block.effectiveMessageIds);
+		if (input.condenser) {
+			for (const id of new Set([...selected].map(baseIdOf))) {
+				const entry = entryById.get(id);
+				if (!entry || alreadyFolded.has(id) || swaps.has(id) || !isEditableEntry(entry)) continue;
+				const content = input.condenser.condense(entry);
+				if (content !== undefined) swaps.set(id, content);
+			}
+		}
 		const withdrawn = block.effectiveMessageIds.filter((id) => !selected.has(id));
 		if (withdrawn.length > 0) {
 			warnings.push(`Withdrawn ${withdrawn.length} message(s) from fold ${block.blockId} to keep whole session entries and tool pairs visible beside the protected recent messages.`);
 		}
 		// Tokens this fold hides, counted on the session's own text: the prepared turn carries
 		// rendered ref tags, which the engine's own count includes.
-		const hiddenTokens = block.directMessageIds.filter((id) => selected.has(id) && id !== keptFirst)
+		const hiddenTokens = block.directMessageIds.filter((id) => selected.has(id) && id !== keptFirst && !swaps.has(baseIdOf(id)))
 			.reduce((sum, id) => sum + (messageById.has(id) ? countMessageTokens(messageById.get(id)!) : 0), 0)
 			+ block.directBlockIds.reduce((sum, id) => sum + defaultCountTokens(summaryById.get(id) ?? ""), 0);
 		const covered = [...new Set([...selected].map(baseIdOf))]
 			.filter((id) => {
 				const entry = entryById.get(id);
-				return entry !== undefined && isEditableEntry(entry) && id !== keptFirst;
+				return entry !== undefined && isEditableEntry(entry) && id !== keptFirst && !swaps.has(id);
 			})
 			.sort((a, b) => (indexById.get(a) ?? 0) - (indexById.get(b) ?? 0));
 		const [carrierId, ...hiddenIds] = covered;
 		if (!carrierId) {
-			const error = keptFirst && block.effectiveMessageIds.includes(keptFirst)
+			const error = swaps.size > 0
+				? "Every other entry in this range carries skill text that condenses instead of folding; there is nothing to fold."
+				: keptFirst && block.effectiveMessageIds.includes(keptFirst)
 				? "Keeping the first user message leaves nothing else to fold (covers no session entry)."
 				: withdrawn.length > 0
 					? "Range would split a session entry or tool pair at the protected-zone boundary; wait until the whole entry ages out of the protected zone."
@@ -453,5 +488,19 @@ export function planFold(input: FoldPlanInput): FoldPlan {
 		records.push(record);
 		drafts.push(...foldDrafts(record, renderFoldSummary(block.summary, block.topic)));
 	}
+	drafts.push(...swapDrafts(input.branch, swaps));
 	return { ok: true, records, drafts, warnings };
+}
+
+/** Context edits that show condensed skill text, skipping an entry already showing the same content. */
+function swapDrafts(branch: readonly SessionEntry[], swaps: ReadonlyMap<string, ContextEditableContent>): ContextEditEntryDraft[] {
+	if (swaps.size === 0) return [];
+	const shown = new Map<string, string | null>();
+	for (const entry of branch) {
+		if (entry.type === "context_edit" && swaps.has(entry.targetId)) {
+			shown.set(entry.targetId, entry.replacement === null ? null : JSON.stringify(entry.replacement.content));
+		}
+	}
+	return [...swaps].flatMap(([targetId, content]): ContextEditEntryDraft[] =>
+		shown.get(targetId) === JSON.stringify(content) ? [] : [{ type: "context_edit", targetId, replacement: { content } }]);
 }

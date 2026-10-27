@@ -20,13 +20,17 @@ import { ALREADY_COMPACTED_TOOL_MESSAGE, NOTHING_TO_COMPACT_TOOL_MESSAGE } from 
 // exported projection and token estimate (#43).
 //
 // The private code it ports, the cut-point functions and prepareCompaction() in
-// dist/core/compaction/compaction.js, is byte-identical in every release listed
-// here. 1.4.0 changed only summary generation in that file (no maxTokens cap,
-// custom instructions in the turn-prefix prompt), which the port does not copy.
-// Any other release proceeds and leaves the decision to Pi; the drift tests in
-// tests/compaction-preflight.test.ts pin each release's file and fail when the
-// installed Pi changes.
-export const VERIFIED_PI_VERSIONS: ReadonlySet<string> = new Set(["1.0.3", "1.0.4", "1.1.0", "1.2.0", "1.3.0", "1.4.0"]);
+// dist/core/compaction/compaction.js, was verified against every release listed
+// here. Any other release proceeds and leaves the decision to Pi; the drift
+// tests in tests/compaction-preflight.test.ts pin each release's file and fail
+// when the installed Pi changes.
+//
+// Only supported releases are listed (#243). Pi 1.0.3 to
+// 1.3.0 carried the same cut-point code, but they are below the supported
+// minimum (PI_MINIMUM_VERSION in scripts/check-pi-dependencies.mjs), so no
+// compatibility job reinstalls them to recheck the pin. On them the preflight
+// proceeds and Pi's own refusal stays handled by decideCompactionError().
+export const VERIFIED_PI_VERSIONS: ReadonlySet<string> = new Set(["1.4.0"]);
 
 /**
  * Estimated tokens for this compact_session call's persisted result and the

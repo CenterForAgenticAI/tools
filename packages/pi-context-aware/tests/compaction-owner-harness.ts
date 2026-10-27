@@ -316,6 +316,8 @@ function ownerJson(label: string, action: string, value: unknown): unknown {
 export interface FakeFabricOptions {
 	/** Carry-forward items Fabric hands the owner in the claim reply. */
 	readonly carry?: readonly string[];
+	/** Answer during `emit` instead of the default asynchronous Fabric timing. */
+	readonly synchronous?: boolean;
 }
 
 export interface FakeFabricClaim {
@@ -353,8 +355,30 @@ export class FakeFabric {
 	/** Set by a test: the handle's withdraw does nothing, so only the lifetime signal can end the claim. */
 	ignoreHandleWithdraw = false;
 
+	/**
+	 * Mirrors pi-fabric `src/extension.ts:366-375`: every message attaches a continuation to
+	 * one shared claim-code promise, so replies happen after `emit` and in emit order.
+	 */
+	private readonly ownerCode = Promise.resolve();
+	private readonly answers: Promise<void>[] = [];
+
 	constructor(bus: EventBus, private readonly options: FakeFabricOptions = {}) {
-		bus.on(OWNER_EVENT, (value) => this.receive(value));
+		bus.on(OWNER_EVENT, (value) => {
+			this.claims.push(value);
+			if (this.options.synchronous === true) {
+				this.handleClaim(value);
+				return;
+			}
+			const answer = this.ownerCode.then(() => { this.handleClaim(value); });
+			// Mark the automatically running continuation handled; flush() still observes failures.
+			void answer.catch(() => {});
+			this.answers.push(answer);
+		});
+	}
+
+	/** Wait for every claim reply scheduled so far. */
+	async flush(): Promise<void> {
+		while (this.answers.length > 0) await Promise.all(this.answers.splice(0));
 	}
 
 	/** True when Fabric's own engine compacts: it yields while a claim is held (src/compaction/hook.ts). */
@@ -362,9 +386,7 @@ export class FakeFabric {
 		return this.claim === undefined;
 	}
 
-	// src/extension.ts: the FABRIC_COMPACTION_OWNER_EVENT listener, then CompactionOwnerRegistry.handle and .claim.
-	private receive(value: unknown): void {
-		this.claims.push(value);
+	private handleClaim(value: unknown): void {
 		const read = readClaim(value);
 		if (!read.ok) {
 			const error = `Invalid Pi Fabric compaction owner message: ${read.error}`;

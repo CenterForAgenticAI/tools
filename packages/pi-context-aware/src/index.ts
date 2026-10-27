@@ -58,7 +58,8 @@
  *     "summarizer": { "enabled": true },                          // false defers summary ownership
  *     "proactiveCompaction": { "enabled": true, "thresholdFraction": 0.78, "outputReserveTokens": 16384 },
  *     "contextCache": { "enabled": true, "maxTotalSizeMB": 5, "staleHours": 168, "scope": "worktree", "maxListedFiles": 12 }, // default TTL: 7 days
- *     "restartNotice": { "enabled": true, "minAwayMs": 60000 }
+ *     "restartNotice": { "enabled": true, "minAwayMs": 60000 },
+ *     "pressureTelemetry": { "mode": "full" }
  *   }
  */
 
@@ -67,10 +68,13 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Api, AssistantMessage, ImageContent, Message, Model, ProviderHeaders, TextContent } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { compatCanDispatch } from "./platform/model-transport.js";
-import { foldToolViews, registerFoldEngine } from "./folds/fold-engine.js";
+import { foldModeFor, foldToolViews, registerFoldEngine, resolveFoldConfig } from "./folds/fold-engine.js";
 import { foldEngineFingerprint } from "./parity/fingerprint.js";
 import { registerFoldParityRecorder } from "./parity/recorder.js";
-import { decideBuiltinCompactionFallback, extrapolateBoundedInputTokens } from "./compaction/compaction-fallback-guard.js";
+import {
+	decideBuiltinCompactionFallback,
+	type BuiltinCompactionRequest,
+} from "./compaction/compaction-fallback-guard.js";
 import {
 	BorderedLoader,
 	calculateContextTokens,
@@ -167,6 +171,7 @@ import {
 	type ContextAwareProactiveCompactionSourceV1,
 	type ContextAwareProactiveCompactionSourcesV1,
 	type ContextAwareServiceV1,
+	type ContextAwareSkillsV1,
 } from "./context-service.js";
 import { stripHistoricalImages } from "./media/image-stripping.js";
 import {
@@ -176,7 +181,14 @@ import {
 	DEFAULT_PRESSURE_BAND_EDGES,
 	type ContextPressureBandEdges,
 } from "./platform/context-telemetry.js";
-import { compactionOwnerIdentity } from "./compaction/owner-identity.js";
+import { COMPACTION_OWNER_NAME, compactionOwnerIdentity } from "./compaction/owner-identity.js";
+import {
+	CONTEXT_AWARE_COMPACTOR_VERSION,
+	CompactionWriterObserver,
+	newestCommittedCompactionEntry,
+	observedCompactionWriter,
+	type CompactionWriterObservation,
+} from "./compaction/compaction-writer.js";
 import { contextPolicyBands, createContextPolicyController, effectivePressureLadder, type ContextPolicyController } from "./policy/context-policy.js";
 import { buildCheckinPrompt, type CheckinSnapshot } from "./platform/checkin.js";
 import { applyPromptSections, PROMPT_SECTION, sectionContent } from "./platform/prompt-sections.js";
@@ -409,6 +421,7 @@ import {
 	type ContextCacheConfig,
 	type ImageStrippingConfig,
 	type ProactiveCompactionConfig,
+	type PressureTelemetryMode,
 	type ResolvedConfig,
 	type SeedAuthorityGuardMode,
 	type SessionRoleBehaviour,
@@ -421,6 +434,10 @@ import type { RecallCachePool } from "./cache/recall.js";
 import { createContextRecallSurface } from "./context-tools/context-recall.js";
 import { decideContextToolSurface } from "./context-tools/surface.js";
 import { createContextFoldSurface } from "./context-tools/context-fold.js";
+import { seedContinuation, seedContinuationRefusalMessage, type SeedContinuation } from "./compaction/seed-continuation.js";
+import { registerLoadSkillTool } from "./skills/load-skill.js";
+import { createSkillRegistry, formatLoadedSkills, loadedSkillsOf, type SkillRegistry } from "./skills/skill-registry.js";
+import { CONDENSED_RESEND_MESSAGE_TYPE, createCondensedSkills, createSkillCondenser, fullSkillBlockLocations, type CondensedSkills } from "./skills/condensed.js";
 import { erasedSessionIds } from "./erasure/database.js";
 import { registerSessionErasure } from "./erasure/extension.js";
 import { guardErasureWrites } from "./erasure/write-boundary.js";
@@ -537,9 +554,9 @@ function compactError(err: unknown): string {
 }
 
 /**
- * Whether a run was started by a user prompt. Pi 1.3 tags the event with
- * `messageType`; older supported Pi versions (1.0.x) omit the field and fire
- * before_agent_start only for prompts, so a missing tag means a user prompt.
+ * Whether a run was started by a user prompt. Pi 1.3 and later tag the event
+ * with `messageType`. Pi 1.0.x, no longer supported, omitted the field and fired
+ * before_agent_start only for prompts, so a missing tag still means a user prompt.
  */
 function isUserTriggeredAgentStart(event: object): boolean {
 	return (event as { messageType?: unknown }).messageType !== "custom";
@@ -1455,6 +1472,17 @@ function compactionUnavailableMessage(cfg: EffectiveConfig): string {
 	return cfg.compactionBlocker ? compactionBlockedMessage(cfg.compactionBlocker) : SUMMARIZER_DEFERRED_HANDOFF_MESSAGE;
 }
 
+/**
+ * Whether this session's host will deliver a compact_session seed after the run
+ * ends. A Fabric child ends with its run, so a handoff there would end the work
+ * silently. See compaction/seed-continuation.ts.
+ */
+function compactSessionContinuation(): SeedContinuation {
+	return seedContinuation();
+}
+
+const FABRIC_CHILD_PROACTIVE_REASON = "fabric child: nothing would continue the session after the run ends";
+
 function getWorkstreamConfig(cfg: Config): WorkstreamConfig {
 	return { ...DEFAULT_WORKSTREAM_CONFIG, ...cfg.workstream };
 }
@@ -1802,6 +1830,18 @@ function resolveCompactionOwnership(
 			cfg.compactionBlocker?.extension,
 		),
 	};
+}
+
+function committedCompactionWriter(ctx: ExtensionContext): CompactionWriterObservation {
+	try {
+		return observedCompactionWriter(ctx.sessionManager.getBranch());
+	} catch {
+		return { kind: "none", name: "none" };
+	}
+}
+
+function formatCommittedCompactionWriter(ctx: ExtensionContext): string {
+	return `Last committed compaction writer: ${committedCompactionWriter(ctx).name}`;
 }
 
 function formatCompactionOwnership(ctx: ExtensionContext): string {
@@ -2321,39 +2361,54 @@ function refreshStatus(ctx: ExtensionContext): void {
 interface CompactionBlockedGuidance {
 	/** Package that cancels every compaction. */
 	readonly blockedBy: string;
-	/** How the model calls the tool that still reduces context, for example `compress`. */
-	readonly invocation: string;
+	/** How the model calls the reachable replacement tool, when this session can. */
+	readonly invocation?: string;
 }
 
-function buildContextUsageGuidanceBlock(
-	compactionAvailable = true,
-	blocked?: CompactionBlockedGuidance,
-	bands: ContextPressureBandEdges = DEFAULT_PRESSURE_BAND_EDGES,
-): string {
-	const pressureRules = compactionAvailable
+interface ContextUsageGuidanceOptions {
+	readonly compactionInvocation?: string;
+	readonly blocked?: CompactionBlockedGuidance;
+	readonly recallInvocation?: string;
+	readonly bands: ContextPressureBandEdges;
+	readonly telemetryMode: PressureTelemetryMode;
+}
+
+function buildContextUsageGuidanceBlock(options: ContextUsageGuidanceOptions): string {
+	const noCompactionRules = [
+		options.blocked
+			? `OK: no action needed. Compaction is not available in this session because ${options.blocked.blockedBy} cancels every compaction.`
+			: "OK: no action needed.",
+		"WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compaction is not available in this session.",
+		"URGENT: finish only the atomic edit or validation that would be unsafe to interrupt, keep every further action small, prefer bounded delegation, and tell the user that context is nearly full. Compaction is not available in this session.",
+	];
+	const pressureRules = options.compactionInvocation
 		? [
 			"OK: compact only at natural phase boundaries.",
-			"WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call compact_session at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.",
-			"URGENT: before nontrivial tool use, call compact_session unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.",
+			`WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call ${options.compactionInvocation} at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.`,
+			`URGENT: before nontrivial tool use, call ${options.compactionInvocation} unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.`,
 		]
-		: blocked
+		: options.blocked?.invocation
 			? [
-				`OK: no action needed. Compaction is not available in this session because ${blocked.blockedBy} cancels every compaction; ${blocked.invocation} reduces context instead.`,
-				`WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call ${blocked.invocation} on finished, older ranges, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result).`,
-				`URGENT: before nontrivial tool use, call ${blocked.invocation} on finished, older ranges unless finishing one atomic edit/validation that would be unsafe to interrupt; then reduce context immediately.`,
+				`OK: no action needed. Compaction is not available in this session because ${options.blocked.blockedBy} cancels every compaction; ${options.blocked.invocation} reduces context instead.`,
+				`WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call ${options.blocked.invocation} on finished, older ranges, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result).`,
+				`URGENT: before nontrivial tool use, call ${options.blocked.invocation} on finished, older ranges unless finishing one atomic edit/validation that would be unsafe to interrupt; then reduce context immediately.`,
 			]
-			: [
-			"OK: no action needed.",
-			"WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compaction is not available in this session.",
-			"URGENT: finish only the atomic edit or validation that would be unsafe to interrupt, keep every further action small, prefer bounded delegation, and tell the user that context is nearly full. Compaction is not available in this session.",
-		];
+			: noCompactionRules;
+	const recallRule = options.recallInvocation
+		? `Use ${options.recallInvocation} early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.`
+		: "";
+	if (options.telemetryMode === "off") {
+		return recallRule ? `<context-awareness>\n${recallRule}\n</context-awareness>` : "";
+	}
+	const envelopeDescription = options.telemetryMode === "full"
+		? "with a <pressure /> element containing band, rounded usage-percent, approximate-headroom, and an optional action."
+		: "with a <pressure /> element containing band and an optional action.";
 	return `<context-awareness>
 Context-aware operating rule: messages delimited by <context-telemetry>...</context-telemetry> are extension-injected context-budget telemetry, not user messages or user requests. Never acknowledge, quote, explain, or apologize for a telemetry envelope in the user-facing response unless the user explicitly asks about it; silently use it only to decide context-management behavior. The envelope does not supersede the preceding user request or tool result.
-Envelope format: <context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">...</context-telemetry>, with a <pressure /> element containing band, rounded usage-percent, approximate-headroom, and an optional action.
-Bands: OK <${formatPercent(bands.warnFraction)}, WARN >=${formatPercent(bands.warnFraction)}, URGENT >=${formatPercent(bands.urgentFraction)}.
+Envelope format: <context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">...</context-telemetry>, ${envelopeDescription}
+Bands: OK <${formatPercent(options.bands.warnFraction)}, WARN >=${formatPercent(options.bands.warnFraction)}, URGENT >=${formatPercent(options.bands.urgentFraction)}.
 UNKNOWN: the size is not measured yet, for example right after a compaction or an overflow. Do not assume it is low; keep the next action small until a measured band arrives.
-${pressureRules.join("\n")}
-Use context_recall early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
+${pressureRules.join("\n")}${recallRule ? `\n${recallRule}` : ""}
 </context-awareness>`;
 }
 
@@ -2400,7 +2455,7 @@ A pinned user objective is user-owned: agent mutations cannot replace it.
 
 type ExtensionToolReachability =
 	| { readonly available: true; readonly kind: "active" | "extension-executor"; readonly invocation: string }
-	| { readonly available: false; readonly kind: "unavailable"; readonly invocation: string };
+	| { readonly available: false; readonly kind: "unavailable" };
 
 interface ToolSourceInfoView {
 	readonly path?: string;
@@ -2487,10 +2542,10 @@ function extensionToolReachability(pi: ExtensionAPI, toolName: string): Extensio
 				return { available: true, kind: "extension-executor", invocation: `extensions.${toolName}(...)` };
 			}
 		}
-		return { available: false, kind: "unavailable", invocation: toolName };
+		return { available: false, kind: "unavailable" };
 	} catch (err) {
 		debugLog(`tool reachability lookup failed for ${toolName}: ${compactError(err)}`);
-		return { available: false, kind: "unavailable", invocation: toolName };
+		return { available: false, kind: "unavailable" };
 	}
 }
 
@@ -5939,6 +5994,10 @@ function shouldProactivelyCompact(
 	// failure shape seen when a worker compacts during its reply. The queued path that waits
 	// for agent_settled is still available, so nothing is lost — only deferred.
 	if (!sessionRoleBehaviour(cfg.sessionRole).compactMidReply) return { ok: false, reason: "worker role: deferred to the host round boundary" };
+	// Proactive compaction ends the run and continues in a new one. A Fabric child
+	// ends with its run, so that would lose the rest of the work; Pi's own
+	// overflow recovery still applies.
+	if (!compactSessionContinuation().available) return { ok: false, reason: FABRIC_CHILD_PROACTIVE_REASON };
 	if (!isProactiveCompactionCheckpoint(stopReason)) return { ok: false, reason: `stopReason=${stopReason ?? "unknown"}` };
 	const key = sessionMetadataKey(ctx);
 	if (getActiveCompactionFlight(key)) return { ok: false, reason: "compaction already queued or running" };
@@ -6193,6 +6252,9 @@ function shouldRecoverContextConstrainedOutputLimit(
 	const proactive = cfg.proactiveCompaction;
 	if (!proactive.enabled) return null;
 	if (!sessionRoleBehaviour(cfg.sessionRole).compactMidReply) return null;
+	// The recovery discards the reply and compacts across a run boundary, which a
+	// Fabric child never reaches.
+	if (!compactSessionContinuation().available) return null;
 	const usage = assistantUsageView(ctx, message);
 	if (!usage) return null;
 	const budget = generationBudgetForUsage(ctx, proactive, usage);
@@ -7826,7 +7888,15 @@ function queueCheckin(pi: ExtensionAPI, ctx: ExtensionContext): void {
 		return;
 	}
 	const sessionKey = sessionMetadataKey(ctx);
-	pendingCheckins.set(sessionKey, { prompt: buildCheckinPrompt(checkinSnapshot(ctx), { compactionAvailable: contextAwareCompactionAvailable(readConfig(ctx)) }) });
+	const cfg = readConfig(ctx);
+	const compactSessionTool = extensionToolReachability(pi, "compact_session");
+	const compactionAvailable = contextAwareCompactionAvailable(cfg) && compactSessionTool.available && compactSessionContinuation().available;
+	pendingCheckins.set(sessionKey, {
+		prompt: buildCheckinPrompt(checkinSnapshot(ctx), {
+			compactionAvailable,
+			...(compactionAvailable ? { compactionInvocation: compactSessionTool.invocation } : {}),
+		}),
+	});
 	ctx.ui.notify("Check-in queued; it will run when the current turn settles.", "info");
 	deliverPendingCheckin(pi, ctx);
 }
@@ -8331,6 +8401,8 @@ function buildServiceSnapshot(ctx: ExtensionContext) {
 	} catch {
 		// Optional for minimal/in-memory SessionManager implementations.
 	}
+	const writer = committedCompactionWriter(ctx);
+	const writerField = writer.kind === "none" ? {} : { writer };
 
 	return buildContextAwareSnapshotV1({
 		// An unmeasured size is reported as UNKNOWN, not as 0 tokens (issue #163).
@@ -8357,8 +8429,8 @@ function buildServiceSnapshot(ctx: ExtensionContext) {
 				updatedBy: entry.updatedBy,
 			})),
 		compaction: active
-			? { state: active.state as "queued" | "running", runId: active.runId }
-			: { state: "idle" },
+			? { state: active.state as "queued" | "running", runId: active.runId, ...writerField }
+			: { state: "idle", ...writerField },
 		proactiveCompaction: currentProactiveLifecycle(sessionKey),
 		effectiveMode: {
 			seedMode: cfg.seedMode,
@@ -8433,12 +8505,14 @@ function createContextAwareService(
 	sessionSignal: AbortSignal,
 	modes: ModesExtensionController,
 	policy: ContextPolicyController,
+	condensed: Pick<ContextAwareSkillsV1, "register" | "endOwner">,
 ): ContextAwareServiceV1 {
 	return {
 		protocolVersion: CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION,
 		getSnapshot: () => buildServiceSnapshot(ctx),
 		modes: modes.capability(),
 		policy: policy.capability(ctx),
+		skills: { loaded: () => loadedSkillsOf(ctx.sessionManager), condensed: true, ...condensed },
 		promoteArtifact(request): ContextAwareArtifactPromotionResultV1 {
 			let validated: ReturnType<typeof validateContextAwareArtifactPromotionRequestV1>;
 			try {
@@ -8958,6 +9032,11 @@ export default function (pi: ExtensionAPI) {
 
 	const wantsCompactionClaim = (cfg: EffectiveConfig): boolean =>
 		cfg.compactionClaim?.enabled === true && contextAwareCompactionAvailable(cfg);
+	const compactionWriterObserver = new CompactionWriterObserver();
+	const expectsContextAwareWriter = (ctx: ExtensionContext, cfg: EffectiveConfig, claimHeld: boolean): boolean => {
+		if (!wantsCompactionClaim(cfg) || !claimHeld) return false;
+		return resolveCompactionOwnership(ctx).assessment?.state === "context-aware";
+	};
 
 	// The latest context this extension's own hooks received. A `compact.*` call acts through
 	// it rather than the context Fabric passes: Fabric's is its own, outside this extension's
@@ -9171,6 +9250,66 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const sessionAsks = registerSessionTasks(pi, tasksRuntimeDeps);
+	// load_skill moved here from pi-caair-dev-tools (pi-context-aware#181).
+	// The registry records each load as a custom entry, answers repeat loads with a pointer
+	// while the native fold engine owns compression, and protects recorded results from folds.
+	const skillRegistry: SkillRegistry = createSkillRegistry({
+		append: (customType, data) => {
+			const appendEntry = (pi as unknown as { appendEntry?: (customType: string, data?: unknown) => void }).appendEntry;
+			if (typeof appendEntry === "function") appendEntry.call(pi, customType, data);
+		},
+		// Pointers only while the native fold engine is live, by the engine's own mode decision.
+		pointersEnabled: () => foldModeFor(registeredToolViews(pi)) === "live",
+		restoreInvocation: () => {
+			const reachability = extensionToolReachability(pi, "decompress");
+			if (!reachability.available) return undefined;
+			return renderReachableToolInvocation("decompress", "decompress", reachability).replace(/\(\.\.\.\)$/u, "");
+		},
+	});
+	// Condensed skills (pi-context-aware#181), off unless folds.condensedSkills is on.
+	// The context of the newest run decides whether the setting is on for a load.
+	const condensedSkills: CondensedSkills = createCondensedSkills({
+		append: (customType, data) => {
+			const appendEntry = (pi as unknown as { appendEntry?: (customType: string, data?: unknown) => void }).appendEntry;
+			if (typeof appendEntry === "function") appendEntry.call(pi, customType, data);
+		},
+	});
+	let condensedRunCtx: ExtensionContext | undefined;
+	const condensedSkillsOn = (ctx: ExtensionContext | undefined): ctx is ExtensionContext => {
+		if (!ctx) return false;
+		try {
+			return resolveFoldConfig(ctx).condensedSkills === true;
+		} catch {
+			return false;
+		}
+	};
+	// After a compaction, each skill still in use is resent once, condensed, unless its full text survived.
+	const resendCondensedSkills = (ctx: ExtensionContext): void => {
+		if (!condensedSkillsOn(ctx)) return;
+		const full = new Set<string>();
+		for (const message of ctx.sessionManager.buildSessionProjection().messages) {
+			const role = (message as { role?: unknown }).role;
+			if (role !== "user" && role !== "custom") continue;
+			const content = (message as { content?: unknown }).content;
+			const text = typeof content === "string" ? content
+				: Array.isArray(content) ? content.map((part) => (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "")).join("\n") : "";
+			for (const location of fullSkillBlockLocations(text)) full.add(location);
+		}
+		for (const view of loadedSkillsOf(ctx.sessionManager)) if (view.state === "visible") full.add(view.path);
+		const resend = condensedSkills.resendText(ctx.sessionManager, (record) => full.has(record.location));
+		if (!resend) return;
+		pi.sendMessage({ customType: CONDENSED_RESEND_MESSAGE_TYPE, content: resend.content, display: false, details: { locations: resend.locations } }, { triggerTurn: false });
+	};
+	// Captured from the extension's one before_agent_start handler below, not a second listener.
+	const captureSkills = registerLoadSkillTool(pi, undefined, undefined, skillRegistry.hooks, {
+		listen: false,
+		onBody: (skill) => {
+			if (condensedSkillsOn(condensedRunCtx)) condensedSkills.captureLoaded(skill, condensedRunCtx.sessionManager);
+		},
+	});
+	pi.on("tool_call", (event) => {
+		skillRegistry.noteToolCall(event);
+	});
 
 	pi.registerCommand("sessions", {
 		description: "List durable workstream sessions and their bounded overlap, lifecycle, and optional terminal projections.",
@@ -9243,6 +9382,7 @@ export default function (pi: ExtensionAPI) {
 		claimController.start(ctx);
 		registerHandoffSurfaces(ctx);
 		registerContextRecallSurface(ctx);
+		skillRegistry.reset(ctx.sessionManager.getBranch());
 		piAutoCompactionSettingBySession.delete(ctx.sessionManager);
 		lastCompactionOwnershipStateBySession.delete(ctx.sessionManager);
 		const sessionKey = sessionMetadataKey(ctx);
@@ -9330,7 +9470,12 @@ export default function (pi: ExtensionAPI) {
 		if (pi.events) {
 			disposeContextService = provideContextAwareServiceV1(
 				pi.events,
-				createContextAwareService(pi, runtime, ctx, contextServiceAbortController.signal, modesController, policyController),
+				createContextAwareService(pi, runtime, ctx, contextServiceAbortController.signal, modesController, policyController, {
+					register: (registration) => (condensedSkillsOn(ctx)
+						? condensedSkills.register(registration, ctx.sessionManager)
+						: { ok: false, error: "folds.condensedSkills is off" }),
+					endOwner: (ownerKey) => condensedSkills.endOwner(ownerKey, ctx.sessionManager),
+				}),
 			);
 		}
 		warnForCompactionOwnership(ctx, { refreshPiSetting: true });
@@ -9347,6 +9492,7 @@ export default function (pi: ExtensionAPI) {
 		claimController.sync(ctx);
 		modesController.restore(ctx);
 		policyController.sync(ctx, "branch");
+		skillRegistry.reset(ctx.sessionManager.getBranch());
 		refreshStatus(ctx);
 		// The selected branch decides which asks are open: requests raised for
 		// another branch are aborted and this branch's open asks raised again.
@@ -9372,7 +9518,10 @@ export default function (pi: ExtensionAPI) {
 		return outcome.payload;
 	});
 	// Observe bcp's context transform before our outgoing-history repair below.
-	const foldEngine = registerFoldEngine(pi);
+	const foldEngine = registerFoldEngine(pi, {
+		config: { isToolProtected: (toolName, text) => skillRegistry.isToolProtected(toolName, text) },
+		condenser: (ctx, branch) => (condensedSkillsOn(ctx) ? createSkillCondenser(branch) : undefined),
+	});
 	compactionPreflightEnvironments.set(pi, {
 		// A host without getSettings() throws here, and the preflight then leaves the decision to Pi.
 		getSettings: () => pi.getSettings(),
@@ -9668,6 +9817,11 @@ export default function (pi: ExtensionAPI) {
 		taskContinuationAuthorityAdvisoryRevision.delete(sessionKey);
 	});
 	pi.on("before_agent_start", async (event, ctx): Promise<BeforeAgentStartEventResult> => {
+		captureSkills(event, ctx);
+		condensedRunCtx = ctx;
+		if ("prompt" in event && typeof event.prompt === "string" && condensedSkillsOn(ctx)) {
+			condensedSkills.capturePrompt(event.prompt, event.systemPromptOptions?.skills ?? [], ctx.sessionManager);
+		}
 		const sessionKey = sessionMetadataKey(ctx);
 		// A pinned mode layer can be entered only before the session's first agent run.
 		modesController.agentStart();
@@ -9689,16 +9843,28 @@ export default function (pi: ExtensionAPI) {
 		refreshWorkstreamFocusWidget(ctx, cfg.enabled ? current : null);
 		if (cfg.enabled && cfg.registryEnabled) syncSessionRegistry(runtime, ctx);
 
-		const contextAwarenessBlock = buildContextUsageGuidanceBlock(
-			contextAwareCompactionAvailable(config),
-			config.compactionBlocker
+		const compactionAvailable = contextAwareCompactionAvailable(config) && compactSessionContinuation().available;
+		const compactSessionTool = extensionToolReachability(pi, "compact_session");
+		const recallTool = extensionToolReachability(pi, "context_recall");
+		const blockerReplacementTool = config.compactionBlocker
+			? extensionToolReachability(pi, config.compactionBlocker.replacementTool)
+			: undefined;
+		const contextAwarenessBlock = buildContextUsageGuidanceBlock({
+			...(compactionAvailable && compactSessionTool.available
+				? { compactionInvocation: compactSessionTool.invocation }
+				: {}),
+			...(config.compactionBlocker
 				? {
-					blockedBy: config.compactionBlocker.extension,
-					invocation: extensionToolReachability(pi, config.compactionBlocker.replacementTool).invocation,
+					blocked: {
+						blockedBy: config.compactionBlocker.extension,
+						...(blockerReplacementTool?.available ? { invocation: blockerReplacementTool.invocation } : {}),
+					},
 				}
-				: undefined,
-			contextPolicyBands(config),
-		);
+				: {}),
+			...(recallTool.available ? { recallInvocation: recallTool.invocation } : {}),
+			bands: contextPolicyBands(config),
+			telemetryMode: config.pressureTelemetry?.mode ?? "full",
+		});
 		// Same audience split as the task list below: a dispatched session is told
 		// its objective belongs to the supervisor that sent it (#66).
 		const audience: TasksAudience = readConfig(ctx).sessionRole === "worker" ? "worker" : "foreground";
@@ -9771,6 +9937,7 @@ export default function (pi: ExtensionAPI) {
 		});
 		const u = readUsage(ctx, estimatePendingPromptTokens(event));
 		const sizeUnmeasured = u?.unmeasured === true;
+		const telemetryMode = config.pressureTelemetry?.mode ?? "full";
 		const result: BeforeAgentStartEventResult = forcedSystemPrompt === undefined ? {} : { systemPrompt: forcedSystemPrompt };
 		const restartNotice = resolveRestartNotice(
 			pendingRestartNotices.get(sessionKey),
@@ -9781,12 +9948,25 @@ export default function (pi: ExtensionAPI) {
 		const restartMessage = restartNotice ? formatRestartNotice(restartNotice) : undefined;
 		if (u) {
 			const usageMessage = sizeUnmeasured
-				? buildUnknownContextTelemetry()
+				? buildUnknownContextTelemetry(telemetryMode)
 				: buildContextTelemetry(u, {
-					compactionAvailable: contextAwareCompactionAvailable(config),
-					replacementTool: config.compactionBlocker?.replacementTool,
+					mode: telemetryMode,
+					compactionAvailable: compactionAvailable && compactSessionTool.available,
+					...(blockerReplacementTool?.available && config.compactionBlocker
+						? { replacementTool: config.compactionBlocker.replacementTool }
+						: {}),
 					bands: contextPolicyBands(config),
 				});
+			if (usageMessage === undefined) {
+				if (restartMessage || tasksContextMessage || briefMessage) {
+					result.message = {
+						customType: restartMessage ? "context-aware-restart-notice" : "context-aware-task-state",
+						content: [tasksContextMessage, briefMessage, restartMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
+						display: false,
+					};
+				}
+				return result;
+			}
 			result.message = {
 				customType: "context-aware-usage-marker",
 				content: [tasksContextMessage, briefMessage, restartMessage, usageMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
@@ -10155,6 +10335,8 @@ export default function (pi: ExtensionAPI) {
 				// This value is added by the extension after summary generation. It
 				// is provenance for the carry marker, not model-authored content.
 				cacheCarryProvenance: CACHE_CARRY_PROVENANCE,
+				compactor: COMPACTION_OWNER_NAME,
+				compactorVersion: CONTEXT_AWARE_COMPACTOR_VERSION,
 			});
 			if (workstreamProjection) details = mergeDetails(details, { workstream: workstreamProjection.details });
 
@@ -10231,22 +10413,31 @@ export default function (pi: ExtensionAPI) {
 			// the overflow (context unchanged), leaving the session stuck. In
 			// that case cancel instead so the failure is visible and the
 			// oversized request is not repeated.
-			// Pi's built-in compact sends the history summary and (for a split
-			// turn) the turn-prefix summary as separate requests, each with
-			// settings.reserveTokens of headroom. Model each request on its own —
-			// the largest is the binding constraint — and extrapolate the bounded
-			// token estimator so a very long session is not under-counted.
-			const historyEstimate = estimateCompactionAccountingInput(prep.messagesToSummarize);
-			const previousInput = estimateAccountingText(prep.previousSummary);
-			const historyRequestTokens = extrapolateBoundedInputTokens(historyEstimate) + previousInput.tokens;
+			// History and split-turn summaries are separate requests. Rebuild each
+			// provider prompt with Pi's exported serializer, then let the guard apply
+			// pi-ai's estimator and clamp margin to the largest request. reserveTokens
+			// only decides when Pi compacts; Pi 1.4 does not use it to budget summary
+			// output, so it is not subtracted here.
 			const isSplitTurn = prep.isSplitTurn === true && Array.isArray(prep.turnPrefixMessages) && prep.turnPrefixMessages.length > 0;
-			const turnPrefixRequestTokens = isSplitTurn
-				? extrapolateBoundedInputTokens(estimateCompactionAccountingInput(prep.turnPrefixMessages))
-				: 0;
+			const requests: BuiltinCompactionRequest[] = [];
+			if (!isSplitTurn || prep.messagesToSummarize.length > 0) {
+				requests.push({
+					kind: "history",
+					conversationText: serializeConversation(convertToLlm(prep.messagesToSummarize as Parameters<typeof convertToLlm>[0])),
+					previousSummary: prep.previousSummary,
+					customInstructions,
+				});
+			}
+			if (isSplitTurn) {
+				requests.push({
+					kind: "turn-prefix",
+					conversationText: serializeConversation(convertToLlm(prep.turnPrefixMessages as Parameters<typeof convertToLlm>[0])),
+					customInstructions,
+				});
+			}
 			const fallbackDecision = decideBuiltinCompactionFallback({
-				requestTokens: [historyRequestTokens, turnPrefixRequestTokens],
+				requests,
 				contextWindow: ctx.model?.contextWindow,
-				reserveTokens: prep.settings?.reserveTokens,
 			});
 			if (!fallbackDecision.fallback) {
 				captureInterruptedPrompt(sessionKey);
@@ -10351,7 +10542,26 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_before_compact", ownerAwareBeforeCompact);
 
 	pi.on("session_compact", async (event, ctx) => {
+		const cfg = readConfig(ctx);
+		let observed: ReturnType<CompactionWriterObserver["observe"]>;
+		try {
+			const committedEntry = newestCommittedCompactionEntry(ctx.sessionManager.getBranch());
+			observed = compactionWriterObserver.observe(
+				ctx.sessionManager.getSessionId(),
+				committedEntry,
+				expectsContextAwareWriter(ctx, cfg, claimController.active),
+			);
+		} catch (error) {
+			debugLog(`committed compaction writer observation failed: ${compactError(error)}`);
+			observed = { writer: { kind: "malformed", name: "unknown (malformed metadata)" } };
+		}
+		debugLog(`committed compaction writer: ${observed.writer.kind} (${observed.writer.name})`);
+		if (observed.warning && ctx.hasUI) {
+			debugLog(observed.warning);
+			safeUi(ctx, "committed compaction writer warning", () => ctx.ui.notify(observed.warning!, "warning"));
+		}
 		modesController.resend(ctx);
+		resendCondensedSkills(ctx);
 		recordWorkerCompactionSatisfied(ctx);
 		const sessionKey = sessionMetadataKey(ctx);
 		clearRetainedSummariesForSession(sessionKey);
@@ -10436,6 +10646,15 @@ export default function (pi: ExtensionAPI) {
 			const compactionConfig = readConfig(ctx);
 			if (!contextAwareCompactionAvailable(compactionConfig)) {
 				throw new Error(compactionUnavailableMessage(compactionConfig));
+			}
+			// Ending the run where nothing delivers the seed loses the work silently.
+			// Throw, so the model sees an error and keeps working in this run.
+			const continuation = compactSessionContinuation();
+			if (!continuation.available) {
+				const foldTool = ["context_fold", "compress"]
+					.map((name) => extensionToolReachability(pi, name))
+					.find((tool) => tool.available);
+				throw new Error(seedContinuationRefusalMessage(foldTool?.available ? foldTool.invocation : undefined));
 			}
 
 			const queuedTextPrefix = "Compaction queued. This tool result ends the current agent run automatically; once the agent is settled, the session will compact and the next phase will begin with this expanded prompt:\n\n";
@@ -10758,7 +10977,7 @@ export default function (pi: ExtensionAPI) {
 	registerHandoffSurfaces = (ctx?: ExtensionContext): void => {
 		const cfg = readConfig(ctx);
 		if (!contextAwareSummarizerEnabled(cfg)) return;
-		const hidden = cfg.compactionBlocker !== undefined;
+		const hidden = cfg.compactionBlocker !== undefined || !compactSessionContinuation().available;
 		if (!handoffSurfacesRegistered) {
 			handoffSurfacesRegistered = true;
 			compactSessionHidden = hidden;
@@ -11187,7 +11406,7 @@ Config: ${configFile()}${cliOverrideStatusLine()}`,
 			const proactiveSources = proactive.source === "mixed"
 				? `\nProactive sources: ${formatProactiveLeafSources(proactive)}`
 				: "";
-			const configLines = `Mode: ${modeLabel(cfg)}\nSeed mode: ${cfg.seedMode}${layerOf("seedMode")}\nSeed rewrite: ${cfg.seedRewrite ? "on" : "off"}${layerOf("seedRewrite")}\nAmbiguity mode: ${cfg.ambiguityMode}${layerOf("ambiguityMode")} (effective: ${effectiveAmbiguityMode(cfg)})\nSeed authority guard: ${cfg.seedAuthorityGuard}${layerOf("seedAuthorityGuard")}\nSeed authority guard implementation: ${SEED_AUTHORITY_GUARD_IMPLEMENTATION_VERSION}\nCompaction model: ${cmpLabel}${layerOf("compactionModel")}\nOverflow fallback model: ${cfg.overflowFallbackModel ?? "(none — reduced-payload retry only)"}${layerOf("overflowFallbackModel")}\nProactive compaction: ${formatResolvedProactiveCompaction(proactive)}${proactiveSources}\n${formatCompactionOwnership(ctx)}\n${formatProactiveLifecycle(ctx)}\n${formatSeedHandoffStatus(ctx)}\nImage stripping: ${formatImageStripping(cfg)}${[...new Set([layerOf("imageStripping.enabled"), layerOf("imageStripping.keepRecent")])].join("")}\nCache scope: ${getContextCacheConfig(cfg).scope}${layerOf("contextCache.scope")}${cliOverrideStatusLine()}\nRun /context-status layers for full attribution.`;
+			const configLines = `Mode: ${modeLabel(cfg)}\nSeed mode: ${cfg.seedMode}${layerOf("seedMode")}\nSeed rewrite: ${cfg.seedRewrite ? "on" : "off"}${layerOf("seedRewrite")}\nAmbiguity mode: ${cfg.ambiguityMode}${layerOf("ambiguityMode")} (effective: ${effectiveAmbiguityMode(cfg)})\nSeed authority guard: ${cfg.seedAuthorityGuard}${layerOf("seedAuthorityGuard")}\nSeed authority guard implementation: ${SEED_AUTHORITY_GUARD_IMPLEMENTATION_VERSION}\nCompaction model: ${cmpLabel}${layerOf("compactionModel")}\nOverflow fallback model: ${cfg.overflowFallbackModel ?? "(none — reduced-payload retry only)"}${layerOf("overflowFallbackModel")}\nProactive compaction: ${formatResolvedProactiveCompaction(proactive)}${proactiveSources}\n${formatCompactionOwnership(ctx)}\n${formatCommittedCompactionWriter(ctx)}\n${formatProactiveLifecycle(ctx)}\n${formatSeedHandoffStatus(ctx)}\nImage stripping: ${formatImageStripping(cfg)}${[...new Set([layerOf("imageStripping.enabled"), layerOf("imageStripping.keepRecent")])].join("")}\nCache scope: ${getContextCacheConfig(cfg).scope}${layerOf("contextCache.scope")}${cliOverrideStatusLine()}\n${formatLoadedSkills(loadedSkillsOf(ctx.sessionManager))}\nRun /context-status layers for full attribution.`;
 			if (!u) {
 				ctx.ui.notify(`Context usage not available yet.\n${configLines}`, "warning");
 				return;

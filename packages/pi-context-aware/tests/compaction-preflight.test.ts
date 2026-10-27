@@ -67,15 +67,9 @@ function sha256(content: string | Buffer): string {
 // ---------------------------------------------------------------------------
 
 // Add a release to both after verifying the port against it. The file hash is
-// per release: 1.4.0 changed summary generation in compaction.js, not the code
-// the port copies.
-const PRE_1_4_COMPACTION_SHA256 = "573f0321e9a93a4e8dca8c327f6459082ac438d1bc8b6c3c171d90894dd1543c";
+// per release, because a release can change other code in compaction.js (1.4.0
+// changed summary generation) without changing the code the port copies.
 const PORTED_COMPACTION_SHA256: Readonly<Record<string, string>> = {
-	"1.0.3": PRE_1_4_COMPACTION_SHA256,
-	"1.0.4": PRE_1_4_COMPACTION_SHA256,
-	"1.1.0": PRE_1_4_COMPACTION_SHA256,
-	"1.2.0": PRE_1_4_COMPACTION_SHA256,
-	"1.3.0": PRE_1_4_COMPACTION_SHA256,
 	"1.4.0": "f51e78ef1da66b5803fc91e185f07b968f8f989ab9326b7744958416aad3f6f6",
 };
 const COMPACT_REFUSAL_SHA256 = "45cf1517a80f20070a3093814328135d3f25c82d7dda46e82b53f45718f09016";

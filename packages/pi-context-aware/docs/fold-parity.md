@@ -17,8 +17,31 @@ and absorbed blocks. It also records ref continuity and partial-entry coverage.
 
 Each call record has a typed outcome for each engine: `oursOutcome` for the
 native preview and `bcpOutcome` for what billion-context-pi returned. The
-recorder classifies the result text before it hashes it. Only the category is
-stored, never the text.
+warning rewrite cannot produce a parity difference:
+
+- The native shadow preview keeps accepted records and rejected-plan errors, then
+  builds `oursOutcome` from the created-record count and those errors
+  (`src/parity/compare.ts:329-357`). It never copies an accepted plan's
+  `warnings` field.
+- billion-context-pi's result text is reduced to a terminal type or a panel's
+  block count and classified `Errors:` reasons (`src/parity/outcome.ts:10-12`
+  and `src/parity/outcome.ts:63-80`). An accepted-call `Warnings:` line is
+  outside those fields. `compareCompressCall` then compares the typed outcomes
+  and block evidence, not warning text (`src/parity/compare.ts:418-455`).
+- The recorder listens only to the `compress` tool while the engine is in shadow
+  mode (`src/parity/recorder.ts:172-174`, `src/parity/recorder.ts:197-198`, and
+  `src/parity/recorder.ts:235-247`). The rewritten warning is rendered by the
+  native live `context_fold` tool or its `compress` alias
+  (`src/context-tools/context-fold.ts:91-118`); the shadow preview never renders
+  that warning as a tool result. It therefore cannot enter the provider-request
+  tool-result hashes compared in `src/parity/compare.ts:525-538`.
+
+The recorder stores `resultHash`, a hash of the first 200 result characters, as
+a diagnostic (`src/parity/recorder.ts:243-247` and
+`src/parity/records.ts:65`), but it is not an input to any difference. The raw
+result text is not stored. Because no `ParityDiff` can contain this wording
+change, a register predicate could never match it; `src/parity/register.ts`
+therefore has no entry for the protected-zone warning.
 
 | Outcome | Native engine | billion-context-pi |
 |---|---|---|
@@ -50,7 +73,9 @@ billion-context-pi with an in-memory preview of our folds, planned in call order
 The recorder runs before context-aware's history repair handler. ACP tags are
 removed before hashing. Summary sequences (topic-line hash and body hash) are
 compared in order; non-summary messages are compared as a multiset of role and
-text hash. Images are outside this comparison.
+text hash. Raw images are outside this comparison. When the native live preview
+elides old images, FP-163 records only paired before/after text hashes and
+explains the resulting content and tool-result differences.
 
 Tool calls and tool results are compared separately from text:
 
@@ -454,6 +479,7 @@ predicate that matches only that difference.
 | FP-006 | Tier-3 rewrite rejection | billion-context-pi refuses a call that only re-condenses tier-3 blocks (`tier3-rewrite`). The native engine has no such rejection. Applies only as described below. | pi-context-aware#131 |
 | FP-007 | Abort | billion-context-pi stops a call when its signal aborts (`aborted`). The native preview runs to completion. Applies only as described below. | pi-context-aware#131 |
 | FP-008 | Cut-off summaries are refused | The native adapter refuses a summary of at most 200 characters that ends in `…`, or a copied block pointer (`stub-summary`). billion-context-pi folds such a summary. Applies only to call differences, as described below. | pi-context-aware#173 |
+| FP-163 | Native request media elision | In image-heavy requests, the native engine keeps the newest five image parts and replaces every older image part with a placeholder that names the original session entry, including within a partially elided boundary entry; billion-context-pi sends every image. Applies only when paired before/after content hashes account exactly for a content or tool-result difference. Unrelated differences remain unexplained. Raw text and image bytes are not recorded. | pi-context-aware#163 |
 | FP-201 | Tier-2 nudge reachable | billion-context-pi 0.1.83 keeps the kernel's `tier2Trigger` 1000 and `tier3Trigger` 2000, which make the tier-2 nudge unreachable (ranxianglei/billion-context-pi#628). The native per-turn pass uses 10 and 20, as ranxianglei/billion-context-pi#629 proposes. Applies only to a `content` difference, and only when the preview recorded a `tier-trigger` nudge fix and swapping its native nudge for billion-context-pi's makes the non-summary content equal. | pi-context-aware#201 |
 | FP-202 | Emergency nudge deferred after a failed turn | billion-context-pi 0.1.83 sends the emergency nudge again on every failed model turn (ranxianglei/billion-context-pi#666). The native per-turn pass sends no emergency nudge while the latest model turn ended in `error` or `aborted`, and sends it on the first turn after one completes. Applies only to a `content` difference, and only when the preview recorded an `emergency-defer` fix and billion-context-pi's emergency nudge is the only extra message. | pi-context-aware#201 |
 
@@ -556,9 +582,10 @@ partial or malformed, the request is not explained.
 The counterfactual request need not equal billion-context-pi's request. It
 keeps every known difference from earlier in the session, because the refused
 calls are the only thing it omits: a fold summary billion-context-pi drops
-(FP-001), a compress summary it shortened (FP-002), or an opening user message
-the native policy folded (FP-003). The counterfactual is clean when each of its
-differences is one that FP-001, FP-002 or FP-003 explains, judged against the
+(FP-001), a compress summary it shortened (FP-002), an opening user message
+the native policy folded (FP-003), or request-only media elision (FP-163). The
+counterfactual is clean when each difference is one that FP-001, FP-002, FP-003
+or FP-163 explains, judged against the
 counterfactual's own evidence (`counterfactualOurs`) with the same predicates
 as the register entries. The report recomputes these differences from that
 evidence and joins them with the stored ones, so a stored empty list cannot
@@ -627,7 +654,7 @@ test in `tests/fold-parity-attribution.test.ts` then failed an assertion
 | Control removed or broken | Test that went red |
 | --- | --- |
 | Known differences explain the counterfactual | a refusal after an earlier accepted fold, after a compress call with a long summary, and after the opening user message was folded is explained |
-| Only FP-001 to FP-003 explain the counterfactual | after each background, a counterfactual difference no register entry explains keeps the refusal unexplained |
+| Only registered request differences explain the counterfactual | after each background, a counterfactual difference no register entry explains keeps the refusal unexplained |
 | Entries judge the counterfactual's own evidence | a refusal after a compress call with a long summary, and after the opening user message was folded, is explained |
 | Recomputation from the counterfactual's evidence | a stored clean counterfactual cannot hide a difference its own evidence shows |
 | Counterfactual evidence is required | a counterfactual without its request evidence explains nothing, even when its stored list is empty |

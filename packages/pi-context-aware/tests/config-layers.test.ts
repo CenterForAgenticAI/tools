@@ -42,10 +42,12 @@ test("first-user settings resolve per leaf through global, project and session, 
 		readConfigLayer({ folds: { firstUserMessage: "keep-under-tokens" } }, "project"),
 		...readPolicyEntryLayers([policyEntry("session", { "folds.firstUserMessageMaxTokens": 100 })]),
 	]);
-	assert.deepEqual(resolved.config.folds, { firstUserMessage: "keep-under-tokens", firstUserMessageMaxTokens: 100 });
+	assert.deepEqual(resolved.config.folds, { firstUserMessage: "keep-under-tokens", firstUserMessageMaxTokens: 100, condensedSkills: false });
 	assert.equal(resolved.byPath.get("folds.firstUserMessage")?.layer, "project");
 	assert.equal(resolved.byPath.get("folds.firstUserMessageMaxTokens")?.layer, "session");
-	assert.deepEqual(resolveConfigLayers([]).config.folds, { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000 });
+	assert.deepEqual(resolveConfigLayers([]).config.folds, { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000, condensedSkills: false });
+	assert.equal(readConfigLayer({ folds: { condensedSkills: true } }, "project").values.get("folds.condensedSkills"), true);
+	assert.deepEqual(readConfigLayer({ folds: { condensedSkills: "yes" } }, "project").rejected, ["folds.condensedSkills"]);
 	for (const limit of [0, -1, 1.5, "8000", Infinity]) {
 		assert.deepEqual(readConfigLayer({ folds: { firstUserMessage: "other", firstUserMessageMaxTokens: limit } }, "project").rejected,
 			["folds.firstUserMessage", "folds.firstUserMessageMaxTokens"]);
@@ -56,6 +58,21 @@ test("first-user settings resolve per leaf through global, project and session, 
 
 test("precedence runs defaults → global → project → CLI → session → host policy", () => {
 	assert.deepEqual([...CONFIG_LAYERS], ["default", "global", "project", "cli", "session", "host"]);
+});
+
+test("pressureTelemetry.mode defaults to full, accepts its three modes, rejects invalid values, and honors session policy", () => {
+	assert.equal(resolveConfigLayers([]).config.pressureTelemetry?.mode, "full");
+	for (const mode of ["full", "band", "off"] as const) {
+		assert.equal(readConfigLayer({ pressureTelemetry: { mode } }, "global").values.get("pressureTelemetry.mode"), mode);
+	}
+	const rejected = readConfigLayer({ pressureTelemetry: { mode: "quiet" } }, "project");
+	assert.deepEqual(rejected.rejected, ["pressureTelemetry.mode"]);
+	const resolved = resolveConfigLayers([
+		readConfigLayer({ pressureTelemetry: { mode: "band" } }, "global"),
+		...readPolicyEntryLayers([policyEntry("session", { "pressureTelemetry.mode": "off" })]),
+	]);
+	assert.equal(resolved.config.pressureTelemetry?.mode, "off");
+	assert.equal(resolved.byPath.get("pressureTelemetry.mode")?.layer, "session");
 });
 
 test("an empty stack resolves entirely from built-in defaults", () => {

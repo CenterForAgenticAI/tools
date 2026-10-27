@@ -90,6 +90,12 @@ function isNudgeFix(value: unknown): boolean {
 	return value.cause === "emergency-defer" ? sent === undefined && compatible !== undefined : true;
 }
 
+function isMediaElision(value: unknown): boolean {
+	if (!isFields(value) || !Array.isArray(value.originals) || !Array.isArray(value.replacements)) return false;
+	if (value.originals.length === 0 || value.originals.length > MAX_MESSAGE_HASHES || value.originals.length !== value.replacements.length) return false;
+	return value.originals.every(isText) && value.replacements.every(isText);
+}
+
 /** The first unusable RequestHashes field. Message hashes are capped at MAX_MESSAGE_HASHES; `total` is not. */
 export function requestHashesFault(value: unknown): string | undefined {
 	if (!isFields(value)) return "missing";
@@ -106,6 +112,7 @@ export function requestHashesFault(value: unknown): string | undefined {
 	if (!isOptional(value.firstUserFolded, isMessageHash)) return "firstUserFolded";
 	if (!isOptional(value.firstUserReplacementHash, isText)) return "firstUserReplacementHash";
 	if (!isOptional(value.nudgeFix, isNudgeFix)) return "nudgeFix";
+	if (!isOptional(value.mediaElision, isMediaElision)) return "mediaElision";
 	return undefined;
 }
 

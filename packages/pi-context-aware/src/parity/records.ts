@@ -94,6 +94,13 @@ export interface MessageHash {
 	/** Set when a tool call or result lacks the fields needed to compare it. */
 	readonly toolEvidence?: "incomplete";
 }
+export interface MediaElisionHashes {
+	/** Content keys before request-only image replacement, one per elided entry. */
+	readonly originals: readonly string[];
+	/** Content keys after replacement, paired by index with originals. */
+	readonly replacements: readonly string[];
+}
+
 export interface RequestHashes {
 	/** Preview state after imports, accepted calls and absorption; independent of evidence collection and rendering. */
 	readonly activeFoldCount?: number;
@@ -120,6 +127,8 @@ export interface RequestHashes {
 	 * nudges, as `hashRequestMessages` hashes a user message. An absent hash means no nudge.
 	 */
 	readonly nudgeFix?: NudgeFixHashes;
+	/** Exact content substitutions made by the native request-only media pass. */
+	readonly mediaElision?: MediaElisionHashes;
 }
 export interface NudgeFixHashes {
 	readonly cause: "tier-trigger" | "emergency-defer";

@@ -35,6 +35,19 @@ function taskSnapshot(fixture: FocusFixture, revision: number, status: "pending"
 	fixture.entries.push({ type: "custom", customType: TASKS_ENTRY_TYPE, data: { ...snapshot, revision } });
 }
 
+test("pressure telemetry off leaves recovered session brief text intact", async () => {
+	const policy = {
+		type: "custom",
+		customType: CONFIG_POLICY_ENTRY_TYPE,
+		data: configPolicyEntry("session", { "pressureTelemetry.mode": "off" }),
+	};
+	await withFixture(async (fixture) => {
+		await fixture.call("session_focus", { action: "brief", brief: "keep the brief text" });
+		fixture.entries.push({ type: "compaction" });
+		assert.match(await fixture.continueRequest(), /keep the brief text/u);
+	}, [policy]);
+});
+
 test("unset brief hints start at five user turns and repeat after fifteen more", async () => {
 	await withFixture(async (fixture) => {
 		users(fixture, 3);

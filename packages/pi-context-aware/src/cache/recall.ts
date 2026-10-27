@@ -73,7 +73,8 @@ const MAX_CACHE_DOCUMENTS = 100;
 const MAX_CITATIONS = 6;
 const MAX_EXCERPT_CHARACTERS = 320;
 const MAX_RENDERED_CHARACTERS = 4_000;
-const STOP_WORDS = new Set([
+/** Words a query drops before term matching. Shared with transcript term matching. */
+export const STOP_WORDS: ReadonlySet<string> = new Set([
 	"a", "about", "after", "again", "all", "also", "an", "and", "any", "are", "as", "at", "be", "been", "before", "being", "between", "but", "by", "can", "could", "did", "do", "does", "for", "from", "has", "have", "how", "i", "if", "in", "into", "is", "it", "its", "just", "may", "me", "more", "most", "my", "no", "not", "of", "on", "or", "our", "out", "should", "so", "some", "such", "than", "that", "the", "their", "there", "these", "they", "this", "to", "too", "under", "use", "using", "was", "were", "what", "when", "where", "which", "who", "why", "will", "with", "without", "would", "you", "your",
 ]);
 

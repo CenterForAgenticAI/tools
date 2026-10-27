@@ -4,8 +4,10 @@ import type { EventBus } from "@earendil-works/pi-coding-agent";
 import type { ContextPressureBand } from "./platform/context-telemetry.js";
 import type { EffectiveAmbiguityMode } from "./seed/seed-expansion.js";
 import type { ContextAwareSessionCompactionV1 } from "./compaction/compaction-history.js";
+import type { CompactionWriterObservation } from "./compaction/compaction-writer.js";
 
 export type { ContextAwareSessionCompactionV1 } from "./compaction/compaction-history.js";
+export type ContextAwareCompactionWriterV1 = CompactionWriterObservation;
 
 export const CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION = 1 as const;
 export const CONTEXT_AWARE_SERVICE_DISCOVERY_EVENT = "context-aware:service:v1:discover";
@@ -170,6 +172,8 @@ export interface ContextAwareSnapshotV1 {
 	compaction: {
 		state: ContextAwareCompactionStateV1;
 		runId?: string;
+		/** Added compatibly in protocol v1. Derived from the newest committed entry. */
+		writer?: ContextAwareCompactionWriterV1;
 	};
 	/** Added compatibly in protocol v1. Older producers may omit it. */
 	proactiveCompaction?: ContextAwareProactiveCompactionLifecycleV1;
@@ -207,6 +211,8 @@ export interface ContextAwareSnapshotSourceV1 {
 	compaction: {
 		state: ContextAwareCompactionStateV1;
 		runId?: string;
+		/** Added compatibly in protocol v1. Derived from the newest committed entry. */
+		writer?: ContextAwareCompactionWriterV1;
 	};
 	proactiveCompaction?: ContextAwareProactiveCompactionLifecycleV1;
 	effectiveMode: ContextAwareEffectiveModeV1;
@@ -406,7 +412,7 @@ export const CONTEXT_AWARE_MODE_DEFAULT_LAYER_V1 = "default" as const;
  * layers by `rank`, then by name.
  */
 export interface ContextAwareModeLayerV1 {
-	/** Layer name, 1 to 64 characters. `default` is reserved. */
+	/** Layer name: 1 to 64 ASCII letters, digits, `_`, `.` or `-`, starting with a letter or digit, so `/mode exit <layer>` can name it. `default` is reserved. */
 	name: string;
 	/** An integer from -1000000 to 1000000. A higher rank is drawn later and left first by `/mode exit`. */
 	rank: number;
@@ -598,6 +604,68 @@ export interface ContextAwarePolicyChangedEventV1 {
 	readonly current: ContextAwarePolicySnapshotV1;
 }
 
+/** State of a skill that `load_skill` delivered on the current branch. */
+export type ContextAwareLoadedSkillStateV1 = "visible" | "compressed" | "partial" | "gone";
+
+/** One skill `load_skill` loaded, newest load per path. */
+export interface ContextAwareLoadedSkillV1 {
+	readonly name: string;
+	/** Resolved path of the SKILL.md that was read. */
+	readonly path: string;
+	/** Size of the SKILL.md body in bytes. */
+	readonly bytes: number;
+	/**
+	 * `visible`: the full result is in context, at `ref` when it has one.
+	 * `compressed`: a native fold covers it; restore it from `blockId`.
+	 * `partial`: another tool made the load or the result was edited, so the
+	 * agent may not have read all of it. `gone`: no longer in context, for
+	 * example after a compaction.
+	 */
+	readonly state: ContextAwareLoadedSkillStateV1;
+	readonly ref?: string;
+	readonly blockId?: string;
+	/** ISO time of the load. */
+	readonly loadedAt: string;
+}
+
+/**
+ * A condensed skill text an extension registers for a skill it injected in a
+ * message (pi-context-aware#181). The engine finds the `<skill>` block by
+ * `location`, `name` and `digest`, and shows `condensed` in its place when a
+ * fold covers the message. Only these fields are read.
+ */
+export interface ContextAwareCondensedSkillRegistrationV1 {
+	readonly name: string;
+	/** The `location` attribute of the injected `<skill>` block. Never read as a path. */
+	readonly location: string;
+	/** The block's `digest` attribute: `sha256-tree/1:<64 hex>`. */
+	readonly digest: string;
+	/** The author-written short form. At most 32,000 characters. */
+	readonly condensed: string;
+	/** Groups registrations, for example a run id; `endOwner` ends them together. */
+	readonly ownerKey: string;
+}
+
+export type ContextAwareCondensedSkillRegistrationResultV1 =
+	| { readonly ok: true; readonly stored: boolean }
+	| { readonly ok: false; readonly error: string };
+
+/** Read-only view of the skills `load_skill` loaded in this session. */
+export interface ContextAwareSkillsV1 {
+	/** Reads the current branch each time it is called. */
+	loaded(): readonly ContextAwareLoadedSkillV1[];
+	/** `true` when `register` and `endOwner` are present. Check with `supportsContextAwareCondensedSkillsV1`. */
+	readonly condensed?: true;
+	/**
+	 * Register condensed text for a skill block the caller injected. Refused
+	 * while `folds.condensedSkills` is off. `stored: false` means the same text
+	 * was already registered.
+	 */
+	register?(registration: ContextAwareCondensedSkillRegistrationV1): ContextAwareCondensedSkillRegistrationResultV1;
+	/** End an owner key: its skills show as one-line stubs at the next fold. `false` when it owned none. */
+	endOwner?(ownerKey: string): boolean;
+}
+
 export interface ContextAwareServiceV1 {
 	readonly protocolVersion: typeof CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION;
 	getSnapshot(): ContextAwareSnapshotV1;
@@ -605,12 +673,19 @@ export interface ContextAwareServiceV1 {
 	modes?: ContextAwareModesV1;
 	/** Added compatibly in protocol v1. Older producers may omit it. */
 	policy?: ContextAwarePolicyV1;
+	/** Added compatibly in protocol v1. Older producers may omit it. */
+	skills?: ContextAwareSkillsV1;
 	requestHandoff(
 		request: ContextAwareHandoffRequestV1,
 		options?: { signal?: AbortSignal },
 	): Promise<ContextAwareHandoffResultV1>;
 	cancelHandoff(runId: string): ContextAwareHandoffCancelResultV1;
 }
+
+/** A service whose modes capability has the named optional members. A `supports…V1` guard narrows to it. */
+export type ContextAwareServiceWithModesV1<K extends keyof ContextAwareModesV1 = never> = ContextAwareServiceV1 & {
+	modes: ContextAwareModesV1 & Required<Pick<ContextAwareModesV1, K>>;
+};
 
 /** Return true when the producer exposes the additive modes capability. */
 export function supportsContextAwareModesV1(service: ContextAwareServiceV1 | undefined): service is ContextAwareServiceV1 & Required<Pick<ContextAwareServiceV1, "modes">> {
@@ -620,17 +695,17 @@ export function supportsContextAwareModesV1(service: ContextAwareServiceV1 | und
 }
 
 /** Return true when the modes capability gives every snapshot an `instanceId`. */
-export function supportsContextAwareModeInstanceIdsV1(service: ContextAwareServiceV1 | undefined): boolean {
+export function supportsContextAwareModeInstanceIdsV1(service: ContextAwareServiceV1 | undefined): service is ContextAwareServiceWithModesV1<"instanceIds"> {
 	return supportsContextAwareModesV1(service) && service.modes.instanceIds === true;
 }
 
 /** Return true when the modes capability enforces a mode's `toolPolicy`. */
-export function supportsContextAwareModeToolPoliciesV1(service: ContextAwareServiceV1 | undefined): boolean {
+export function supportsContextAwareModeToolPoliciesV1(service: ContextAwareServiceV1 | undefined): service is ContextAwareServiceWithModesV1<"toolPolicies"> {
 	return supportsContextAwareModesV1(service) && service.modes.toolPolicies === true;
 }
 
 /** Return true when the modes capability accepts a mode's `layer` and provides `layers` and `setTrail`. */
-export function supportsContextAwareModeLayersV1(service: ContextAwareServiceV1 | undefined): boolean {
+export function supportsContextAwareModeLayersV1(service: ContextAwareServiceV1 | undefined): service is ContextAwareServiceWithModesV1<"layered" | "layers" | "setTrail"> {
 	return supportsContextAwareModesV1(service)
 		&& service.modes.layered === true
 		&& typeof service.modes.layers === "function"
@@ -638,7 +713,7 @@ export function supportsContextAwareModeLayersV1(service: ContextAwareServiceV1 
 }
 
 /** Return true when the modes capability accepts a mode's `ui` color and label. */
-export function supportsContextAwareModeUiV1(service: ContextAwareServiceV1 | undefined): boolean {
+export function supportsContextAwareModeUiV1(service: ContextAwareServiceV1 | undefined): service is ContextAwareServiceWithModesV1<"ui"> {
 	return supportsContextAwareModesV1(service) && service.modes.ui === true;
 }
 
@@ -647,6 +722,23 @@ export function supportsContextAwarePolicyV1(
 	service: ContextAwareServiceV1 | undefined,
 ): service is ContextAwareServiceV1 & Required<Pick<ContextAwareServiceV1, "policy">> {
 	return typeof service?.policy?.current === "function";
+}
+
+/** Return true when the producer exposes the additive read-only loaded-skills capability. */
+export function supportsContextAwareLoadedSkillsV1(
+	service: ContextAwareServiceV1 | undefined,
+): service is ContextAwareServiceV1 & Required<Pick<ContextAwareServiceV1, "skills">> {
+	return typeof service?.skills?.loaded === "function";
+}
+
+/** Return true when the producer accepts condensed skill registrations. */
+export function supportsContextAwareCondensedSkillsV1(
+	service: ContextAwareServiceV1 | undefined,
+): service is ContextAwareServiceV1 & { skills: ContextAwareSkillsV1 & Required<Pick<ContextAwareSkillsV1, "condensed" | "register" | "endOwner">> } {
+	return supportsContextAwareLoadedSkillsV1(service)
+		&& service.skills.condensed === true
+		&& typeof service.skills.register === "function"
+		&& typeof service.skills.endOwner === "function";
 }
 
 /** Return true when a discovered producer implements the additive promotion capability. */

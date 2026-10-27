@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager, buildSessionProjection, estimateTokens } from "@earendil-works/pi-coding-agent";
-import { describeFoldedMedia, planMediaElision } from "../src/media/media-fold.js";
+import { describeFoldedMedia, elideImageParts, planMediaElision } from "../src/media/media-fold.js";
 import {
 	CLOSING_REPLY,
 	FOLLOW_UP_REQUEST,
@@ -109,6 +109,58 @@ test("elided media stays recoverable after the session file is reopened", () => 
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+test("elideImageParts replaces only images and leaves non-image content in place", () => {
+	const elide = elideImageParts;
+	const textOne = { type: "text", text: "before" };
+	const textTwo = { type: "text", text: "between" };
+	assert.deepEqual(elide([
+		textOne,
+		{ type: "image", mimeType: "image/png", data: "AAAA" },
+		textTwo,
+		{ type: "image", mimeType: "image/jpeg", data: "AAAAAAAA" },
+	], "entry-42"), {
+		content: [
+			textOne,
+			{ type: "text", text: "[image/png, ~3 B image omitted from context; the original is in session entry entry-42]" },
+			textTwo,
+			{ type: "text", text: "[image/jpeg, ~6 B image omitted from context; the original is in session entry entry-42]" },
+		],
+		refs: [
+			{ entryId: "entry-42", mimeType: "image/png", approxBytes: 3 },
+			{ entryId: "entry-42", mimeType: "image/jpeg", approxBytes: 6 },
+		],
+	});
+	assert.deepEqual(elide("plain string", "entry-42"), { content: "plain string", refs: [] });
+	const imageFree = [{ type: "text", text: "left alone" }, { type: "toolCall", id: "call-1" }];
+	assert.deepEqual(elide(imageFree, "entry-42"), { content: imageFree, refs: [] });
+});
+
+test("elideImageParts keeps the newest image parts and preserves every position", () => {
+	const keepNewest = elideImageParts as (content: unknown, entryId: string, keepNewestImages?: number) => ReturnType<typeof elideImageParts>;
+	const before = { type: "text", text: "before" };
+	const between = { type: "text", text: "between" };
+	const newest = { type: "image", mimeType: "image/webp", data: "AAAAAAAAAAAA" };
+	assert.deepEqual(keepNewest([
+		before,
+		{ type: "image", mimeType: "image/png", data: "AAAA" },
+		between,
+		{ type: "image", mimeType: "image/jpeg", data: "AAAAAAAA" },
+		newest,
+	], "entry-keep", 1), {
+		content: [
+			before,
+			{ type: "text", text: "[image/png, ~3 B image omitted from context; the original is in session entry entry-keep]" },
+			between,
+			{ type: "text", text: "[image/jpeg, ~6 B image omitted from context; the original is in session entry entry-keep]" },
+			newest,
+		],
+		refs: [
+			{ entryId: "entry-keep", mimeType: "image/png", approxBytes: 3 },
+			{ entryId: "entry-keep", mimeType: "image/jpeg", approxBytes: 6 },
+		],
+	});
 });
 
 test("an entry with a part that is not text or an image keeps its images (#166)", () => {

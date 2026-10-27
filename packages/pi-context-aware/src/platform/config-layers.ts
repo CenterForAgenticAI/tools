@@ -100,6 +100,11 @@ export interface RestartNoticeConfig {
 	minAwayMs?: number;
 }
 
+export type PressureTelemetryMode = "full" | "band" | "off";
+export interface PressureTelemetryConfig {
+	mode: PressureTelemetryMode;
+}
+
 export interface SummarizerConfig {
 	/** Claim Pi's compaction hook and generate context-aware summaries. */
 	enabled: boolean;
@@ -181,8 +186,14 @@ export type FirstUserMessageMode = "keep" | "fold" | "keep-under-tokens";
 export interface FoldsConfig {
 	firstUserMessage: FirstUserMessageMode;
 	firstUserMessageMaxTokens: number;
+	/**
+	 * Show a skill's author-written `condensed.md` in place of its full text when
+	 * a fold covers it (pi-context-aware#181). Off until the replay
+	 * comparison is recorded. Absent means off.
+	 */
+	condensedSkills?: boolean;
 }
-export const DEFAULT_FOLDS_CONFIG: FoldsConfig = { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000 };
+export const DEFAULT_FOLDS_CONFIG: FoldsConfig = { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000, condensedSkills: false };
 
 export interface Config {
 	folds?: FoldsConfig;
@@ -199,6 +210,7 @@ export interface Config {
 	proactiveCompaction?: ProactiveCompactionConfig;
 	contextCache?: ContextCacheConfig;
 	restartNotice?: RestartNoticeConfig;
+	pressureTelemetry?: PressureTelemetryConfig;
 	workstream?: WorkstreamConfig;
 	busyProbe?: BusyProbeConfig;
 	modes?: ModesConfig;
@@ -221,6 +233,10 @@ export const DEFAULT_CONTEXT_CACHE_CONFIG: ContextCacheConfig = {
 export const DEFAULT_RESTART_NOTICE_CONFIG: Required<RestartNoticeConfig> = {
 	enabled: true,
 	minAwayMs: DEFAULT_RESTART_NOTICE_MIN_AWAY_MS,
+};
+
+export const DEFAULT_PRESSURE_TELEMETRY_CONFIG: PressureTelemetryConfig = {
+	mode: "full",
 };
 
 export const DEFAULT_SUMMARIZER_CONFIG: SummarizerConfig = {
@@ -294,6 +310,7 @@ export const DEFAULT_CONFIG: Config = {
 	proactiveCompaction: DEFAULT_PROACTIVE_COMPACTION_CONFIG,
 	contextCache: DEFAULT_CONTEXT_CACHE_CONFIG,
 	restartNotice: DEFAULT_RESTART_NOTICE_CONFIG,
+	pressureTelemetry: DEFAULT_PRESSURE_TELEMETRY_CONFIG,
 	workstream: DEFAULT_WORKSTREAM_CONFIG,
 	busyProbe: DEFAULT_BUSY_PROBE_CONFIG,
 	modes: DEFAULT_MODES_CONFIG,
@@ -391,6 +408,7 @@ export function normalizeProactiveThreshold(value: unknown): number | undefined 
 export const CONFIG_LEAVES: readonly LeafDescriptor[] = [
 	{ path: "folds.firstUserMessage", parse: oneOf(["keep", "fold", "keep-under-tokens"]), fallback: DEFAULT_FOLDS_CONFIG.firstUserMessage },
 	{ path: "folds.firstUserMessageMaxTokens", parse: positiveInteger(1), fallback: DEFAULT_FOLDS_CONFIG.firstUserMessageMaxTokens },
+	{ path: "folds.condensedSkills", parse: bool, fallback: DEFAULT_FOLDS_CONFIG.condensedSkills },
 	{ path: "seedMode", parse: oneOf(["auto-gen", "user-approve"]), fallback: DEFAULT_CONFIG.seedMode },
 	{ path: "sessionRole", parse: oneOf(["foreground", "worker"]), fallback: DEFAULT_CONFIG.sessionRole },
 	{ path: "compactionModel", parse: nullableString, fallback: DEFAULT_CONFIG.compactionModel },
@@ -438,6 +456,7 @@ export const CONFIG_LEAVES: readonly LeafDescriptor[] = [
 
 	{ path: "restartNotice.enabled", parse: bool, fallback: DEFAULT_RESTART_NOTICE_CONFIG.enabled },
 	{ path: "restartNotice.minAwayMs", parse: finiteNumber(0, Number.MAX_SAFE_INTEGER), fallback: DEFAULT_RESTART_NOTICE_CONFIG.minAwayMs },
+	{ path: "pressureTelemetry.mode", parse: oneOf(["full", "band", "off"]), fallback: DEFAULT_PRESSURE_TELEMETRY_CONFIG.mode },
 
 	{ path: "workstream.enabled", parse: bool, fallback: DEFAULT_WORKSTREAM_CONFIG.enabled },
 	{ path: "workstream.registryEnabled", parse: bool, fallback: DEFAULT_WORKSTREAM_CONFIG.registryEnabled },

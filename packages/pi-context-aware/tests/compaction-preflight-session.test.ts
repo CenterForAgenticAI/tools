@@ -60,6 +60,63 @@ test("compact_session on a session Pi compacts is queued and Pi then compacts it
 	});
 });
 
+const FABRIC_CHILD_LINEAGE = JSON.stringify({ version: 1, rootSessionId: "root", runId: "child-run", depth: 1, childIndex: 0, worker: true });
+
+async function asFabricChild(body: () => Promise<void>): Promise<void> {
+	const previous = process.env.PI_FABRIC_LINEAGE;
+	process.env.PI_FABRIC_LINEAGE = FABRIC_CHILD_LINEAGE;
+	try {
+		await body();
+	} finally {
+		if (previous === undefined) delete process.env.PI_FABRIC_LINEAGE;
+		else process.env.PI_FABRIC_LINEAGE = previous;
+	}
+}
+
+// A Fabric child ends when its run ends, so a compact_session handoff there
+// would never deliver its seed and the rest of the work would be lost silently.
+test("compact_session in a Fabric child does not end the run or compact", async () => {
+	await asFabricChild(async () => {
+		let secondRequest = "";
+		const carryOn: FauxResponseStep = (context) => {
+			secondRequest = JSON.stringify(context.messages);
+			return fauxAssistantMessage("Kept working in this run.");
+		};
+		await withSession(largeHistory, [compactSessionCall(), carryOn], async ({ session, faux, events, preparations }) => {
+			assert.equal(session.getActiveToolNames().includes("compact_session"), false, "a child is not offered compact_session");
+			// A model that calls it anyway gets Pi's not-found error and keeps going;
+			// the next test covers a call that reaches the tool.
+			await session.prompt("Hand off to the next phase.");
+			await settle(session);
+
+			const end = compactSessionEnd(events);
+			assert.equal(end.isError, true, "the model sees an error, not a queued handoff");
+			assert.doesNotMatch(JSON.stringify(end.result), /Compaction queued/u);
+			assert.equal(faux.state.callCount, 2, "the run went on: the model was asked again");
+			assert.match(JSON.stringify(end.result), /Tool compact_session not found/u);
+			assert.match(secondRequest, /Tool compact_session not found/u, "the model sees the error in the next request");
+			assert.equal(compactionStarts(events), 0, "nothing was queued for Pi to compact");
+			assert.equal(preparations.length, 0);
+		});
+	});
+});
+
+test("compact_session called directly in a Fabric child refuses with a reason and queues nothing", async () => {
+	await asFabricChild(async () => {
+		await withSession(largeHistory, [], async ({ session, events, preparations }) => {
+			const tool = session.extensionRunner.getToolDefinition("compact_session");
+			assert.ok(tool, "compact_session stays registered");
+			await assert.rejects(
+				tool.execute("child-call", { seed_prompt: SEED, rewrite_seed: false }, new AbortController().signal, undefined, session.extensionRunner.createToolContext("child-call", undefined)),
+				/^Error: Refused: compact_session is unavailable in a Fabric child session..*Nothing was compacted. Keep working/su,
+			);
+			await settle(session);
+			assert.equal(compactionStarts(events), 0);
+			assert.equal(preparations.length, 0);
+		});
+	});
+});
+
 test("/compact-then refuses an idle session Pi refuses, with Pi's message", async () => {
 	await withSession(smallHistory, [], async ({ session, events, notifications, preparations }) => {
 		await session.prompt(`/compact-then ${SEED}`);

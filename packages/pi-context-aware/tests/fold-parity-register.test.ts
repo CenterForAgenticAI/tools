@@ -116,6 +116,31 @@ test("FP-002 handles JSON-string content and surrogate-safe prefixes exactly", (
 	assert.equal(report(ours, bcp).counts.explained, 1);
 });
 
+test("FP-163 explains only the exact native media-elision content substitution", () => {
+	const originalMessage: RequestMessage = {
+		role: "toolResult",
+		toolCallId: "shot-1",
+		toolName: "browser_screenshot",
+		content: [{ type: "text", text: "Screenshot one." }, { type: "image", mimeType: "image/png", data: "AAAA" }],
+	};
+	const replacementMessage: RequestMessage = {
+		...originalMessage,
+		content: [{ type: "text", text: "Screenshot one." }, { type: "text", text: "[image/png, ~3 bytes image omitted from context; the original is in session entry e1]" }],
+	};
+	const bcp = hashRequestMessages([originalMessage]);
+	const replacement = unfolded([replacementMessage]);
+	const originalKey = `toolResult:${bcp.messages[0]!.hash}`;
+	const replacementKey = `toolResult:${replacement.messages[0]!.hash}`;
+	const ours = { ...replacement, mediaElision: { originals: [originalKey], replacements: [replacementKey] } };
+
+	const explained = report(ours, bcp);
+	assert.equal(explained.counts.explained, 1);
+	assert.equal(explained.registerHits["FP-163"]?.differences, 2);
+
+	const extraDifference = hashRequestMessages([{ role: "user", content: "unrelated change" }, originalMessage]);
+	assert.deepEqual(report(ours, extraDifference).unexplainedKinds, { content: 1 });
+});
+
 test("FP-002 leaves malformed, short and unrelated compress arguments without shortening evidence", () => {
 	for (const args of [undefined, null, [], { content: "bad JSON" }, { content: {} }, { content: [null, "x", { summary: "x".repeat(200) }] }]) {
 		assert.equal(hashRequestMessages([tool("compress", args)]).messages[0]?.toolCalls?.[0]?.compactedArgsHash, undefined);

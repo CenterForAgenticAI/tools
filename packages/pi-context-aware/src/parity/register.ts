@@ -1,5 +1,5 @@
 import { STUB_SUMMARY_CODE } from "../folds/stub-summary.js";
-import { compareNextRequest, contentKeys, expectedSummariesMatch } from "./compare.js";
+import { compareNextRequest, contentKey, contentKeys, expectedSummariesMatch, toolResultKeys } from "./compare.js";
 import { isRequestHashes, refusalEvidence, type RefusalEvidence } from "./evidence.js";
 import type { CompressRecord, DiffKind, NextRequestRecord, ParityDiff, RefusalOutcome, RequestHashes } from "./records.js";
 
@@ -127,6 +127,27 @@ function nudgeFixOnly(cause: "tier-trigger" | "emergency-defer") {
 	};
 }
 
+function mediaElisionOnly(diff: ParityDiff, request?: NextRequestRecord): boolean {
+	if ((diff.kind !== "content" && diff.kind !== "tool-results") || !request?.ours || !request.bcp || !complete(request.ours) || !complete(request.bcp)) return false;
+	const evidence = request.ours.mediaElision;
+	if (!evidence || evidence.originals.length === 0 || evidence.originals.length !== evidence.replacements.length) return false;
+	const messages = request.bcp.messages.map((message) => ({ ...message }));
+	for (let index = 0; index < evidence.originals.length; index++) {
+		const original = evidence.originals[index]!;
+		const at = messages.findIndex((message) => contentKey(message) === original);
+		if (at < 0) return false;
+		const replacement = evidence.replacements[index]!;
+		const originalColon = original.indexOf(":");
+		const replacementColon = replacement.indexOf(":");
+		if (originalColon < 1 || replacementColon < 1 || replacement.slice(0, replacementColon) !== original.slice(0, originalColon)) return false;
+		messages[at] = { ...messages[at]!, hash: replacement.slice(replacementColon + 1) };
+	}
+	const transformed = { ...request.bcp, messages };
+	return diff.kind === "content"
+		? JSON.stringify(contentKeys(request.ours)) === JSON.stringify(contentKeys(transformed))
+		: JSON.stringify(toolResultKeys(request.ours)) === JSON.stringify(toolResultKeys(transformed));
+}
+
 /** Nudge fixes billion-context-pi 0.1.83 lacks (pi-context-aware#201). */
 const NUDGE_FIXES: readonly ParityRegisterEntry[] = [
 	{
@@ -183,6 +204,11 @@ const KNOWN_REQUEST_DIFFERENCES: readonly ParityRegisterEntry[] = [
 			theirs.splice(index, 1);
 			return JSON.stringify(contentKeys(request.ours)) === JSON.stringify(theirs);
 		},
+	},
+	{
+		id: "FP-163", title: "Native request media elision", issue: "pi-context-aware#163",
+		reason: "The native engine replaces old image parts with entry-addressed text placeholders in image-heavy requests; billion-context-pi sends every image.",
+		matches: (diff, _call, request) => mediaElisionOnly(diff, request),
 	},
 	...NUDGE_FIXES,
 ];

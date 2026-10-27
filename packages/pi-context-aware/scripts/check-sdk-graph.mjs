@@ -23,8 +23,7 @@ import { BUN_LOCK, bunLockAsPackageLock, readBunLock } from "./bun-lock.mjs";
  * holds exactly one copy of each SDK package at the pinned version.
  *
  * The overrides cover the whole supported host range, and SDK releases add and
- * drop packages (Pi 1.2 drops chord, which the minimum endpoint still installs),
- * so only the development pins themselves must be present.
+ * drop packages, so only the development pins themselves must be present.
  */
 
 export const SDK_SCOPE = "@earendil-works/";

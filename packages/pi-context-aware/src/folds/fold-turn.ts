@@ -16,9 +16,12 @@
  *   billion-context-pi's text, thresholds and once-per-turn gate, measured on
  *   the sent view (output headroom, host-usage floor, sent-view recount).
  *
- * Two deliberate differences from billion-context-pi 0.1.83 (register entries
- * FP-201 and FP-202 in src/parity/register.ts):
+ * Deliberate differences from billion-context-pi 0.1.83 (register entries
+ * FP-163, FP-201 and FP-202 in src/parity/register.ts):
  *
+ * - image-heavy requests keep only the newest five image parts once they exceed
+ *   provider-safe image counts or reach the nudge ceiling; the original bytes
+ *   remain in their session entries;
  * - tier distillation triggers default to 10 tier-1 and 20 tier-2 blocks, as in
  *   ranxianglei/billion-context-pi#629, because the kernel defaults (1000 and
  *   2000) make the tier-2 nudge unreachable (ranxianglei/billion-context-pi#628);
@@ -36,6 +39,7 @@
 
 import type { ContextEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 
+import { elideImageParts, planNativeMediaElision, type MediaElisionPlan, type ProjectedEntryView } from "../media/media-fold.js";
 import { foldStateFromBranch } from "./fold-adapter.js";
 import { renderEarlierFoldCalls } from "./fold-call-render.js";
 import { foldRecordsOnBranch, type FoldRecord } from "./fold-entries.js";
@@ -130,7 +134,7 @@ export interface FoldTurnInput {
 	/** The request Pi is about to send, without system messages. */
 	readonly messages: readonly Message[];
 	/** Pi's projection of the branch: which entry each request message comes from. */
-	readonly projection: { readonly entries: readonly { readonly sourceEntry: { readonly id: string }; readonly messages: readonly { readonly role: string }[] }[] };
+	readonly projection: { readonly entries: readonly ProjectedEntryView[] };
 	readonly branch: readonly SessionEntry[];
 	readonly contextEntries: readonly SessionEntry[];
 	readonly model: FoldTurnModel;
@@ -157,6 +161,10 @@ export interface FoldTurnResult {
 	readonly messages: Message[];
 	/** Session entry of each returned message; undefined for the nudge and a live-only tail. */
 	readonly sources: (string | undefined)[];
+	/** Entries whose image parts were replaced only in this outgoing request. */
+	readonly mediaElidedEntryIds?: readonly string[];
+	/** Rebuilt request messages immediately before their image parts were replaced. */
+	readonly mediaElisionBefore?: readonly { readonly entryId: string; readonly message: Message }[];
 	/** Text of the nudge appended to the request, if any. */
 	readonly nudge?: string;
 	readonly nudgeFix?: NudgeFix;
@@ -196,8 +204,15 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 	const limit = headroomLimit(input.model);
 	const config = turnConfig(limit, input.config);
 	const core = createCore();
-	const images = imageTokens(input.contextEntries, input.model.vision === true);
+	const allImages = imageTokens(input.projection.entries);
 	const sys = input.systemPromptTokens;
+	const sentWithAllImages = estimateTokens(state.messages, coveredMessageIds(kernel), allImages) + sys;
+	const mediaElision = planNativeMediaElision(
+		input.projection.entries,
+		sentWithAllImages,
+		config.nudge.maxContextLimitPct * config.modelContextLimit,
+	);
+	const images = imageTokens(input.projection.entries, mediaElision);
 	const sent = estimateTokens(state.messages, coveredMessageIds(kernel), images) + sys;
 	const { predates, netReclaimed } = anchorStaleness(input.contextEntries, kernel.blocks);
 	const real = input.hostTokens !== undefined && Number.isFinite(input.hostTokens) && input.hostTokens > 0 ? input.hostTokens : 0;
@@ -257,7 +272,14 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 		rebuilt.sources.splice(at, 0, undefined);
 	}
 	if (turn.state.blocks.length > 0) dropOrphanResults(rebuilt);
-	return { messages: rebuilt.messages, sources: rebuilt.sources, ...(decided.text !== undefined ? { nudge: decided.text } : {}), ...(nudgeFix ? { nudgeFix } : {}) };
+	const appliedMedia = applyMediaElision(rebuilt, mediaElision);
+	return {
+		messages: rebuilt.messages,
+		sources: rebuilt.sources,
+		...(appliedMedia.entryIds.length > 0 ? { mediaElidedEntryIds: appliedMedia.entryIds, mediaElisionBefore: appliedMedia.before } : {}),
+		...(decided.text !== undefined ? { nudge: decided.text } : {}),
+		...(nudgeFix ? { nudgeFix } : {}),
+	};
 }
 
 function optionalText<K extends "sent" | "compatible">(key: K, text: string | undefined): { [P in K]?: string } {
@@ -347,6 +369,29 @@ function alignSources(messages: readonly Message[], projection: FoldTurnInput["p
 }
 
 interface Rebuilt { messages: Message[]; sources: (string | undefined)[] }
+
+interface AppliedMediaElision {
+	readonly entryIds: string[];
+	readonly before: { readonly entryId: string; readonly message: Message }[];
+}
+
+function applyMediaElision(rebuilt: Rebuilt, plan: MediaElisionPlan): AppliedMediaElision {
+	const planned = new Map(plan.targets.map((target) => [target.targetId, target.keepNewestImages]));
+	const applied = new Set<string>();
+	const before: AppliedMediaElision["before"][number][] = [];
+	for (let index = 0; index < rebuilt.messages.length; index++) {
+		const source = rebuilt.sources[index];
+		const message = rebuilt.messages[index]!;
+		const keepNewestImages = source === undefined ? undefined : planned.get(source);
+		if (source === undefined || keepNewestImages === undefined) continue;
+		const elided = elideImageParts((message as { content?: unknown }).content, source, keepNewestImages);
+		if (elided.refs.length === 0) continue;
+		before.push({ entryId: source, message });
+		rebuilt.messages[index] = { ...message, content: elided.content } as Message;
+		applied.add(source);
+	}
+	return { entryIds: [...applied], before };
+}
 
 /** billion-context-pi's coreOutToAgentMessages, over the request Pi built. */
 function rebuild(messages: readonly Message[], sources: readonly (string | undefined)[], entries: readonly SessionEntry[], out: readonly CoreMessage[], carriers: ReadonlySet<string>): Rebuilt {
@@ -478,13 +523,19 @@ function estimateTokens(messages: readonly CoreMessage[], covered: ReadonlySet<s
 	return tokens;
 }
 
-function imageTokens(entries: readonly SessionEntry[], vision: boolean): Map<string, number> {
+function imageTokens(
+	entries: FoldTurnInput["projection"]["entries"],
+	plan?: MediaElisionPlan,
+): Map<string, number> {
+	const keptByEntry = new Map(plan?.targets.map((target) => [target.targetId, target.keepNewestImages]) ?? []);
 	const out = new Map<string, number>();
-	if (!vision) return out;
 	for (const entry of entries) {
-		if (entry.type !== "message") continue;
-		const count = partsOf((entry.message as { content?: unknown }).content).filter((part) => part.type === "image").length;
-		if (count > 0) out.set(entry.id, count * IMAGE_TOKEN_COST);
+		const count = entry.messages.reduce<number>((total, message) => {
+			return total + partsOf(message.content).filter((part) => part.type === "image").length;
+		}, 0);
+		const plannedCount = keptByEntry.get(entry.sourceEntry.id);
+		const sentCount = plannedCount === undefined ? count : Math.min(count, plannedCount);
+		if (sentCount > 0) out.set(entry.sourceEntry.id, sentCount * IMAGE_TOKEN_COST);
 	}
 	return out;
 }

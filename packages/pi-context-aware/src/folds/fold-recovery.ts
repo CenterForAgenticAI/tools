@@ -61,7 +61,7 @@ import { createHash } from "node:crypto";
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
-import { foldStateFromBranch, planFold, summaryLimitOf, type BranchFoldState, type FoldPlan, type FoldRequest } from "./fold-adapter.js";
+import { foldStateFromBranch, planFold, summaryLimitOf, type BranchFoldState, type FoldCondenser, type FoldPlan, type FoldRequest } from "./fold-adapter.js";
 import type { FoldsConfig } from "../platform/config-layers.js";
 import {
 	FOLD_ENTRY_TYPE,
@@ -675,6 +675,7 @@ export interface ReplanInput {
 	readonly modelContextLimit: number;
 	/** Effective fold settings; the same ones a fresh request is planned with. */
 	readonly folds?: FoldsConfig;
+	readonly condenser?: FoldCondenser;
 	readonly config?: Partial<Config>;
 }
 
@@ -749,6 +750,7 @@ export function replanAcceptedFold(input: ReplanInput): ReplannedFold {
 		contextEntries: input.contextEntries,
 		modelContextLimit: input.modelContextLimit,
 		...(input.folds ? { folds: input.folds } : {}),
+		...(input.condenser ? { condenser: input.condenser } : {}),
 		...(input.config ? { config: input.config } : {}),
 	});
 	const shown = { startRef: accepted.reportStartRef ?? startRef, endRef: accepted.reportEndRef ?? endRef };

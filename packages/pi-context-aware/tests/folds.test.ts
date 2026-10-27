@@ -116,6 +116,23 @@ function assertUnfolded(manager: SessionManager, message: string): void {
 	assert.deepEqual(foldStateFromBranch(manager.getBranch()).active, [], `${message}: fold leaked`);
 }
 
+test("protected-zone warnings say excluded messages can be folded later", () => {
+	const manager = SessionManager.inMemory("/tmp");
+	seed(manager);
+	const plan = planFold({
+		branch: manager.getBranch(),
+		startRef: "m00001",
+		endRef: "m00006",
+		summary: SUMMARY,
+		modelContextLimit: 64_000,
+		config: TEST_CONFIG,
+	});
+	assert.ok(plan.ok, JSON.stringify(plan));
+	assert.deepEqual(plan.warnings, [
+		"Excluded 2 protected message(s) m00005, m00006 from compression range (recent/last-user zone) — they stay visible for now and can be folded in a later call once newer messages push them out of the protected zone.",
+	]);
+});
+
 test("a fold is one carrier edit, hide edits and one metadata entry; originals stay in the session", () => {
 	const manager = SessionManager.inMemory("/tmp");
 	const ids = seed(manager);

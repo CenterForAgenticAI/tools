@@ -124,6 +124,7 @@ export async function withSession(
 		await session.bindExtensions({
 			uiContext: { ...session.extensionRunner.createContext().ui, notify: (message) => { notifications.push(message); } },
 		});
+		await fabric?.flush();
 		const service = discoverContextAwareServiceV1(eventBus, "compaction-preflight-session");
 		assert.ok(service, "context-aware publishes its service at session_start");
 		await body({ session, faux, events, notifications, preparations, service, fabric });

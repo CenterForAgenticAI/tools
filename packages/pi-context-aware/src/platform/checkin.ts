@@ -47,11 +47,15 @@ function pressureSection(pressure: CheckinPressureSnapshot | null): string {
 }
 
 /** Build the read-only reconciliation request from one invocation-time snapshot. */
-export function buildCheckinPrompt(snapshot: CheckinSnapshot, options: { compactionAvailable?: boolean } = {}): string {
+export function buildCheckinPrompt(
+	snapshot: CheckinSnapshot,
+	options: { compactionAvailable?: boolean; compactionInvocation?: string } = {},
+): string {
 	const compact = options.compactionAvailable !== false;
+	const compactionInvocation = options.compactionInvocation ?? "compact_session";
 	const hasDurableRecord = snapshot.focus !== null || (snapshot.tasks?.tasks.length ?? 0) > 0;
 	return [
-		`Perform a read-only session check-in using the invocation-time snapshot below. ${compact ? "Do not call compact_session and do not mutate" : "Do not mutate"} session_focus or session_tasks unless proposing the exact corrective calls in the Record corrections section.`,
+		`Perform a read-only session check-in using the invocation-time snapshot below. ${compact ? `Do not call ${compactionInvocation} and do not mutate` : "Do not mutate"} session_focus or session_tasks unless proposing the exact corrective calls in the Record corrections section.`,
 		"",
 		...focusSection(snapshot.focus),
 		...tasksSection(snapshot.tasks),
@@ -63,7 +67,7 @@ export function buildCheckinPrompt(snapshot: CheckinSnapshot, options: { compact
 		"Left — report what remains, including blocked or deferred work and the reason for each.",
 		"Record corrections — identify stale focus or task records and show the session_focus / session_tasks calls that would fix them. Do not execute those calls merely because this is a check-in.",
 		compact
-			? "Continue or compact — say whether this is a clean phase boundary, whether to continue, and what a compact_session seed would carry forward if compaction is appropriate. Do not compact from this request."
+			? `Continue or compact — say whether this is a clean phase boundary, whether to continue, and what a ${compactionInvocation} seed would carry forward if compaction is appropriate. Do not compact from this request.`
 			: "Continue — say whether this is a clean phase boundary and whether to continue. Compaction is not available in this session.",
 	].join("\n");
 }
