@@ -37,8 +37,15 @@ canonical provider IDs, model IDs, token and cost numbers, timestamps, bounded
 error categories, and `project-<digest>` keys. They do not contain OAuth tokens,
 API keys, authorization headers, request or response bodies, prompts, assistant
 text, tool content, request IDs, raw provider errors, or raw project paths.
-Human account and project labels remain in `config.json`; renderers resolve them
-at output time instead of copying them into retained observations.
+Human account and project nicknames remain in `config.json`; renderers resolve
+them at output time instead of copying them into retained observations. The
+optional detected Anthropic email lives only with its credential in Pi's global
+AuthStorage, under `piMultiAccountAnthropicEmail`. It is copied from the normal
+token response only after bounded validation, and disappears on explicit logout.
+Operator status/account lists and allowed alias login names can show it. Every
+agent tool action, public live status, diagnostic and retained observation excludes
+detected email and JWT-derived identity. No second identity store or profile
+request is used. A manual nickname is not verified account identity.
 
 Response-header diagnostics retain only named, validated quota and retry facts.
 Unknown header names, request identifiers, private prose, and malformed values

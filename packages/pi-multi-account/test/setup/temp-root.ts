@@ -13,7 +13,7 @@ import { join } from "node:path";
  * os.tmpdir() reads TMPDIR (TMP and TEMP on other platforms). Global setup runs
  * before Vitest starts its workers, and workers inherit this environment, so
  * pointing these at the run root moves every fixture at once. Under the
- * wrapper the root is nested inside the wrapper's own root; both are removed.
+ * wrapper the nested root is removed by the wrapper after Vitest exits.
  *
  * Set PI_KEEP_TEST_TMP=1 to keep the root for inspection after a failure.
  */
@@ -44,6 +44,7 @@ export default function setup(): () => void {
 	// the platform default instead of failing the run.
 	const configured = tmpdir();
 	const base = usableDir(configured) ? configured : platformTempDir();
+	const wrapperOwnsBase = process.env.PI_TEST_RUN_ROOT === base;
 	const root = mkdtempSync(join(base, "pi-multi-account-vitest-"));
 	const saved = new Map<string, string | undefined>(
 		TEMP_KEYS.map((key) => [key, process.env[key]]),
@@ -59,7 +60,9 @@ export default function setup(): () => void {
 			return;
 		}
 		try {
-			rmSync(root, { recursive: true, force: true });
+			// Wrapped runs await asynchronous removal outside Vitest's shutdown
+			// deadline. Direct runs retain their existing synchronous cleanup.
+			if (!wrapperOwnsBase) rmSync(root, { recursive: true, force: true });
 		} catch (error) {
 			// A leak is what this exists to stop, so say so; a passing run stays green.
 			console.error(

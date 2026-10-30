@@ -37,7 +37,7 @@ import {
 	getApiProvider,
 	registerApiProvider,
 } from "@earendil-works/pi-ai/compat";
-import { composeDisplayName } from "./account-labels.js";
+import { credentialFingerprint } from "./credential-events.js";
 import {
 	createAnthropicAliasProviderConfig,
 	type CapturedAnthropicProvider,
@@ -90,6 +90,11 @@ export interface ProviderRegistrationInput {
 	 * stays free of credential access; the caller owns credential lookup.
 	 */
 	resolveLabel?: (providerId: string) => string;
+	/**
+	 * Told the slot and the returned credential's expiry, never the credential,
+	 * after an OAuth login into a slot this extension registers resolves.
+	 */
+	onLogin?: LoginNotice;
 	/** Session-local model divergence used to prune known-unsupported aliases. */
 	modelSupport?: ModelSupportRegistry;
 	/** Live opt-in old-image policy for Anthropic aliases (src/image-strip.ts). */
@@ -113,6 +118,47 @@ interface RegistrationPlanEntry {
 	readonly role: "base" | "alias" | "spare";
 }
 
+/**
+ * Receives a slot id and the one-way fingerprint of its new credential
+ * (`credentialFingerprint`); never a credential value.
+ */
+export type LoginNotice = (providerId: string, fingerprint: string | undefined) => void;
+
+/**
+ * Wraps a slot config's OAuth `login` so a successful login is reported.
+ *
+ * The wrapper returns the login's credential unchanged and passes on only a
+ * one-way fingerprint of it, so the watcher can tell the committed credential
+ * from an earlier one with the same expiry. Refresh and API-key callbacks are carried through as they
+ * are. A config without OAuth, or no notice, is returned unchanged. Apply this
+ * only to configs this extension registers: the host's base providers are
+ * never replaced to observe a login.
+ */
+export function withLoginNotice(
+	config: ProviderConfig,
+	providerId: string,
+	notice: LoginNotice | undefined,
+): ProviderConfig {
+	const oauth = config.oauth;
+	if (notice === undefined || oauth === undefined) return config;
+	const login = oauth.login;
+	return {
+		...config,
+		oauth: {
+			...oauth,
+			login: async (callbacks) => {
+				const credential = await login.call(oauth, callbacks);
+				try {
+					notice(providerId, credentialFingerprint(credential));
+				} catch {
+					// Reporting a login can never fail the login itself.
+				}
+				return credential;
+			},
+		},
+	};
+}
+
 function displayLabelFor(providerId: string): string {
 	const match = /-account-(\d+)$/.exec(providerId);
 	return match ? `Account ${match[1]}` : "Account 1";
@@ -130,20 +176,19 @@ function displayLabelFor(providerId: string): string {
  * Returns the config unchanged when no label resolver is supplied, so callers
  * that do not care about identity keep today's exact behavior.
  */
-function withAccountIdentity(
+export function withAccountIdentity(
 	config: ProviderConfig,
 	providerId: string,
 	resolveLabel: ((providerId: string) => string) | undefined,
 ): ProviderConfig {
 	if (!resolveLabel) return config;
-	const label = resolveLabel(providerId);
+	const resolved = resolveLabel(providerId);
+	// Protected Anthropic/Codex base registrations never use this decorator.
+	const label = resolved === providerId ? providerId : `${resolved} · ${providerId}`;
 	const baseName = config.name ?? config.oauth?.name ?? providerId;
-	const displayName = composeDisplayName(baseName, label, providerId);
+	const displayName = `${baseName} — ${label}`;
 	const oauth = config.oauth
-		? {
-				...config.oauth,
-				name: composeDisplayName(config.oauth.name, label, providerId),
-			}
+		? { ...config.oauth, name: `${config.oauth.name} — ${label}` }
 		: undefined;
 	return {
 		...config,
@@ -300,7 +345,11 @@ export function registerDiscoveredProviders(
 		resolveLabel,
 		modelSupport,
 		imageStripping,
+		onLogin,
 	} = input;
+	const registerSlot = (providerId: string, slotConfig: ProviderConfig): void => {
+		pi.registerProvider(providerId, withLoginNotice(slotConfig, providerId, onLogin));
+	};
 
 	const registered: RegistrationRecord[] = [];
 	let codexLiveModels: readonly ProviderModelConfig[] | undefined;
@@ -348,7 +397,7 @@ export function registerDiscoveredProviders(
 				resolveLabel,
 				modelsFor,
 			);
-			pi.registerProvider(slot.providerId, aliasConfig);
+			registerSlot(slot.providerId, aliasConfig);
 			registered.push({
 				providerId: slot.providerId,
 				family: slot.family,
@@ -365,7 +414,7 @@ export function registerDiscoveredProviders(
 				// Re-register only numbered spare aliases; replacing `anthropic` with an
 				// OAuth-only config would discard its captured models and stream handler.
 				if (slot.slotIndex !== 1) {
-					pi.registerProvider(
+					registerSlot(
 						slot.providerId,
 						withAccountIdentity(
 							{ oauth: anthropicCaptured.config.oauth },
@@ -388,7 +437,7 @@ export function registerDiscoveredProviders(
 				// spare is registered as its own api-key alias so an operator can
 				// target it.
 				if (slot.slotIndex !== 1) {
-					pi.registerProvider(
+					registerSlot(
 						slot.providerId,
 						withAccountIdentity(
 							createOpenAiAliasProviderConfig(
@@ -413,7 +462,7 @@ export function registerDiscoveredProviders(
 				// re-registered — mirroring the anthropic and openai spare guards. A
 				// numbered spare is registered as its own alias.
 				if (slot.slotIndex !== 1) {
-					pi.registerProvider(
+					registerSlot(
 						slot.providerId,
 						withAccountIdentity(
 							{ oauth: codexCaptured.oauth },
@@ -452,7 +501,7 @@ export function registerDiscoveredProviders(
 					slot.providerId,
 					resolveLabel,
 				);
-				pi.registerProvider(slot.providerId, aliasConfig);
+				registerSlot(slot.providerId, aliasConfig);
 				registered.push({
 					providerId: slot.providerId,
 					family: slot.family,
@@ -489,7 +538,7 @@ export function registerDiscoveredProviders(
 					slot.providerId,
 					resolveLabel,
 				);
-				pi.registerProvider(slot.providerId, aliasConfig);
+				registerSlot(slot.providerId, aliasConfig);
 				registered.push({
 					providerId: slot.providerId,
 					family: slot.family,
@@ -524,7 +573,7 @@ export function registerDiscoveredProviders(
 				slot.providerId,
 				resolveLabel,
 			);
-			pi.registerProvider(slot.providerId, aliasConfig);
+			registerSlot(slot.providerId, aliasConfig);
 			registered.push({
 				providerId: slot.providerId,
 				family: slot.family,

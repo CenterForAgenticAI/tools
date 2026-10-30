@@ -187,6 +187,13 @@ export type ModelFallbackMap = Readonly<Record<string, readonly string[]>>;
 /** Upper bound for `recoveryStallTimeoutMs`: one stalled attempt never waits longer. */
 export const MAX_RECOVERY_STALL_TIMEOUT_MS = 30 * 60_000;
 
+/**
+ * Upper bound for `recoveryMaxAttempts`: one unified call never makes more
+ * physical sends than this. The recovery engine enforces the same limit as
+ * `RECOVERY_MAX_PROVIDER_SENDS_PER_CALL`.
+ */
+export const MAX_RECOVERY_ATTEMPTS = 6;
+
 export interface MultiAccountConfig {
 	readonly accountLimit: number;
 	readonly sameFamilyFailover: boolean;
@@ -207,6 +214,13 @@ export interface MultiAccountConfig {
 	 */
 	readonly recoveryStallTimeoutMs: number;
 	/**
+	 * Most physical sends one unified call may make: the first send plus account
+	 * rollover onto other eligible accounts serving the same model, each at most
+	 * once, all before any output. An integer from 1 through
+	 * `MAX_RECOVERY_ATTEMPTS`; 1 disables in-call recovery.
+	 */
+	readonly recoveryMaxAttempts: number;
+	/**
 	 * Operator-chosen display labels keyed by canonical provider id, so managed
 	 * accounts are distinguishable in Pi's login list and the status view.
 	 * Anthropic credentials are opaque, so configuration is the only way to name
@@ -223,8 +237,23 @@ export interface MultiAccountConfig {
 	readonly accountGroups?: Readonly<Record<string, readonly string[]>>;
 	/** Exact absolute cwd to account-group id defaults. No project-root folding. */
 	readonly accountGroupCwdDefaults?: Readonly<Record<string, string>>;
-	/** Optional machine-wide fallback when no exact-cwd or session override applies. */
+	/**
+	 * Absolute folder to account-group id tree defaults. A rule applies to its
+	 * folder and every folder below it; the deepest matching rule wins, and an
+	 * exact `accountGroupCwdDefaults` rule beats every tree rule.
+	 */
+	readonly accountGroupDirectoryDefaults?: Readonly<Record<string, string>>;
+	/** Optional machine-wide fallback when no folder rule or session override applies. */
 	readonly defaultAccountGroup?: string;
+	/**
+	 * Canonical managed provider ids that automatic routing must never choose:
+	 * unified dispatch, in-call recovery, failover, parked resume, the route
+	 * resolver, `next`, and the upcoming-expiry preflight all skip them. An
+	 * excluded account stays visible, keeps its usage, and still serves an
+	 * explicit physical selection. Absent and empty mean the same thing, and
+	 * neither is written back.
+	 */
+	readonly automaticRoutingExcludedAccounts?: readonly string[];
 	/**
 	 * Monthly subscription price in USD, keyed by canonical managed provider
 	 * id. Legacy, mutable, and retroactive: it has no effective start. Kept
@@ -314,6 +343,7 @@ export const DEFAULT_CONFIG: MultiAccountConfig = {
 	recoveryIdleTimeoutMs: 5 * 60_000,
 	recoveryAbsoluteTimeoutMs: 30 * 60_000,
 	recoveryStallTimeoutMs: 3 * 60_000,
+	recoveryMaxAttempts: MAX_RECOVERY_ATTEMPTS,
 	accountLabels: {},
 	projectLabels: {},
 	accountGroups: {},
@@ -342,11 +372,14 @@ const CONFIG_KEYS = new Set<keyof MultiAccountConfig>([
 	"recoveryIdleTimeoutMs",
 	"recoveryAbsoluteTimeoutMs",
 	"recoveryStallTimeoutMs",
+	"recoveryMaxAttempts",
 	"accountLabels",
 	"projectLabels",
 	"accountGroups",
 	"accountGroupCwdDefaults",
+	"accountGroupDirectoryDefaults",
 	"defaultAccountGroup",
+	"automaticRoutingExcludedAccounts",
 	"monthlySubscriptionUsd",
 	"subscriptionPlanCatalogOverrides",
 	"accountRateHistory",
@@ -542,6 +575,91 @@ export function isCanonicalSubscriptionAccountId(
 	if (!isAccountLimit(accountLimit)) return false;
 	const slotIndex = configuredSubscriptionProviderSlotIndex(accountId);
 	return slotIndex !== null && slotIndex <= accountLimit;
+}
+
+/**
+ * True when `accountId` is the canonical id of a managed account slot -- a
+ * {@link MANAGED_FAMILIES} member, base or numbered, including `openai` --
+ * within the current `accountLimit`. The automatic-routing exclusion parser
+ * and the `account exclude|include` command use this one recognizer, so the
+ * command refuses exactly the ids the parser would reject.
+ */
+export function isCanonicalManagedAccountId(
+	accountId: string,
+	accountLimit: number,
+): boolean {
+	if (!isAccountLimit(accountLimit)) return false;
+	const slotIndex = configuredManagedProviderSlotIndex(accountId);
+	return slotIndex !== null && slotIndex <= accountLimit;
+}
+
+/**
+ * Parse the automatic-routing exclusion list. Every entry must be a canonical
+ * managed provider id within `accountLimit`, listed once. Rejection messages
+ * are fixed and never echo the rejected value. An empty list normalizes to
+ * `undefined` so it is never materialized.
+ */
+function parseAutomaticRoutingExcludedAccounts(
+	value: unknown,
+	accountLimit: number,
+): readonly string[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) {
+		throw new ConfigValidationError(
+			"automaticRoutingExcludedAccounts must be an array of canonical managed provider ids.",
+		);
+	}
+	const seen = new Set<string>();
+	for (const entry of value) {
+		if (typeof entry !== "string") {
+			throw new ConfigValidationError(
+				"automaticRoutingExcludedAccounts entries must be strings.",
+			);
+		}
+		const slotIndex = configuredManagedProviderSlotIndex(entry);
+		if (slotIndex === null) {
+			throw new ConfigValidationError(
+				"automaticRoutingExcludedAccounts contains an entry that is not a canonical managed provider id.",
+			);
+		}
+		if (slotIndex > accountLimit) {
+			throw new ConfigValidationError(
+				"automaticRoutingExcludedAccounts contains a provider id above accountLimit.",
+			);
+		}
+		if (seen.has(entry)) {
+			throw new ConfigValidationError(
+				"automaticRoutingExcludedAccounts lists a provider id more than once.",
+			);
+		}
+		seen.add(entry);
+	}
+	if (seen.size === 0) return undefined;
+	return Object.freeze([...seen]);
+}
+
+/**
+ * Applies one `account exclude|include` edit to a config value. Returns the
+ * edited config, or `undefined` when the id is already in the requested state,
+ * so the writer reports `unchanged` and writes nothing. Removing the last id
+ * drops the key, which keeps the file readable by builds that predate it.
+ * Every other field is carried through unchanged; the caller validates the
+ * result with {@link parseConfig}.
+ */
+export function editAutomaticRoutingExclusion(
+	config: MultiAccountConfig,
+	providerId: string,
+	excluded: boolean,
+): MultiAccountConfig | undefined {
+	const current = config.automaticRoutingExcludedAccounts ?? [];
+	if (current.includes(providerId) === excluded) return undefined;
+	const next = excluded
+		? [...current, providerId]
+		: current.filter((id) => id !== providerId);
+	const { automaticRoutingExcludedAccounts: _previous, ...rest } = config;
+	return next.length === 0
+		? rest
+		: { ...rest, automaticRoutingExcludedAccounts: next };
 }
 
 /** Fixed, bounded, key-free rejection for an over-limit canonical label key. */
@@ -986,6 +1104,24 @@ export class ConfigValidationError extends Error {
 	}
 }
 
+/**
+ * The accepted config key a validation error names, or undefined. Only a key
+ * from the schema's own list can be returned, so a key the operator wrote and
+ * the validator's prose never reach a caller.
+ */
+export function configValidationErrorField(error: unknown): string | undefined {
+	if (!(error instanceof ConfigValidationError)) return undefined;
+	for (const key of CONFIG_KEYS) {
+		if (
+			error.message.startsWith(`[multi-account config] ${key} `) ||
+			error.message.startsWith(`[multi-account config] ${key}.`)
+		) {
+			return key;
+		}
+	}
+	return undefined;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1030,26 +1166,31 @@ function parseAccountGroups(
 	return Object.freeze(groups);
 }
 
-function parseAccountGroupCwdDefaults(
+/**
+ * Folder-to-group rules share one shape: absolute keys without NUL, each
+ * naming a configured group. Two keys that canonicalize to the same folder
+ * with different groups are detected when a session resolves, because
+ * canonicalization reads the live filesystem.
+ */
+function parseAccountGroupFolderDefaults(
+	key: "accountGroupCwdDefaults" | "accountGroupDirectoryDefaults",
 	value: unknown,
 	groups: Readonly<Record<string, readonly string[]>>,
 ): Readonly<Record<string, string>> {
-	if (value === undefined) return DEFAULT_CONFIG.accountGroupCwdDefaults ?? {};
+	if (value === undefined) return DEFAULT_CONFIG[key] ?? {};
 	if (!isRecord(value)) {
-		throw new ConfigValidationError(
-			"accountGroupCwdDefaults must be a JSON object.",
-		);
+		throw new ConfigValidationError(`${key} must be a JSON object.`);
 	}
 	const defaults = Object.create(null) as Record<string, string>;
 	for (const [cwd, groupId] of Object.entries(value)) {
 		if (!isAbsolute(cwd) || cwd.includes("\u0000")) {
 			throw new ConfigValidationError(
-				"accountGroupCwdDefaults keys must be absolute directory paths.",
+				`${key} keys must be absolute directory paths.`,
 			);
 		}
 		if (typeof groupId !== "string" || !Object.hasOwn(groups, groupId)) {
 			throw new ConfigValidationError(
-				"accountGroupCwdDefaults values must name a configured accountGroups entry.",
+				`${key} values must name a configured accountGroups entry.`,
 			);
 		}
 		defaults[cwd] = groupId;
@@ -1336,14 +1477,25 @@ export function parseConfig(value: unknown): MultiAccountConfig {
 		);
 	}
 	const accountGroups = parseAccountGroups(value["accountGroups"], accountLimit);
-	const accountGroupCwdDefaults = parseAccountGroupCwdDefaults(
+	const accountGroupCwdDefaults = parseAccountGroupFolderDefaults(
+		"accountGroupCwdDefaults",
 		value["accountGroupCwdDefaults"],
+		accountGroups,
+	);
+	const accountGroupDirectoryDefaults = parseAccountGroupFolderDefaults(
+		"accountGroupDirectoryDefaults",
+		value["accountGroupDirectoryDefaults"],
 		accountGroups,
 	);
 	const defaultAccountGroup = parseDefaultAccountGroup(
 		value["defaultAccountGroup"],
 		accountGroups,
 	);
+	const automaticRoutingExcludedAccounts =
+		parseAutomaticRoutingExcludedAccounts(
+			value["automaticRoutingExcludedAccounts"],
+			accountLimit,
+		);
 	if (typeof sameFamilyFailover !== "boolean") {
 		throw new ConfigValidationError("sameFamilyFailover must be a boolean.");
 	}
@@ -1413,6 +1565,18 @@ export function parseConfig(value: unknown): MultiAccountConfig {
 			"recoveryStallTimeoutMs must be less than recoveryIdleTimeoutMs.",
 		);
 	}
+	const recoveryMaxAttempts =
+		value["recoveryMaxAttempts"] ?? DEFAULT_CONFIG.recoveryMaxAttempts;
+	if (
+		typeof recoveryMaxAttempts !== "number" ||
+		!Number.isSafeInteger(recoveryMaxAttempts) ||
+		recoveryMaxAttempts < 1 ||
+		recoveryMaxAttempts > MAX_RECOVERY_ATTEMPTS
+	) {
+		throw new ConfigValidationError(
+			`recoveryMaxAttempts must be an integer from 1 through ${MAX_RECOVERY_ATTEMPTS}.`,
+		);
+	}
 	if (
 		typeof preemptiveExpiryWindowMs !== "number" ||
 		!Number.isFinite(preemptiveExpiryWindowMs) ||
@@ -1433,6 +1597,7 @@ export function parseConfig(value: unknown): MultiAccountConfig {
 		recoveryIdleTimeoutMs: recoveryIdleTimeoutMs as number,
 		recoveryAbsoluteTimeoutMs: recoveryAbsoluteTimeoutMs as number,
 		recoveryStallTimeoutMs,
+		recoveryMaxAttempts,
 		accountLabels,
 		projectLabels,
 		accountGroups,
@@ -1448,8 +1613,19 @@ export function parseConfig(value: unknown): MultiAccountConfig {
 		usageFetchEnabled,
 		imageStripping,
 	};
-	if (defaultAccountGroup === undefined) return parsedConfig;
-	return { ...parsedConfig, defaultAccountGroup };
+	// Like automaticRoutingExcludedAccounts, an empty tree-rule map is not
+	// materialized: a config write then stays readable by builds that reject
+	// the key as unknown.
+	const withDirectoryDefaults: MultiAccountConfig =
+		Object.keys(accountGroupDirectoryDefaults).length === 0
+			? parsedConfig
+			: { ...parsedConfig, accountGroupDirectoryDefaults };
+	const withDefaultGroup: MultiAccountConfig =
+		defaultAccountGroup === undefined
+			? withDirectoryDefaults
+			: { ...withDirectoryDefaults, defaultAccountGroup };
+	if (automaticRoutingExcludedAccounts === undefined) return withDefaultGroup;
+	return { ...withDefaultGroup, automaticRoutingExcludedAccounts };
 }
 
 export function validateConfig(

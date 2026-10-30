@@ -56,6 +56,44 @@ loads later cannot restore a different request path. No separate global
 installation is required. Codex aliases use Pi's native OAuth surface and
 `openai-codex-responses` transport.
 
+### Recognizing accounts on each device
+
+Operator `status` (including `--json`) and `models` show a configured nickname
+beside detected Anthropic email and the canonical slot. Alias `/login` names
+include the slot even when identity is unknown. Run `/multi-account rediscover`
+after login or a nickname edit to refresh those registered names.
+
+Use `/multi-account nickname set anthropic-account-2 Research laptop` to name a
+slot, and `/multi-account nickname clear anthropic-account-2` to remove its
+nickname. This works for every managed family, including opaque credentials with
+no detected identity and slots awaiting login. Nicknames use the existing
+`accountLabels` configuration; they are manual recognition, not verified email,
+account IDs, or cross-device subscription-matching keys. Slots and credentials
+remain independent on each device. No credentials are synchronized.
+
+The bundled OAuth flow copies only a validated optional `account.email_address`
+from the normal token response into `piMultiAccountAnthropicEmail` in Pi's
+AuthStorage. This follows first-party Claude Code 2.1.97 precedent, not a promised
+Anthropic API contract. There are no profile requests or background backfills.
+Old credentials fall back to nickname or slot until normal refresh or login
+supplies metadata. Refresh retains validated stored email when metadata is
+missing or invalid and replaces it when a valid new email arrives. A replacement
+login with unknown identity never inherits the previous occupant's email.
+
+Expired or login-required credentials remain recognizable while Pi still stores
+the metadata. Explicit logout/removal deletes it; there is no separate identity
+store. Nickname configuration survives logout. A bare base `anthropic` account
+can show only the identity supplied by its active OAuth implementation. This
+extension does not rename the base provider or wrap its OAuth callbacks: base
+native `/login` recognition remains limited to preserve the registration
+contract. Use extension-owned status for that slot.
+
+Detected email and JWT-derived identity are operator-only. The agent tool and
+public live status use configured nicknames or canonical IDs, never credential
+identity. Detected email is not copied into diagnostics or retained history.
+Rebuild/restart Pi after updating. Rolling back code leaves optional credential
+metadata harmless to older builds.
+
 ### Google Antigravity
 
 `google-antigravity` resolves from the in-tree
@@ -80,7 +118,7 @@ The current catalog has eight models: `gemini-3.8-flash`, `gemini-3.7-flash`,
 `claude-sonnet-4-6`, and `gpt-oss-120b`. `/multi-account add google-antigravity`
 registers the next free numbered slot the same way as the other families, and
 `/multi-account rediscover` picks up a credential added outside the running
-session. A changed stored credential (new expiry) clears a terminal login-required mark at the next rediscover or turn without restarting Pi.
+session. A changed stored credential (new expiry) clears a terminal login-required mark at the next rediscover or turn without restarting Pi. `/multi-account rediscover` also clears every terminal-auth mark. Without it, a unified call probes an invalidated account once, 15 minutes after the failure (doubling to a 4-hour cap after each failed probe); a served probe clears the mark.
 
 Usage fetching honors an `AbortSignal` end to end: `UsageFetcher` forwards it
 through to the vendored package's `fetchAccountUsage(apiKey?, { signal })`, and a
@@ -92,7 +130,7 @@ duplicate real call while one is still outstanding.
 
 Google Antigravity's vendored stream ignores the recovery's zero-retry setting
 and can make several provider sends in one invocation, so recovery treats its
-send count as unknown: an Antigravity account is never the recovery send, and a
+send count as unknown: an Antigravity account is never a recovery send, and a
 failed initial Antigravity attempt stops without recovery. See
 [Routing](routing.md) for the send bound. Reported model `cost`
 fields from the upstream usage endpoint are API-style rate estimates, not

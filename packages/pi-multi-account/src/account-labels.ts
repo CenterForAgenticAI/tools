@@ -12,6 +12,9 @@
  * retains credential material.
  */
 
+import type { MultiAccountConfig } from "./config.js";
+import { isCanonicalManagedAccountId } from "./config.js";
+import { readAnthropicAccountEmail, identityDataField } from "../packages/pi-anthropic-oauth/src/account-identity.js";
 import {
 	classifyProviderId,
 	isProviderSlotWithinAccountLimit,
@@ -32,6 +35,30 @@ const IDENTITY_CLAIMS = ["email", "preferred_username", "name"] as const;
 
 /** Bounded per-account label overrides, keyed by canonical provider id. */
 export type AccountLabelConfig = Readonly<Record<string, string>>;
+
+/** Strict command input, unlike the legacy display-only truncation policy. */
+export function normalizeAccountNickname(value: unknown): string | undefined {
+	if (typeof value !== "string" || !DISPLAY_SAFE.test(value)) return undefined;
+	const nickname = value.trim();
+	return nickname.length > 0 && nickname.length <= MAX_LABEL_LENGTH ? nickname : undefined;
+}
+
+/** One field owned by the locked config edit; never an identity assertion. */
+export function editAccountNickname(
+	config: MultiAccountConfig,
+	providerId: string,
+	nickname: string | undefined,
+): MultiAccountConfig | undefined {
+	if (!isCanonicalManagedAccountId(providerId, config.accountLimit) ||
+		(nickname !== undefined && normalizeAccountNickname(nickname) !== nickname)) {
+		throw new TypeError("Invalid nickname edit; use a canonical slot and 1–64 printable ASCII characters.");
+	}
+	if (nickname === undefined ? !Object.hasOwn(config.accountLabels, providerId) : config.accountLabels[providerId] === nickname) return undefined;
+	const accountLabels = { ...config.accountLabels };
+	if (nickname === undefined) delete accountLabels[providerId];
+	else accountLabels[providerId] = nickname;
+	return { ...config, accountLabels };
+}
 
 /**
  * Normalizes an operator-supplied or derived label. Returns undefined when the
@@ -191,6 +218,7 @@ export function resolveAccountLabelWithinLimit(input: Readonly<{
 	accountLimit: number;
 	configured: AccountLabelConfig;
 	readToken: (providerId: string) => unknown;
+	readCredential?: (providerId: string) => unknown;
 }>): string {
 	const slot = classifyProviderId({
 		providerId: input.providerId,
@@ -200,6 +228,14 @@ export function resolveAccountLabelWithinLimit(input: Readonly<{
 		slot === null ||
 		!isProviderSlotWithinAccountLimit(slot, input.accountLimit)
 	) return input.providerId;
+	// Older callers provide only readToken; retain that fallback contract.
+	if (slot.family === "anthropic" && input.readCredential !== undefined) {
+		const credential = input.readCredential(input.providerId);
+		const email = identityDataField(credential, "type") === "oauth"
+			? readAnthropicAccountEmail(credential) : undefined;
+		const nickname = normalizeLabel(input.configured[input.providerId]);
+		return [nickname, email].filter((part) => part !== undefined).join(" · ") || input.providerId;
+	}
 	return resolveAccountLabel({
 		providerId: input.providerId,
 		configured: input.configured,

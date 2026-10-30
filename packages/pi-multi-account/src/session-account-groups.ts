@@ -155,6 +155,7 @@ function copyResolution(value: unknown): EffectiveAccountGroupResolution {
 	if (
 		(source === "session-override" ||
 			source === "cwd-default" ||
+			source === "directory-default" ||
 			source === "global-default") &&
 		isAccountGroupId(groupId)
 	) {

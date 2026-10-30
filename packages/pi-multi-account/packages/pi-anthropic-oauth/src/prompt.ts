@@ -29,7 +29,7 @@ export const PI_REWRITE_PATTERN_ENV = "PI_ANTHROPIC_OAUTH_REWRITE_PATTERN";
 
 export type PiRewriteMode = "aggressive" | "path-safe" | "technical-safe" | "custom";
 
-const DEFAULT_PI_REWRITE_MODE: PiRewriteMode = "aggressive";
+const DEFAULT_PI_REWRITE_MODE: PiRewriteMode = "technical-safe";
 const PI_REWRITE_PATTERN_SOURCES: Record<Exclude<PiRewriteMode, "custom">, string> = {
   aggressive: String.raw`\b[Pp]i\b`,
   "path-safe": String.raw`(?<![/\\])\b[Pp]i\b`,

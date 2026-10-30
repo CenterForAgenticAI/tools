@@ -1,4 +1,5 @@
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { ACCOUNT_GROUP_NONE } from "./account-group-config-edits.js";
 import { fuzzyMatch } from "./fuzzy.js";
 import {
 	accountSlotIndexes,
@@ -20,6 +21,7 @@ import {
 } from "./logical-model-switcher.js";
 import { LOGICAL_PROVIDER_ID } from "./models-declaration.js";
 import {
+	MULTI_ACCOUNT_GROUP_ACTIONS,
 	MULTI_ACCOUNT_SUBCOMMANDS,
 	type MultiAccountSubcommand,
 } from "./commands.js";
@@ -60,8 +62,14 @@ export type CompletionSlotChoices = Readonly<
 
 export type MultiAccountCompletionSnapshot = Readonly<{
 	accounts: readonly CompletionAccountIdentity[];
+	/** All configured canonical slots, including signed-out and opaque accounts. */
+	nicknameAccountIds?: readonly string[];
 	addSlots: CompletionSlotChoices;
 	groupIds: readonly string[];
+	/** Config `accountGroups` members by group id, offered by `group remove`. */
+	groupMembers: Readonly<Record<string, readonly string[]>>;
+	/** Config `automaticRoutingExcludedAccounts`, offered by `account include`. */
+	excludedAccountIds: readonly string[];
 	logicalModels: LogicalModelInventory;
 }>;
 
@@ -136,6 +144,19 @@ export function projectCompletionAddSlots(
 	return choices;
 }
 
+/** No credential read: manual nicknames can name any current supported slot. */
+export function projectNicknameAccountIds(accountLimit: number): readonly string[] {
+	if (!isAccountLimit(accountLimit)) return [];
+	const ids: string[] = [];
+	for (const family of MANAGED_FAMILIES) {
+		for (const index of accountSlotIndexes(accountLimit, 1)) {
+			const id = canonicalProviderIdForAccountSlot(family, index, accountLimit);
+			if (id !== null) ids.push(id);
+		}
+	}
+	return ids;
+}
+
 type GrammarChoice = Readonly<{
 	text: string;
 	account?: CompletionAccountIdentity;
@@ -196,8 +217,12 @@ const ROOT_TABLE: Partial<Record<MultiAccountSubcommand, RootSpec>> = {
 	enable: { token2: () => null },
 	disable: { token2: () => familyChoices() },
 	group: {
-		token2: () => [{ text: "use" }, { text: "reset" }, { text: "status" }],
+		token2: () => MULTI_ACCOUNT_GROUP_ACTIONS.map((action) => ({ text: action })),
 	},
+	account: {
+		token2: () => [{ text: "exclude" }, { text: "include" }],
+	},
+	nickname: { token2: () => [{ text: "set" }, { text: "clear" }] },
 };
 
 const ROOT_ORDER: readonly MultiAccountSubcommand[] =
@@ -231,6 +256,103 @@ function terminalTokenLevel(
 	};
 }
 
+// `create` takes a new id, so it is free text and never opens a level.
+const GROUP_NONTERMINAL_ACTIONS: ReadonlySet<string> = new Set([
+	"use",
+	"delete",
+	"add",
+	"remove",
+	"default",
+	"dir",
+]);
+
+const GROUP_NONE = ACCOUNT_GROUP_NONE;
+const GROUP_TREE_FLAG = "--tree";
+
+function groupIdChoices(snapshot: MultiAccountCompletionSnapshot): GrammarChoice[] {
+	return snapshot.groupIds.map((groupId) => ({ text: groupId }));
+}
+
+/** Members of a configured group; an unknown or inherited name has none. */
+function configuredGroupMembers(
+	snapshot: MultiAccountCompletionSnapshot,
+	groupId: string,
+): readonly string[] | undefined {
+	if (!snapshot.groupIds.includes(groupId)) return undefined;
+	return Object.hasOwn(snapshot.groupMembers, groupId)
+		? snapshot.groupMembers[groupId]
+		: [];
+}
+
+/** A level whose choices are group ids, each opening its own member level. */
+function groupMemberLevel(
+	head: string,
+	snapshot: MultiAccountCompletionSnapshot,
+	members: (groupId: string, listed: readonly string[]) => GrammarChoice[],
+): GrammarLevel {
+	return {
+		head,
+		choices: groupIdChoices(snapshot),
+		isNonterminal: (text) => configuredGroupMembers(snapshot, text) !== undefined,
+		descend: (text) => {
+			const listed = configuredGroupMembers(snapshot, text);
+			if (listed === undefined) return null;
+			return terminalTokenLevel(`${head} ${text}`, members(text, listed));
+		},
+	};
+}
+
+/** `group dir <path> <id|none> [--tree]`: the folder itself is free text. */
+function groupDirectoryLevel(snapshot: MultiAccountCompletionSnapshot): GrammarLevel {
+	return {
+		head: "group dir",
+		choices: [],
+		isNonterminal: () => false,
+		descend: (path) => {
+			const head = `group dir ${path}`;
+			const targets = [...groupIdChoices(snapshot), { text: GROUP_NONE }];
+			return {
+				head,
+				choices: targets,
+				isNonterminal: (text) => targets.some((choice) => choice.text === text),
+				descend: (text) =>
+					targets.some((choice) => choice.text === text)
+						? terminalTokenLevel(`${head} ${text}`, [{ text: GROUP_TREE_FLAG }])
+						: null,
+			};
+		},
+	};
+}
+
+function groupActionLevel(
+	action: string,
+	snapshot: MultiAccountCompletionSnapshot,
+): GrammarLevel | null {
+	switch (action) {
+		case "use":
+		case "delete":
+			return terminalTokenLevel(`group ${action}`, groupIdChoices(snapshot));
+		case "default":
+			return terminalTokenLevel("group default", [
+				...groupIdChoices(snapshot),
+				{ text: GROUP_NONE },
+			]);
+		case "add":
+			// Offer the live accounts the group does not list yet.
+			return groupMemberLevel("group add", snapshot, (_groupId, listed) =>
+				accountChoices(snapshot).filter((choice) => !listed.includes(choice.text)),
+			);
+		case "remove":
+			return groupMemberLevel("group remove", snapshot, (_groupId, listed) =>
+				listed.map((member) => ({ text: member })),
+			);
+		case "dir":
+			return groupDirectoryLevel(snapshot);
+		default:
+			return null;
+	}
+}
+
 function token2Level(
 	root: MultiAccountSubcommand,
 	source: readonly GrammarChoice[],
@@ -241,7 +363,9 @@ function token2Level(
 		choices: source,
 		isNonterminal: (text) =>
 			(root === "add" && isManagedFamilyText(text)) ||
-			(root === "group" && text === "use"),
+			(root === "group" && GROUP_NONTERMINAL_ACTIONS.has(text)) ||
+			(root === "account" && (text === "exclude" || text === "include")) ||
+			(root === "nickname" && (text === "set" || text === "clear")),
 		descend: (text) => {
 			if (root === "add" && isManagedFamilyText(text)) {
 				return terminalTokenLevel(
@@ -249,10 +373,17 @@ function token2Level(
 					snapshot.addSlots[text].map((slot) => ({ text: slot })),
 				);
 			}
-			if (root === "group" && text === "use") {
+			if (root === "group") return groupActionLevel(text, snapshot);
+			if (root === "nickname" && (text === "set" || text === "clear")) {
+				return terminalTokenLevel(`nickname ${text}`, (snapshot.nicknameAccountIds ?? snapshot.accounts.map((account) => account.providerId)).map((id) => ({ text: id })));
+			}
+			if (root === "account" && text === "exclude") {
+				return terminalTokenLevel("account exclude", accountChoices(snapshot));
+			}
+			if (root === "account" && text === "include") {
 				return terminalTokenLevel(
-					"group use",
-					snapshot.groupIds.map((groupId) => ({ text: groupId })),
+					"account include",
+					snapshot.excludedAccountIds.map((providerId) => ({ text: providerId })),
 				);
 			}
 			return null;

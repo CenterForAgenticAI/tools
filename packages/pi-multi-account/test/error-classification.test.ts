@@ -7,15 +7,22 @@ import {
 	providerErrorCodeFromMessage,
 	providerErrorTypeFromMessage,
 	upstreamFailureKindFromMessage,
+	CODEX_ERROR_CODES,
+	CODEX_FAILURE_KINDS,
+	codexErrorCodeFromMessage,
+	codexFailureKindFromMessage,
 	type ProviderFailureSignal,
 } from "../src/error-classification.js";
 
 const CANARY = "sk-ant-SUPER-SECRET-CANARY";
 
 describe("providerErrorCodeFromMessage", () => {
-	it.each(["rate_limit_error", "overloaded_error"])(
-		"projects an Anthropic SSE %s into the bounded rate_limit code",
-		(providerErrorType) => {
+	it.each([
+		["rate_limit_error", "rate_limit"],
+		["overloaded_error", "overloaded"],
+	] as const)(
+		"projects an Anthropic SSE %s into the bounded %s code",
+		(providerErrorType, expected) => {
 			const message = JSON.stringify({
 				type: "error",
 				error: {
@@ -27,7 +34,7 @@ describe("providerErrorCodeFromMessage", () => {
 			});
 
 			const code = providerErrorCodeFromMessage(message);
-			expect(code).toBe("rate_limit");
+			expect(code).toBe(expected);
 			expect(JSON.stringify(code)).not.toContain(CANARY);
 		},
 	);
@@ -76,6 +83,63 @@ describe("providerErrorCodeFromMessage", () => {
 
 		// Prose that merely mentions a brace-less status is still not an envelope.
 		expect(providerErrorCodeFromMessage("429 too many requests")).toBeUndefined();
+	});
+});
+
+// Synthetic proxy data only; exercise the shared public projection.
+const biliError = {
+	type: "rate_limit_error", code: "bili_throttle_terminal", stage: "forward", retryable: false,
+	message: `fixture ${CANARY}`, details: CANARY,
+};
+const biliEnvelope = JSON.stringify({ error: biliError, request_id: CANARY });
+
+describe("BILI-TERMINAL-PROJECTION", () => {
+	it.each(["", "424 ", "Error: 424 ", "Retry failed after 3 attempts: 424 ", "Retry failed after 3 attempts: Error: 424 "])(
+		"projects only rate-limit metadata through supported framing %j", (prefix) => {
+			const message = prefix + biliEnvelope;
+			expect(providerErrorCodeFromMessage(message)).toBe("rate_limit");
+			expect(providerErrorTypeFromMessage(message)).toBe("rate_limit_error");
+			expect(classifyFailure({ code: providerErrorCodeFromMessage(message)! })).toEqual({
+				category: "quota-rate-limit", accountAction: "cooldown-and-route", cooldownReason: "rate-limit",
+			});
+		},
+	);
+
+	it.each([
+		{ ...biliError, type: "overloaded_error" },
+		{ ...biliError, type: "constructor" },
+		{ ...biliError, code: "rate_limit" },
+		{ ...biliError, code: "__proto__" },
+		{ ...biliError, stage: "retry" },
+		{ ...biliError, retryable: true },
+		{ ...biliError, retryable: "false" },
+		{ code: "bili_throttle_terminal", stage: "forward", retryable: false },
+		{ type: "rate_limit_error", code: "bili_throttle_terminal", stage: "forward" },
+		{ type: "rate_limit_error", code: "bili_throttle_terminal", retryable: false },
+		{ type: "rate_limit_error", stage: "forward", retryable: false },
+		[], null, "rate_limit_error",
+	])("rejects a missing or wrong terminal discriminator %#", (error) => {
+		const message = `424 ${JSON.stringify({ error })}`;
+		expect(providerErrorCodeFromMessage(message)).toBeUndefined();
+		expect(providerErrorTypeFromMessage(message)).toBeUndefined();
+	});
+
+	it.each([
+		`429 ${biliEnvelope}`, `1424 ${biliEnvelope}`, `prose ${biliEnvelope}`,
+		`Error: 424 prose ${biliEnvelope}`, `[${biliEnvelope}]`, `424 ${biliEnvelope} trailing`,
+		`424 ${biliEnvelope.slice(0, -1)}`, `424 ${JSON.stringify({ type: "message", error: biliError })}`,
+		`424 ${JSON.stringify({ error: { __proto__: biliError } })}`,
+		`424 {"__proto__":{"error":${JSON.stringify(biliError)}}}`,
+		`424 ${JSON.stringify({ error: biliError, extra: "x".repeat(4096) })}`,
+	])("rejects malformed, oversized, inherited, array or unsupported framing %#", (message) => {
+		expect(providerErrorCodeFromMessage(message)).toBeUndefined();
+		expect(providerErrorTypeFromMessage(message)).toBeUndefined();
+	});
+
+	it("ignores hostile extra fields rather than retaining or interpreting them", () => {
+		const message = `424 {"error":${JSON.stringify(biliError)},"__proto__":{"type":"error"},"constructor":"${CANARY}"}`;
+		expect(providerErrorCodeFromMessage(message)).toBe("rate_limit");
+		expect(providerErrorTypeFromMessage(message)).toBe("rate_limit_error");
 	});
 });
 
@@ -141,7 +205,7 @@ describe("SHAPE-PROTOTYPE providerErrorCodeFromMessage", () => {
 
 	it("still returns the routing code for the listed types", () => {
 		expect(providerErrorCodeFromMessage(envelopeOf("rate_limit_error"))).toBe("rate_limit");
-		expect(providerErrorCodeFromMessage(envelopeOf("overloaded_error"))).toBe("rate_limit");
+		expect(providerErrorCodeFromMessage(envelopeOf("overloaded_error"))).toBe("overloaded");
 	});
 });
 
@@ -166,6 +230,75 @@ describe("SHAPE-UPSTREAM upstreamFailureKindFromMessage", () => {
 	it("drops a non-string message without throwing", () => {
 		for (const value of [undefined, null, 7, {}, [], () => "Connection error."]) {
 			expect(upstreamFailureKindFromMessage(value as unknown as string)).toBeUndefined();
+		}
+	});
+});
+
+describe("SHAPE-CODEX codexFailureKindFromMessage", () => {
+	// The fixed strings pi-ai's Codex and Responses paths produce, with invented tails.
+	it.each([
+		["Codex error: The usage limit has been reached", "codex-event-error"],
+		["Codex error: server_error", "codex-event-error"],
+		["Codex response failed", "codex-response-failed"],
+		["Codex stream ended without a stop reason", "codex-no-stop-reason"],
+		["Codex SSE response headers timed out after 30000ms", "codex-sse-header-timeout"],
+		["OpenAI Responses stream ended before a terminal response event", "responses-no-terminal-event"],
+		["OpenAI Responses stream completed with an unfinished tool call: fixture_tool (call_1)", "responses-unfinished-tool-call"],
+		["Response incomplete: content_filter", "responses-incomplete"],
+		["Response incomplete without a provider reason", "responses-incomplete"],
+		["  Codex response failed  ", "codex-response-failed"],
+	] as const)("names %j as %s", (message, kind) => {
+		expect(codexFailureKindFromMessage(message)).toBe(kind);
+	});
+
+	it("maps every listed kind from at least one message", () => {
+		const seen = new Set([
+			"Codex error: x", "Codex response failed", "Codex stream ended without a stop reason",
+			"Codex SSE response headers timed out after 1ms", "OpenAI Responses stream ended before a terminal response event",
+			"OpenAI Responses stream completed with an unfinished tool call: t (c)", "Response incomplete: r",
+		].map((message) => codexFailureKindFromMessage(message)));
+		expect([...seen].sort()).toEqual([...CODEX_FAILURE_KINDS].sort());
+	});
+
+	it.each([
+		"", "codex error: x", "Codex error:" + CANARY, "Codex error " + CANARY, "Codex response failed: " + CANARY,
+		"Codex response failed.", "Codex SSE response headers timed out after ms", "Codex SSE response headers timed out after 30000ms " + CANARY,
+		"Codex SSE response headers timed out after 1000000000000ms", CANARY + " Codex error: x", "OpenAI Responses stream ended",
+		"constructor", "__proto__", "toString", "Codex error: " + "x".repeat(4_097),
+	])("drops the near-miss or hostile message %j", (message) => {
+		expect(codexFailureKindFromMessage(message)).toBeUndefined();
+	});
+
+	it("returns only the kind, never the text after the prefix", () => {
+		const kind = codexFailureKindFromMessage("Codex error: " + CANARY);
+		expect(kind).toBe("codex-event-error");
+		expect(JSON.stringify({ kind })).not.toContain(CANARY);
+	});
+
+	it("drops a non-string message without throwing", () => {
+		for (const value of [undefined, null, 7, {}, [], () => "Codex response failed"]) {
+			expect(codexFailureKindFromMessage(value as unknown as string)).toBeUndefined();
+		}
+	});
+});
+
+describe("SHAPE-CODEX codexErrorCodeFromMessage", () => {
+	it.each(CODEX_ERROR_CODES)("keeps the listed bare code %s after the event prefix", (code) => {
+		expect(codexErrorCodeFromMessage(`Codex error: ${code}`)).toBe(code);
+	});
+
+	it.each([
+		"Codex error: invented_code", "Codex error: " + CANARY, "Codex error: server_error " + CANARY,
+		"Codex error: SERVER_ERROR", "Codex error: server_error.", "Codex error: The usage limit has been reached",
+		"Codex error: constructor", "Codex error: __proto__", "server_error", "Codex response failed",
+		"Response incomplete: server_error", "", "Codex error: ",
+	])("drops %j", (message) => {
+		expect(codexErrorCodeFromMessage(message)).toBeUndefined();
+	});
+
+	it("drops a non-string message without throwing", () => {
+		for (const value of [undefined, null, 7, {}, [], () => "Codex error: server_error"]) {
+			expect(codexErrorCodeFromMessage(value as unknown as string)).toBeUndefined();
 		}
 	});
 });
@@ -249,6 +382,13 @@ describe("classifyFailure", () => {
 			"transient-auth",
 			"cooldown-and-route",
 		],
+		// A dispatch that could not resolve a credential may clear by itself
+		// (issue #214): a bounded cooldown, never an invalidation.
+		[
+			{ code: "credential_unresolved" },
+			"transient-auth",
+			"cooldown-and-route",
+		],
 		[{ httpStatus: 403 }, "permission", "cooldown-and-route"],
 		[{ code: "insufficient_permissions" }, "permission", "cooldown-and-route"],
 		[{ code: "model_not_found" }, "config", "route-without-retry"],
@@ -256,12 +396,24 @@ describe("classifyFailure", () => {
 		[{ code: "unknown_stop" }, "unknown", "retain-account"],
 		[{ transportKind: "socket-reset" }, "transport", "cooldown-and-route"],
 		[{ httpStatus: 503 }, "transport", "cooldown-and-route"],
+		[{ code: "overloaded" }, "transport", "cooldown-and-route"],
+		[{ httpStatus: 529, code: "overloaded" }, "transport", "cooldown-and-route"],
 		[{}, "unknown", "cooldown-and-route"],
 	] as const)("classifies structured signal %#", (signal, category, action) => {
 		expect(classifyFailure(signal)).toMatchObject({
 			category,
 			accountAction: action,
 		});
+	});
+
+	it("classifies overload as a transport cooldown, never a rate limit (internal issue #194)", () => {
+		expect(classifyFailure({ code: "overloaded" })).toEqual({
+			category: "transport",
+			accountAction: "cooldown-and-route",
+			cooldownReason: "transport",
+		});
+		// A real 429 stays a rate limit even with an overload code attached.
+		expect(classifyFailure({ httpStatus: 429, code: "overloaded" }).category).toBe("quota-rate-limit");
 	});
 
 	it("classifies a refusal or unknown provider stop as retain-account without a cooldown", () => {

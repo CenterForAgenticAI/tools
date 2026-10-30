@@ -94,7 +94,7 @@ Key behavior:
 | `preemptiveExpiryWindowMs` | `120000` | Prefer a fresher same-family credential before expiry. Set `0` to disable. |
 | `usageFetchEnabled` | all `true` | Enable fail-soft provider usage fetches by family. |
 | `imageStripping` | off | Stopgap: remove old images from `unified` and Anthropic alias requests. See [Removing old images (stopgap)](#removing-old-images-stopgap). |
-| `accountLabels` | `{}` | Operator display labels keyed by canonical provider ID. |
+| `accountLabels` | `{}` | Manual nicknames keyed by canonical provider ID. Edit with `/multi-account nickname set <id> <text>` or `nickname clear <id>`. Not verified identity; detected Anthropic email stays in AuthStorage. |
 | `projectLabels` | `{}` | Display labels keyed by `project-<24 hex>` digest. |
 | `monthlySubscriptionUsd` | `{}` | Legacy, retroactive monthly price for subscription-value reporting, kept readable for compatibility. Superseded by `accountRateHistory` (see `multi-account account set-plan`); reading or writing either field never converts, deletes, or migrates the other, and neither reporting surface sums them together. |
 
@@ -143,8 +143,12 @@ config write materializes it with its default value.
 
 ### Configuring cross-family routing
 
-`/multi-account configure` is the only production path that writes this file. It
-is interactive and runs in the Pi terminal UI only. Use it to view the current
+`/multi-account configure`, `/multi-account account exclude|include`, and
+`/multi-account group create|delete|add|remove|default|dir` write this file.
+The account and group edits use the same locked, atomic writer. See
+[Excluding accounts from automatic routing](#excluding-accounts-from-automatic-routing)
+and [Editing account groups from a session](#editing-account-groups-from-a-session).
+`configure` is interactive and runs in the Pi terminal UI only. Use it to view the current
 policy, authorize one Anthropic↔Codex direction, and set the best-first
 destination model list for that direction.
 
@@ -184,6 +188,152 @@ Recover from an interrupted write or an outside edit with `/multi-account
 reload`. If a `config.lock` file is left behind, confirm that no Pi process is
 committing, then remove it.
 
+### Excluding accounts from automatic routing
+
+`automaticRoutingExcludedAccounts` lists managed accounts that automatic
+routing must skip:
+
+```json
+{
+  "accountLimit": 4,
+  "automaticRoutingExcludedAccounts": ["anthropic-account-3"]
+}
+```
+
+Each entry is a canonical managed provider ID within `accountLimit`: a family
+ID such as `anthropic` or `openai-codex`, or a numbered alias such as
+`anthropic-account-3`. The parser rejects a value that is not an array, an
+entry that is not a string, an unknown or non-canonical ID, an ID above
+`accountLimit`, and a duplicate. Its message never echoes the rejected value.
+A rejected entry makes the whole file invalid, like a bad `accountGroups`
+member: requests stay blocked until valid config loads, and a failed
+`/multi-account reload` keeps the last valid config. Lowering `accountLimit`
+below an excluded slot is invalid in the same way. An absent key or an empty
+list excludes nothing.
+
+An excluded account stays signed in and can still be used directly. Automatic
+routing skips it. [Routing and recovery](routing.md#excluding-accounts-from-automatic-routing)
+lists every path this covers. An entry for an account that is later signed out
+stays valid, and `status` shows it as not authorized.
+
+An account group that lists an excluded account overrides the exclusion for
+sessions that use the group: their automatic routing may choose it. The
+configured list is unchanged, and sessions under another group or no group still
+skip the account. `group status` marks such a member `excluded from automatic
+routing; this pool overrides the opt-out`.
+
+Change the list with `/multi-account account exclude <account-id>` and
+`/multi-account account include <account-id>`. Each takes the same `config.lock`
+lease as `configure`, re-reads the file under that lease, changes only this key,
+validates the whole file, and replaces it atomically at mode `0600`. Every other
+field, including one another process wrote after the command started, is kept.
+Including the last excluded ID removes the key. The current Pi process applies
+the change at once. Other running processes apply it after
+`/multi-account reload` or a restart.
+
+Older builds reject this key as unknown, which makes the whole file invalid.
+Before downgrading, run `/multi-account account include <account-id>` for each
+excluded ID, or delete the key, then downgrade.
+
+### Account-group defaults by folder tree
+
+`accountGroupDirectoryDefaults` maps an absolute folder to a configured group.
+The rule covers that folder and every folder below it:
+
+```json
+{
+  "accountGroups": {
+    "client": ["anthropic-account-2", "openai"],
+    "lab": ["anthropic"]
+  },
+  "accountGroupDirectoryDefaults": {
+    "/srv/work/client": "client",
+    "/srv/work/client/lab": "lab"
+  }
+}
+```
+
+A session resolves its group in this order:
+
+1. its `group use` override;
+2. an `accountGroupCwdDefaults` rule for exactly its cwd;
+3. the deepest `accountGroupDirectoryDefaults` folder that contains its cwd;
+4. `defaultAccountGroup`;
+5. unrestricted routing.
+
+In the example, a session in `/srv/work/client/lab/tool` uses `lab`, and a
+session in `/srv/work/client/api` uses `client`. A folder contains a cwd when the
+two are equal or the cwd continues the folder after a path separator, so
+`/srv/work/client` does not cover `/srv/work/client-old`. Both paths are made
+absolute and have symbolic links resolved first, as for the exact key; a path
+that cannot be resolved is compared as written. Key order never decides.
+
+Each key must be an absolute path and each value a configured group, or the
+whole file is invalid. When two keys resolve to the same folder but name
+different groups, sessions that this folder decides fail with the `policy`
+cause. A conflict at a shallower folder does not matter where a deeper rule
+decides. `group status` shows the source as `directory default`, and a delegate
+child that inherits its parent's group keeps that source.
+
+Older builds reject this key as unknown, which makes the whole file invalid.
+They also reject a cached `directory-default` source in
+`session-account-groups.json` as `store-invalid`, which blocks every session.
+Before downgrading, delete the key, then move `session-account-groups.json` and
+`session-account-groups.last-used.json` aside. That discards every session's
+saved `group use` choice.
+
+### Editing account groups from a session
+
+Six `/multi-account group` actions edit `accountGroups`, `defaultAccountGroup`,
+`accountGroupCwdDefaults`, and `accountGroupDirectoryDefaults`, so you need not
+edit the file by hand:
+
+```text
+/multi-account group create client-a
+/multi-account group add client-a anthropic-account-2
+/multi-account group dir ~/Code/client-a client-a --tree
+/multi-account group default client-a
+```
+
+Each action takes the same `config.lock` lease as `configure`, re-reads the file
+under that lease, changes only the account-group keys, validates the whole file,
+and replaces it atomically at mode `0600`. Every other field, including one
+another process wrote after the command started, is kept. When another process
+holds the lease, the file is malformed, or the write fails, nothing changes and
+the reply says so. The current session applies a change at once and resolves its
+group again. Other running sessions apply it after `/multi-account reload` or a
+restart, and new sessions read it when they start.
+
+- `group create <id>` adds a group with no members. An id is 1–64 letters,
+  digits, dots, underscores, or hyphens, starting with a letter or digit;
+  `none` is reserved.
+- `group add <id> <account>` accepts every reference a hand-edited file may
+  list. See [Account-group members](#account-group-members). A reference that
+  cannot serve this session yet, such as a misspelling or a provider that is
+  not signed in, is stored, and the reply warns once. A provider this extension
+  does not route, such as `google`, lets a selected model on it run inside the
+  group, but `unified`, failover, recovery, parking, and preflight never choose
+  it; the reply says so. A non-canonical managed slot, a slot above
+  `accountLimit`, or an unsafe reference is refused.
+- `group remove <id> <account>` keeps a group it empties, and warns that
+  sessions using the group are blocked until it has a usable member.
+- `group delete <id>` is refused while `defaultAccountGroup` or any folder rule
+  names the group. The reply lists each one; change them with `group default`
+  and `group dir` first.
+- `group default <id|none>` sets or clears `defaultAccountGroup`.
+- `group dir <path> <id|none> [--tree]` stores the folder as an absolute path:
+  `~` and `~/...` start at your home folder, and any other relative path starts
+  at the session's cwd. Without `--tree` it edits `accountGroupCwdDefaults`;
+  with it, `accountGroupDirectoryDefaults`. A rule for a folder that already
+  has one replaces it, including a key that names the same folder through a
+  trailing separator, `..`, or a symbolic link, and the reply names the group
+  it replaced. A folder that does not exist yet is stored, with a note. `none`
+  removes the rule. Command arguments are split at spaces, so a folder whose
+  path contains a space cannot be set here; edit the config file instead.
+
+A refusal or an unchanged reply never repeats an argument that did not
+validate, because it may be a label or an email address.
+
 ## Additional accepted keys
 
 These keys were already accepted by the shipped parser but were not listed in
@@ -193,10 +343,13 @@ the pre-standard README table:
 | --- | ---: | --- |
 | `recoveryIdleTimeoutMs` | `300000` | Maximum time without qualifying recovery progress, at least `1000` ms and more than `recoveryStallTimeoutMs`. |
 | `recoveryAbsoluteTimeoutMs` | `1800000` | Maximum elapsed time for one complete recovery invocation. |
-| `recoveryStallTimeoutMs` | `180000`, or one less than `recoveryIdleTimeoutMs` when that is shorter | Longest one `unified` physical attempt may wait for the provider's `start` event (opening included), from `1000` through `1800000` ms and less than `recoveryIdleTimeoutMs`; otherwise the idle limit would end the call before a stalled attempt could move. A stall before `start` is a pre-start transient that may move once to another account. After `start` the provider has answered and keeps the connection alive, and a model may think silently for minutes, so later waits are bounded only by `recoveryIdleTimeoutMs` before the first content and by `recoveryAbsoluteTimeoutMs` after it. |
+| `recoveryStallTimeoutMs` | `180000`, or one less than `recoveryIdleTimeoutMs` when that is shorter | Longest one `unified` physical attempt may wait for the provider's `start` event (opening included), from `1000` through `1800000` ms and less than `recoveryIdleTimeoutMs`; otherwise the idle limit would end the call before a stalled attempt could move. A stall before `start` is a pre-start transient that may move to another account. After `start` the provider has answered and keeps the connection alive, and a model may think silently for minutes, so later waits are bounded only by `recoveryIdleTimeoutMs` before the first content and by `recoveryAbsoluteTimeoutMs` after it. |
+| `recoveryMaxAttempts` | `6` | Most physical sends one `unified` call may make, the first send included, as an integer from `1` through `6`. Recovery rolls over to each other eligible account serving the same model at most once, so a call stops after this many sends or when no further account is eligible, whichever comes first. `1` turns in-call recovery off. Any other value is rejected. |
 | `accountGroups` | `{}` | Named allow-lists of exact Pi provider IDs, including configured built-in and custom providers. Managed numbered aliases must remain canonical and within `accountLimit`. |
 | `accountGroupCwdDefaults` | `{}` | Exact absolute cwd-to-group defaults. |
-| `defaultAccountGroup` | absent | Optional machine-wide group when no session or exact-cwd choice applies. |
+| `accountGroupDirectoryDefaults` | `{}` | Absolute folder-to-group defaults that also cover every folder below; the deepest folder wins. See [Account-group defaults by folder tree](#account-group-defaults-by-folder-tree). |
+| `defaultAccountGroup` | absent | Optional machine-wide group when no session, exact-cwd, or folder-tree choice applies. |
+| `automaticRoutingExcludedAccounts` | absent | Managed provider IDs that automatic routing skips. See [Excluding accounts from automatic routing](#excluding-accounts-from-automatic-routing). |
 | `subscriptionPlanCatalogOverrides` | `{}` | Replace or add machine-global subscription-plan presets. |
 | `accountRateHistory` | `{}` | Effective-dated copied plan and rate records per account. |
 
@@ -264,9 +417,15 @@ custom provider in extension-owned refresh, usage, cost, unified routing, parkin
 or recovery. Those candidate sets remain managed-only. `group status` shows
 availability and exclusion through credential-free public metadata.
 
-`openrouter` is a valid reference, but this release still blocks metered OpenRouter
-under a named group, even when listed. The separate group-enabled OpenRouter,
-tree-directory rules, and opt-out precedence changes are not part of this feature.
-Unrestricted OpenRouter retains all existing consent, concrete-model, positive-cap,
-credential, pricing, budget, and delegate-exclusion checks. Older builds reject
-these new member kinds; remove them before downgrading and reload valid config.
+Listing `openrouter` lets sessions in the group use OpenRouter, but listing is
+never enough on its own. An explicit `openrouter/<model>` selection still needs
+exact `conversation-egress` consent, a concrete configured model, a positive
+daily cap, credentials, known pricing, and a budget reservation for each turn.
+Delegate and Fabric children in the group may make that selection too; their
+spend counts against the same per-project daily cap. The automatic metered last
+resort can run inside a group that lists `openrouter`, and it still excludes
+delegates. A group that does not list `openrouter` blocks it in every session.
+See [OpenRouter in an account group](routing.md#openrouter-in-an-account-group).
+Unrestricted OpenRouter is unchanged. Older builds block metered OpenRouter
+under every named group, and reject these new member kinds; remove them before
+downgrading and reload valid config.

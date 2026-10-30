@@ -23,6 +23,7 @@
 
 import type { DiagnosticLog } from "./diagnostics.js";
 import type { AllowedFamily } from "./config.js";
+import type { CredentialEventSink } from "./credential-events.js";
 
 /**
  * The slice of a stored OAuth credential this module touches. Matches the
@@ -92,6 +93,7 @@ export interface HostForcedCredentialRefresherOptions {
 	readonly modelRegistry: unknown;
 	readonly oauthByFamily: Partial<Record<AllowedFamily, unknown>>;
 	readonly diagnostics: Pick<DiagnosticLog, "record">;
+	readonly events?: CredentialEventSink;
 }
 
 /**
@@ -132,6 +134,7 @@ export function createHostForcedCredentialRefresher(
 		modify: credentials.modify.bind(credentials) as AuthModify,
 		refreshers,
 		diagnostics: options.diagnostics,
+		...(options.events === undefined ? {} : { events: options.events }),
 	});
 }
 
@@ -167,12 +170,31 @@ export interface ForcedCredentialRefresherOptions {
 	readonly modify: AuthModify;
 	readonly refreshers: Partial<Record<AllowedFamily, FamilyRefresher>>;
 	readonly diagnostics: Pick<DiagnosticLog, "record">;
+	/**
+	 * Announces the refresh to peers: `refreshDue` before the locked modify and
+	 * `changed` once a different credential has been written. Optional so a
+	 * host without an event bus refreshes exactly as before.
+	 */
+	readonly events?: CredentialEventSink;
+}
+
+/** Whether a refresh replaced any field a request authenticates with. */
+function credentialChanged(
+	before: OAuthRefreshCredential,
+	after: OAuthRefreshCredential,
+): boolean {
+	return (
+		before.access !== after.access ||
+		before.refresh !== after.refresh ||
+		before.expires !== after.expires
+	);
 }
 
 export class ForcedCredentialRefresher {
 	readonly #modify: AuthModify;
 	readonly #refreshers: Partial<Record<AllowedFamily, FamilyRefresher>>;
 	readonly #diagnostics: Pick<DiagnosticLog, "record">;
+	readonly #events: CredentialEventSink | undefined;
 	/**
 	 * Exactly one forced attempt per provider per session, whatever the outcome.
 	 * A 401 that survives a fresh token is not a staleness problem, and retrying
@@ -185,6 +207,7 @@ export class ForcedCredentialRefresher {
 		this.#modify = options.modify;
 		this.#refreshers = options.refreshers;
 		this.#diagnostics = options.diagnostics;
+		this.#events = options.events;
 	}
 
 	async attempt(
@@ -198,6 +221,12 @@ export class ForcedCredentialRefresher {
 		if (refresher === undefined) return "unsupported";
 
 		let outcome: ForcedRefreshOutcome = "failed";
+		// Only this boolean leaves the modify callback; the credentials do not.
+		// True once the callback returned a changed credential; reset if the
+		// write then fails, so it means "a different credential is stored".
+		let changed = false as boolean;
+		// Before the lock, so a peer can hand over a newer login first.
+		this.#events?.refreshDue(providerId);
 		try {
 			await this.#modify(providerId, async (current) => {
 				if (!isOAuthRefreshCredential(current)) {
@@ -235,14 +264,20 @@ export class ForcedCredentialRefresher {
 					return undefined;
 				}
 				outcome = "refreshed";
+				changed = credentialChanged(current, merged);
 				return merged;
 			});
 		} catch {
 			// Record only bounded metadata. The thrown value can originate in an OAuth
 			// implementation and is therefore not safe diagnostic material.
 			outcome = "failed";
+			changed = false;
 		}
 
+		// `modify` has resolved, so the changed credential is on disk.
+		if (changed) {
+			this.#events?.changed(providerId, "refresh");
+		}
 		return recordOutcome(this.#diagnostics, providerId, outcome);
 	}
 }

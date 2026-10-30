@@ -773,6 +773,8 @@ function stableUsageTail(options: {
 function compactUsageFile(options: {
 	readonly path: string;
 	readonly maxBytes: number;
+	/** Space reserved for the append that triggered compaction. */
+	readonly pendingBytes?: number;
 	readonly beforeRename?: () => void;
 	readonly mutationLease: MachineLeaseHandle;
 	readonly ownerLease?: { renew(): boolean };
@@ -787,6 +789,14 @@ function compactUsageFile(options: {
 		const latestRateLimits = new Map<string, SharedUsageRecord>();
 		const latestAttempts = new Map<string, SharedUsageAttemptRecord>();
 		const latestHolds = new Map<string, SharedUsageExhaustionHoldRecord>();
+		const accountLatest = new Map<string, SharedUsageRecord>();
+		const accountTokens = new Map<string, SharedUsageRecord>();
+		const accountInstruments = new Map<string, SharedUsageRecord>();
+		const recoveryRecords: SharedUsageRecord[] = [];
+		const keepNewest = (map: Map<string, SharedUsageRecord>, key: string, record: SharedUsageRecord): void => {
+			const previous = map.get(key);
+			if (previous === undefined || record.observedAtMs > previous.observedAtMs) map.set(key, record);
+		};
 		// Compaction is a CLOSED REGISTRY: only the three record types this
 		// build validates survive, and each survives as the JSON of its own
 		// validated projection, never as the source bytes.
@@ -808,6 +818,11 @@ function compactUsageFile(options: {
 		// build compacts; a new type must stay advisory until every build in the
 		// fleet recognises it.
 
+		// Original file position of every projected record. Readers sort stably
+		// by observedAtMs, so equal-time records are ordered by file position and
+		// that order picks the recovery candidate (CR-USAGE-PRESSURE-TIE-ORDER).
+		// Compaction re-emits records in this order so it never changes a verdict.
+		const filePosition = new Map<SharedUsageLogRecord, number>();
 		for (const line of completeUsageLines(options.path, completePrefixBytes)) {
 			let parsed: unknown;
 			try {
@@ -817,6 +832,13 @@ function compactUsageFile(options: {
 			}
 			if (validRecord(parsed)) {
 				const record = projectRecord(parsed);
+				filePosition.set(record, filePosition.size);
+				keepNewest(accountLatest, record.providerId, record);
+				if (record.tokens !== undefined) keepNewest(accountTokens, record.providerId, record);
+				if (record.rateLimit !== undefined) {
+					keepNewest(accountInstruments, JSON.stringify([record.providerId, record.rateLimit.utilizationSource]), record);
+					if (record.rateLimit.recoveryAtMs !== undefined) recoveryRecords.push(record);
+				}
 				const key = JSON.stringify([record.providerId, record.observerId]);
 				const previous = latest.get(key);
 				if (!previous || record.observedAtMs > previous.observedAtMs) {
@@ -841,6 +863,7 @@ function compactUsageFile(options: {
 				}
 			} else if (validAttemptRecord(parsed)) {
 				const attempt = projectAttempt(parsed);
+				filePosition.set(attempt, filePosition.size);
 				const previous = latestAttempts.get(attempt.providerId);
 				if (!previous || attempt.observedAtMs >= previous.observedAtMs) {
 					latestAttempts.set(attempt.providerId, attempt);
@@ -851,6 +874,7 @@ function compactUsageFile(options: {
 				// expiry against the current clock, and deleting one early would
 				// hide the record from a reader whose clock disagrees.
 				const hold = projectExhaustionHold(parsed);
+				filePosition.set(hold, filePosition.size);
 				const previous = latestHolds.get(hold.providerId);
 				if (!previous || hold.observedAtMs >= previous.observedAtMs) {
 					latestHolds.set(hold.providerId, hold);
@@ -864,17 +888,49 @@ function compactUsageFile(options: {
 			...latestAttempts.values(),
 			...latestHolds.values(),
 		]);
-		const compacted = [...compactedRecords]
-			.map((record) => `${JSON.stringify(record)}\n`)
-			.join("");
+		const budget = options.maxBytes - (options.pendingBytes ?? 0);
+		const encode = (record: SharedUsageLogRecord): string => `${JSON.stringify(record)}\n`;
+		let retained = [...compactedRecords];
+		if (retained.reduce((bytes, record) => bytes + Buffer.byteLength(encode(record)), 0) > budget) {
+			// Observer snapshots are advisory, not an accounting history. Preserve
+			// account facts first; process churn must not prevent the next refresh.
+			const required = new Set<SharedUsageLogRecord>([
+				...accountLatest.values(), ...accountTokens.values(),
+				...accountInstruments.values(), ...latestAttempts.values(), ...latestHolds.values(),
+			]);
+			// Keep the recovery skyline: an older observation matters only when
+			// its recovery outlasts every newer one. Together with the newest
+			// reading per instrument this preserves recovery and supersession at
+			// every reader clock, without inventing a TTL for provider evidence.
+			const longestRecovery = new Map<string, number>();
+			for (const record of recoveryRecords.sort((a, b) => b.observedAtMs - a.observedAtMs)) {
+				const recovery = record.rateLimit?.recoveryAtMs;
+				if (recovery !== undefined && recovery > (longestRecovery.get(record.providerId) ?? -1)) {
+					required.add(record);
+					longestRecovery.set(record.providerId, recovery);
+				}
+			}
+			let bytes = [...required].reduce((sum, record) => sum + Buffer.byteLength(encode(record)), 0);
+			if (bytes > budget) return false; // Required evidence cannot safely be evicted.
+			for (const record of retained.sort((a, b) => b.observedAtMs - a.observedAtMs)) {
+				if (required.has(record)) continue;
+				const size = Buffer.byteLength(encode(record));
+				if (bytes + size > budget) continue;
+				required.add(record);
+				bytes += size;
+			}
+			retained = [...required];
+		}
+		retained.sort((a, b) => (filePosition.get(a) ?? 0) - (filePosition.get(b) ?? 0));
+		const compacted = retained.map(encode).join("");
 		const compactedBytes = Buffer.byteLength(compacted, "utf8");
-		if (compactedBytes > options.maxBytes) return false;
+		if (compactedBytes > budget) return false;
 
 		options.beforeRename?.();
 		const tail = stableUsageTail({
 			path: options.path,
 			start: completePrefixBytes,
-			maxBytes: options.maxBytes - compactedBytes,
+			maxBytes: budget - compactedBytes,
 			expectedDevice: initial.dev,
 			expectedInode: initial.ino,
 		});
@@ -1041,6 +1097,7 @@ export class SharedUsageStore {
 						!compactUsageFile({
 							path: this.#path,
 							maxBytes: this.#maxBytes,
+							pendingBytes: appendBytes,
 							...(this.#beforeCompactionRename === undefined
 								? {}
 								: { beforeRename: this.#beforeCompactionRename }),

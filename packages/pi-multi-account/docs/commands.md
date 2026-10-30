@@ -14,7 +14,7 @@ For operators and agents: slash commands, the read-only agent tool, account grou
 | `model [id]` | Select a unified logical model by exact id; with no id, show the selectable models. Replaces the deprecated `/multi-account-model`. |
 | `cost [day\|week\|month\|quarter\|half-year\|year]` | Retained provider cost and separate API-equivalent estimates. |
 | `log [lines]` | The latest sanitized diagnostics; default 20, maximum 100. |
-| `rediscover` | Refresh account metadata and provider slots. |
+| `rediscover` | Refresh account metadata and provider slots, and clear terminal-auth failure marks. Cooldowns and limit streaks stay. |
 | `add <family> [slot]` | Register a new OAuth login slot. Authentication still uses Pi `/login`. |
 | `remove <account-id>` | Use Pi's public removal API when available; otherwise direct the operator to `/logout`. |
 | `clear <account-id>` | Clear process-local state, disable the slot, and preserve credentials. |
@@ -25,25 +25,82 @@ For operators and agents: slash commands, the read-only agent tool, account grou
 | `reload` | Validate and reload machine-global config. |
 | `configure` | Configure cross-family routing directions and destination models. Interactive TUI only. |
 | `group use <id>` | Bind this session id to one configured account group. |
-| `group reset` | Clear this session override and return to the exact-cwd default, global default, or unrestricted routing. |
+| `group reset` | Clear this session override and return to the exact-cwd default, folder-tree default, global default, or unrestricted routing. |
 | `group status` | Report the cached effective group and original source, listed members' availability, and recognized excluded providers, without changing policy. |
+| `group create <id>` | Add an empty account group to machine-global config. |
+| `group delete <id>` | Remove an account group. Refused while the global default or a folder rule names it; the reply lists each one. |
+| `group add <id> <account>` | Add a provider ID to a group. A well-formed ID that cannot serve this session yet is stored with one warning. |
+| `group remove <id> <account>` | Remove a member. A group left empty stays configured and blocks its sessions. |
+| `group default <id\|none>` | Set or clear the global default account group. |
+| `group dir <path> <id\|none> [--tree]` | Set or remove the account-group rule for a folder: exactly that folder, or with `--tree` that folder and every folder below it. |
+| `account exclude <account-id>` | Add a managed account to `automaticRoutingExcludedAccounts`, so automatic routing skips it. The account stays signed in and usable directly. |
+| `account include <account-id>` | Remove a managed account from `automaticRoutingExcludedAccounts`. |
+| `nickname set <account-id> <text>` | Set a manual nickname in `accountLabels`, even without detected identity. |
+| `nickname clear <account-id>` | Remove the nickname without changing credentials or routing. |
 | `enable` | Re-enable managed accounts and reset process-local state. |
 | `disable <family>` | Disable one managed family in the current process. |
 
 The registered `multi_account_status` tool exposes only `status`, `limits`,
-`models`, `cost`, and `log`. Every `group` action and every other subcommand remains
-operator-only. An agent can inspect general account state but cannot set or reset a
-session group, edit cwd/global defaults, or change account policy or lifecycle state.
+`models`, `cost`, and `log`. Every `nickname` and `group` action, both `account` actions, and
+every other subcommand remain operator-only. An agent can inspect general account
+state, including which accounts are excluded from automatic routing, but cannot
+set or reset a session group, create, edit, or delete a group, edit folder or
+global defaults, exclude or include an account, or change account policy or
+lifecycle state.
+Nickname commands accept a canonical managed slot within `accountLimit` in any
+supported family. Nicknames contain 1–64 printable ASCII characters; spaces are
+allowed without quoting. The locked config transaction preserves other settings,
+publishes this session's nickname immediately, and reports busy/invalid config
+without writing. Other running sessions use `/multi-account reload`; use
+`rediscover` to update alias login names. Completion offers `nickname set|clear`
+and all current slots, including signed-out slots. Nicknames are a manual
+recognition fallback, not proof of email or shared subscription identity.
+
+Operator status and models may contain detected identity. Every agent tool action
+excludes it, including `models` provider display names and raw JWT fingerprints.
+Public status keeps its configured-nickname-only label policy.
+
 Automatic failover is a reaction to a classified provider failure;
 discretionary account changes remain operator actions.
+
+`account exclude` and `account include` take one canonical managed provider ID
+within `accountLimit`, such as `anthropic-account-3`. Any other value, including
+a label, an unmanaged provider, or an out-of-range or non-canonical slot, is
+refused with `Refused: that is not a canonical managed account id within
+accountLimit. Nothing was changed.` The refusal never repeats the value. A valid
+ID reports one of four results:
+
+| Result | Meaning |
+| --- | --- |
+| applied | The file now lists the ID, or no longer lists it. This session applies it at once; other running sessions apply it after `/multi-account reload`. |
+| unchanged | The ID was already excluded, or was not excluded. Nothing was written. |
+| busy | Another process held the `config.lock` lease. Nothing was written; rerun the command in a moment. |
+| invalid | The config file on disk is malformed. Nothing was written; repair the file, then rerun the command. |
+
+When any account is excluded, `status` ends its account list with an
+`EXCLUDED FROM AUTOMATIC ROUTING` section in config order. A signed-out entry
+reads `<account-id> — not authorized`. `status --json` marks each excluded
+account row with `automaticRoutingExcluded: true` and adds a top-level
+`automaticRoutingExcludedAccounts` list of `{ providerId, signedIn }`. A status
+scoped to one account shows only that account's entry. `group status` adds
+`excluded from automatic routing` to a member that the list names. The flag is
+display only: it does not change that member's group eligibility. The setting
+and the routing paths it covers are in
+[Configuration reference](configuration.md#excluding-accounts-from-automatic-routing).
 
 Account groups are named allow-lists in machine-global config. `accountGroups` maps
 a group id to exact Pi provider IDs, including configured built-in and custom
 providers. Managed numbered aliases must be canonical and within `accountLimit`.
 See [member identity and availability](configuration.md#account-group-members).
-`accountGroupCwdDefaults` maps an exact absolute directory to a configured group;
+`accountGroupCwdDefaults` maps an exact absolute directory to a configured group.
+`accountGroupDirectoryDefaults` maps an absolute folder to a group for that folder
+and every folder below it; the deepest containing folder wins. See
+[Account-group defaults by folder tree](configuration.md#account-group-defaults-by-folder-tree).
 `defaultAccountGroup` is the optional machine-wide fallback. Resolution order is
-session override, exact-cwd default, global default, then unrestricted. Unknown,
+session override, exact-cwd default, deepest folder-tree default, global default,
+then unrestricted. The `group` edit actions change these keys from a session;
+see [Editing account groups from a session](configuration.md#editing-account-groups-from-a-session).
+Unknown,
 removed, or unauthenticated members are individually inactive. Other listed usable
 members can serve; an unknown, empty, or wholly unusable group blocks requests
 rather than widening access. Discovery and login remain available.
@@ -95,7 +152,7 @@ Managed routing stays blocked. The error, the direct-provider notice, and
 | --- | --- | --- |
 | `filesystem` | The store file could not be read or written. | Fix the file's permissions or free disk space. The session reads the store again on a request made at least two seconds later, as for `store-busy`. |
 | `store-invalid` | The store's contents, or this session's id, failed validation. | Move `session-account-groups.json` aside, then run `/multi-account reload` in each blocked session. |
-| `policy` | Two `accountGroupCwdDefaults` keys resolve to the same directory but name different groups. | Correct `accountGroupCwdDefaults` in the global config, then run `/multi-account reload`. |
+| `policy` | Two `accountGroupCwdDefaults` keys, or two `accountGroupDirectoryDefaults` keys, resolve to the same directory but name different groups. | Correct `accountGroupCwdDefaults` or `accountGroupDirectoryDefaults` in the global config, then run `/multi-account reload`. |
 | `unknown` | Any other error. | Run `/multi-account reload`. If it fails again, check `/multi-account log` and restart Pi. |
 
 Move `session-account-groups.last-used.json` aside together with the store. Both
@@ -103,7 +160,7 @@ choices are safe: a time file kept without its store loses its entries at the
 next write, and a store without a time file only delays pruning by 14 days.
 
 Moving the store aside discards every session's saved `group use` choice and
-cached group. Sessions fall back to their cwd or global default on their next
+cached group. Sessions fall back to their cwd, folder-tree, or global default on their next
 resolution. A running session's new delegate workers cannot inherit its group
 until that session runs `/multi-account reload` or restarts. If `store-invalid`
 returns with a fresh store, the session id is the cause: a `--session-id` must
@@ -117,8 +174,12 @@ It reads Pi's public catalog and authorization metadata without resolving API ke
 or displaying credential labels. Managed health or disablement can add a routing
 block. Status does not select a model or change group policy. Group membership does
 not give this extension ownership of a custom provider's refresh, usage, cost,
-unified routing, parking, or recovery. Listing `openrouter` leaves the current
-named-group metered block intact.
+unified routing, parking, or recovery. A listed `openrouter` shows `eligible
+(listed; each turn needs an OpenRouter budget reservation)` when its consent,
+model, and cap are complete, or `blocked (OpenRouter off: <reason>)` when they
+are not. A listed member that `automaticRoutingExcludedAccounts` also names
+shows `excluded from automatic routing; this pool overrides the opt-out`,
+because the group's sessions may still route to it.
 In an operator session, status ends with a line saying that automatic routing
 stays inside the group and that a model selected with `/model` from an excluded
 provider still runs as selected. Delegate children do not show it, because they
@@ -126,7 +187,7 @@ stay confined.
 
 At startup and resume, in-process and durable delegate children inherit the parent's
 complete cached effective result. The child's cwd does not replace it. Status keeps
-the original source, such as `cwd default`; it does not add an `inherited` source or
+the original source, such as `cwd default` or `directory default`; it does not add an `inherited` source or
 recompute policy. Missing or invalid parent identity or cache blocks requests.
 After startup, explicit operator `group use` and `group reset` retain the semantics
 in the table: they resolve this session's own policy. A later delegate resume
@@ -211,30 +272,44 @@ The `/multi-account` callback walks a finite grammar. Every suggested `value` is
 the full argument prefix to insert, for example `status --json` or
 `add anthropic 3`, not a bare token.
 
-- With no argument it lists all 19 subcommands in source order: `status`,
+- With no argument it lists all 21 subcommands in source order: `status`,
   `limits`, `models`, `model`, `cost`, `log`, `rediscover`, `add`, `remove`,
   `clear`, `next`, `switch`, `stop`, `reset`, `reload`, `configure`, `enable`,
-  `disable`, `group`.
+  `disable`, `group`, `account`, `nickname`.
 - `status` suggests `--json` and every account ID.
 - `models` suggests `install`, `update`, and every account ID.
 - `model` suggests every selectable unified logical model id, with the same
   labels and bare-id insertion as `/multi-account-model`.
 - `remove`, `clear`, and `switch` suggest every account ID.
-- `group` suggests `use`, `reset`, and `status`; `group use` then suggests every
-  configured group id.
+- `group` suggests `use`, `reset`, `status`, `create`, `delete`, `add`,
+  `remove`, `default`, and `dir`. `group use`, `delete`, `add`, and `remove`
+  then suggest every configured group id, and `group default` adds `none`.
+  After a group, `group add` suggests each account ID the group does not list
+  yet, and `group remove` suggests each listed member. `group create` and the
+  folder of `group dir` are free text; after the folder, `group dir` suggests
+  every group id and `none`, then `--tree`.
+- `account` suggests `exclude` and `include`. `account exclude` then suggests
+  every account ID, and `account include` suggests each currently excluded ID.
+- `nickname` suggests `set` and `clear`, then every supported canonical slot
+  within the configured account limit, including signed-out and opaque accounts.
+  Nickname text after `set <id>` is free text and has no suggestions.
 - `cost` suggests exactly `day`, `week`, `month`, `quarter`, `half-year`, `year`.
 - `log` suggests exactly `1`, `20`, `50`, `100`.
-- `add` suggests `anthropic` then `openai-codex`; after a family it suggests the
-  ascending, current, free, in-range numbered slots for that family.
-- `disable` suggests `anthropic` then `openai-codex`.
+- `add` suggests `anthropic`, `openai-codex`, `google-antigravity`, and `openai`
+  in that order; after a family it suggests the ascending, current, free,
+  in-range numbered slots for that family.
+- `disable` suggests the same four families in that order.
 - `limits`, `rediscover`, `next`, `stop`, `reset`, `reload`, `configure`, and
   `enable` take no argument and suggest nothing.
 
-The account IDs offered are only discovered slots within the current limit that
-also back a live model.
+Direct account arguments for `status`, `models`, `remove`, `clear`, `switch`,
+and `account exclude` use discovered slots within the current limit that also
+back a live model. Nickname completion does not require discovery, credentials,
+or a model catalog. Group membership and `account include` follow the configured
+lists described above.
 
 Add-slot suggestions follow live state. They exclude occupied, spare, and
-out-of-range slots, skip the `openai-codex` family while it is disabled, and
+out-of-range slots, offer no `openai-codex` slots while it is disabled, and
 refresh after `rediscover` or a config change. Selecting a complete prefix such
 as `add anthropic 3` runs that exact slot. A prefix matches a suggestion by
 fuzzy search until it exactly names one; an exact terminal token then closes to

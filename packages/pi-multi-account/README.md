@@ -6,9 +6,9 @@ Concurrent Anthropic, OpenAI Codex, and Google Antigravity OAuth accounts for Pi
 
 ## What it does
 
-When a managed account reaches a limit or loses authorization, `pi-multi-account` waits for Pi's own retries to settle, selects an eligible route, and sends one fixed continuation. It never replays the failed provider request, with one bounded exception: a `unified` logical call that fails before showing any output may move once to another account serving the same model.
+When a managed account reaches a limit or loses authorization, `pi-multi-account` waits for Pi's own retries to settle, selects an eligible route, and sends one fixed continuation. It never replays the failed provider request, with one bounded exception: a `unified` logical call that fails before showing any output may move to other eligible accounts serving the same model, one send per account.
 
-- Registers numbered OAuth account aliases without copying credentials out of Pi's `AuthStorage`.
+- Registers numbered OAuth account aliases without copying credentials out of Pi's `AuthStorage`. Operator status shows detected Anthropic email when available; `nickname set|clear` supplies manual recognition for any managed slot.
 - Routes within a provider family first, then through explicit owning-vendor or cross-family policy.
 - Adds an optional `unified` logical provider for exact model selection across eligible accounts.
 - Retains bounded, sanitized usage, cost, and diagnostic records.
@@ -28,7 +28,7 @@ Pi extensions run with your user permissions. Review the source before installat
 pi install npm:@centerforagenticai/pi-multi-account
 ```
 
-Restart Pi or run `/reload`, then authenticate each managed slot through Pi's `/login` flow. Run `/multi-account rediscover` after adding or changing credentials. The package requires Node.js `>=22.19` and Pi `>=0.86.0`, and is developed and verified against Pi `1.3.0`.
+Restart Pi or run `/reload`, then authenticate each managed slot through Pi's `/login` flow. Run `/multi-account rediscover` after adding or changing credentials. The package requires Node.js `>=22.19` and Pi `>=0.86.0`, and is developed and verified against Pi `1.4.0`.
 
 The package bundles reviewed Anthropic OAuth and Google Antigravity source under their original MIT licenses. It does not fetch the private fork package names at installation time. See [Accounts and provider integration](docs/accounts.md).
 
@@ -44,12 +44,24 @@ The package bundles reviewed Anthropic OAuth and Google Antigravity source under
 | CLI | `multi-account` | Offline cost reports, pricing refresh, period closure, and account plan history. |
 | Export | exact-model route resolver v1 | Read-only, credential-free route policy for code consumers. |
 | Export | `./public-status` v1 | Read-only live account status for other extensions over `pi.events`. |
+| Events | credential channels | `pi-multi-account:credential-changed` and `pi-multi-account:credential-refresh-due` on `pi.events`, for login sync such as pi-profile. |
 
 Every subcommand and argument is in [Commands, tools, and autocomplete](docs/commands.md). The resolver contract is in [Routing and recovery](docs/routing.md).
 
 ### Public account status subpath
 
 Import `@centerforagenticai/pi-multi-account/public-status` and call `discoverPublicAccountStatusReader(pi.events)`. Use the package name your installation resolves: the package is installed under its published name. The subpath is a plain JavaScript module with no imports, so plain Node can load it and it never loads the extension or Pi. The v1 contract uses the query channel `pi-multi-account:public-status-service-query:v1` and returns a `public-status-v1` snapshot, or `owner-unavailable` until `session_start` finishes and after `session_shutdown`, and `source-error` when the owner fails. Version 1 covers only Anthropic and OpenAI Codex accounts; Google Antigravity accounts are omitted. Each account's `label` is the label you configured in `accountLabels`, or else the provider id. It is never read from a token. The read itself writes nothing, but the first read of a new UTC day schedules the once-a-day cost period closer, which can refresh OpenRouter pricing over the network and append day digests. See [Commands, tools, and autocomplete](docs/commands.md#public-live-account-status-public-status).
+
+### Credential events
+
+The extension also publishes two events on `pi.events` so another extension, such as pi-profile, can copy a changed login to the operator's other machines:
+
+| Channel | Payload | When |
+| --- | --- | --- |
+| `pi-multi-account:credential-refresh-due` | `{ provider }` | Just before this extension starts a refresh: the forced refresh after an explicit 401, or a near-expiry warmer, usage or preflight resolve that Pi will refresh. A listener can pull a newer login from its peers first. |
+| `pi-multi-account:credential-changed` | `{ provider, kind }` | `kind` is `refresh` after a refresh wrote a different credential, `login` after the credential a login into a slot this extension registers returned was found in the store, and `invalidated` when an account becomes invalidated after a terminal auth failure. |
+
+`provider` is the Pi auth provider key, such as `anthropic-account-2` or `openai-codex`, and matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. A payload never carries a token, expiry, account id, label, path, or error text. A refresh that changed nothing, because another process had already refreshed, emits no `credential-changed`. A login into a host base provider (`anthropic`, `openai-codex`) is not announced, because the extension does not wrap host providers; a listener should also watch `auth.json` for changes made outside this extension. Without an event bus nothing is published, and a bus that throws never affects a refresh, login, or request.
 
 ## Configuration
 
@@ -67,7 +79,8 @@ When `PI_CODING_AGENT_DIR` is unset, the root is `~/.pi/agent`. Missing configur
 | `sameFamilyFailover` | `true` | Permit another eligible account in the same family. |
 | `crossFamilyChainEnabled` | `false` | Enable only the directional transitions in `crossFamilyChains`. |
 | `preferredModels` / `tierModelMap` | `{}` | Resolve explicit cross-family and cross-tier model identity. |
-| `accountGroups` and defaults | `{}` | Restrict a session, exact cwd, or global fallback to named account allow-lists. |
+| `accountGroups` and defaults | `{}` | Restrict a session, exact cwd, folder tree, or global fallback to named account allow-lists. Edit them with the `/multi-account group` actions; see [Editing account groups from a session](docs/configuration.md#editing-account-groups-from-a-session). |
+| `automaticRoutingExcludedAccounts` | absent | Managed accounts that automatic routing skips. Set it with `/multi-account account exclude` and `include`; remove it before downgrading. |
 | `usageFetchEnabled` | all managed families `true` | Enable fail-soft provider usage fetches. |
 | `imageStripping` | off | Stopgap: replace images older than the newest `keepNewest` image-bearing messages in `unified` and Anthropic alias requests. See [Removing old images](docs/configuration.md#removing-old-images-stopgap). |
 
@@ -87,8 +100,11 @@ When a group prevents `unified` selection, the turn error names the group, its
 original source, and a bounded cause. It reports outside-group availability
 without naming excluded accounts. This guidance does not authorize a send or
 prove that request credentials have resolved.
-Listing `openrouter` does not enable it: the current named-group metered block
-remains in force.
+A group may list `openrouter`. Its sessions, including delegate children, may
+then select an OpenRouter model, but each turn still needs exact consent, a
+model, credentials, known pricing, and a reservation within the daily cap. A
+group that lists an account excluded from automatic routing may still route to
+it. See [Configuration reference](docs/configuration.md#account-group-members).
 
 The full schema, defaults, examples, timing controls, labels, and rate-history fields are in [Configuration reference](docs/configuration.md).
 
@@ -96,7 +112,7 @@ The full schema, defaults, examples, timing controls, labels, and rate-history f
 
 The extension discovers accounts and registers aliases at `session_start`. It checks account-group and OpenRouter safety before a run, tracks model selection and provider responses, repairs failed assistant history at `message_end`, and releases resources at `session_shutdown`.
 
-Reactive routing starts only at `agent_settled`, after Pi's provider retry and compaction loop. A classified provider failure can schedule one fixed `deliverAs: "followUp"` continuation. It does not replay the prompt, provider request, or uncertain tool work. A `unified` call is different: it recovers inside the call, before any output, with at most two physical sends, and never continues after settlement. `recoveryStallTimeoutMs` bounds the wait for a physical attempt's response to start. More detail is in [Routing and recovery](docs/routing.md#in-call-recovery).
+Reactive routing starts only at `agent_settled`, after Pi's provider retry and compaction loop. A classified provider failure can schedule one fixed `deliverAs: "followUp"` continuation. It does not replay the prompt, provider request, or uncertain tool work. A `unified` call is different: it recovers inside the call, before any output, rolling over to each other eligible account at most once, with at most `recoveryMaxAttempts` physical sends (default six), and never continues after settlement. `recoveryStallTimeoutMs` bounds the wait for a physical attempt's response to start. More detail is in [Routing and recovery](docs/routing.md#in-call-recovery).
 
 ## Develop
 

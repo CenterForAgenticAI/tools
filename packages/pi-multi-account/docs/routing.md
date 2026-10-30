@@ -48,6 +48,41 @@ runs at `agent_settled`, after Pi's retry and compaction loop has finished. A
 visible pause before failover is normally Pi's backoff, not an extra retry made
 by this extension.
 
+## Excluding accounts from automatic routing
+
+An account listed in `automaticRoutingExcludedAccounts` stays signed in, but
+the extension never chooses it automatically. These paths all skip it:
+
+- `unified` dispatch and its in-call recovery;
+- same-family and cross-family failover after a classified failure;
+- the upcoming-request preflight that replaces the active account;
+- parked recovery;
+- the exact-model route resolver that delegates use;
+- the `next` suggestion;
+- the OpenRouter last-resort check, where an excluded account does not count
+  as an available managed route.
+
+Direct use is still allowed. `/multi-account switch <account-id>` and picking
+the provider with `/model` run the request on the excluded account. When that
+request fails, failover goes only to accounts that are not excluded. Cooldowns
+still reach excluded accounts: when an account fails, a twin slot that shares
+its identity is cooled with it even when that twin is excluded.
+
+When every managed account that serves a `unified` model is excluded, the call
+fails before any send. Its reason says that every managed account serving the
+model is excluded from automatic routing. It never falls back to an excluded
+account. OpenRouter still runs only when its own policy allows.
+
+Excluding a base provider such as `openai-codex` only filters it. The
+extension never registers or changes the base provider. An account group still
+applies on top: an account must be in the active group. An excluded account
+that the active group lists stays a candidate for that group's sessions, because
+listing it is the operator's explicit choice for that group. Every path above
+then treats it as not excluded. Sessions under another group or no group still
+skip it.
+See [Configuration reference](configuration.md#excluding-accounts-from-automatic-routing)
+for the setting and its commands.
+
 ## Startup default model
 
 Pi resolves the saved default model (`defaultProvider` and `defaultModel` in
@@ -84,8 +119,10 @@ In an operator session, a model selected with `/model`, or restored from an
 earlier session, from a known provider outside the group runs as selected. No
 notice is shown. A turn that fails on that provider is not routed to another
 account, because automatic routing stays inside the group. `/multi-account group
-status` says so in its last line. A listed member that is unavailable, a virtual
-model, and a direct OpenRouter selection stay blocked.
+status` says so in its last line. A listed member that is unavailable and a
+virtual model stay blocked. OpenRouter follows its own rule: it runs only when
+the active group lists it, as described in
+[OpenRouter in an account group](#openrouter-in-an-account-group).
 
 A delegate child keeps its inherited confinement, because its dispatcher chose
 its model. An in-process worker, a durable child (`PI_DELEGATE_CHILD`), a child
@@ -119,9 +156,10 @@ account in the group can serve the origin now, the input is refused as above.
 
 In a delegate child, a custom-message run that bypasses the `input` event is
 aborted at `agent_start`. In an operator session it dispatches unchanged. A
-selected virtual model, a selected OpenRouter model, and an invalid policy
-configuration stay blocked in every session and keep their own notices. In-group
-selections and `unified/<id>` are not affected.
+selected virtual model, an OpenRouter model under a group that does not list
+`openrouter`, and an invalid policy configuration stay blocked in every session
+and keep their own notices. In-group selections and `unified/<id>` are not
+affected.
 
 Pi print mode (`pi -p` and `--mode json`) binds no extension UI, so Pi discards
 the notice and the refused prompt ends without an assistant message. The
@@ -180,7 +218,8 @@ While a `unified` model is selected, Pi renders `(unified)` in its model line an
 shows one compact, right-aligned below-editor route widget under model/thinking status.
 It starts at `unified(waiting)`, then shows the exact physical account serving an
 attempt and its live usage, such as `unified(anthropic-account-2 · 75% left)`.
-A configured account label appears last inside the parentheses. An in-call
+A configured account label follows the usage text; only a session account move
+note (see Session affinity) comes after it. An in-call
 recovery send replaces the account with the new exact route. Selecting any physical or unrelated provider
 removes the widget.
 
@@ -188,10 +227,86 @@ The indicator uses the same machine-shared quota observations as the status view
 Fresh utilization leads; fresh request or token counts are used only when utilization
 is absent. Old quota is shown as `usage stale`, and an account with no quota
 observation is `usage unknown`; stale values never appear as current headroom. An
-optional account label is read from live config on every render and appears last.
-Updates are event-driven by model selection, route attempts, usage observations, and
-terminal settlement. The indicator creates no timer, polling loop, retained record,
+optional account label is read from live config on every render and follows the
+usage text. A session account move note, described under Session affinity,
+appears last.
+Updates are event-driven by model selection, route attempts, usage observations,
+session account moves, and terminal settlement. The indicator creates no timer, polling loop, retained record,
 or diagnostic state.
+
+### Session affinity
+
+Each account move costs a session a full prompt-cache rebuild, so a `unified`
+session keeps the account that last served it. For each session and logical
+model, the extension remembers the provider id of the account that served the
+last successful call. After an in-call recovery, that is the account that
+actually answered. The session is identified by the `sessionId` Pi passes with
+each request; a request without one uses the plain route order.
+
+- Selection prefers the remembered account while it is eligible. A new usage
+  reading, an added or reordered account, or another session's routing does not
+  move a healthy session.
+- The session moves only when the remembered account becomes ineligible
+  (cooling down, exhausted, cleared, disabled, or outside the session's account
+  group) or a call fails on it. It does not move back when the old account
+  recovers.
+- Eligibility, account groups, cooldowns, `clear`, and `disable` stay
+  authoritative. Affinity only reorders accounts that are already eligible, and
+  only within the best eligible tier: a session served by a metered API account
+  returns to a subscription account as soon as one is eligible again.
+- An aborted call, a structured refusal, and an unknown stop change nothing.
+- In-call recovery is unchanged: each account gets at most one send, and the
+  failed or cooling account is never revisited.
+- The memory lives in the Pi process and is never persisted. It holds provider
+  ids only, at most 16 logical models for each of at most 64 sessions, and
+  evicts the least recently served first. A restart or `/reload` starts empty.
+
+When a session moves, the extension records the info diagnostic
+`logical.session-account-change`. Its fields are `modelId`, `fromProviderId`,
+`toProviderId`, and `reason`: `recovered` (in-call recovery served the call
+elsewhere), `failed` (an earlier call failed on the old account), `ineligible`,
+or `tier` (a subscription account is eligible again). Session ids never appear in
+diagnostics or logs.
+
+The route footer also shows the move: `from <provider>` is added last, after the
+usage text and any label, as in
+`unified(anthropic-account-2 · 75% left · from anthropic)`. The note holds a
+provider id only, bounded like a label (printable ASCII, at most 64 characters);
+an id that is not display-safe shows no note. The next move replaces the note,
+and the next model selection, a new session, or shutdown clears it.
+
+### Cache warming
+
+Pi's cache warmer can keep a session's prompt cache alive between turns. Shortly
+before the cache expires, it sends the session's last request again with a
+one-token output cap and no retries (Pi's `cacheWarming` setting). Unified rows
+carry the catalog row's `promptCache` lifetimes, so the warmer runs on them.
+
+Anthropic reasoning rows without forced adaptive thinking are the exception. They
+use budget thinking, which both Anthropic streams send only when the output cap
+is above one token, so a one-token replay would miss the cache and write a new
+one. These rows carry no `promptCache`, and the warmer stays off for them. The
+Anthropic alias rows follow the same rule.
+
+- The extension treats a call as a warm replay when it sends the same message
+  array as an earlier real call, with `maxTokens: 1` and `maxRetries: 0`. A new
+  request with those two values is an ordinary call.
+- A replay goes only to the account that served the session's last successful
+  call for that logical model, and only while a real call would still choose
+  that account. With no remembered account, or when that account is cooling
+  down, exhausted, cleared, disabled, outside the session's account group, or
+  displaced by an eligible subscription account, the replay is skipped. Nothing
+  is sent, and the warmer does not count the cache as warm. Warming any other
+  account would write a cache that no later call reads.
+- A replay that asks for thinking on an Anthropic budget-thinking row is also
+  skipped, in case such a row reaches the warmer with a cache lifetime.
+- A replay is one physical send. It never fails over and never uses in-call
+  recovery. It changes no account or session state: no cooldown, no session
+  affinity, no route footer, and no `logical.failure` diagnostic. A failed
+  replay does not cool the account; the next real call tests it.
+- Pi records a successful replay's usage in the session as `cache_warm`. The
+  extension keeps no usage or cost record of a replay, so retained usage and
+  cost history leave replays out and nothing is counted twice.
 
 ### In-call recovery
 
@@ -199,31 +314,40 @@ A `unified` call recovers an account failure inside the same logical call,
 through the recovery engine, instead of through host retry or a settled
 continuation. The rules are fixed:
 
-- At most two physical provider sends per logical call. The first send uses the
-  exact selected account and model. The one recovery action changes the account
-  only, to another eligible account of the same vendor that serves the same
-  model. It never changes the model. With `sameFamilyFailover: false` there is
-  no recovery action: every `unified` call is one attempt. The setting is read
-  per call, so `/multi-account reload` applies to the next call.
+- Account rollover: the first send uses the exact selected account and model.
+  Each recovery send changes the account only, to another eligible account of
+  the same vendor that serves the same model, in route order. It never changes
+  the model, and each account gets at most one send per call. The call stops
+  after `recoveryMaxAttempts` physical sends (default six, which is also the
+  hard limit). With `sameFamilyFailover: false` there is no recovery action:
+  every `unified` call is one attempt. Both settings are read per call, so
+  `/multi-account reload` applies to the next call.
+- An account listed in `automaticRoutingExcludedAccounts` is never a recovery
+  target. The live account list is read again before every recovery send, so an
+  exclusion committed during the call still stops it.
 - Every physical send carries `maxRetries: 0`, so a provider SDK adds no sends of
   its own.
-- Output means assistant content: a text, thinking, or tool-call event. The
-  provider's `start` event is not output. pi-ai sends it as soon as the response
-  headers arrive, before any content, so each attempt's leading `start` is held:
-  it is not published and does not count as progress. A failure after a held
-  `start` but before content is a failure before any output, and the failed
-  attempt's `start` is never published; after a recovery send the consumer sees
-  only the second attempt's `start` and events. A successful terminal with no
-  content is published as its held `start` and then the terminal.
-- Output streams live. The first content event hands the attempt to the
-  consumer, preceded by that attempt's one held `start`, and nothing after it is
-  ever sent again: a later failure ends the call with the bounded text `Unified
-  recovery stopped after its bounded provider attempt.`, which the host does not
-  retry.
+- Output means assistant text or a tool call. The provider's `start` event is
+  not output. pi-ai sends it as soon as the response headers arrive, before any
+  content, so each attempt's leading `start` is held: it is not published and
+  does not count as progress. Thinking is not output either. Thinking events
+  that arrive before the first text or tool call are held too; each one
+  restarts the idle wait, but none is published yet. A failure after a held `start` or held thinking is a failure
+  before any output, and the failed attempt's held events are never published;
+  after a recovery send the consumer sees only the serving attempt's `start` and
+  events. A successful terminal with no text or tool call is published as its
+  held `start`, its held thinking, and then the terminal.
+- Output streams live. The first text or tool-call event hands the attempt to
+  the consumer, preceded by that attempt's one held `start` and its held
+  thinking, in order, and nothing after it is ever sent again: a later failure
+  ends the call with the bounded text `Unified recovery stopped after its
+  bounded provider attempt.`, which the host does not retry.
 - Recoverable before any output: an account-local rate limit or quota, an
   account-local authentication failure, and a pre-start transient (a network or
   transport failure, a 5xx, a retryable setup failure, or a stall before the
-  provider's `start`). The failed account is cooled
+  provider's `start`). Any other failure after thinking alone is also
+  recoverable, except a structured refusal, an unknown stop, or a context
+  overflow. The failed account is cooled
   exactly as before. A caller abort while a `start` is held aborts the live send
   and ends the call with no recovery send.
 - A structured refusal or unknown stop is an outcome, not a failure. It is sent
@@ -245,7 +369,7 @@ continuation. The rules are fixed:
   physical attempt's `start`, opening included. After `start` the provider has
   answered and a model may think silently for minutes, so later waits are not
   stalls: `recoveryIdleTimeoutMs` bounds the wait for the first content and
-  `recoveryAbsoluteTimeoutMs` bounds the whole call.
+  `recoveryAbsoluteTimeoutMs` bounds the whole call, every rollover send included.
 - Anthropic attempts also report connection activity, keep-alive pings
   included. Each report restarts the idle wait, so a model thinking silently
   is never cut off while its connection is alive. Once an attempt has reported
@@ -414,7 +538,8 @@ only that provider may be returned.
 A resolved result has `reason: "eligible-routes"` and an immutable ordered
 `routes` array. Each route contains only
 `{ providerId, modelId, family }`. An affinity preference can reorder eligible
-routes but cannot admit one. Exclusions, disabled or cleared accounts,
+routes but cannot admit one. Exclusions, including accounts listed in
+`automaticRoutingExcludedAccounts`, disabled or cleared accounts,
 cooldowns, invalidation, exhaustion, dead credentials, duplicate or malformed
 accounts, unsupported model observations, and missing catalog membership are
 filtered before serialization. Unresolved reasons are closed:
@@ -451,7 +576,7 @@ and await `session_shutdown`, before disposing directly.
 ## Optional OpenRouter last resort
 
 OpenRouter requires credentials available to Pi plus three extension policy
-variables in the non-delegate Pi session. Authenticate with Pi's OpenRouter
+variables in the Pi session. Authenticate with Pi's OpenRouter
 OAuth `/login` flow or provide `OPENROUTER_API_KEY`. For example:
 
 ```sh
@@ -490,7 +615,35 @@ OpenRouter is never sticky. Before another metered reservation, the extension
 checks managed accounts again. Any available subscription account still blocks
 OpenRouter as before. An owning-vendor API account blocks it only when that
 account can resolve and serve the turn's original model. Delegate environments
-identified by `PI_DELEGATE_LINEAGE_*` cannot use this rung.
+identified by `PI_DELEGATE_LINEAGE_*`, and trusted in-process delegates, cannot
+use this rung.
+
+### OpenRouter in an account group
+
+Under an active account group, OpenRouter is available only when the group lists
+`openrouter`. Listing it is necessary but never sufficient.
+
+An explicit `openrouter/<model>` selection in such a group needs exact
+`conversation-egress` consent, a concrete `PI_MULTI_ACCOUNT_OPENROUTER_MODEL`, a
+positive daily cap, credentials, and known pricing for the selected model. Before
+each turn the extension reserves that model's worst-case cost from the same
+per-project daily budget. Delegate and Fabric children in the group may make this
+selection, because the dispatcher chose the model; delegate lineage does not veto
+it, and the child's spend counts against the same cap. A failed check refuses
+the turn before dispatch with `Multi-account refused this OpenRouter turn:
+<reason>. Run /multi-account status for details.` The reason names the missing
+setting, unknown pricing, an exhausted budget, or unavailable budget state, and
+the warning diagnostic `routing.openrouter-pooled-<reason>` records it. A
+custom-message run that bypasses the `input` event has no reservation, so it is
+aborted at `agent_start`.
+
+The automatic last resort may run in a group that lists `openrouter`, with every
+rule above, including the delegate exclusion. A group that does not list
+`openrouter` blocks both paths in every session, even with consent and a cap.
+`group status` shows a listed `openrouter` as `eligible (listed; each turn needs
+an OpenRouter budget reservation)` when its policy is complete, or as `blocked
+(OpenRouter off: <reason>)` when it is not. Sessions without a group keep the
+unrestricted behavior described above.
 
 ## Known boundaries
 
@@ -511,8 +664,9 @@ identified by `PI_DELEGATE_LINEAGE_*` cannot use this rung.
   numbered alias models yet fail to resolve their alias credentials. Use a base
   provider for delegated work until the upstream runtime fix is deployed and
   verified.
-- OpenRouter is a non-delegate-session escape hatch, not a delegate fallback and
-  not a replacement for managed OAuth accounts.
+- The automatic OpenRouter rung is a non-delegate-session escape hatch, not a
+  delegate fallback and not a replacement for managed OAuth accounts. A delegate
+  reaches OpenRouter only by an explicit selection in a group that lists it.
 - Cross-family subscription model IDs are not portable. Configure
   `preferredModels` for every enabled subscription destination family or accept
   its catalog head. Owning-vendor API and OpenRouter routes instead use
@@ -527,8 +681,8 @@ identified by `PI_DELEGATE_LINEAGE_*` cannot use this rung.
   candidates, and three endpoint fallbacks. Recovery therefore reserves an
   unknown count for Antigravity, never uses an Antigravity candidate for the
   recovery send, and stops with `uncertain-external-effects` after a failed
-  initial Antigravity attempt. The at-most-two-sends guarantee does not hold for
-  Antigravity calls; only the two-invocation bound does.
+  initial Antigravity attempt. A call with an Antigravity attempt therefore
+  makes one invocation, whose inner send count is unknown.
 - Automated verification never performs a real Google sign-in. Exercising a
   live `google-antigravity` account end to end is an operator action performed
   after `integration:verify` passes, the same deferred pattern already used for

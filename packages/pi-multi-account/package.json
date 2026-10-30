@@ -1,5 +1,5 @@
 {
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Global Anthropic and OpenAI Codex multi-account OAuth routing for Pi.",
   "type": "module",
   "bin": {
@@ -39,7 +39,9 @@
     "upstream:update": "node scripts/upstream-update.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.public-status.json --noEmit",
     "build": "node scripts/build.mjs",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "hooks:install": "sh scripts/install-git-hooks.sh",
+    "test:hooks": "node scripts/with-temp-root.mjs sh scripts/test-autobuild-hooks.sh"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -65,16 +67,16 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",
-    "undici": "^8.10.0"
+    "undici": "^8.12.2"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^1.3.0",
-    "@earendil-works/pi-coding-agent": "^1.3.0",
-    "@earendil-works/pi-tui": "^1.3.0",
+    "@earendil-works/pi-ai": "^1.4.0",
+    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "@earendil-works/pi-tui": "^1.4.0",
     "@types/node": "^24.0.0",
-    "typebox": "1.3.37",
+    "typebox": "1.4.3",
     "typescript": "^5.9.0",
-    "vitest": "^4.1.11",
+    "vitest": "^4.1.12",
     "esbuild": "0.28.2"
   },
   "peerDependencies": {
@@ -84,6 +86,7 @@
     "typebox": "*"
   },
   "overrides": {
+    "vite": "8.1.6",
     "@earendil-works/pi-coding-agent": {
       "undici": "$undici"
     }

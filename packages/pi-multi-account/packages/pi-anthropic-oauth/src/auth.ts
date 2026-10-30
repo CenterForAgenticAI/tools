@@ -5,6 +5,7 @@ import type {
   OAuthLoginCallbacks,
 } from "@earendil-works/pi-ai";
 import { makeClaudeCodeUserAgent } from "./version.js";
+import { ANTHROPIC_ACCOUNT_EMAIL, identityDataField, normalizeAnthropicEmail, readAnthropicAccountEmail } from "./account-identity.js";
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
@@ -70,7 +71,22 @@ type TokenResponse = {
   access_token: string;
   refresh_token: string;
   expires_in: number;
+  account?: unknown;
 };
+
+function tokenAccountEmail(data: TokenResponse): string | undefined {
+  return normalizeAnthropicEmail(identityDataField(data.account, "email_address"));
+}
+
+function projectStoredCredential(credentials: OAuthCredentials): OAuthCredentials {
+  const email = readAnthropicAccountEmail(credentials);
+  return {
+    access: credentials.access,
+    refresh: credentials.refresh,
+    expires: credentials.expires,
+    ...(email === undefined ? {} : { [ANTHROPIC_ACCOUNT_EMAIL]: email }),
+  };
+}
 
 // A JSON parse error quotes the start of the body, so it is replaced as well.
 async function readTokenResponse(
@@ -221,7 +237,7 @@ export async function loginAnthropic(
           redirect_uri: exchangeRedirectUri,
           code_verifier: verifier,
         }),
-        signal: callbacks.signal,
+        ...(callbacks.signal === undefined ? {} : { signal: callbacks.signal }),
       },
       "Token exchange",
     );
@@ -232,8 +248,10 @@ export async function loginAnthropic(
   }
 
   const data = await readTokenResponse(tokenResponse, "Token exchange");
+  const email = tokenAccountEmail(data);
 
   return {
+    ...(email === undefined ? {} : { [ANTHROPIC_ACCOUNT_EMAIL]: email }),
     access: data.access_token,
     refresh: data.refresh_token,
     expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
@@ -253,7 +271,7 @@ export async function refreshAnthropicToken(
     if (until <= now) transientRefreshCooldowns.delete(key);
   }
   if (credentials.expires > now && transientRefreshCooldowns.has(fingerprint)) {
-    return { ...credentials };
+    return projectStoredCredential(credentials);
   }
 
   let response: Response;
@@ -277,7 +295,7 @@ export async function refreshAnthropicToken(
         fingerprint,
         Date.now() + TRANSIENT_REFRESH_COOLDOWN_MS,
       );
-      return { ...credentials };
+      return projectStoredCredential(credentials);
     }
     transientRefreshCooldowns.delete(fingerprint);
     throw new Error(`Token refresh failed: ${describeTokenFailure(error)}`);
@@ -285,8 +303,11 @@ export async function refreshAnthropicToken(
 
   transientRefreshCooldowns.delete(fingerprint);
   const data = await readTokenResponse(response, "Token refresh");
+  // Pi replaces credentials, so omission must retain only validated metadata.
+  const email = tokenAccountEmail(data) ?? readAnthropicAccountEmail(credentials);
 
   return {
+    ...(email === undefined ? {} : { [ANTHROPIC_ACCOUNT_EMAIL]: email }),
     access: data.access_token,
     refresh: data.refresh_token || credentials.refresh,
     expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,

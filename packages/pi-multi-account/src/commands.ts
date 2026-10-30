@@ -14,6 +14,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { normalizeAccountNickname } from "./account-labels.js";
 import type { AccountGroupMemberAvailability } from "./account-group-members.js";
 import { acquireMachineLease } from "./machine-lease.js";
 import {
@@ -41,6 +42,7 @@ import {
 	ALLOWED_CROSS_FAMILY_PAIRS,
 	ALLOWED_FAMILIES,
 	isAllowedFamily,
+	isCanonicalManagedAccountId,
 	isManagedFamily,
 	normalizeCrossFamilyChains,
 	routingProjection,
@@ -54,8 +56,17 @@ import {
 	resolveCodexLongContextDefaults,
 } from "./codex-model-defaults.js";
 import {
+	ACCOUNT_GROUP_NONE,
+	type AccountGroupConfigEdit,
+	type AccountGroupEditRefusal,
+	type AccountGroupReference,
+	resolveAccountGroupDirectoryPath,
+} from "./account-group-config-edits.js";
+import {
 	COMMIT_WARNING_GUIDANCE,
+	CONFIG_EDIT_WARNING_GUIDANCE,
 	NON_ROUTING_DRIFT_GUIDANCE,
+	type ConfigEditCommitResult,
 	type RoutingConfigCommitResult,
 } from "./routing-config-transaction.js";
 import type { ContinuationController } from "./continuation.js";
@@ -103,6 +114,8 @@ export const MULTI_ACCOUNT_SUBCOMMANDS = Object.freeze([
 	"enable",
 	"disable",
 	"group",
+	"account",
+	"nickname",
 ] as const);
 
 export type MultiAccountSubcommand = (typeof MULTI_ACCOUNT_SUBCOMMANDS)[number];
@@ -132,7 +145,10 @@ export const COMMAND_USAGE: Readonly<Record<MultiAccountSubcommand, string>> =
 		configure: "configure",
 		enable: "enable",
 		disable: "disable <anthropic|openai-codex|google-antigravity|openai>",
-		group: "group <use <id>|reset|status>",
+		group:
+			"group <use <id>|reset|status|create <id>|delete <id>|add <id> <account>|remove <id> <account>|default <id|none>|dir <path> <id|none> [--tree]>",
+		account: "account <exclude|include> <id>",
+		nickname: "nickname <set <id> <text>|clear <id>>",
 	});
 
 const COMMAND_ARITY: Readonly<
@@ -156,7 +172,9 @@ const COMMAND_ARITY: Readonly<
 	configure: [0, 0],
 	enable: [0, 0],
 	disable: [1, 1],
-	group: [1, 2],
+	group: [1, 4],
+	account: [2, 2],
+	nickname: [2, 64],
 });
 
 function assertCommandArity(
@@ -169,15 +187,136 @@ function assertCommandArity(
 	}
 }
 
+/** Argument count after the action word, inclusive bounds, in usage-line order. */
+const GROUP_ACTION_ARITY = Object.freeze({
+	use: [1, 1],
+	reset: [0, 0],
+	status: [0, 0],
+	create: [1, 1],
+	delete: [1, 1],
+	add: [2, 2],
+	remove: [2, 2],
+	default: [1, 1],
+	dir: [2, 3],
+} as const);
+
+type GroupAction = keyof typeof GROUP_ACTION_ARITY;
+
+/** The `group` actions in usage-line order; completion offers this list. */
+export const MULTI_ACCOUNT_GROUP_ACTIONS: readonly GroupAction[] = Object.freeze(
+	Object.keys(GROUP_ACTION_ARITY) as GroupAction[],
+);
+
 function assertGroupCommand(
 	action: string | undefined,
-	groupId: string | undefined,
-): asserts action is "use" | "reset" | "status" {
+	args: readonly string[],
+): asserts action is GroupAction {
+	const arity =
+		action !== undefined && Object.hasOwn(GROUP_ACTION_ARITY, action)
+			? GROUP_ACTION_ARITY[action as GroupAction]
+			: undefined;
 	const valid =
-		(action === "use" && groupId !== undefined) ||
-		((action === "reset" || action === "status") && groupId === undefined);
+		arity !== undefined &&
+		args.length >= arity[0] &&
+		args.length <= arity[1] &&
+		(action !== "dir" || args.length === 2 || args[2] === "--tree");
 	if (!valid) {
 		throw new TypeError(`Usage: /multi-account ${COMMAND_USAGE.group}`);
+	}
+}
+
+const ACCOUNT_GROUP_REFUSAL_TEXT: Readonly<
+	Record<Exclude<AccountGroupEditRefusal, "group-referenced">, string>
+> = Object.freeze({
+	"unknown-group": "Refused: that account group is not configured. Nothing was changed.",
+	"invalid-group-id":
+		"Refused: a group id is 1-64 letters, digits, dots, underscores, or hyphens, starting with a letter or digit. Nothing was changed.",
+	"reserved-group-id": "Refused: none is reserved for clearing a default or a folder rule. Nothing was changed.",
+	"invalid-member":
+		"Refused: that is not a safe provider reference, or it names a managed account slot that is not canonical or is beyond accountLimit. Nothing was changed.",
+	"invalid-path":
+		"Refused: that folder must resolve to an absolute path without a NUL byte; use an absolute path, ~/..., or a path relative to this session. Nothing was changed.",
+});
+
+function accountGroupRefusalText(refusal: AccountGroupEditRefusal): string {
+	return refusal === "group-referenced"
+		? "Refused: a rule still uses that account group. Nothing was changed."
+		: ACCOUNT_GROUP_REFUSAL_TEXT[refusal];
+}
+
+function renderGroupReferencedRefusal(
+	edit: AccountGroupConfigEdit,
+	references: readonly AccountGroupReference[],
+): string {
+	const lines = [
+		`Refused: account group ${"groupId" in edit ? edit.groupId : ""} is still used by:`,
+	];
+	for (const reference of references) {
+		if (reference.kind === "global-default") lines.push("- the global default");
+		else if (reference.kind === "directory") lines.push(`- the folder rule for ${reference.path}`);
+		else lines.push(`- the folder-tree rule for ${reference.path}`);
+	}
+	lines.push(
+		"Change those with /multi-account group default and group dir first. Nothing was changed.",
+	);
+	return lines.join("\n");
+}
+
+function accountGroupUnchangedText(edit: AccountGroupConfigEdit): string {
+	switch (edit.kind) {
+		case "create":
+			return `Account group ${edit.groupId} already exists.`;
+		case "delete":
+			return "That account group does not exist.";
+		case "add":
+			return `${edit.member} is already in account group ${edit.groupId}.`;
+		case "remove":
+			return `That account is not in account group ${edit.groupId}.`;
+		case "default":
+			return edit.groupId === undefined
+				? "No global default account group is set."
+				: `The global default account group is already ${edit.groupId}.`;
+		case "dir":
+			return edit.groupId === undefined
+				? `No ${edit.tree ? "folder-tree" : "folder"} rule exists for ${edit.path}.`
+				: `The ${edit.tree ? "folder-tree" : "folder"} rule for ${edit.path} already names ${edit.groupId}.`;
+	}
+}
+
+function accountGroupAppliedText(
+	edit: AccountGroupConfigEdit,
+	replacedGroupIds: readonly string[],
+): string {
+	switch (edit.kind) {
+		case "create":
+			return `Created account group ${edit.groupId} with no members.`;
+		case "delete":
+			return `Deleted account group ${edit.groupId}.`;
+		case "add":
+			return `Added ${edit.member} to account group ${edit.groupId}.`;
+		case "remove":
+			return `Removed ${edit.member} from account group ${edit.groupId}.`;
+		case "default":
+			return edit.groupId === undefined
+				? "Cleared the global default account group."
+				: `Set the global default account group to ${edit.groupId}.`;
+		case "dir": {
+			const kind = edit.tree ? "folder-tree" : "folder";
+			const replaced =
+				replacedGroupIds.length === 0 ? "" : ` It replaced the rule for ${replacedGroupIds.join(", ")}.`;
+			return edit.groupId === undefined
+				? `Removed the ${kind} rule for ${edit.path}.${replaced}`
+				: `${edit.path} now uses account group ${edit.groupId} as a ${kind} rule.${replaced}`;
+		}
+	}
+}
+
+function assertAccountCommand(
+	action: string | undefined,
+	providerId: string | undefined,
+): asserts action is "exclude" | "include" {
+	if ((action !== "exclude" && action !== "include") || providerId === undefined) {
+		throw new TypeError(`Usage: /multi-account ${COMMAND_USAGE.account}`);
 	}
 }
 
@@ -297,6 +436,10 @@ export function declarationNoticeMessage(notice: DeclarationNotice): string {
 export interface AccountGroupCommandMemberStatus extends Pick<AccountGroupMemberAvailability, "providerId" | "eligible"> {
 	/** Membership availability or an additional managed-routing/metered block. */
 	readonly reason: string;
+	/** Set when config `automaticRoutingExcludedAccounts` lists this member. */
+	readonly automaticRoutingExcluded?: true;
+	/** Set when the active pool lists an excluded member, so the pool may use it. */
+	readonly automaticRoutingExclusionOverridden?: true;
 }
 
 export interface AccountGroupCommandStatus {
@@ -309,10 +452,60 @@ export interface AccountGroupCommandStatus {
 	readonly explicitSelectionOutsideGroup?: boolean;
 }
 
+/**
+ * The `/multi-account account exclude|include` surface. `excluded` and
+ * `accountLimit` read this process's published config; `commit` takes the
+ * locked config writer and edits only `automaticRoutingExcludedAccounts`.
+ */
+export interface AutomaticRoutingExclusionCommandSurface {
+	readonly excluded: () => ReadonlySet<string>;
+	readonly accountLimit: () => number;
+	readonly commit: (edit: {
+		readonly providerId: string;
+		readonly excluded: boolean;
+	}) => Promise<ConfigEditCommitResult>;
+}
+
+/**
+ * Outcome of one locked account-group config edit. `applied` carries what
+ * the output must warn about and this session's re-resolved group.
+ */
+export type AccountGroupEditResult =
+	| {
+			readonly status: "applied" | "applied-warning";
+			/** `remove` left the group with no members. */
+			readonly emptiedGroup?: boolean;
+			/** Groups whose rule for the same folder `dir` replaced or removed. */
+			readonly replacedGroupIds?: readonly string[];
+			/** `add`: why the new member cannot serve this session, when it cannot. */
+			readonly memberUnusableReason?: string;
+			/** `add`: the member is not an account this extension routes. */
+			readonly memberNotRouted?: boolean;
+			/** `dir`: the folder does not exist yet. */
+			readonly folderMissing?: boolean;
+			/** This session's group after the edit, or why it could not be read. */
+			readonly session:
+				| { readonly status: AccountGroupCommandStatus }
+				| { readonly error: string };
+	  }
+	| { readonly status: "unchanged" | "busy" | "invalid" }
+	| {
+			readonly status: "refused";
+			readonly refusal: AccountGroupEditRefusal;
+			readonly references?: readonly AccountGroupReference[];
+	  };
+
 export interface AccountGroupCommandSurface {
 	readonly use: (groupId: string) => AccountGroupCommandStatus;
 	readonly reset: () => AccountGroupCommandStatus;
 	readonly status: () => AccountGroupCommandStatus;
+	/**
+	 * Takes the `config.lock` lease, re-reads the file, applies one edit to the
+	 * account-group keys only, and replaces the file atomically.
+	 */
+	readonly edit?: (edit: AccountGroupConfigEdit) => Promise<AccountGroupEditResult>;
+	/** Bases for a relative `group dir` path: the session cwd and the home folder. */
+	readonly directoryContext?: () => { readonly cwd: string; readonly home: string };
 }
 
 export interface CommandDependencies {
@@ -385,6 +578,17 @@ export interface CommandDependencies {
 	};
 	/** Operator-only session group mutation and status surface. */
 	readonly accountGroups?: AccountGroupCommandSurface;
+	/**
+	 * Operator-only writer for `automaticRoutingExcludedAccounts`. Absent in a
+	 * build or test that does not wire the locked config writer, in which case
+	 * the `account` command fails closed.
+	 */
+	readonly automaticRoutingExclusions?: AutomaticRoutingExclusionCommandSurface;
+	/** Operator-only manual recognition, including opaque and signed-out slots. */
+	readonly nicknames?: {
+		readonly accountLimit: () => number;
+		readonly commit: (edit: { readonly providerId: string; readonly nickname: string | undefined }) => Promise<ConfigEditCommitResult>;
+	};
 }
 
 export const CONFIGURE_VIEW_OPTION = "View cross-family routing policy";
@@ -659,10 +863,17 @@ export class MultiAccountCommandController {
 		try {
 			if (rawArguments.length > 1_024)
 				throw new RangeError("command arguments are too long.");
+			if (/^\s*nickname(?:\s|$)/.test(rawArguments) && /[\x00-\x1f\x7f]/.test(rawArguments)) {
+				return "Refused: nickname commands cannot contain control characters. Nothing was changed.";
+			}
 			const parts = rawArguments.trim()
 				? rawArguments.trim().split(/\s+/)
 				: ["status"];
-			if (parts.length > 3) throw new TypeError("too many command arguments.");
+			// Nickname text and group edits take multiple words; other commands
+			// keep the old two-argument bound.
+			if (parts.length > (parts[0] === "nickname" ? 65 : parts[0] === "group" ? 5 : 3)) {
+				throw new TypeError("too many command arguments.");
+			}
 			const [rawCommand, first, second] = parts;
 			if (
 				!rawCommand ||
@@ -676,7 +887,8 @@ export class MultiAccountCommandController {
 			}
 			const command = rawCommand as MultiAccountSubcommand;
 			assertCommandArity(command, parts.length - 1);
-			if (command === "group") assertGroupCommand(first, second);
+			if (command === "group") assertGroupCommand(first, parts.slice(2));
+			if (command === "account") assertAccountCommand(first, second);
 			let result: string;
 			switch (command) {
 				case "status":
@@ -746,7 +958,13 @@ export class MultiAccountCommandController {
 					result = this.#disable(first);
 					break;
 				case "group":
-					result = this.#group(first, second);
+					result = await this.#group(first, parts.slice(2));
+					break;
+				case "account":
+					result = await this.#accountRouting(first, second);
+					break;
+				case "nickname":
+					result = await this.#nickname(first, second, parts.slice(3));
 					break;
 				default:
 					throw new TypeError(`Unsupported subcommand: ${String(command)}`);
@@ -790,7 +1008,7 @@ export class MultiAccountCommandController {
 	 * Renders account status. Human-readable by default; `status --json` keeps the
 	 * original machine-readable shape for scripted consumers.
 	 */
-	#status(argument: string | undefined): string {
+	#status(argument: string | undefined, audience: "operator" | "agent" = "operator"): string {
 		const now = this.#now();
 		const unsupportedModels = this.#dependencies.unsupportedModels?.() ?? [];
 		const asJson = argument === "--json";
@@ -808,7 +1026,8 @@ export class MultiAccountCommandController {
 		const providerId = asJson ? undefined : argument;
 		const allAccounts = this.#accounts();
 		const accounts = providerId ? [this.#account(providerId)] : allAccounts;
-		if (accounts.length === 0) {
+		const excludedAccounts = this.#automaticRoutingExcludedAccounts(allAccounts, providerId);
+		if (accounts.length === 0 && excludedAccounts.length === 0) {
 			const message =
 				"No managed accounts are available. Run /multi-account rediscover.";
 			if (asJson) {
@@ -826,14 +1045,15 @@ export class MultiAccountCommandController {
 			});
 		}
 		const currentProviderId = this.#dependencies.currentProviderId();
-		// Label and expiry are resolved HERE, not per-branch, so the JSON and
-		// human-readable views cannot drift: a scripted consumer sees the same
-		// credential freshness the operator does.
+		// Health and expiry are shared; the audience selects the label boundary.
 		const projected = this.#projectAccountViews(
 			accounts,
 			now,
 			unsupportedModels,
-			(providerId) => this.#dependencies.accountLabel?.(providerId),
+			(providerId) => audience === "operator"
+				? this.#dependencies.accountLabel?.(providerId)
+				: this.#dependencies.publicAccountLabel?.(providerId),
+			audience,
 		);
 		const meteredFallback = this.#dependencies.meteredFallbackStatus?.();
 		if (asJson) {
@@ -841,15 +1061,22 @@ export class MultiAccountCommandController {
 				currentProviderId,
 				healthyAccountCount: projected.filter((account) => account.healthy)
 					.length,
-				accounts: projected,
+				accounts: projected.map((account) =>
+					excludedAccounts.some((entry) => entry.providerId === account.providerId)
+						? { ...account, automaticRoutingExcluded: true }
+						: account,
+				),
 				unsupportedModels: this.#dependencies.unsupportedModels?.(),
 				...(declarationNoticeJson === undefined
 					? {}
 					: { declarationNotice: declarationNoticeJson }),
+				...(excludedAccounts.length === 0
+					? {}
+					: { automaticRoutingExcludedAccounts: excludedAccounts }),
 				...(meteredFallback === undefined ? {} : { meteredFallback }),
 			});
 		}
-		const rendered = renderStatus({
+		const renderedAccounts = renderStatus({
 			nowMs: now,
 			scoped: providerId !== undefined,
 			accounts: projected.map((account) => ({
@@ -880,6 +1107,17 @@ export class MultiAccountCommandController {
 			...(unsupportedModels.length === 0 ? {} : { unsupportedModels }),
 			...(declarationNotice === undefined ? {} : { declarationNotice }),
 		});
+		const rendered =
+			excludedAccounts.length === 0
+				? renderedAccounts
+				: [
+						renderedAccounts,
+						"",
+						"EXCLUDED FROM AUTOMATIC ROUTING",
+						...excludedAccounts.map(({ providerId: id, signedIn }) =>
+							signedIn ? `  ${id}` : `  ${id} — not authorized`,
+						),
+					].join("\n");
 		if (meteredFallback === undefined) return rendered;
 		const budget =
 			meteredFallback.reservedTodayUsd === undefined ||
@@ -970,7 +1208,7 @@ export class MultiAccountCommandController {
 		return lines.join("\n");
 	}
 
-	#models(providerId: string | undefined): string {
+	#models(providerId: string | undefined, audience: "operator" | "agent" = "operator"): string {
 		const accounts = providerId
 			? [this.#account(providerId)]
 			: this.#accounts();
@@ -988,7 +1226,7 @@ export class MultiAccountCommandController {
 				);
 				return {
 					providerId: account.providerId,
-					displayName: account.displayName ?? account.providerId,
+					displayName: audience === "operator" ? (this.#dependencies.accountLabel?.(account.providerId) ?? account.displayName ?? account.providerId) : account.providerId,
 					api: account.model.api,
 					models: account.modelIds,
 					...(unsupported.length === 0
@@ -1005,7 +1243,13 @@ export class MultiAccountCommandController {
 
 	async #rediscover(): Promise<string> {
 		await this.#dependencies.rediscover();
-		return "Account metadata rediscovered and provider slots refreshed.";
+		// Rediscovery implies refreshed account state, but a terminal-auth mark
+		// outlives it (#227). Clear only those marks: a cooldown or limit streak
+		// describes the upstream account, which rediscovery did not change.
+		const cleared = this.#dependencies.state.clearTerminalAuthInvalidations();
+		return cleared === 0
+			? "Account metadata rediscovered and provider slots refreshed."
+			: `Account metadata rediscovered and provider slots refreshed. Cleared ${cleared} authentication-failure mark(s); cooldowns were kept.`;
 	}
 
 	async #add(
@@ -1345,23 +1589,188 @@ export class MultiAccountCommandController {
 		);
 	}
 
-	#group(action: string | undefined, groupId: string | undefined): string {
-		assertGroupCommand(action, groupId);
+	async #group(action: string | undefined, args: readonly string[]): Promise<string> {
+		assertGroupCommand(action, args);
 		const surface = this.#dependencies.accountGroups;
 		if (surface === undefined) {
 			throw new Error("Session account groups are unavailable in this build.");
 		}
-		if (action === "use") {
-			if (groupId === undefined) {
-				throw new TypeError(`Usage: /multi-account ${COMMAND_USAGE.group}`);
+		const [groupArgument, secondArgument, flag] = args;
+		switch (action) {
+			case "use": {
+				if (groupArgument === undefined) {
+					throw new TypeError(`Usage: /multi-account ${COMMAND_USAGE.group}`);
+				}
+				const status = surface.use(groupArgument);
+				return `Session account group set to ${groupArgument}.\n${this.#renderAccountGroupStatus(status)}`;
 			}
-			const status = surface.use(groupId);
-			return `Session account group set to ${groupId}.\n${this.#renderAccountGroupStatus(status)}`;
+			case "reset":
+				return `Session account group override reset.\n${this.#renderAccountGroupStatus(surface.reset())}`;
+			case "status":
+				return this.#renderAccountGroupStatus(surface.status());
 		}
-		if (action === "reset") {
-			return `Session account group override reset.\n${this.#renderAccountGroupStatus(surface.reset())}`;
+		if (groupArgument === undefined) {
+			throw new TypeError(`Usage: /multi-account ${COMMAND_USAGE.group}`);
 		}
-		return this.#renderAccountGroupStatus(surface.status());
+		const commitEdit = surface.edit;
+		const directoryContext = surface.directoryContext;
+		if (commitEdit === undefined || directoryContext === undefined) {
+			throw new Error("Account-group configuration edits are unavailable in this build.");
+		}
+		let edit: AccountGroupConfigEdit;
+		switch (action) {
+			case "create":
+			case "delete":
+				edit = { kind: action, groupId: groupArgument };
+				break;
+			case "default":
+				edit = {
+					kind: "default",
+					groupId: groupArgument === ACCOUNT_GROUP_NONE ? undefined : groupArgument,
+				};
+				break;
+			case "add":
+			case "remove":
+				if (secondArgument === undefined) {
+					throw new TypeError(`Usage: /multi-account ${COMMAND_USAGE.group}`);
+				}
+				edit = { kind: action, groupId: groupArgument, member: secondArgument };
+				break;
+			case "dir": {
+				if (secondArgument === undefined) {
+					throw new TypeError(`Usage: /multi-account ${COMMAND_USAGE.group}`);
+				}
+				const path = resolveAccountGroupDirectoryPath(groupArgument, directoryContext());
+				if (path === undefined) return accountGroupRefusalText("invalid-path");
+				edit = {
+					kind: "dir",
+					path,
+					groupId: secondArgument === ACCOUNT_GROUP_NONE ? undefined : secondArgument,
+					tree: flag === "--tree",
+				};
+				break;
+			}
+		}
+		const result = await commitEdit(edit);
+		return this.#renderAccountGroupEdit(edit, result);
+	}
+
+	/**
+	 * Refusal and `unchanged` text never echoes an argument that did not
+	 * validate: an unknown group or member may be a label or an email address.
+	 */
+	#renderAccountGroupEdit(
+		edit: AccountGroupConfigEdit,
+		result: AccountGroupEditResult,
+	): string {
+		switch (result.status) {
+			case "refused":
+				return result.refusal === "group-referenced"
+					? renderGroupReferencedRefusal(edit, result.references ?? [])
+					: accountGroupRefusalText(result.refusal);
+			case "unchanged":
+				return `${accountGroupUnchangedText(edit)} Nothing was changed.`;
+			case "busy":
+				return "Another process is committing multi-account configuration. Nothing was changed; rerun the command in a moment.";
+			case "invalid":
+				return "The machine-global configuration is malformed, so nothing was written. Repair the file, then rerun the command.";
+			case "applied":
+			case "applied-warning":
+				break;
+		}
+		const lines = [accountGroupAppliedText(edit, result.replacedGroupIds ?? [])];
+		if (edit.kind === "remove" && result.emptiedGroup === true) {
+			lines.push(
+				`Warning: account group ${edit.groupId} now has no members. Sessions that use it are blocked until it has a usable member.`,
+			);
+		}
+		if (edit.kind === "add" && result.memberUnusableReason !== undefined) {
+			lines.push(
+				`Warning: ${edit.member} cannot serve this session yet (${result.memberUnusableReason}). It was stored anyway.`,
+			);
+		}
+		if (edit.kind === "add" && result.memberNotRouted === true) {
+			lines.push(
+				`${edit.member} is not an account this extension routes: the group lets requests that select it run, but unified, failover, recovery, parking, and preflight never choose it.`,
+			);
+		}
+		if (edit.kind === "dir" && result.folderMissing === true) {
+			lines.push("That folder does not exist yet. The rule applies once it does.");
+		}
+		lines.push(
+			"This session applies it now; other running sessions apply it after /multi-account reload.",
+		);
+		if (result.status === "applied-warning") lines.push(CONFIG_EDIT_WARNING_GUIDANCE);
+		lines.push(
+			"status" in result.session
+				? this.#renderAccountGroupStatus(result.session.status)
+				: result.session.error,
+		);
+		return lines.join("\n");
+	}
+
+	async #nickname(action: string | undefined, providerId: string | undefined, words: readonly string[]): Promise<string> {
+		const surface = this.#dependencies.nicknames;
+		if ((action !== "set" && action !== "clear") || providerId === undefined ||
+			(action === "set" ? words.length === 0 : words.length !== 0)) {
+			return `Usage: /multi-account ${COMMAND_USAGE.nickname}`;
+		}
+		if (surface === undefined) return "Nickname editing is unavailable in this build.";
+		const nickname = action === "set" ? normalizeAccountNickname(words.join(" ")) : undefined;
+		if (!isCanonicalManagedAccountId(providerId, surface.accountLimit()) ||
+			(action === "set" && nickname === undefined)) {
+			return "Refused: use a canonical managed slot within accountLimit and a nickname of 1–64 printable ASCII characters. Nothing was changed.";
+		}
+		const result = await surface.commit({ providerId, nickname });
+		switch (result.status) {
+			case "applied":
+			case "applied-warning":
+				return `${action === "set" ? "Set nickname" : "Cleared nickname"} for ${providerId}. Manual recognition only; other sessions apply it after /multi-account reload. Alias login names refresh after rediscover.${result.status === "applied-warning" ? `\n${CONFIG_EDIT_WARNING_GUIDANCE}` : ""}`;
+			case "unchanged": return `Nickname for ${providerId} is already in that state. Nothing was changed.`;
+			case "busy": return "Another process is committing multi-account configuration. Nothing was changed; retry the nickname command.";
+			case "invalid": return "The machine-global configuration is malformed. Nothing was changed; repair it and retry the nickname command.";
+		}
+	}
+
+	async #accountRouting(
+		action: string | undefined,
+		providerId: string | undefined,
+	): Promise<string> {
+		assertAccountCommand(action, providerId);
+		if (providerId === undefined) {
+			throw new TypeError(`Usage: /multi-account ${COMMAND_USAGE.account}`);
+		}
+		const surface = this.#dependencies.automaticRoutingExclusions;
+		if (surface === undefined) {
+			throw new Error("Automatic routing exclusions are unavailable in this build.");
+		}
+		// The fixed message never echoes the id: it may be an email or a label.
+		if (!isCanonicalManagedAccountId(providerId, surface.accountLimit())) {
+			return "Refused: that is not a canonical managed account id within accountLimit. Nothing was changed.";
+		}
+		const excluded = action === "exclude";
+		const result = await surface.commit({ providerId, excluded });
+		const rerun = `/multi-account account ${action} ${providerId}`;
+		switch (result.status) {
+			case "applied":
+			case "applied-warning": {
+				const done = excluded
+					? `Excluded ${providerId} from automatic routing.`
+					: `Included ${providerId} in automatic routing.`;
+				const applied = `${done} This session applies it now; other running sessions apply it after /multi-account reload.`;
+				return result.status === "applied"
+					? applied
+					: `${applied}\n${CONFIG_EDIT_WARNING_GUIDANCE}`;
+			}
+			case "unchanged":
+				return excluded
+					? `${providerId} is already excluded from automatic routing. Nothing was changed.`
+					: `${providerId} is not excluded from automatic routing. Nothing was changed.`;
+			case "busy":
+				return `Another process is committing multi-account configuration. Nothing was changed; rerun ${rerun} in a moment.`;
+			case "invalid":
+				return `The machine-global configuration is malformed, so nothing was written. Repair the file, then rerun ${rerun}.`;
+		}
 	}
 
 	#renderAccountGroupStatus(status: AccountGroupCommandStatus): string {
@@ -1372,7 +1781,7 @@ export class MultiAccountCommandController {
 		const lines = [`Effective account group: ${groupId} (${source}).`];
 		for (const member of status.members ?? []) {
 			lines.push(
-				`- ${member.providerId}: ${member.eligible ? "eligible" : "blocked"} (${member.reason})`,
+				`- ${member.providerId}: ${member.eligible ? "eligible" : "blocked"} (${member.reason})${member.automaticRoutingExcluded === true ? `, excluded from automatic routing${member.automaticRoutingExclusionOverridden === true ? "; this pool overrides the opt-out" : ""}` : ""}`,
 			);
 		}
 		if (status.members !== undefined && status.explicitSelectionOutsideGroup === true) {
@@ -1434,6 +1843,7 @@ export class MultiAccountCommandController {
 		now: number,
 		unsupportedModels: readonly UnsupportedModelPair[],
 		labelFor: (providerId: string) => string | undefined,
+		audience: "operator" | "agent" = "operator",
 	) {
 		const activeAccountProviderId =
 			this.#dependencies.activeAccountProviderId?.() ??
@@ -1475,7 +1885,7 @@ export class MultiAccountCommandController {
 				...view,
 				api: account.model.api,
 				healthy: health === "ready" || health === "low-headroom",
-				...(account.accountFingerprint === undefined
+				...(audience === "agent" || account.accountFingerprint === undefined
 					? {}
 					: { accountFingerprint: account.accountFingerprint }),
 				usageFetch: this.#dependencies.usageFetchStatus?.(account.providerId),
@@ -1495,6 +1905,24 @@ export class MultiAccountCommandController {
 				),
 			};
 		});
+	}
+
+	/**
+	 * Config-ordered `automaticRoutingExcludedAccounts` entries, each marked
+	 * signed in when its slot is live. An excluded account that is signed out
+	 * still shows, so the operator can see and include it again. A scoped status
+	 * shows only the named account's entry.
+	 */
+	#automaticRoutingExcludedAccounts(
+		allAccounts: readonly OperatorAccount[],
+		scopedProviderId: string | undefined,
+	): readonly { readonly providerId: string; readonly signedIn: boolean }[] {
+		const excluded = this.#dependencies.automaticRoutingExclusions?.excluded();
+		if (excluded === undefined) return [];
+		const live = new Set(allAccounts.map((account) => account.providerId));
+		return [...excluded]
+			.filter((id) => scopedProviderId === undefined || id === scopedProviderId)
+			.map((id) => ({ providerId: id, signedIn: live.has(id) }));
 	}
 
 	/**
@@ -1548,22 +1976,24 @@ export class MultiAccountCommandController {
 	}
 
 	/**
-	 * Machine-readable account status for the agent-invocable tool.
-	 *
-	 * REQ-STATUS-TOOL. This delegates to the SAME `#status("--json")` path the
-	 * operator's `/multi-account status --json` renders, rather than assembling a
-	 * second view. Duplicating it would let the operator surface and the agent
-	 * surface drift, and the label rule below is exactly the kind of detail that
-	 * drifts first.
-	 *
-	 * Human-readable labels are decorated HERE, at render time, from live config
-	 * via `dependencies.accountLabel`. They are never read from the usage store:
-	 * the store holds observations keyed by canonical provider id, and a label
-	 * persisted alongside them would go stale the moment config changed, then be
-	 * reported as current.
+	 * Agent status shares health observations, but takes only configured nicknames.
+	 * Detected email, JWT identity and raw account fingerprints are operator-only.
+	 * No rendered recognition is copied into retained observations.
 	 */
 	statusJson(): string {
-		return this.#status("--json");
+		return this.#status("--json", "agent");
+	}
+
+	/** Explicit agent projection: never dispatch an operator command or name. */
+	async executeAgent(command: string, argument?: string): Promise<string> {
+		switch (command) {
+			case "status": return this.statusJson();
+			case "models": return this.#models(undefined, "agent");
+			case "limits": return this.#limits();
+			case "log": return this.execute(`log${argument === undefined ? "" : ` ${argument}`}`);
+			case "cost": return this.execute(`cost${argument === undefined ? "" : ` ${argument}`}`);
+			default: return "Unsupported read-only multi-account status command.";
+		}
 	}
 
 	isDisabled(providerId: string): boolean {

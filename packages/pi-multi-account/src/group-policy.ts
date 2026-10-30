@@ -1,10 +1,11 @@
 import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import type { MultiAccountConfig } from "./config.js";
 
 export type AccountGroupResolutionSource =
 	| "session-override"
 	| "cwd-default"
+	| "directory-default"
 	| "global-default"
 	| "unrestricted";
 
@@ -19,19 +20,20 @@ export type EffectiveAccountGroupResolution =
 
 /**
  * The operator's group policy is ambiguous for this session: two configured
- * cwd defaults canonicalize to the same exact directory but name different
- * groups. The store is not at fault, so this is reported as a policy cause.
+ * exact-folder rules, or two configured tree rules, canonicalize to the same
+ * directory but name different groups. The store is not at fault, so this is
+ * reported as a policy cause.
  */
 export class AccountGroupPolicyConflictError extends Error {
 	constructor() {
-		super("Conflicting account-group defaults canonicalize to the same exact cwd.");
+		super("Conflicting account-group defaults canonicalize to the same directory.");
 		this.name = "AccountGroupPolicyConflictError";
 	}
 }
 
 export type AccountGroupPolicyConfig = Pick<
 	MultiAccountConfig,
-	"accountGroupCwdDefaults" | "defaultAccountGroup"
+	"accountGroupCwdDefaults" | "accountGroupDirectoryDefaults" | "defaultAccountGroup"
 >;
 
 /**
@@ -49,10 +51,24 @@ export function canonicalizeAccountGroupCwd(cwd: string): string {
 }
 
 /**
- * Resolve one session's effective group in strict precedence order. Both the live
- * cwd and each operator-authored absolute cwd key are realpath-canonicalized,
- * then compared byte-for-byte. Subtrees and linked worktrees therefore never
- * inherit a parent or shared-repository default.
+ * Whether canonical `cwd` is canonical `root` or a folder below it. The
+ * separator test keeps `/foo` from matching `/foobar`; a filesystem root
+ * already ends in the separator and so covers every folder.
+ */
+function isWithinAccountGroupRoot(root: string, cwd: string): boolean {
+	if (cwd === root) return true;
+	return cwd.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
+}
+
+/**
+ * Resolve one session's effective group in strict precedence order: session
+ * override, exact-folder rule, the deepest tree rule that contains the cwd,
+ * the global default, then unrestricted. The live cwd and every
+ * operator-authored key are realpath-canonicalized before comparison, so
+ * symlinks and `..` segments resolve to the real folder first. Exact rules
+ * compare byte-for-byte; tree rules match the root or a folder below it.
+ * Matching uses paths only, never Git metadata: a worktree below a tree root
+ * inherits its rule, and a linked worktree outside the root does not.
  */
 export function resolveEffectiveAccountGroup(
 	config: AccountGroupPolicyConfig,
@@ -79,6 +95,31 @@ export function resolveEffectiveAccountGroup(
 	}
 	if (cwdDefault !== undefined) {
 		return Object.freeze({ groupId: cwdDefault, source: "cwd-default" as const });
+	}
+
+	// Key order never decides: the longest canonical root that contains the
+	// cwd wins, and every key for that root must name the same group. A
+	// conflict at a shallower root the winner shadows cannot change the result.
+	const treeGroups = new Map<string, Set<string>>();
+	for (const [configuredRoot, groupId] of Object.entries(
+		config.accountGroupDirectoryDefaults ?? {},
+	)) {
+		const root = canonicalizeAccountGroupCwd(configuredRoot);
+		if (!isWithinAccountGroupRoot(root, canonicalCwd)) continue;
+		const groups = treeGroups.get(root) ?? new Set<string>();
+		groups.add(groupId);
+		treeGroups.set(root, groups);
+	}
+	let treeRoot: string | undefined;
+	for (const root of treeGroups.keys()) {
+		if (treeRoot === undefined || root.length > treeRoot.length) treeRoot = root;
+	}
+	if (treeRoot !== undefined) {
+		const [groupId, ...others] = treeGroups.get(treeRoot) ?? [];
+		if (groupId === undefined || others.length > 0) {
+			throw new AccountGroupPolicyConflictError();
+		}
+		return Object.freeze({ groupId, source: "directory-default" as const });
 	}
 
 	if (config.defaultAccountGroup !== undefined) {

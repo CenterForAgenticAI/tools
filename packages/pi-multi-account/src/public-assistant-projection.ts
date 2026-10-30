@@ -103,7 +103,12 @@ const PUBLIC_RAW_STOP_REASONS = [
 export function projectPublicAssistantMessage(
   message: AssistantMessage, identity: PublicAssistantIdentity, errorMessage?: string,
 ): PublicAssistantMessage {
-  const stop = hostFinalStopMessage(message);
+  const structuredStop = hostFinalStopMessage(message);
+  // Persist the cause and next step, not just the transient refusal notification.
+  // Only a structured refusal qualifies; provider prose is never display evidence.
+  const stop = structuredStop?.rawStopReason === "refusal"
+    ? { rawStopReason: "refusal" as const, errorMessage: "Content refusal: the model declined this request, not a subscription or usage limit. Revise the request. Specific policy details are unavailable here." }
+    : structuredStop;
   const codeValue = Object.getOwnPropertyDescriptor(message, "code")?.value;
   const code = PROVIDER_ERROR_CODES.find((value) => value === codeValue);
   const statusValue = Object.getOwnPropertyDescriptor(message, "httpStatus")?.value ?? Object.getOwnPropertyDescriptor(message, "status")?.value;

@@ -35,6 +35,7 @@ import {
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type { ProviderErrorCode } from "./error-classification.js";
 import type { LogicalDispatchCall } from "./logical-provider.js";
 
 /** Derived from the host so this cannot drift from the real return shape. */
@@ -74,11 +75,19 @@ export function mergeProviderHeaders(
 	return merged;
 }
 
-/** Raised when an attempt cannot be made at all, so a sibling can be tried. */
+/**
+ * Raised when an attempt cannot be made at all, so a sibling can be tried.
+ *
+ * `code` is a closed {@link ProviderErrorCode}, set only where this module
+ * knows the failure class itself. The logical provider's failure projection
+ * reads it by name, so classification needs no message text.
+ */
 export class LogicalDispatchError extends Error {
-	constructor(message: string) {
+	readonly code?: ProviderErrorCode;
+	constructor(message: string, code?: ProviderErrorCode) {
 		super(message);
 		this.name = "LogicalDispatchError";
+		if (code !== undefined) this.code = code;
 	}
 }
 
@@ -230,6 +239,7 @@ export function createLogicalDispatch(
 		if (!auth.ok) {
 			throw new LogicalDispatchError(
 				`Could not resolve credentials for ${providerId}.`,
+				"credential_unresolved",
 			);
 		}
 		// `ok: true` with no key is reachable, for example after a mid-session
@@ -239,6 +249,7 @@ export function createLogicalDispatch(
 		if (auth.apiKey === undefined) {
 			throw new LogicalDispatchError(
 				`No credential is available for ${providerId}.`,
+				"credential_unresolved",
 			);
 		}
 

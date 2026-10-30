@@ -46,15 +46,40 @@ export function isDelegateEnvironment(
 	});
 }
 
+export interface OpenRouterPolicyOptions {
+	readonly environment?: Readonly<Record<string, string | undefined>>;
+	readonly sessionDisabled?: boolean;
+}
+
 /**
  * Resolve the explicit per-project OpenRouter policy without reading the API key.
  * Partial, malformed, absent, and delegate-process configurations all disable the
  * metered rung without turning an optional capability into a startup failure.
  */
-export function resolveOpenRouterEnvironmentPolicy(options: {
-	readonly environment?: Readonly<Record<string, string | undefined>>;
-	readonly sessionDisabled?: boolean;
-} = {}): OpenRouterEnvironmentPolicy {
+export function resolveOpenRouterEnvironmentPolicy(
+	options: OpenRouterPolicyOptions = {},
+): OpenRouterEnvironmentPolicy {
+	return resolveOpenRouterPolicy(options, false);
+}
+
+/**
+ * Resolve the policy for an explicit `openrouter/<model>` selection in a
+ * session whose active account group lists `openrouter`. A dispatcher's
+ * explicit choice is a routing decision, so delegate lineage does not veto it.
+ * Consent, a concrete configured model, a
+ * positive daily cap, and session disablement still apply, and the caller must
+ * reserve the selected model's worst-case turn cost before dispatch.
+ */
+export function resolvePooledOpenRouterSelectionPolicy(
+	options: OpenRouterPolicyOptions = {},
+): OpenRouterEnvironmentPolicy {
+	return resolveOpenRouterPolicy(options, true);
+}
+
+function resolveOpenRouterPolicy(
+	options: OpenRouterPolicyOptions,
+	explicitPoolSelection: boolean,
+): OpenRouterEnvironmentPolicy {
 	const environment = options.environment ?? process.env;
 	const consented =
 		environment[OPENROUTER_ENABLE_ENV] === OPENROUTER_ENABLE_VALUE;
@@ -67,7 +92,9 @@ export function resolveOpenRouterEnvironmentPolicy(options: {
 		delegatesAllowed: false,
 	});
 	if (options.sessionDisabled) return disabled("session-disabled");
-	if (isDelegateEnvironment(environment)) return disabled("delegate-session");
+	if (!explicitPoolSelection && isDelegateEnvironment(environment)) {
+		return disabled("delegate-session");
+	}
 	if (!consented) return disabled("not-enabled");
 
 	const modelId = environment[OPENROUTER_MODEL_ENV]?.trim();

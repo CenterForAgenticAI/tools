@@ -451,6 +451,7 @@ function isAvailable(
 	account: ManagedAccount,
 	state: RuntimeState,
 	nowMs: number,
+	invalidation?: InvalidationProbePolicy,
 ): boolean {
 	// REQ-FAILOVER-USAGE-TRUST plus fleet exhaustion, shared with the proactive
 	// path so the two cannot disagree about what "exhausted" means.
@@ -460,6 +461,7 @@ function isAvailable(
 		nowMs,
 		state.getCooldown.bind(state),
 		state.isUsageSnapshotUntrusted.bind(state),
+		invalidation,
 	);
 }
 
@@ -476,11 +478,22 @@ export function selectAvailableManagedAccount(options: {
 	readonly state: RuntimeState;
 	readonly nowMs: number;
 	readonly preferredProviderId?: string;
+	/**
+	 * Count an invalidated account whose probe is due as available. Only the
+	 * unified path dispatches a probe, so only its callers (account-group
+	 * enforcement) set this; it never claims the probe.
+	 */
+	readonly admitInvalidationProbe?: boolean;
 }): ManagedAccount | undefined {
 	const seen = new Set<string>();
 	const available = options.accounts.filter((account) => {
 		if (firstCanonicalAccount(account, seen) === undefined) return false;
-		return isAvailable(account, options.state, options.nowMs);
+		return isAvailable(
+			account,
+			options.state,
+			options.nowMs,
+			options.admitInvalidationProbe === true ? "probe-if-due" : undefined,
+		);
 	});
 	return (
 		available.find(
@@ -730,6 +743,8 @@ function accountEligibleCore(options: {
 	readonly nowMs: number;
 	readonly readCooldown: CooldownReader;
 	readonly isUsageSnapshotUntrusted: UsageDistrustReader;
+	/** How a terminal-auth invalidation is judged; see {@link InvalidationProbePolicy}. */
+	readonly invalidation?: InvalidationProbePolicy | undefined;
 }): boolean {
 	if (options.authenticated === false) return false;
 	if (
@@ -742,11 +757,41 @@ function accountEligibleCore(options: {
 		return false;
 	}
 	if (options.providerReportedExhausted) return false;
-	return (
-		options.state.getInvalidation(options.providerId) === undefined &&
-		options.readCooldown(options.providerId, options.nowMs) === undefined
-	);
+	if (options.readCooldown(options.providerId, options.nowMs) !== undefined) {
+		return false;
+	}
+	if (options.state.getInvalidation(options.providerId) === undefined) {
+		return true;
+	}
+	// A terminal-auth invalidation excludes the account, except for the one
+	// probe dispatch the unified path may admit once its wait has elapsed
+	// (#227). Everything above still applies to a probe:
+	// a cooldown, exhaustion or usage distrust is not a reason to probe.
+	switch (options.invalidation) {
+		case "claimed":
+			return true;
+		case "probe-if-due":
+			return options.state.isInvalidationProbeDue(
+				options.providerId,
+				options.nowMs,
+			);
+		default:
+			return false;
+	}
 }
+
+/**
+ * How {@link accountEligibleCore} treats a terminal-auth invalidation.
+ *
+ * - omitted or `excluded`: the account is excluded. Every direct-alias and
+ *   reactive caller, and any recovery target other than the claimed probe.
+ * - `probe-if-due`: the account is eligible once its probe wait has elapsed.
+ *   A pure read, so any number of selections may ask; it claims nothing.
+ * - `claimed`: this call already won the probe through
+ *   {@link RuntimeState.claimInvalidationProbe}, so the pre-send recheck must not
+ *   refuse the one dispatch the claim bought.
+ */
+export type InvalidationProbePolicy = "excluded" | "probe-if-due" | "claimed";
 
 function accountAvailableWithStateReaders(
 	account: ManagedAccount,
@@ -754,6 +799,7 @@ function accountAvailableWithStateReaders(
 	nowMs: number,
 	readCooldown: CooldownReader,
 	isUsageSnapshotUntrusted: UsageDistrustReader,
+	invalidation?: InvalidationProbePolicy,
 ): boolean {
 	return accountEligibleCore({
 		providerId: account.providerId,
@@ -767,6 +813,7 @@ function accountAvailableWithStateReaders(
 		nowMs,
 		readCooldown,
 		isUsageSnapshotUntrusted,
+		invalidation,
 	});
 }
 
@@ -809,6 +856,7 @@ export function logicalAccountEligible(
 	account: LogicalEligibilityAccount,
 	state: RuntimeState | undefined,
 	nowMs: number,
+	invalidation?: InvalidationProbePolicy,
 ): boolean {
 	// Both signals go through the one shared rule rather than being tested
 	// beside it. A second exhaustion test here would be a second notion of
@@ -831,6 +879,7 @@ export function logicalAccountEligible(
 			state === undefined
 				? () => false
 				: state.peekUsageSnapshotUntrusted.bind(state),
+		invalidation,
 	});
 }
 
@@ -1083,6 +1132,11 @@ export function routeAfterFailure(options: {
 	modelSupport?: ModelSupportRegistry;
 	/** The same attempt already wrote its synchronous cooldown before host retry. */
 	alreadyCooled?: boolean;
+	/**
+	 * Destinations automatic routing must not choose. Narrows the alternative
+	 * only: cooldown propagation to sibling slots still sees every account.
+	 */
+	excludedProviderIds?: ReadonlySet<string>;
 }): ReactiveRouteDecision {
 	const {
 		failedAccount,
@@ -1143,11 +1197,23 @@ export function routeAfterFailure(options: {
 			nowMs,
 		});
 	}
-	const accounts = normalized.some(
+	const routable = normalized.some(
 		(account) => account.providerId === failedAccount.providerId,
 	)
 		? normalized
 		: [failedAccount, ...normalized];
+	// Exclusions narrow the alternative only. They are removed before the
+	// candidate scan, so an excluded slot never hides a same-account twin, and
+	// after cooldown propagation, which must still reach every slot.
+	const excluded = options.excludedProviderIds;
+	const accounts =
+		excluded === undefined
+			? routable
+			: routable.filter(
+					(account) =>
+						account.providerId === failedAccount.providerId ||
+						!excluded.has(account.providerId),
+				);
 	const failedIsOriginSubscription =
 		isSubscriptionManagedAccount(failedAccount) &&
 		failedAccount.family === originFamily;

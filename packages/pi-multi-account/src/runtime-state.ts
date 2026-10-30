@@ -35,6 +35,33 @@ export interface CooldownRecord {
 	readonly serverHint?: NumericServerHint;
 }
 
+/**
+ * Wait before the first probe of a terminal-auth invalidation (#227).
+ * Fifteen minutes is long enough that a revoked credential is not retried
+ * on every turn, and short enough that a transient auth failure does not
+ * strand a long-lived process for hours.
+ */
+export const INVALIDATION_PROBE_INTERVAL_MS = 15 * 60 * 1000;
+
+/** The wait doubles after each probe and never exceeds this (four hours). */
+export const INVALIDATION_PROBE_MAX_INTERVAL_MS = 4 * 60 * 60 * 1000;
+
+/** Probe wait after `failedProbes` probes that did not clear the invalidation. */
+function invalidationProbeWaitMs(failedProbes: number): number {
+	// Clamp the exponent first so a long-lived process cannot overflow the shift.
+	const doublings = Math.min(Math.max(failedProbes, 0), 16);
+	return Math.min(
+		INVALIDATION_PROBE_INTERVAL_MS * 2 ** doublings,
+		INVALIDATION_PROBE_MAX_INTERVAL_MS,
+	);
+}
+
+interface InvalidationProbeSchedule {
+	/** Probes admitted since the last success that have not cleared the mark. */
+	readonly failedProbes: number;
+	readonly nextProbeAtMs: number;
+}
+
 export interface InvalidatedAccount {
 	readonly providerId: string;
 	readonly family: ManagedFamily;
@@ -170,6 +197,10 @@ function assertTimestamp(value: number, name: string): void {
 export class RuntimeState {
 	readonly #cooldowns = new Map<string, CooldownRecord>();
 	readonly #invalidatedAccounts = new Map<string, InvalidatedAccount>();
+	/** Probe schedule per invalidated slot; always the same key set as above. */
+	readonly #invalidationProbes = new Map<string, InvalidationProbeSchedule>();
+	/** Told the provider id, and nothing else, when an account becomes invalidated. */
+	readonly #invalidationListeners = new Set<(providerId: string) => void>();
 	/**
 	 * Limit-error timestamps per provider, newest last, used to distrust a usage
 	 * snapshot the provider itself contradicts.
@@ -299,8 +330,18 @@ export class RuntimeState {
 	invalidateAccount(record: InvalidatedAccount): void {
 		assertManagedProviderId(record.providerId, record.family);
 		assertTimestamp(record.invalidatedAtMs, "invalidatedAtMs");
+		const key = providerIdKey(record.providerId);
+		const newlyInvalidated = !this.#invalidatedAccounts.has(key);
+		// A renewal keeps the failed-probe count, so a probe that fails again waits
+		// longer; only a success, reset or changed credential restarts the backoff.
+		const failedProbes = this.#invalidationProbes.get(key)?.failedProbes ?? 0;
+		this.#invalidationProbes.set(key, {
+			failedProbes,
+			nextProbeAtMs:
+				record.invalidatedAtMs + invalidationProbeWaitMs(failedProbes),
+		});
 		this.#invalidatedAccounts.set(
-			providerIdKey(record.providerId),
+			key,
 			Object.freeze({
 				providerId: record.providerId,
 				family: record.family,
@@ -308,14 +349,80 @@ export class RuntimeState {
 				invalidatedAtMs: record.invalidatedAtMs,
 			}),
 		);
+		if (!newlyInvalidated) return;
+		for (const listener of [...this.#invalidationListeners]) {
+			try {
+				listener(record.providerId);
+			} catch {
+				// A listener cannot undo or block the invalidation.
+			}
+		}
+	}
+
+	/**
+	 * Calls `listener` once each time an account moves from usable to invalidated;
+	 * a repeat invalidation of an already invalidated account is not reported.
+	 * Returns the unsubscribe function.
+	 */
+	onAccountInvalidated(listener: (providerId: string) => void): () => void {
+		this.#invalidationListeners.add(listener);
+		return () => {
+			this.#invalidationListeners.delete(listener);
+		};
 	}
 
 	getInvalidation(providerId: string): InvalidatedAccount | undefined {
 		return this.#invalidatedAccounts.get(providerIdKey(providerId));
 	}
 
+	/**
+	 * True when this slot is invalidated and its probe wait has elapsed. A pure
+	 * read: asking, from any number of callers, never consumes the probe.
+	 */
+	isInvalidationProbeDue(providerId: string, nowMs: number): boolean {
+		const schedule = this.#invalidationProbes.get(providerIdKey(providerId));
+		return schedule !== undefined && nowMs >= schedule.nextProbeAtMs;
+	}
+
+	/**
+	 * Admits exactly one probe dispatch for a due invalidation. The first caller
+	 * after the wait wins and pushes the next probe out by the doubled wait, so
+	 * a concurrent caller, or a probe whose outcome never reaches the host, cannot
+	 * admit a second one. The invalidation itself stays until
+	 * {@link markAuthenticationSuccess} clears it or a terminal-auth failure
+	 * renews it through {@link invalidateAccount}.
+	 */
+	claimInvalidationProbe(providerId: string, nowMs: number): boolean {
+		assertTimestamp(nowMs, "nowMs");
+		const key = providerIdKey(providerId);
+		const schedule = this.#invalidationProbes.get(key);
+		if (schedule === undefined || nowMs < schedule.nextProbeAtMs) return false;
+		const failedProbes = schedule.failedProbes + 1;
+		this.#invalidationProbes.set(key, {
+			failedProbes,
+			nextProbeAtMs: nowMs + invalidationProbeWaitMs(failedProbes),
+		});
+		return true;
+	}
+
+	/**
+	 * Drops every terminal-auth invalidation and its probe backoff, leaving
+	 * cooldowns, limit streaks and identity untouched. Returns how many were held.
+	 */
+	clearTerminalAuthInvalidations(): number {
+		const held = this.#invalidatedAccounts.size;
+		this.#invalidatedAccounts.clear();
+		this.#invalidationProbes.clear();
+		return held;
+	}
+
+	#deleteInvalidation(key: string): boolean {
+		this.#invalidationProbes.delete(key);
+		return this.#invalidatedAccounts.delete(key);
+	}
+
 	markAuthenticationSuccess(providerId: string): void {
-		this.#invalidatedAccounts.delete(providerIdKey(providerId));
+		this.#deleteInvalidation(providerIdKey(providerId));
 		this.#cooldowns.delete(providerId);
 		// A success is the provider contradicting our distrust, so the streak is
 		// retired. Without this the account would stay untrusted until the window
@@ -329,7 +436,7 @@ export class RuntimeState {
 	 * an upstream cooldown or repeated 429 has recovered.
 	 */
 	markCredentialResolutionSuccess(providerId: string): void {
-		this.#invalidatedAccounts.delete(providerIdKey(providerId));
+		this.#deleteInvalidation(providerIdKey(providerId));
 	}
 
 	/**
@@ -402,7 +509,7 @@ export class RuntimeState {
 		const previous = this.#credentialRevisions.get(key);
 		this.#credentialRevisions.set(key, revision);
 		if (previous !== undefined && previous !== revision) {
-			return this.#invalidatedAccounts.delete(key);
+			return this.#deleteInvalidation(key);
 		}
 		return false;
 	}
@@ -438,21 +545,21 @@ export class RuntimeState {
 			this.#accountIdentities.set(key, fingerprint);
 		if (!shouldClearAccountState(change)) return false;
 		this.#cooldowns.delete(providerId);
-		this.#invalidatedAccounts.delete(key);
+		this.#deleteInvalidation(key);
 		return true;
 	}
 
 	resetAccount(providerId: string): void {
 		const key = providerIdKey(providerId);
 		this.#cooldowns.delete(providerId);
-		this.#invalidatedAccounts.delete(key);
+		this.#deleteInvalidation(key);
 		this.#credentialRevisions.delete(key);
 		this.#accountIdentities.delete(key);
 	}
 
 	resetRouting(): void {
 		this.#cooldowns.clear();
-		this.#invalidatedAccounts.clear();
+		this.clearTerminalAuthInvalidations();
 		this.#credentialRevisions.clear();
 		this.#accountIdentities.clear();
 	}

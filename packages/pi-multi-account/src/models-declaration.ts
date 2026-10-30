@@ -15,6 +15,7 @@ import type {
 	ModelImageInputLimits,
 	ModelImageResizeOptions,
 	ModelInputLimits,
+	ModelPromptCache,
 	ModelThinkingLevel,
 	OpenAIResponsesCompat,
 	ThinkingLevelMap,
@@ -65,6 +66,7 @@ export interface ModelDeclarationRow {
 	maxTokens: number;
 	samplingParams?: Partial<Record<SamplingParamKey, number>>;
 	inputLimits?: ModelInputLimits;
+	promptCache?: ModelPromptCache;
 	compat?: LogicalCompat;
 }
 
@@ -116,9 +118,10 @@ const MODEL_FIELD_DISPOSITION = {
 	maxTokens: "copy",
 	samplingParams: "copy",
 	inputLimits: "copy",
-	// Enables the host cache warmer, whose replays are not account-sticky yet
-	// (internal issue #206).
-	promptCache: "exclude",
+	// Enables the host cache warmer; Anthropic budget-thinking rows drop it. The
+	// logical provider sends each replay only to the account that holds the
+	// session's cache (internal issue #206).
+	promptCache: "copy",
 	// Read only by the openai-completions, openai-responses, and Azure APIs.
 	samplingParamsByThinkingLevel: "exclude",
 	// Every built-in model is "chat", the default.
@@ -645,6 +648,51 @@ function projectInputLimits(
 	return projected;
 }
 
+const PROMPT_CACHE_KEYS = new Set(["short", "long"]);
+
+/**
+ * Copy Pi's prompt cache lifetimes, in seconds, through the bounds of
+ * `ModelPromptCacheSchema`. The host cache warmer reads them from the routed
+ * row (internal issue #206).
+ */
+function projectPromptCache(
+	value: unknown,
+	family: DeclaredFamily,
+): ModelPromptCache | undefined {
+	if (value === undefined) return undefined;
+	const properties = capturedLimitObject(value, PROMPT_CACHE_KEYS, family, "promptCache");
+	const projected: ModelPromptCache = {};
+	for (const key of ["short", "long"] as const) {
+		if (!properties.has(key)) continue;
+		const seconds = requiredCapturedValue(properties, key, family, `promptCache.${key}`);
+		if (!isPositiveFiniteLimit(seconds)) return rejectProjection(family, `promptCache.${key}`);
+		projected[key] = seconds;
+	}
+	return projected;
+}
+
+/**
+ * Whether Pi's cache warmer would replay this row's requests without their
+ * thinking block. An Anthropic reasoning row without forced adaptive thinking
+ * uses budget thinking, which both Anthropic streams add only when `maxTokens`
+ * is above one. The one-token replay then misses the message cache and writes a
+ * new one, and the host's `isReplayable` refuses that only for the
+ * `anthropic-messages` API, which unified rows do not use. Such rows carry no
+ * `promptCache`, so the warmer never schedules them; the Anthropic alias rows
+ * follow the same rule (internal issues #205 and #206).
+ */
+function warmReplayDropsThinking(
+	family: DeclaredFamily,
+	reasoning: boolean | undefined,
+	compat: LogicalCompat | undefined,
+): boolean {
+	return (
+		family === "anthropic" &&
+		reasoning === true &&
+		(compat as AnthropicLogicalCompat | undefined)?.forceAdaptiveThinking !== true
+	);
+}
+
 function projectOptionalCompatBoolean(
 	value: unknown,
 	family: DeclaredFamily,
@@ -864,8 +912,12 @@ export function projectManagedLogicalModel(
 	if (samplingParams !== undefined) projected.samplingParams = samplingParams;
 	const inputLimits = projectInputLimits(optionalCapturedValue(raw, "inputLimits"), family);
 	if (inputLimits !== undefined) projected.inputLimits = inputLimits;
+	const promptCache = projectPromptCache(optionalCapturedValue(raw, "promptCache"), family);
 	const compat = projectCompat(optionalCapturedValue(raw, "compat"), family);
 	if (compat !== undefined) projected.compat = compat;
+	if (promptCache !== undefined && !warmReplayDropsThinking(family, projected.reasoning, compat)) {
+		projected.promptCache = promptCache;
+	}
 	projected.api = LOGICAL_PROVIDER_ID;
 	projected.baseUrl = DECLARATION_BASE_URL;
 	return assertProjectedManagedModel(projected, family);
@@ -884,6 +936,7 @@ const PROJECTED_ROW_KEYS = new Set([
 	"maxTokens",
 	"samplingParams",
 	"inputLimits",
+	"promptCache",
 	"compat",
 ]);
 const ANTHROPIC_COPIED_COMPAT_KEYS = new Set(copiedKeys(ANTHROPIC_COMPAT_DISPOSITION));
@@ -1026,6 +1079,7 @@ function validateProjectedManagedModel(
 	);
 	projectSamplingParams(optionalCapturedValue(properties, "samplingParams"), family);
 	projectInputLimits(optionalCapturedValue(properties, "inputLimits"), family);
+	projectPromptCache(optionalCapturedValue(properties, "promptCache"), family);
 	if (compat?.has("allowedFallbackModels")) {
 		return rejectProjection(family, "compat.allowedFallbackModels");
 	}
@@ -1080,6 +1134,7 @@ function freezeProjectedManagedModel(row: ModelDeclarationRow): void {
 	}
 	Object.freeze(cost);
 	freezeIfObject(optionalCapturedValue(properties, "samplingParams"));
+	freezeIfObject(optionalCapturedValue(properties, "promptCache"));
 	const inputLimits = optionalCapturedValue(properties, "inputLimits");
 	if (isPlainObject(inputLimits)) {
 		const images = inputLimits.images;

@@ -190,7 +190,7 @@ export class MultiAccountLifecycle {
       });
     };
     this.#capture(host.registerCommand("multi-account", {
-      description: "Manage Anthropic and Codex OAuth accounts.",
+      description: "Manage accounts: status, nickname set <id> <text>, nickname clear <id>, and routing policy.",
       getArgumentCompletions: (argumentPrefix) =>
         this.#dependencies.completeMultiAccount(argumentPrefix),
       handler: multiAccountHandler,

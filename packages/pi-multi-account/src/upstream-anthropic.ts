@@ -290,6 +290,16 @@ export function reassertAnthropicBaseRegistration(
  * caller from the live model registry — pi-anthropic-oauth 0.2.0 no longer
  * carries a `models` field on the captured base config, and alias provider ids
  * have no built-in base provider for Pi to inherit a catalog from.
+ *
+ * `promptCache` is dropped from every reasoning row that does not force
+ * adaptive thinking (internal issue #205). Pi's cache warmer replays a request
+ * with `maxTokens: 1`, and both Anthropic streams then omit the budget-thinking
+ * block, so the replay misses the message cache it was meant to keep warm.
+ * The host's `isReplayable` refuses such replays only for `api ===
+ * "anthropic-messages"`, which alias rows never use; without a cache lifetime
+ * the warmer never schedules them. The host judges each request's reasoning
+ * level, but a row cannot, so these rows also lose warming for requests sent
+ * with thinking off.
  */
 export function createAnthropicAliasProviderConfig(
   captured: CapturedAnthropicProvider,
@@ -316,10 +326,18 @@ export function createAnthropicAliasProviderConfig(
   return {
     ...captured.config,
     api: ANTHROPIC_ALIAS_API,
-    models: models.map((model) => ({
-      ...model,
-      api: ANTHROPIC_ALIAS_API,
-    })),
+    models: models.map((model) => {
+      const aliasModel = { ...model, api: ANTHROPIC_ALIAS_API };
+      if (
+        "reasoning" in model &&
+        model.reasoning &&
+        (model.compat as { forceAdaptiveThinking?: boolean } | undefined)
+          ?.forceAdaptiveThinking !== true
+      ) {
+        Reflect.deleteProperty(aliasModel, "promptCache");
+      }
+      return aliasModel;
+    }),
     oauth: captured.config.oauth,
     streamSimple: aliasStream,
   };

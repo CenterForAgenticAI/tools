@@ -46,7 +46,15 @@ export type RecoveryRetrySafety =
 				 * produced any output. Only valid while nothing has been observed;
 				 * the engine converts it to `uncertain-external-effects` otherwise.
 				 */
-				| "pre-start-transient";
+				| "pre-start-transient"
+				/**
+				 * Any other failure after the attempt produced only thinking. Thinking
+				 * is held until the first text or tool call, so the consumer saw
+				 * nothing and one other account may serve the same request. Only
+				 * valid while no text or tool call has been observed; the engine
+				 * converts it to `uncertain-external-effects` otherwise.
+				 */
+				| "thinking-only-failure";
 	  }
 	| {
 			readonly status: "model-policy";
@@ -254,6 +262,13 @@ export interface RecoveryRequest {
 	readonly timing: RecoveryTimingConfig;
 	readonly signal?: AbortSignal;
 	readonly deadlineMs?: number;
+	/**
+	 * Per-request physical send cap: an integer from 1 through
+	 * {@link RECOVERY_MAX_PROVIDER_SENDS_PER_CALL}. Omitted means the hard upper
+	 * limit. Any other value terminates the request as `malformed-config` before
+	 * a send, so a bad caller value can never widen the bound.
+	 */
+	readonly maxAttempts?: number;
 }
 
 export type RecoveryTerminationReason =
@@ -336,25 +351,31 @@ const GAP_USAGE: RecoveryUsageCoverage = Object.freeze({ coverage: "gap" });
 const GAP_COST: RecoveryCostCoverage = Object.freeze({ coverage: "gap" });
 
 /**
- * One unified logical call owns at most two provider invocations: the initial
- * invocation plus one recovery invocation. Raising this value allows a third
- * invocation and must fail the named `RECOVERY-TWO-SEND-CAP` regression.
+ * Hard upper limit on provider invocations for one unified logical call: the
+ * initial invocation plus at most five recovery invocations. A request may lower
+ * it with `RecoveryRequest.maxAttempts`; nothing can raise it. Within the limit,
+ * account recovery rolls over the eligible candidates in order and sends to
+ * each physical account at most once (the named `RECOVERY-ROLLOVER-*` and
+ * `RECOVERY-SEND-CAP` regressions). Model recovery stays a single recovery
+ * send directly after the initial invocation, and the two actions never combine
+ * in one call. Every send happens before any output: a committed attempt ends
+ * recovery, and the invocation-wide absolute timer bounds the whole rollover.
  *
  * For the bounded HTTP/SSE families (Anthropic, OpenAI, Codex SSE) inner
  * provider retries are forced to zero, so each invocation is one possibly
- * charged send and the call makes at most two sends. Both Anthropic
- * paths honour that zero: the adaptive adapter
+ * charged send and the call makes at most as many sends as invocations. Both
+ * Anthropic paths honour that zero: the adaptive adapter
  * (`src/anthropic-adaptive-stream.ts`) and the vendored pinned stream
  * (`packages/pi-anthropic-oauth/src/stream.ts`, local patch 0003) forward a
  * finite non-negative integer `maxRetries` into `client.messages.create`.
  *
  * A Codex non-SSE (auto/WebSocket) invocation has an unknown internal send
  * count: locked pi-ai 1.1.0 may reconnect or fall back to SSE inside one
- * invocation. The engine therefore never uses such an invocation for the
+ * invocation. The engine therefore never uses such an invocation for a
  * recovery send, but it cannot control the internal count of a non-SSE initial
  * invocation. Consumers, including the production cutover, must not claim the
- * at-most-two-sends guarantee for Codex auto/WebSocket calls; only the
- * two-invocation bound holds there. Routed Codex calls are currently pinned to
+ * one-send-per-invocation guarantee for Codex auto/WebSocket calls; only the
+ * invocation bound holds there. Routed Codex calls are currently pinned to
  * SSE by `forceCodexSseOptions` (`src/codex-adapter.ts`), so a caller that
  * passes the forced options here receives the bounded-HTTP reservation.
  *
@@ -363,12 +384,19 @@ const GAP_COST: RecoveryCostCoverage = Object.freeze({ coverage: "gap" });
  * `maxRetries` and can send once per empty-response retry (up to three), runtime
  * model candidate, and `ENDPOINT_FALLBACKS` entry
  * (`packages/pi-antigravity/src/client/client.ts`, three endpoints). The engine
- * reserves it as unknown, never uses it for the recovery send, and terminates
+ * reserves it as unknown, never uses it for a recovery send, and terminates
  * with `uncertain-external-effects` after a failed initial Antigravity
- * invocation. Consumers must not claim the at-most-two-sends guarantee for
- * Antigravity calls; only the two-invocation bound holds there.
+ * invocation. Consumers must not claim the one-send-per-invocation guarantee
+ * for Antigravity calls; only the invocation bound holds there.
  */
-export const RECOVERY_MAX_PROVIDER_SENDS_PER_CALL = 2 as const;
+export const RECOVERY_MAX_PROVIDER_SENDS_PER_CALL = 6 as const;
+
+function validMaxAttempts(value: number | undefined): boolean {
+	return (
+		value === undefined ||
+		(Number.isSafeInteger(value) && value >= 1 && value <= RECOVERY_MAX_PROVIDER_SENDS_PER_CALL)
+	);
+}
 
 /**
  * Supported request-local retry controls. Keep every managed family's entry
@@ -447,7 +475,7 @@ function chargedSendExposureFor(
 /**
  * Content-free terminal error text for an exhausted or terminated recovery.
  *
- * Host retries count toward the same two-send cap. Locked pi-coding-agent 1.1.0
+ * Host retries count toward the same send cap. Locked pi-coding-agent 1.1.0
  * `AgentSession._isRetryableError` (`dist/core/agent-session.js:2978-2983`)
  * restarts the turn when `isRetryableAssistantError` from
  * `@earendil-works/pi-ai/compat` matches the final `errorMessage`
@@ -455,7 +483,7 @@ function chargedSendExposureFor(
  * when `isContextOverflow` matches (`agent-session.js:2371`,
  * `pi-ai/dist/utils/overflow.js:132`). A
  * production caller must surface this message, never a provider's own text, so
- * neither host path can add a third send. The named `HOST-RETRY-BOUNDARY`
+ * neither host path can add a send beyond the cap. The named `HOST-RETRY-BOUNDARY`
  * regression checks both classifiers directly.
  */
 export function buildBoundedRecoveryFinalErrorMessage(): string {
@@ -553,12 +581,27 @@ function isProgressEvent(event: unknown): boolean {
 	);
 }
 
+const THINKING_EVENT_TYPES = new Set(["thinking_start", "thinking_delta", "thinking_end"]);
+
 /**
- * Whether an event is assistant content (text, thinking or a tool call). Only
- * content counts as output for in-call recovery; a `start` never does.
+ * Whether an event is thinking. Thinking is held with the `start` until the
+ * first text or tool call, so it is liveness, not output: a failure after
+ * thinking alone may still be sent once more.
+ */
+export function isRecoveryThinkingEvent(event: unknown): boolean {
+	return (
+		typeof event === "object" &&
+		event !== null &&
+		THINKING_EVENT_TYPES.has((event as { type?: unknown }).type as string)
+	);
+}
+
+/**
+ * Whether an event is assistant output: text or a tool call. Only output
+ * commits an attempt for in-call recovery; a `start` or thinking never does.
  */
 export function isRecoveryContentEvent(event: unknown): boolean {
-	return isProgressEvent(event);
+	return isProgressEvent(event) && !isRecoveryThinkingEvent(event);
 }
 
 /** Whether an event is the provider's `start`, held until the first content. */
@@ -572,7 +615,7 @@ export function isRecoveryStartEvent(event: unknown): boolean {
 
 function observedOutput(
 	upstream: AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>,
-	onProgress: () => void,
+	onProgress: (event: unknown) => void,
 	onTerminal: (terminal: AssistantMessage) => void,
 	onFacts: (facts: AttemptFacts) => void,
 ): AsyncIterable<unknown> {
@@ -580,7 +623,7 @@ function observedOutput(
 		async *[Symbol.asyncIterator]() {
 			const source = await upstream;
 			for await (const event of source) {
-				if (isProgressEvent(event)) onProgress();
+				if (isProgressEvent(event)) onProgress(event);
 				const terminal = assistantTerminal(terminalFromEvent(event));
 				if (terminal !== undefined) {
 					onTerminal(terminal);
@@ -695,9 +738,10 @@ function observeLatePhysicalAttempt(
 }
 
 /**
- * An attempt read up to its first event that is not a `start`. At most one
- * `start` is kept: a provider sends one, and a repeat carries nothing a
- * consumer needs.
+ * An attempt read up to its first event that is neither a `start` nor
+ * thinking. At most one `start` is kept: a provider sends one, and a repeat
+ * carries nothing a consumer needs. Every thinking event is kept, in order,
+ * so the consumer sees it once the first text or tool call commits the attempt.
  */
 interface HeldPrefix {
 	readonly iterator: AsyncIterator<unknown>;
@@ -713,13 +757,15 @@ type PeekResult =
 	| { readonly status: "replay"; readonly prefix: Promise<HeldPrefix> };
 
 /**
- * Read an attempt past its leading `start` events. A held `start` is not
- * progress, so it never resets the request's idle limit. A rejection while
- * opening the stream or before any `start` rejects; a rejection after a held
- * `start` is kept so the replay can rethrow it at the same point.
+ * Read an attempt past its leading `start` and thinking events. A held
+ * `start` is not progress, so it never resets the request's idle limit; held
+ * thinking is liveness and calls `onThinking`, which resets it. A rejection
+ * while opening the stream or before any held event rejects; a rejection after
+ * a held event is kept so the replay can rethrow it at the same point.
  */
 function readHeldPrefix(
 	output: AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>,
+	onThinking: () => void = () => {},
 ): Promise<HeldPrefix> {
 	const pending = (async (): Promise<HeldPrefix> => {
 		const source = await output;
@@ -731,12 +777,17 @@ function readHeldPrefix(
 			try {
 				step = await iterator.next();
 			} catch (error) {
-				if (!sawStart) throw error;
+				if (held.length === 0) throw error;
 				return { iterator, held, failure: { error } };
 			}
 			if (step.done !== true && isRecoveryStartEvent(step.value)) {
 				if (!sawStart) held.push(step.value);
 				sawStart = true;
+				continue;
+			}
+			if (step.done !== true && isRecoveryThinkingEvent(step.value)) {
+				held.push(step.value);
+				onThinking();
 				continue;
 			}
 			return { iterator, held, next: step };
@@ -794,8 +845,9 @@ function resumedOutput(prefix: Promise<HeldPrefix>): AsyncIterable<unknown> {
 async function peekFirstContent(
 	output: AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>,
 	request: ActiveRequest,
+	onThinking: () => void,
 ): Promise<PeekResult> {
-	const prefix = readHeldPrefix(output);
+	const prefix = readHeldPrefix(output, onThinking);
 	const settled = await awaitRequest(prefix, request);
 	if (settled.status === "aborted") {
 		void prefix.then(({ iterator }) => closeIterator(iterator), () => {});
@@ -871,7 +923,8 @@ function validRetrySafety(value: unknown): value is RecoveryRetrySafety {
 			(safety.reason === "account-local-quota" ||
 				safety.reason === "account-local-auth" ||
 				safety.reason === "account-local-rate-limit" ||
-				safety.reason === "pre-start-transient")
+				safety.reason === "pre-start-transient" ||
+				safety.reason === "thinking-only-failure")
 		);
 	}
 	if (safety.status === "model-policy") {
@@ -966,10 +1019,11 @@ async function runRecovery(
 		errorMessage: buildBoundedRecoveryFinalErrorMessage(),
 	});
 	const consideredPairs = new Set<string>();
+	const sendCap = input.maxAttempts ?? RECOVERY_MAX_PROVIDER_SENDS_PER_CALL;
 
 	for (const candidate of [...input.candidates]) {
 		if (request.controller.signal.aborted) return terminated();
-		if (attempts >= RECOVERY_MAX_PROVIDER_SENDS_PER_CALL) return exhausted();
+		if (attempts >= sendCap) return exhausted();
 		if (!validCandidate(candidate)) continue;
 		if (initialCandidate === undefined && !eligibleInitialCandidate(candidate)) continue;
 		if (
@@ -1021,9 +1075,9 @@ async function runRecovery(
 			return terminated();
 		}
 		if (attempts > 0 && reservation.maximumPossiblyChargedSends === "unknown") {
-			// The recovery send is the call's last send. A pinned Codex non-SSE or a
-			// vendored Antigravity invocation can make several internal sends, so it
-			// cannot fit a one-send remainder.
+			// Every recovery send must be one bounded send. A pinned Codex non-SSE or
+			// a vendored Antigravity invocation can make several internal sends, so it
+			// is never a recovery target.
 			continue;
 		}
 		// A reservation keeps its ordinal even when the request aborts before dispatch.
@@ -1048,6 +1102,8 @@ async function runRecovery(
 		let terminal: AssistantMessage | undefined;
 		let callbackFailed = false;
 		let sawProgress = false;
+		// Text or a tool call: output that commits the attempt. Thinking is not.
+		let sawOutput = false;
 		let committed: { readonly output: AsyncIterable<unknown> } | undefined;
 		const attemptController = new AbortController();
 		const abortAttempt = (): void => attemptController.abort();
@@ -1093,12 +1149,17 @@ async function runRecovery(
 							physical.output;
 						let peekAborted = false;
 						if (input.publication === "stream-after-first-content") {
-							const peek = await peekFirstContent(physical.output, request);
+							const peek = await peekFirstContent(physical.output, request, () => {
+								// Held thinking is liveness, not output: only the idle limit is reset.
+								sawProgress = true;
+								if (!attemptController.signal.aborted) onProgress();
+							});
 							if (peek.status === "aborted") {
 								peekAborted = true;
 							} else if (peek.status === "content") {
 								onProgress();
 								sawProgress = true;
+								sawOutput = true;
 								committed = { output: resumedOutput(Promise.resolve(peek.prefix)) };
 							} else {
 								upstream = resumedOutput(peek.prefix);
@@ -1108,8 +1169,9 @@ async function runRecovery(
 							const output = createAcceptedOutputStream(
 								observedOutput(
 									upstream,
-									() => {
+									(event) => {
 										sawProgress = true;
+										if (isRecoveryContentEvent(event)) sawOutput = true;
 										onProgress();
 									},
 									(observed) => {
@@ -1233,7 +1295,16 @@ async function runRecovery(
 			abortRequest(request, "uncertain-external-effects");
 			return terminated();
 		}
+		if (safety.status === "recoverable" && safety.reason === "thinking-only-failure" && sawOutput) {
+			// Thinking alone is resent; once text or a tool call arrived, nothing is.
+			abortRequest(request, "uncertain-external-effects");
+			return terminated();
+		}
 		if (safety.status === "recoverable") {
+			// Account rollover continues on the same action only. A failure after
+			// the single model recovery send ends the call, so one call never
+			// combines a model change with an account change.
+			if (recoveryAction !== undefined && recoveryAction !== safety.action) return exhausted();
 			recoveryAction = safety.action;
 			continue;
 		}
@@ -1241,9 +1312,10 @@ async function runRecovery(
 			abortRequest(request, safety.reason);
 			return terminated();
 		}
-		// The recovery send was the last send; do not consult model policy for a
-		// third send that the call can never make.
-		if (attempts >= RECOVERY_MAX_PROVIDER_SENDS_PER_CALL) return exhausted();
+		// Model policy is consulted only directly after the initial send, and only
+		// when the cap leaves room for one model recovery send. A structured
+		// refusal during account rollover, or after the model send, ends the call.
+		if (recoveryAction !== undefined || attempts >= sendCap) return exhausted();
 		if (terminal === undefined || deps.classifyModelRecovery === undefined) {
 			abortRequest(request, "unknown");
 			return terminated();
@@ -1299,6 +1371,7 @@ export function createRecoveryEngine(
 			}
 			if (
 				!validTiming(input.timing) ||
+				!validMaxAttempts(input.maxAttempts) ||
 				(input.deadlineMs !== undefined &&
 					(!Number.isFinite(input.deadlineMs) || input.deadlineMs < 0))
 			) {

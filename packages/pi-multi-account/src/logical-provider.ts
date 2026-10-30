@@ -40,17 +40,36 @@ import type {
 	MultiAccountConfig,
 } from "./config.js";
 import {
+	CODEX_ERROR_CODE_SET,
+	CODEX_FAILURE_KIND_SET,
 	CONTEXT_OVERFLOW_REASONS,
 	PROVIDER_ERROR_CODES,
 	TRANSPORT_FAILURE_KINDS,
 	classifyFailure,
+	codexErrorCodeFromMessage,
+	codexFailureKindFromMessage,
 	contextOverflowReason,
 	providerErrorCodeFromMessage,
 	providerErrorTypeFromMessage,
 	upstreamFailureKindFromMessage,
 } from "./error-classification.js";
+import {
+	isErrorName,
+	isMessageForm,
+	isMessageHash,
+	isNodeErrorCode,
+	isProviderIdentifier,
+	isReportedMessageLength,
+	messageIdentifiers,
+	thrownIdentifiers,
+	type MessageForm,
+	type MessageIdentifiers,
+	type ThrownIdentifiers,
+} from "./failure-identifiers.js";
 import type {
 	AnthropicErrorType,
+	CodexErrorCode,
+	CodexFailureKind,
 	ContextOverflowReason,
 	FailureCategory,
 	ProviderErrorCode,
@@ -66,6 +85,8 @@ import type { ProviderType, Vendor } from "./vendor.js";
 export { LOGICAL_PROVIDER_ID } from "./models-declaration.js";
 import { LOGICAL_PROVIDER_ID } from "./models-declaration.js";
 import { forceCodexSseOptions } from "./codex-adapter.js";
+import { createSessionAffinity, sessionAffinityKey } from "./session-affinity.js";
+import { createCacheWarmReplayRecognizer } from "./cache-warm-replay.js";
 import { readImageStripPolicy, stripOldImages, type ImageStripPolicy } from "./image-strip.js";
 import {
 	isImageCountBucket,
@@ -79,7 +100,7 @@ import {
 	buildBoundedRecoveryFinalErrorMessage,
 	createRecoveryEngine,
 	isRecoveryStartEvent,
-	RECOVERY_MAX_PROVIDER_SENDS_PER_CALL,
+	isRecoveryThinkingEvent,
 	type RecoveryClock,
 	type RecoveryDispatchRequest,
 	type RecoveryEngine,
@@ -138,6 +159,12 @@ export interface LogicalPhysicalAccount {
 	healthy?: boolean;
 	/** False when the credential is present but provably unusable. */
 	authenticated?: boolean;
+	/**
+	 * Set when the operator removed this account from automatic routing (#137).
+	 * Unified dispatch and in-call recovery never choose it; cooldown
+	 * propagation and exhaustion cross-checks still see it.
+	 */
+	automaticRoutingExcluded?: boolean;
 	modelSupported?: boolean;
 	/** Bounded, non-identifying. Never a human account name. */
 	accountFingerprint?: string;
@@ -158,9 +185,10 @@ export interface LogicalPhysicalAccount {
 
 /**
  * How far the last attempt got: no `start` yet, a `start` (response headers)
- * with no content, or content already seen.
+ * with no content, thinking with no text or tool call, or text or a tool call
+ * already seen.
  */
-export type LogicalFailurePhase = "opening" | "started" | "streaming";
+export type LogicalFailurePhase = "opening" | "started" | "thinking" | "streaming";
 
 /**
  * How the last attempt ended. `error-terminal` is a provider error event;
@@ -187,8 +215,10 @@ export type LogicalFailureStop =
 	| RecoveryTerminationReason;
 
 /**
- * Closed facts about the last attempt's failure. Every member is an enum value
- * or a bounded integer picked from provider data; nothing is copied from it.
+ * Closed facts about the last attempt's failure. Every member is an enum value,
+ * a bounded integer, an identifier that matched a strict pattern, or a
+ * truncated hash, picked from provider data. An identifier may be a
+ * provider-chosen word; no message text around it is copied.
  */
 export interface LogicalFailureShape {
 	readonly phase: LogicalFailurePhase;
@@ -200,15 +230,44 @@ export interface LogicalFailureShape {
 	readonly errorType?: AnthropicErrorType;
 	/** A fixed upstream message that carries no envelope. */
 	readonly upstream?: UpstreamFailureKind;
+	/** A fixed Codex failure message, by exact text or fixed prefix only. */
+	readonly codexFailure?: CodexFailureKind;
+	/** A Codex error code, only when it is on the fixed list. */
+	readonly codexCode?: CodexErrorCode;
 	/** An HTTP status from 100 through 599. */
 	readonly httpStatus?: number;
 	readonly transportKind?: TransportFailureKind;
+	/** The thrown value's class name, such as `TypeError`. */
+	readonly errorName?: string;
+	/** A Node system error code, such as `ECONNRESET`, from the thrown value or its cause. */
+	readonly errorCode?: string;
+	/** The provider envelope's `error.type`, when identifier-shaped and not on the fixed list. */
+	readonly envelopeType?: string;
+	/** The provider envelope's or Codex event's error code, when identifier-shaped. */
+	readonly envelopeCode?: string;
+	/** Length of a message no fixed list matched, capped at 65536. */
+	readonly messageLength?: number;
+	/** How a message no fixed list matched starts. */
+	readonly messageForm?: MessageForm;
+	/** Twelve hex characters of a hash of the normalized unmatched message. */
+	readonly messageHash?: string;
 }
 
 /** Safe physical cause of a failed logical call; never contains provider prose. */
 export interface LogicalFailureEvidence {
 	readonly providerId?: string;
-	readonly category: FailureCategory | "context-overflow" | "host-stale-install";
+	/**
+	 * `login-required` and `credential-unavailable` are evidence-only, like
+	 * `context-overflow`: a dispatch that could not resolve the account's
+	 * credential, with or without a terminal-auth invalidation already recorded.
+	 * Neither is a routing category.
+	 */
+	readonly category:
+		| FailureCategory
+		| "context-overflow"
+		| "host-stale-install"
+		| "login-required"
+		| "credential-unavailable";
 	/** Which limit a `context-overflow` hit, from structured provider facts only. */
 	readonly overflowReason?: ContextOverflowReason;
 	/**
@@ -247,8 +306,21 @@ export function logicalFailureDiagnosticFields(
 					stop: shape.stop,
 					...(shape.errorType === undefined ? {} : { errorType: shape.errorType }),
 					...(shape.upstream === undefined ? {} : { upstream: shape.upstream }),
+					...(shape.codexFailure !== undefined && CODEX_FAILURE_KIND_SET.has(shape.codexFailure)
+						? { codexFailure: shape.codexFailure }
+						: {}),
+					...(shape.codexCode !== undefined && CODEX_ERROR_CODE_SET.has(shape.codexCode)
+						? { codexCode: shape.codexCode }
+						: {}),
 					...(shape.httpStatus === undefined ? {} : { httpStatus: shape.httpStatus }),
 					...(shape.transportKind === undefined ? {} : { transportKind: shape.transportKind }),
+					...(isErrorName(shape.errorName) ? { errorName: shape.errorName } : {}),
+					...(isNodeErrorCode(shape.errorCode) ? { errorCode: shape.errorCode } : {}),
+					...(isProviderIdentifier(shape.envelopeType) ? { envelopeType: shape.envelopeType } : {}),
+					...(isProviderIdentifier(shape.envelopeCode) ? { envelopeCode: shape.envelopeCode } : {}),
+					...(isReportedMessageLength(shape.messageLength) ? { messageLength: shape.messageLength } : {}),
+					...(isMessageForm(shape.messageForm) ? { messageForm: shape.messageForm } : {}),
+					...(isMessageHash(shape.messageHash) ? { messageHash: shape.messageHash } : {}),
 				}),
 	};
 }
@@ -396,6 +468,12 @@ export interface LogicalProviderDeps {
 	onPublicTerminal?: (physical: AssistantMessage, publicMessage: AssistantMessage) => void;
 	onDiagnostic?: (message: string) => void;
 	/**
+	 * A session's logical model is now served by a different account than the
+	 * one that last served it. Carries provider ids only, never the session key.
+	 * A sink that throws cannot change the call's result.
+	 */
+	onSessionAccountChange?: (change: LogicalSessionAccountChange) => void;
+	/**
 	 * One closed evidence record for each failed (not aborted) call. A sink that
 	 * throws cannot change the call's result.
 	 */
@@ -409,11 +487,12 @@ export interface LogicalProviderDeps {
 	onSupersededTerminal?: (physical: AssistantMessage) => void;
 	state?: RuntimeState;
 	/**
-	 * Per-invocation idle and absolute limits and the per-attempt stall limit;
-	 * omitted fields use the defaults.
+	 * Per-invocation idle and absolute limits, the per-attempt stall limit, and
+	 * the per-call send cap; omitted fields use the defaults.
 	 */
 	recoveryTiming?: Partial<
-		RecoveryTimingConfig & Pick<MultiAccountConfig, "recoveryStallTimeoutMs">
+		RecoveryTimingConfig &
+			Pick<MultiAccountConfig, "recoveryStallTimeoutMs" | "recoveryMaxAttempts">
 	>;
 	/** Injected only by tests; production uses the system clock. */
 	recoveryClock?: RecoveryClock;
@@ -432,6 +511,27 @@ export interface LogicalProvider {
 	) => AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>;
 	preflight?: (model: unknown) => unknown;
 	shutdown?: () => unknown;
+	/**
+	 * The account that last served a successful call for this session key and
+	 * logical model, while it is still preferred (internal issue #204).
+	 */
+	lastServingAccount?: (sessionKey: string, modelId: string) => string | undefined;
+}
+
+/**
+ * Why a session moved off the account that last served it:
+ * - `recovered`: the call failed on it before output and in-call recovery served it elsewhere;
+ * - `failed`: an earlier call failed on it, so it was no longer preferred;
+ * - `ineligible`: it was cooling, exhausted, cleared, disabled, or outside the account group;
+ * - `tier`: it is a metered API account and a subscription account is eligible again.
+ */
+export type LogicalSessionAccountChangeReason = "recovered" | "failed" | "ineligible" | "tier";
+
+export interface LogicalSessionAccountChange {
+	readonly modelId: string;
+	readonly fromProviderId: string;
+	readonly toProviderId: string;
+	readonly reason: LogicalSessionAccountChangeReason;
 }
 
 export function safeAttributionCall(call: () => void): void {
@@ -548,6 +648,32 @@ function rawMessageOf(error: unknown): unknown {
 	}
 }
 
+/** Codex kinds chosen by a whole fixed message, not by a prefix. */
+const FULLY_NAMED_CODEX_KINDS: ReadonlySet<CodexFailureKind> = new Set<CodexFailureKind>([
+	"codex-response-failed",
+	"codex-no-stop-reason",
+	"codex-sse-header-timeout",
+	"responses-no-terminal-event",
+]);
+
+/**
+ * Message identifiers for the failure shape. An envelope type or code a fixed
+ * list already named is not repeated; length, form and hash are present only
+ * when no fixed list named the message.
+ */
+function identifierFacts(
+	message: MessageIdentifiers | undefined,
+	named: { readonly errorType?: unknown; readonly codexCode?: unknown } | undefined,
+): MessageIdentifiers {
+	if (message === undefined) return {};
+	const { envelopeType, envelopeCode, ...unmatched } = message;
+	return {
+		...(envelopeType === undefined || named?.errorType !== undefined ? {} : { envelopeType }),
+		...(envelopeCode === undefined || named?.codexCode !== undefined ? {} : { envelopeCode }),
+		...unmatched,
+	};
+}
+
 /** Only a real HTTP status survives as failure evidence. */
 function boundedHttpStatus(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599
@@ -568,6 +694,10 @@ interface FailureShapeHints {
 	readonly failedAtMs: number;
 	readonly errorType?: AnthropicErrorType;
 	readonly upstream?: UpstreamFailureKind;
+	readonly codexFailure?: CodexFailureKind;
+	readonly codexCode?: CodexErrorCode;
+	readonly thrown?: ThrownIdentifiers;
+	readonly message?: MessageIdentifiers;
 }
 
 const EXHAUSTION_LENGTH_MAX_OUTPUT_TOKENS = 1;
@@ -594,7 +724,59 @@ const VISIBLE_FAILURE_CAUSES: Readonly<Record<LogicalFailureEvidence["category"]
 	unknown: "unknown",
 	"context-overflow": "context-overflow",
 	"host-stale-install": "host_stale_install",
+	"login-required": "login-required",
+	"credential-unavailable": "credential-unavailable",
 });
+
+/**
+ * Fixed public text when a credential failure left the call with no other
+ * account to try. It explains a footer `attempts: 1`. Neither host retry
+ * predicate matches it.
+ */
+export const NO_OTHER_ACCOUNT_MESSAGE = "No other account was usable for this model.";
+
+/**
+ * Fixed next-step text for a dispatch that could not resolve an account's
+ * credential. Only the canonical physical provider id is interpolated, which
+ * is the same id the footer already shows; no provider or credential text is.
+ */
+function credentialAdvice(
+	cause: "login-required" | "credential-unavailable",
+	providerId: string | undefined,
+	subscription: boolean,
+): string {
+	if (!subscription) {
+		return providerId === undefined
+			? "Check the account's configured credential."
+			: `Check the credential configured for ${providerId}.`;
+	}
+	if (cause === "login-required") {
+		return providerId === undefined
+			? "Sign in again with /login."
+			: `Run /login ${providerId} to sign in again.`;
+	}
+	return providerId === undefined
+		? "Credentials could not be resolved. If this continues, run /login."
+		: `Credentials for ${providerId} could not be resolved. If this continues, run /login ${providerId}.`;
+}
+
+/** Most provider ids named in the all-invalidated sign-in advice. */
+const MAX_PREINVALIDATED_LOGIN_IDS = 4;
+
+/**
+ * Fixed sign-in text for a call refused before any attempt because every
+ * account in the call's own pool is already invalidated for terminal auth.
+ * Only canonical provider ids from that pool are interpolated; no credential,
+ * provider or error text is. Undefined when no id is a subscription account,
+ * since `/login` does not apply to an API key.
+ */
+function preInvalidatedAdvice(providerIds: readonly string[]): string | undefined {
+	if (providerIds.length === 0) return undefined;
+	if (providerIds.length === 1) return `Run /login ${providerIds[0]} to sign in again.`;
+	const shown = providerIds.slice(0, MAX_PREINVALIDATED_LOGIN_IDS).join(", ");
+	const more = providerIds.length - MAX_PREINVALIDATED_LOGIN_IDS;
+	return `Run /login for each account to sign in again: ${shown}${more > 0 ? `, and ${more} more` : ""}.`;
+}
 
 /**
  * Public text for a local host fault: the running pi process tried to load a
@@ -1144,7 +1326,15 @@ export function createLogicalProvider(
 		deps.onDiagnostic?.(message);
 	};
 
-	const selectAccount = (modelId: string): LogicalServingAccount => {
+	const affinity = createSessionAffinity();
+	const warmReplays = createCacheWarmReplayRecognizer();
+
+	const selectAccount = (
+		modelId: string,
+		sessionKey?: string,
+		/** Accounts a concurrent call already claimed the invalidation probe for. */
+		skipProviderIds?: ReadonlySet<string>,
+	): LogicalServingAccount & { readonly displaced?: "ineligible" | "tier" } => {
 		const snapshot = deps.captureSelectionSnapshot?.(modelId);
 		const accounts = snapshot?.accounts ?? deps.accounts;
 		const tierModelMap = deps.tierModelMap ?? DEFAULT_CONFIG.tierModelMap;
@@ -1155,10 +1345,12 @@ export function createLogicalProvider(
 			const candidates = group.allAccounts.map((account): AccountGroupFailureCandidate => ({
 				providerId: account.providerId,
 				servesModel: modelVendor !== undefined && vendorForFamily(account.family) === modelVendor && resolveLogicalServingAccount(account, modelId, tierModelMap) !== undefined,
-				eligible: logicalAccountEligible(account, coordinator.state, nowMs),
+				eligible: account.automaticRoutingExcluded !== true && logicalAccountEligible(account, coordinator.state, nowMs),
 				...(account.authenticated === undefined ? {} : { authenticated: account.authenticated }),
 				...(account.exhausted === undefined ? {} : { exhausted: account.exhausted }),
 				coolingDown: coordinator.state.peekCooldown(account.providerId, nowMs) !== undefined,
+				invalidated: coordinator.state.getInvalidation(account.providerId) !== undefined,
+				usageDistrusted: coordinator.state.peekUsageSnapshotUntrusted(account.providerId, nowMs),
 			}));
 			return formatAccountGroupFailure({ policy: group.policy, modelId, accountLimit: group.accountLimit, candidates: [...candidates, ...group.otherCandidates] })?.message ?? fallback;
 		};
@@ -1204,24 +1396,43 @@ export function createLogicalProvider(
 				failureMessage(`no managed account serves the exact model id ${modelId}`),
 			);
 		}
+		// The operator's automatic-routing opt-out (#137) removes accounts from
+		// the pool before eligibility, so an excluded account is never chosen even
+		// when it is the only healthy one. Refuse with that reason, not a generic
+		// ineligible one, when the opt-out leaves nothing.
+		const automatic = serving.filter(
+			({ account }) => account.automaticRoutingExcluded !== true,
+		);
+		if (automatic.length === 0) {
+			throw new Error(
+				failureMessage(
+					`every managed account serving ${modelId} is excluded from automatic routing`,
+				),
+			);
+		}
 
 		// Physical OpenAI subscription (`openai-codex`) and owning-vendor API
 		// (`openai`) accounts are one routing family: vendor `openai`. Ownership is
 		// fixed from the declared subscription catalog before API exact/map matches are
 		// admitted, so another vendor's API catalog cannot make a row ambiguous.
-		const eligible = serving.filter(({ account }) =>
-			logicalAccountEligible(
-				{
-					providerId: account.providerId,
-					exhausted: account.exhausted,
-					authenticated: account.authenticated,
-				},
-				// The coordinator's carrier, not `deps.state` directly. A failure
-				// this turn already recorded lives there, and reading anywhere else
-				// would re-select the account that just failed.
-				coordinator.state,
-				nowMs,
-			),
+		const eligible = automatic.filter(
+			({ account }) =>
+				skipProviderIds?.has(account.providerId) !== true &&
+				logicalAccountEligible(
+					{
+						providerId: account.providerId,
+						exhausted: account.exhausted,
+						authenticated: account.authenticated,
+					},
+					// The coordinator's carrier, not `deps.state` directly. A failure
+					// this turn already recorded lives there, and reading anywhere else
+					// would re-select the account that just failed.
+					coordinator.state,
+					nowMs,
+					// A due terminal-auth invalidation is selectable so that one probe
+					// can clear it (#227). Selection only reads; the claim is below.
+					"probe-if-due",
+				),
 		);
 		eligible.sort(
 			(left, right) =>
@@ -1233,11 +1444,81 @@ export function createLogicalProvider(
 			// Every account across every tier that serves this model is currently
 			// ineligible. The turn is refused before any physical request is issued;
 			// it is not parked, and no account is mutated by having been asked.
-			throw new Error(
-				failureMessage(`every managed account serving ${modelId} is currently ineligible`),
+			//
+			// When a terminal-auth invalidation already explains every account in
+			// the call's own pool (`automatic`, which is policy-scoped and already
+			// drops opted-out accounts), say so and name the sign-in. A cooldown, an
+			// exhaustion or a missing credential is never read as a login need, and
+			// one account that may still recover by itself keeps the generic text.
+			const allInvalidated = automatic.every(
+				({ account }) => coordinator.state.getInvalidation(account.providerId) !== undefined,
 			);
+			const advice = allInvalidated
+				? preInvalidatedAdvice(
+						automatic
+							.filter(({ account }) => logicalProviderType(account) === "subscription")
+							.map(({ account }) => account.providerId),
+					)
+				: undefined;
+			const base = failureMessage(`every managed account serving ${modelId} is currently ineligible`);
+			throw new Error(advice === undefined ? base : `${base} ${advice}`);
 		}
-		return chosen;
+		// Session affinity (internal issue #204) only reorders the eligible accounts
+		// of the best eligible tier: a session keeps the account that last served it
+		// rather than rebuilding its prompt cache elsewhere, but never stays on a
+		// metered API account once a subscription account is eligible.
+		const remembered =
+			sessionKey === undefined ? undefined : affinity.lastServingAccount(sessionKey, modelId);
+		if (remembered === undefined) return chosen;
+		const rememberedServing = eligible.find(({ account }) => account.providerId === remembered);
+		if (rememberedServing === undefined) return { ...chosen, displaced: "ineligible" };
+		return tierRank(logicalProviderType(rememberedServing.account)) ===
+			tierRank(logicalProviderType(chosen.account))
+			? rememberedServing
+			: { ...chosen, displaced: "tier" };
+	};
+
+	/**
+	 * Remember which account served this session's call, or that the call failed
+	 * on the accounts it used. Only a published terminal counts, so an aborted
+	 * call and a structured refusal or unknown stop change nothing.
+	 */
+	const noteSessionOutcome = (
+		sessionKey: string,
+		modelId: string,
+		selected: { readonly displaced?: "ineligible" | "tier" },
+		boxes: readonly { readonly account: LogicalPhysicalAccount; readonly physicalTerminal?: AssistantMessage }[],
+		event: unknown,
+	): void => {
+		const last = boxes.at(-1);
+		if (last === undefined || typeof event !== "object" || event === null) return;
+		const { type, reason, message } = event as { type?: unknown; reason?: unknown; message?: unknown };
+		if (type === "error" && reason === "error") {
+			if (last.physicalTerminal !== undefined && hostFinalStopMessage(last.physicalTerminal) !== undefined) return;
+			for (const box of boxes) affinity.recordFailed(sessionKey, modelId, box.account.providerId);
+			return;
+		}
+		const stopReason = (message as { stopReason?: unknown } | undefined)?.stopReason;
+		if (type !== "done" || stopReason === "error" || stopReason === "aborted") return;
+		const servedBy = last.account.providerId;
+		const previous = affinity.recordServed(sessionKey, modelId, servedBy);
+		if (previous === undefined || previous.providerId === servedBy) return;
+		const change: LogicalSessionAccountChange = Object.freeze({
+			modelId,
+			fromProviderId: previous.providerId,
+			toProviderId: servedBy,
+			reason:
+				boxes.length > 1 && boxes[0]?.account.providerId === previous.providerId
+					? "recovered"
+					: previous.failed
+						? "failed"
+						: (selected.displaced ?? "ineligible"),
+		});
+		try {
+			deps.onSessionAccountChange?.(change);
+		} catch {
+			// A change sink cannot replace a provider result.
+		}
 	};
 
 	/**
@@ -1359,29 +1640,51 @@ export function createLogicalProvider(
 	/** The account did nothing wrong; report it as handled so nothing cools it. */
 	const hostFaultReceipt = (): HostRetryCooldownReceipt => ({ alreadyCooled: true, rollback: () => {} });
 
-	/** Whether the attempt produced content: nothing after it is ever sent again. */
+	/**
+	 * Whether the attempt produced text or a tool call: nothing after it is ever
+	 * sent again. Thinking alone is not output.
+	 */
 	const attemptHadOutput = (box: AttemptRecordBox): boolean => {
 		const content = box.physicalTerminal?.content;
-		return box.sawOutput || (Array.isArray(content) && content.length > 0);
+		return (
+			box.sawOutput ||
+			(Array.isArray(content) &&
+				content.some((block) => (block as { type?: unknown } | null)?.type !== "thinking"))
+		);
 	};
 
 	/**
 	 * Keep the closed facts of how an attempt failed, once. The provider's own
-	 * text is read here only to pick enum values and is never stored.
+	 * text is read here only to pick enum values, identifier-shaped tokens and,
+	 * when no fixed list names it, a length, form and truncated hash. The text
+	 * itself is never stored. `thrown` is the value the attempt threw, if any.
 	 */
 	const noteFailureShape = (
 		box: AttemptRecordBox,
 		ending: LogicalFailureEnding,
 		raw?: unknown,
+		thrown?: unknown,
 	): void => {
 		if (box.shapeHints !== undefined) return;
 		const errorType = providerErrorTypeFromMessage(raw);
 		const upstream = upstreamFailureKindFromMessage(raw);
+		const codexFailure = codexFailureKindFromMessage(raw);
+		const codexCode = codexErrorCodeFromMessage(raw);
+		// A prefix-only Codex kind leaves its tail unnamed, so it still gets a hash.
+		const matched =
+			errorType !== undefined ||
+			upstream !== undefined ||
+			codexCode !== undefined ||
+			(codexFailure !== undefined && FULLY_NAMED_CODEX_KINDS.has(codexFailure));
 		box.shapeHints = {
 			ending,
 			failedAtMs: box.clock.now(),
 			...(errorType === undefined ? {} : { errorType }),
 			...(upstream === undefined ? {} : { upstream }),
+			...(codexFailure === undefined ? {} : { codexFailure }),
+			...(codexCode === undefined ? {} : { codexCode }),
+			...(thrown === undefined ? {} : { thrown: thrownIdentifiers(thrown) }),
+			message: messageIdentifiers(raw, !matched),
 		};
 	};
 
@@ -1409,6 +1712,7 @@ export function createLogicalProvider(
 		// same rule from the events it observed.
 		if (attemptHadOutput(box)) return { status: "unsafe", reason: "unknown" };
 		if (failure === undefined) return { status: "unsafe", reason: "unknown" };
+		const afterThinking = box.sawThinking;
 		const category = classifyFailure(failure).category;
 		if (category === "quota-rate-limit") {
 			return {
@@ -1424,6 +1728,9 @@ export function createLogicalProvider(
 			return { status: "recoverable", action: "account", reason: "account-local-auth" };
 		}
 		if (category === "config") return { status: "unsafe", reason: "invalid-request" };
+		// Thinking is held until the first text or tool call, so the consumer has
+		// seen nothing and one other account may serve the same request.
+		if (afterThinking) return { status: "recoverable", action: "account", reason: "thinking-only-failure" };
 		if (category === "transport" || box.preStartRetryable) {
 			// A network or server failure before any content: the provider never
 			// produced output, so one other account may serve the same request.
@@ -1460,12 +1767,26 @@ export function createLogicalProvider(
 		 */
 		sawOutput: boolean;
 		/**
+		 * Thinking reached the engine. The engine holds it until the first text
+		 * or tool call, so it is not output: a failure after thinking alone may
+		 * still be sent once more.
+		 */
+		sawThinking: boolean;
+		/**
 		 * The attempt's first `start`, held by the engine until the first content.
 		 * A successful terminal with no content publishes this exact event.
 		 */
 		heldStart?: unknown;
 		/** A setup-shaped first terminal whose raw text the host would retry. */
 		preStartRetryable: boolean;
+		/**
+		 * The dispatch itself could not resolve a credential for this account
+		 * (its own `credential_unresolved` code), and whether runtime state had
+		 * already invalidated the account for terminal auth when it failed. Set
+		 * only from a rejected open, never from a provider terminal, so
+		 * provider-authored fields cannot select the login advice.
+		 */
+		credentialUnresolved?: "login-required" | "credential-unavailable";
 		/** Setup failed because this pi process could not load its own code. */
 		hostStaleInstall?: boolean;
 		/** The missing module is a bare package, so a reinstall, not a restart, helps. */
@@ -1531,8 +1852,9 @@ export function createLogicalProvider(
 				failure: ProviderFailureSignal,
 				ending: LogicalFailureEnding,
 				raw?: unknown,
+				thrown?: unknown,
 			): void => {
-				noteFailureShape(box, ending, raw);
+				noteFailureShape(box, ending, raw, thrown);
 				const receipt = recordFailureOnce(message);
 				box.failure = failure;
 				box.physicalTerminal = message;
@@ -1565,7 +1887,8 @@ export function createLogicalProvider(
 					sawEvent = true;
 					const terminal = terminalAttribution(event);
 					if (terminal === undefined) {
-						box.sawOutput = true;
+						if (isRecoveryThinkingEvent(event)) box.sawThinking = true;
+						else box.sawOutput = true;
 						yield event;
 						continue;
 					}
@@ -1664,11 +1987,14 @@ export function createLogicalProvider(
 					box.preStartRetryable = disposition === "retryable";
 				}
 				if (box.physicalTerminal === undefined) {
+					const stalled = error instanceof PhysicalAttemptStall;
 					attributeFailure(
 						syntheticErrorMessage(requestedModelId, buildBoundedRecoveryFinalErrorMessage()),
 						safeProjectFailureSignal(error, dispatchedModelId),
-						error instanceof PhysicalAttemptStall ? "stalled" : "stream-threw",
-						rawMessageOf(error),
+						stalled ? "stalled" : "stream-threw",
+						// A stall is this extension's own timeout, not provider evidence.
+						stalled ? undefined : rawMessageOf(error),
+						stalled ? undefined : error,
 					);
 				}
 				throw error;
@@ -1749,10 +2075,13 @@ export function createLogicalProvider(
 			});
 		}
 		// Same vendor only, exact model only: the one recovery action in this slice
-		// is another account serving the selected model.
+		// is another account serving the selected model. An account the operator
+		// excluded from automatic routing (#137) is never a recovery target.
 		const accounts = deps.accounts
 			.filter(
 				(account) =>
+					(account.automaticRoutingExcluded !== true ||
+						account.providerId === selected.account.providerId) &&
 					vendorForFamily(account.family) === vendor &&
 					resolveLogicalServingAccount(account, modelId, tierModelMap)?.resolvedModelId === modelId,
 			)
@@ -1910,7 +2239,16 @@ export function createLogicalProvider(
 					buildBoundedRecoveryFinalErrorMessage(),
 				);
 				box.failure = safeProjectFailureSignal(error, dispatchedModelId);
-				noteFailureShape(box, "dispatch-rejected", rawMessageOf(error));
+				// The dispatch's own code, read from the projected signal. An account
+				// the warmer or settlement already invalidated needs a real login;
+				// any other unresolved credential may clear by itself.
+				if (box.failure.code === "credential_unresolved") {
+					box.credentialUnresolved =
+						coordinator.state.getInvalidation(account.providerId) === undefined
+							? "credential-unavailable"
+							: "login-required";
+				}
+				noteFailureShape(box, "dispatch-rejected", rawMessageOf(error), error);
 				if (!hasStructuredFailureEvidence(box.failure) && isHostStaleInstallFailure(error)) {
 					markHostStaleInstall(box, account, error);
 					box.receipt = hostFaultReceipt();
@@ -2012,7 +2350,7 @@ export function createLogicalProvider(
 		}
 	};
 
-	/** The closed shape of the last attempt's failure. Never reads provider text. */
+	/** The bounded shape of the last attempt's failure. Never reads provider text. */
 	const failureShape = (box: AttemptRecordBox, stop: LogicalFailureStop): LogicalFailureShape => {
 		const hints = box.shapeHints;
 		const httpStatus = boundedHttpStatus(box.failure?.httpStatus);
@@ -2022,14 +2360,24 @@ export function createLogicalProvider(
 				? box.failure.transportKind
 				: undefined;
 		return Object.freeze({
-			phase: attemptHadOutput(box) ? "streaming" : box.heldStart !== undefined ? "started" : "opening",
+			phase: attemptHadOutput(box)
+				? "streaming"
+				: box.sawThinking
+					? "thinking"
+					: box.heldStart !== undefined
+						? "started"
+						: "opening",
 			ending: hints?.ending ?? "unfinished",
 			elapsedSeconds: boundedElapsedSeconds((hints?.failedAtMs ?? box.clock.now()) - box.dispatchedAtMs),
 			stop,
 			...(hints?.errorType === undefined ? {} : { errorType: hints.errorType }),
 			...(hints?.upstream === undefined ? {} : { upstream: hints.upstream }),
+			...(hints?.codexFailure === undefined ? {} : { codexFailure: hints.codexFailure }),
+			...(hints?.codexCode === undefined ? {} : { codexCode: hints.codexCode }),
 			...(httpStatus === undefined ? {} : { httpStatus }),
 			...(transportKind === undefined ? {} : { transportKind }),
+			...hints?.thrown,
+			...identifierFacts(hints?.message, hints),
 		});
 	};
 
@@ -2040,9 +2388,10 @@ export function createLogicalProvider(
 	const failureStop = (
 		result: Extract<RecoveryResult, { status: "exhausted" | "terminated" }>,
 		last: AttemptRecordBox | undefined,
+		sendCap: number,
 	): LogicalFailureStop => {
 		if (result.status === "exhausted") {
-			return result.attempts >= RECOVERY_MAX_PROVIDER_SENDS_PER_CALL ? "send-cap" : "no-candidate";
+			return result.attempts >= sendCap ? "send-cap" : "no-candidate";
 		}
 		if (result.reason !== "unknown") return result.reason;
 		if (last === undefined) return "unknown";
@@ -2075,8 +2424,13 @@ export function createLogicalProvider(
 			? account.providerId : undefined;
 		const classified = classifyFailure(box?.failure ?? {}).category;
 		const stale = box?.hostStaleInstall === true;
+		// The cause was decided when the open failed. A failed or unavailable
+		// credential read that is not already a terminal invalidation may clear
+		// by itself, so it is named as such and cooled for a bounded time; no
+		// failure here writes an invalidation.
+		const credentialCause = stale || box?.overflow === true ? undefined : box?.credentialUnresolved;
 		const category = stale ? "host-stale-install" : box?.overflow === true ? "context-overflow" :
-			box?.preStartRetryable === true && classified === "unknown" ? "transport" : classified;
+			credentialCause ?? (box?.preStartRetryable === true && classified === "unknown" ? "transport" : classified);
 		const attemptCount = box?.ordinal ?? 0;
 		const shape = box === undefined ? undefined : failureShape(box, stop);
 		const overflowReason = category === "context-overflow" ? box?.overflowReason ?? "unknown" : undefined;
@@ -2087,10 +2441,13 @@ export function createLogicalProvider(
 			? `bytes: ${size.requestBytes}; images: ${size.imageCount}; `
 			: "";
 		const evidence = `[${providerId === undefined ? "" : `physical provider: ${providerId}; `}cause: ${VISIBLE_FAILURE_CAUSES[category]}; ${overflowReason === undefined ? "" : `overflow: ${overflowReason}; `}${sizeFooter}attempts: ${attemptCount}]`;
+		const advice = credentialCause === undefined || box === undefined
+			? ""
+			: ` ${credentialAdvice(credentialCause, providerId, logicalProviderType(box.account) === "subscription")}${stop === "no-candidate" ? ` ${NO_OTHER_ACCOUNT_MESSAGE}` : ""}`;
 		return {
 			...syntheticErrorMessage(
 				modelId,
-				`${stale ? (box?.hostMissingDependency === true ? HOST_MISSING_DEPENDENCY_MESSAGE : HOST_STALE_INSTALL_MESSAGE) : errorMessage} ${evidence}`,
+				`${stale ? (box?.hostMissingDependency === true ? HOST_MISSING_DEPENDENCY_MESSAGE : HOST_STALE_INSTALL_MESSAGE) : errorMessage}${advice} ${evidence}`,
 				physical === undefined ? undefined : projectTerminalUsage(physical),
 				physical === undefined ? undefined : finiteNonNegative(physical.timestamp),
 			),
@@ -2126,6 +2483,7 @@ export function createLogicalProvider(
 		modelId: string,
 		result: Extract<RecoveryResult, { status: "exhausted" | "terminated" }>,
 		last: AttemptRecordBox | undefined,
+		sendCap: number,
 	): { readonly event: unknown; readonly message: AssistantMessage } => {
 		const physical = last?.physicalTerminal;
 		// A provider's own aborted terminal stays aborted: the host never retries
@@ -2146,7 +2504,7 @@ export function createLogicalProvider(
 		// Keep validated usage and named failure facts, never arbitrary physical
 		// fields, content no consumer saw, or the provider's own error text. An
 		// aborted terminal carries no error text at all.
-		const projected = safeFailureMessage(modelId, last, errorMessage, failureStop(result, last));
+		const projected = safeFailureMessage(modelId, last, errorMessage, failureStop(result, last, sendCap));
 		if (!aborted) reportFailure(projected.logicalFailure);
 		const message: AssistantMessage = aborted
 			? { ...withoutErrorMessage(projected), stopReason: "aborted" }
@@ -2221,6 +2579,159 @@ export function createLogicalProvider(
 		},
 	});
 
+	/** Fixed warm-replay terminal texts; neither carries provider text. */
+	const WARM_REPLAY_SKIPPED_MESSAGE =
+		"Cache warm replay skipped: the account holding this session's cache cannot take it now.";
+	const WARM_REPLAY_FAILED_MESSAGE = "Cache warm replay failed; no account state was changed.";
+
+	/**
+	 * The account a host cache-warm replay may use (internal issue #206): the
+	 * account that served the session's last successful call for this logical
+	 * model, and only while a real call would still choose it now. With no
+	 * remembered account, or when that account is cooling, spent, cleared,
+	 * disabled, outside the session's account group, or displaced by a
+	 * subscription account, the replay is skipped: warming any other account
+	 * writes a cache that no later call reads.
+	 */
+	const warmReplayTarget = (
+		modelId: string,
+		sessionKey: string | undefined,
+	): LogicalServingAccount | undefined => {
+		if (sessionKey === undefined) return undefined;
+		const remembered = affinity.lastServingAccount(sessionKey, modelId);
+		if (remembered === undefined) return undefined;
+		try {
+			const selected = selectAccount(modelId, sessionKey);
+			// A replay is a send outside the probe claim, so it never goes to an
+			// invalidated account even when that account's probe is due.
+			return selected.displaced === undefined &&
+				selected.account.providerId === remembered &&
+				coordinator.state.getInvalidation(remembered) === undefined
+				? selected
+				: undefined;
+		} catch {
+			return undefined;
+		}
+	};
+
+	/** A replay terminal the host warmer treats as not warmed. */
+	const warmReplayTerminal = (modelId: string, errorMessage: string, aborted: boolean): unknown => {
+		const message = syntheticErrorMessage(modelId, errorMessage);
+		return aborted
+			? { type: "error", reason: "aborted", error: { ...withoutErrorMessage(message), stopReason: "aborted" } }
+			: { type: "error", reason: "error", error: message };
+	};
+
+	/**
+	 * Whether a replay would be sent without the thinking block its real call
+	 * had. Both Anthropic streams add a budget-thinking block only when
+	 * `maxTokens` is above one, so a one-token replay of a budget-thinking
+	 * request misses the message cache and writes a new one. Pi's `isReplayable`
+	 * refuses that case only for the `anthropic-messages` API, which unified rows
+	 * do not use. Adaptive thinking and thinking off keep the request the same.
+	 */
+	const replayDropsThinking = (
+		model: unknown,
+		account: LogicalPhysicalAccount,
+		options: SimpleStreamOptions | undefined,
+	): boolean => {
+		if (account.family !== "anthropic" || !options?.reasoning) return false;
+		if (typeof model !== "object" || model === null) return false;
+		const row = model as { reasoning?: unknown; compat?: { forceAdaptiveThinking?: unknown } };
+		return row.reasoning === true && row.compat?.forceAdaptiveThinking !== true;
+	};
+
+	/**
+	 * One host cache-warm replay (internal issue #206): at most one physical
+	 * send, to the account that holds the session's cache. It never enters the
+	 * recovery engine, so it never fails over and never sends twice. It records
+	 * no cooldown, failure evidence, attribution, or session affinity: a
+	 * one-token refresh is not a turn, and a failed refresh must not cool a
+	 * healthy account. The host itself records a successful replay's usage as
+	 * `cache_warm`.
+	 */
+	const warmReplay = (
+		model: unknown,
+		modelId: string,
+		context: unknown,
+		options: SimpleStreamOptions | undefined,
+		sessionKey: string | undefined,
+	): AsyncIterable<unknown> => ({
+		async *[Symbol.asyncIterator]() {
+			const target = warmReplayTarget(modelId, sessionKey);
+			if (target === undefined || replayDropsThinking(model, target.account, options)) {
+				yield warmReplayTerminal(modelId, WARM_REPLAY_SKIPPED_MESSAGE, false);
+				return;
+			}
+			const { account, resolvedModelId } = target;
+			const controller = new AbortController();
+			const abort = (): void => controller.abort();
+			const abortSources = [options?.signal, shutdownController.signal].filter(
+				(signal): signal is AbortSignal => signal !== undefined,
+			);
+			for (const signal of abortSources) {
+				if (signal.aborted) abort();
+				else signal.addEventListener("abort", abort, { once: true });
+			}
+			const cancelled = (): boolean =>
+				options?.signal?.aborted === true || shutdownController.signal.aborted;
+			// The same request transforms a real call gets, so the replay matches
+			// the cached prefix.
+			const callerOptions =
+				account.family === "openai-codex" ? forceCodexSseOptions(options).options : options;
+			const physicalContext =
+				account.providerId === account.family
+					? context
+					: stripOldImages(context, readImageStripPolicy(() => deps.imageStripping));
+			const stallTimeoutMs =
+				deps.recoveryTiming?.recoveryStallTimeoutMs ?? DEFAULT_CONFIG.recoveryStallTimeoutMs;
+			let reportActivity: () => void = () => {};
+			const physicalOptions = {
+				...callerOptions,
+				signal: controller.signal,
+				onTransportActivity: () => reportActivity(),
+			} as SimpleStreamOptions;
+			const guard = stallGuarded(
+				async () =>
+					await deps.dispatch({
+						providerId: account.providerId,
+						modelId: resolvedModelId,
+						context: physicalContext,
+						options: physicalOptions,
+					}),
+				{
+					timeoutMs: stallTimeoutMs,
+					startedTimeoutMs: Math.max(
+						stallTimeoutMs,
+						deps.recoveryTiming?.recoveryAbsoluteTimeoutMs ?? DEFAULT_CONFIG.recoveryAbsoluteTimeoutMs,
+					),
+					silenceTimeoutMs: deps.transportSilenceTimeoutMs ?? TRANSPORT_SILENCE_TIMEOUT_MS,
+				},
+				deps.recoveryClock ?? SYSTEM_RECOVERY_CLOCK,
+				abort,
+			);
+			reportActivity = guard.activity;
+			try {
+				for await (const event of guard.output) {
+					const terminal = terminalAttribution(event);
+					if (terminal === undefined || terminal.outcome === "finish") {
+						const projected = projectEvent(event, modelId);
+						if (projected !== undefined) yield projected;
+						if (terminal !== undefined) return;
+						continue;
+					}
+					yield warmReplayTerminal(modelId, WARM_REPLAY_FAILED_MESSAGE, terminal.outcome === "abort");
+					return;
+				}
+				yield warmReplayTerminal(modelId, WARM_REPLAY_FAILED_MESSAGE, false);
+			} catch {
+				yield warmReplayTerminal(modelId, WARM_REPLAY_FAILED_MESSAGE, cancelled());
+			} finally {
+				for (const signal of abortSources) signal.removeEventListener("abort", abort);
+			}
+		},
+	});
+
 	return {
 		api: LOGICAL_PROVIDER_ID,
 
@@ -2241,7 +2752,30 @@ export function createLogicalProvider(
 			if (shutDown) {
 				throw new Error("the logical provider session has shut down");
 			}
-			const selected = selectAccount(modelId);
+			const sessionKey = sessionAffinityKey(options);
+			// A host cache-warm replay (internal issue #206) goes only to the account
+			// that holds the session's cache, as one send outside recovery,
+			// attribution, cooldown, and session affinity.
+			if (warmReplays.isReplay(context, options)) {
+				return warmReplay(model, modelId, context, options, sessionKey);
+			}
+			warmReplays.noteRealRequest(context);
+			// Selecting a due terminal-auth invalidation only reads (#227). The claim
+			// is the one write, made in the same synchronous turn as the selection, so
+			// of several concurrent calls exactly one dispatches the probe and the
+			// rest are re-selected away from it.
+			const lostProbes = new Set<string>();
+			let selected = selectAccount(modelId, sessionKey);
+			let probeProviderId: string | undefined;
+			while (coordinator.state.getInvalidation(selected.account.providerId) !== undefined) {
+				if (coordinator.state.claimInvalidationProbe(selected.account.providerId, Date.now())) {
+					probeProviderId = selected.account.providerId;
+					diagnose("a terminal-auth invalidation is being probed with one dispatch.");
+					break;
+				}
+				lostProbes.add(selected.account.providerId);
+				selected = selectAccount(modelId, sessionKey, lostProbes);
+			}
 			const candidates = recoveryCandidates(modelId, selected);
 			// Codex routes are pinned to SSE before the engine sees the options, so
 			// the engine reserves one bounded send for them instead of an unknown count.
@@ -2266,6 +2800,9 @@ export function createLogicalProvider(
 			const stallTimeoutMs =
 				deps.recoveryTiming?.recoveryStallTimeoutMs ??
 				DEFAULT_CONFIG.recoveryStallTimeoutMs;
+			// Read once per call: a reload changes the next call's cap, never this one's.
+			const maxAttempts =
+				deps.recoveryTiming?.recoveryMaxAttempts ?? DEFAULT_CONFIG.recoveryMaxAttempts;
 			// Once the provider has answered, only the whole-call limit bounds a
 			// silent wait; the engine's absolute timer still ends the call.
 			const startedStallTimeoutMs = Math.max(
@@ -2280,9 +2817,16 @@ export function createLogicalProvider(
 						({ providerId, family }) =>
 							providerId === candidate.providerId && family === candidate.family,
 					);
-					if (account === undefined) return { status: "skip" };
-					// Re-read live eligibility for every candidate: a second candidate is
-					// checked after the first failure has already cooled its own account.
+					// The live accounts getter re-reads the opt-out, so an exclusion
+					// committed after planning still stops a later send.
+					if (account === undefined || account.automaticRoutingExcluded === true) {
+						return { status: "skip" };
+					}
+					// Re-read live eligibility for every candidate: a later candidate is
+					// checked after earlier failures have already cooled their own accounts.
+					// The claimed probe account is the one admitted exception: its claim
+					// already pushed the next probe out, so the plain rule would refuse
+					// the dispatch the claim bought. A recovery target never gets this.
 					return logicalAccountEligible(
 						{
 							providerId: account.providerId,
@@ -2291,6 +2835,7 @@ export function createLogicalProvider(
 						},
 						coordinator.state,
 						Date.now(),
+						account.providerId === probeProviderId ? "claimed" : undefined,
 					)
 						? { status: "eligible" }
 						: { status: "skip" };
@@ -2332,6 +2877,7 @@ export function createLogicalProvider(
 						dispatchedAtMs: clock.now(),
 						overflow: false,
 						sawOutput: false,
+						sawThinking: false,
 						preStartRetryable: false,
 						invalidated: false,
 						attempt,
@@ -2355,7 +2901,7 @@ export function createLogicalProvider(
 				},
 				// The attribution store retains every physical attempt's usage and cost
 				// at its own terminal, under its own physical account. A failed attempt
-				// whose retention failed cannot buy a second send that could not be
+				// whose retention failed cannot buy a further send that could not be
 				// accounted for either; an accepted answer is never discarded for it,
 				// and its missing record stays a reported coverage gap.
 				account: async (record) => {
@@ -2395,6 +2941,7 @@ export function createLogicalProvider(
 								deps.recoveryTiming?.recoveryAbsoluteTimeoutMs ??
 								DEFAULT_CONFIG.recoveryAbsoluteTimeoutMs,
 						},
+						maxAttempts,
 						...(options?.signal === undefined ? {} : { signal: options.signal }),
 					});
 				} finally {
@@ -2421,7 +2968,8 @@ export function createLogicalProvider(
 					// well formed; one that sent nothing else is published as its bare
 					// terminal.
 					const heldStart = last?.heldStart;
-					const replayProgress = last?.sawOutput === true || heldStart !== undefined;
+					const replayProgress =
+						last?.sawOutput === true || last?.sawThinking === true || heldStart !== undefined;
 					return (async function* () {
 						let startPublished = false;
 						for await (const event of accepted) {
@@ -2439,7 +2987,7 @@ export function createLogicalProvider(
 					// The live attempt is the last box: the engine dispatched nothing after it.
 					return publishCommitted(modelId, result.output, last!);
 				}
-				const failure = publicFailure(modelId, result, last);
+				const failure = publicFailure(modelId, result, last, maxAttempts);
 				const physical = last?.physicalTerminal;
 				if (physical !== undefined) {
 					safeAttributionCall(() => last?.attempt.bindPublicTerminal?.(physical, failure.message));
@@ -2451,7 +2999,16 @@ export function createLogicalProvider(
 			})();
 			void settled.catch(() => {});
 			return (async function* () {
-				yield* await settled;
+				for await (const event of await settled) {
+					if (sessionKey !== undefined) {
+						try {
+							noteSessionOutcome(sessionKey, modelId, selected, boxes, event);
+						} catch {
+							// Session affinity cannot replace a provider result.
+						}
+					}
+					yield event;
+				}
 			})();
 		},
 
@@ -2497,6 +3054,10 @@ export function createLogicalProvider(
 				);
 				return undefined;
 			}
+		},
+
+		lastServingAccount(sessionKey, modelId) {
+			return affinity.lastServingAccount(sessionKey, modelId);
 		},
 
 		shutdown() {

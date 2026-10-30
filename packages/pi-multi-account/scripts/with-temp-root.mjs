@@ -110,6 +110,7 @@ const child = spawn(command, args, {
 	stdio: "inherit",
 	env: {
 		...process.env,
+		PI_TEST_RUN_ROOT: runRoot,
 		TMPDIR: runRoot,
 		TMP: runRoot,
 		TEMP: runRoot,

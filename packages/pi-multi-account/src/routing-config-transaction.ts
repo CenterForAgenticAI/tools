@@ -11,11 +11,16 @@
  * Publication is deliberately routing-only. Assigning a whole freshly read
  * config into the live closure would change account, label, usage, and cost
  * behavior without the account rediscovery `/multi-account reload` performs.
+ *
+ * {@link commitConfigEdit} is the sibling for one-shot slash commands that edit
+ * a single policy field. It shares the lease and the atomic writer, and its
+ * caller's publish callback copies only the field it owns.
  */
 
 import { dirname, join } from "node:path";
 import {
 	nonRoutingProjectionsEqual,
+	parseConfig,
 	readConfig,
 	routingProjection,
 	routingProjectionsEqual,
@@ -103,11 +108,63 @@ const BUSY = Object.freeze({ status: "busy" } as const);
 const CHANGED = Object.freeze({ status: "changed" } as const);
 const INVALID = Object.freeze({ status: "invalid" } as const);
 const UNCHANGED = Object.freeze({ status: "unchanged" } as const);
+const APPLIED = Object.freeze({ status: "applied" } as const);
+const APPLIED_WARNING = Object.freeze({ status: "applied-warning" } as const);
 
 function defaultSleep(ms: number): Promise<void> {
 	return new Promise<void>((resolve) => {
 		setTimeout(resolve, ms);
 	});
+}
+
+interface LeaseAcquisitionOptions {
+	readonly lockPath: string;
+	readonly now?: () => number;
+	readonly sleep?: (ms: number) => Promise<void>;
+	readonly acquireLease?: (
+		options: MachineLeaseOptions,
+	) => MachineLeaseHandle | undefined;
+}
+
+/**
+ * At most {@link ROUTING_CONFIG_LEASE_ATTEMPTS} attempts inside
+ * {@link ROUTING_CONFIG_LEASE_WINDOW_MS}; undefined means busy.
+ *
+ * A held OR malformed lease is fail-closed, and callers deliberately do not
+ * opt into malformed reclaim. The original reason no longer holds: a malformed
+ * record was once indistinguishable from a live writer mid-record, but leases
+ * are now published by link(2) from a complete fsynced temporary file, so the
+ * lock path is never contentless mid-write. The opt-out stands on its own
+ * ground instead. These paths are operator initiated and return BUSY
+ * immediately, so a wedged lock is visible and retryable rather than a silent
+ * permanent refusal, and .spec/configure-explicit-routing-chains.md requires
+ * that actionable busy guidance. Changing it is a spec decision, not a
+ * lock-recovery one.
+ */
+async function acquireConfigLease(
+	options: LeaseAcquisitionOptions,
+): Promise<MachineLeaseHandle | undefined> {
+	const now = options.now ?? Date.now;
+	const sleep = options.sleep ?? defaultSleep;
+	const acquire = options.acquireLease ?? acquireMachineLease;
+	const startedMs = now();
+	for (
+		let attempt = 1;
+		attempt <= ROUTING_CONFIG_LEASE_ATTEMPTS;
+		attempt += 1
+	) {
+		const handle = acquire({
+			lockPath: options.lockPath,
+			ttlMs: MACHINE_LEASE_TTL_MS,
+			now,
+		});
+		if (handle !== undefined) return handle;
+		if (attempt === ROUTING_CONFIG_LEASE_ATTEMPTS) break;
+		const remainingMs = ROUTING_CONFIG_LEASE_WINDOW_MS - (now() - startedMs);
+		if (remainingMs <= 0) break;
+		await sleep(Math.min(remainingMs, LEASE_RETRY_INTERVAL_MS));
+	}
+	return undefined;
 }
 
 /**
@@ -125,43 +182,13 @@ function defaultSleep(ms: number): Promise<void> {
 export async function commitRoutingConfig(
 	options: RoutingConfigTransactionOptions,
 ): Promise<RoutingConfigCommitResult> {
-	const now = options.now ?? Date.now;
-	const sleep = options.sleep ?? defaultSleep;
-	const acquire = options.acquireLease ?? acquireMachineLease;
 	const read = options.readConfigImpl ?? readConfig;
 	const write = options.writeConfigImpl ?? writeConfig;
 	const signal = options.signal;
 
 	if (signal?.aborted) return CHANGED;
 
-	const startedMs = now();
-	let handle: MachineLeaseHandle | undefined;
-	for (
-		let attempt = 1;
-		attempt <= ROUTING_CONFIG_LEASE_ATTEMPTS;
-		attempt += 1
-	) {
-		handle = acquire({
-			lockPath: options.lockPath,
-			ttlMs: MACHINE_LEASE_TTL_MS,
-			now,
-		});
-		if (handle !== undefined) break;
-		if (attempt === ROUTING_CONFIG_LEASE_ATTEMPTS) break;
-		const remainingMs = ROUTING_CONFIG_LEASE_WINDOW_MS - (now() - startedMs);
-		if (remainingMs <= 0) break;
-		await sleep(Math.min(remainingMs, LEASE_RETRY_INTERVAL_MS));
-	}
-	// A held OR malformed lease is fail-closed, and this caller deliberately
-	// does not opt into malformed reclaim. The original reason no longer holds:
-	// a malformed record was once indistinguishable from a live writer
-	// mid-record, but leases are now published by link(2) from a complete
-	// fsynced temporary file, so the lock path is never contentless mid-write.
-	// The opt-out stands on its own ground instead. This path is operator
-	// initiated and returns BUSY immediately, so a wedged lock is visible and
-	// retryable rather than a silent permanent refusal, and
-	// .spec/configure-explicit-routing-chains.md requires that actionable busy
-	// guidance. Changing it is a spec decision, not a lock-recovery one.
+	const handle = await acquireConfigLease(options);
 	if (handle === undefined) return BUSY;
 
 	try {
@@ -226,6 +253,127 @@ export async function commitRoutingConfig(
 			return { status: "applied-warning", nonRoutingDrift };
 		}
 		return { status: "applied", nonRoutingDrift };
+	} finally {
+		handle.release();
+	}
+}
+
+/**
+ * A pre-rename write failure of a single-field edit. Like
+ * {@link RoutingConfigWriteError}, the original error is discarded because
+ * filesystem errors carry raw paths.
+ */
+export class ConfigEditWriteError extends Error {
+	constructor() {
+		super(
+			"the configuration could not be written; the previous configuration is unchanged.",
+		);
+		this.name = "ConfigEditWriteError";
+	}
+}
+
+export type ConfigEditCommitResult =
+	| { readonly status: "applied" }
+	| { readonly status: "applied-warning" }
+	| { readonly status: "unchanged" }
+	| { readonly status: "busy" }
+	| { readonly status: "invalid" };
+
+export const CONFIG_EDIT_WARNING_GUIDANCE =
+	"Configuration was committed and published, but its final file mode or directory durability was not verified. Inspect the machine-global config file, then run /multi-account reload.";
+
+export interface ConfigEditTransactionOptions {
+	readonly configPath: string;
+	readonly lockPath: string;
+	/**
+	 * Builds the next config from the fresh under-lease value, or returns
+	 * undefined when the fresh value already says what the operator asked for.
+	 * Copies named fields only; never spreads caller input.
+	 */
+	readonly edit: (fresh: MultiAccountConfig) => MultiAccountConfig | undefined;
+	/**
+	 * Contracted non-throwing assignment of the edited field into the live
+	 * closure. Receives the validated persisted config, also on `unchanged`, so
+	 * this process follows the file for the field the caller owns.
+	 */
+	readonly publish: (persisted: MultiAccountConfig) => void;
+	readonly diagnostics?: Pick<DiagnosticLog, "record">;
+	readonly signal?: AbortSignal;
+	readonly now?: () => number;
+	readonly sleep?: (ms: number) => Promise<void>;
+	readonly acquireLease?: (
+		options: MachineLeaseOptions,
+	) => MachineLeaseHandle | undefined;
+	readonly readConfigImpl?: (configPath: string) => MultiAccountConfig;
+	readonly writeConfigImpl?: (
+		configPath: string,
+		config: MultiAccountConfig,
+		onCommitted?: () => void,
+	) => ConfigWriteOutcome;
+}
+
+/**
+ * Commits one operator edit to the machine-global config.
+ *
+ * Takes the bounded `config.lock` lease, re-reads the file under it, applies
+ * the edit to that fresh value so a concurrent writer's fields survive,
+ * validates the whole candidate with the config parser, writes atomically at
+ * 0600, and publishes as the first statement after the rename. An abort
+ * before the write writes nothing and reports `busy`, so the operator retries.
+ * Once the rename begins, abort is ignored, as in {@link commitRoutingConfig}.
+ */
+export async function commitConfigEdit(
+	options: ConfigEditTransactionOptions,
+): Promise<ConfigEditCommitResult> {
+	const read = options.readConfigImpl ?? readConfig;
+	const write = options.writeConfigImpl ?? writeConfig;
+	const signal = options.signal;
+
+	if (signal?.aborted) return BUSY;
+	const handle = await acquireConfigLease(options);
+	if (handle === undefined) return BUSY;
+
+	try {
+		if (signal?.aborted) return BUSY;
+		let fresh: MultiAccountConfig;
+		try {
+			fresh = read(options.configPath);
+		} catch {
+			return INVALID;
+		}
+
+		const edited = options.edit(fresh);
+		if (edited === undefined) {
+			options.publish(fresh);
+			return UNCHANGED;
+		}
+
+		let candidate: MultiAccountConfig;
+		try {
+			candidate = parseConfig(edited);
+		} catch {
+			return INVALID;
+		}
+
+		if (signal?.aborted) return BUSY;
+
+		let outcome: ConfigWriteOutcome;
+		try {
+			outcome = write(options.configPath, candidate, () => {
+				options.publish(candidate);
+			});
+		} catch {
+			throw new ConfigEditWriteError();
+		}
+		if (outcome === "committed-warning") {
+			options.diagnostics?.record(
+				"warning",
+				"config.edit-commit",
+				CONFIG_EDIT_WARNING_GUIDANCE,
+			);
+			return APPLIED_WARNING;
+		}
+		return APPLIED;
 	} finally {
 		handle.release();
 	}

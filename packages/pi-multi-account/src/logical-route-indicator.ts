@@ -35,6 +35,12 @@ export interface LogicalRouteIndicator {
 	modelSelected(providerId: string | undefined): void;
 	beginAttempt(route: LogicalRouteIndicatorRoute): LogicalRouteIndicatorAttempt;
 	usageChanged(providerId: string): void;
+	/**
+	 * Notes that the session moved off `fromProviderId` (internal issue #204).
+	 * The footer shows `from <id>` last until the next move replaces it, the
+	 * next model selection, or shutdown. Only a bounded provider id is kept.
+	 */
+	accountMoved(fromProviderId: string): void;
 	settle(): void;
 	shutdown(): void;
 }
@@ -122,6 +128,8 @@ export function createLogicalRouteIndicator(
 	let generation = 0;
 	let logicalSelected = false;
 	let displayed: "waiting" | DisplayedAttempt | undefined;
+	// The account a unified session last moved off, already display-bounded.
+	let movedFrom: string | undefined;
 
 	const publish = (text: string | undefined): void => {
 		try {
@@ -155,9 +163,11 @@ export function createLogicalRouteIndicator(
 		} catch {
 			// Labels are optional presentation data.
 		}
+		// Order: account · usage · optional label · optional move note.
 		publish(
 			`unified(${displayed.route.providerId} · ${usageText(usage, nowMs)}` +
-				(label === undefined ? ")" : ` · ${label})`),
+				(label === undefined ? "" : ` · ${label}`) +
+				(movedFrom === undefined ? ")" : ` · from ${movedFrom})`),
 		);
 	};
 
@@ -166,6 +176,7 @@ export function createLogicalRouteIndicator(
 			generation += 1;
 			logicalSelected = providerId === LOGICAL_PROVIDER_ID;
 			displayed = logicalSelected ? "waiting" : undefined;
+			movedFrom = undefined;
 			render();
 		},
 		beginAttempt(route) {
@@ -196,6 +207,13 @@ export function createLogicalRouteIndicator(
 			) {
 				return;
 			}
+			render();
+		},
+		accountMoved(fromProviderId) {
+			if (!logicalSelected) return;
+			// Same bound as a label: printable ASCII, at most 64 characters. An
+			// unsafe id still replaces the previous note, so it clears it.
+			movedFrom = normalizeLabel(fromProviderId);
 			render();
 		},
 		settle() {

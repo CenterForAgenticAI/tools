@@ -3,12 +3,23 @@ import type { CooldownReason, NumericServerHint } from "./runtime-state.js";
 export const PROVIDER_ERROR_CODES = [
 	"rate_limit",
 	"quota_exhausted",
+	/**
+	 * Anthropic `overloaded_error`: the API is busy for every caller. It says
+	 * nothing about this account's quota (internal issue #194).
+	 */
+	"overloaded",
 	"invalid_api_key",
 	"invalid_token",
 	"token_expired",
 	"token_revoked",
 	"oauth_refresh_rejected",
 	"oauth_service_unavailable",
+	/**
+	 * The dispatch could not obtain a credential for the account (a failed
+	 * refresh, or a credential that vanished). It says nothing about why, so it
+	 * classifies as a bounded transient-auth cooldown, never as terminal auth.
+	 */
+	"credential_unresolved",
 	"insufficient_permissions",
 	"model_not_found",
 	"unsupported_api_version",
@@ -83,7 +94,7 @@ const STRUCTURED_PROVIDER_ERROR_CODES: Readonly<
 	Record<string, ProviderErrorCode>
 > = Object.freeze({
 	rate_limit_error: "rate_limit",
-	overloaded_error: "rate_limit",
+	overloaded_error: "overloaded",
 	quota_exhausted: "quota_exhausted",
 	authentication_error: "invalid_token",
 	permission_error: "insufficient_permissions",
@@ -110,6 +121,8 @@ const CODEX_QUOTA_EXHAUSTED_MESSAGES: ReadonlySet<string> = new Set([
  * this projection a real `rate_limit_error` is misclassified as unknown.
  *
  * JSON objects shaped as `{ type: "error", error: { type } }` are accepted.
+ * Bili also omits the outer type for its exact terminal rate-limit tuple; that
+ * exception requires the allowlisted code, stage, retryability and framing.
  * The exact fixed Codex wrapper message for subscription exhaustion is also
  * projected because that SSE failure exposes no response status to extensions.
  * Raw messages, request ids, details, and credentials never cross the
@@ -180,11 +193,26 @@ function providerErrorEnvelopeType(errorMessage: unknown): string | undefined {
 	}
 	if (typeof parsed !== "object" || parsed === null) return undefined;
 	const envelope = parsed as Record<string, unknown>;
-	if (envelope.type !== "error") return undefined;
 	if (typeof envelope.error !== "object" || envelope.error === null) {
 		return undefined;
 	}
-	const providerType = (envelope.error as Record<string, unknown>).type;
+	const error = envelope.error as Record<string, unknown>;
+	if (envelope.type !== "error") {
+		// Bili's credential-local terminal hold omits the outer `type`. Accept
+		// only its exact tuple and bare/HTTP-424 host framing, never prose.
+		const framing = errorMessage.slice(0, envelopeStart).trim();
+		if (
+			Array.isArray(parsed) || Array.isArray(error) ||
+			Object.hasOwn(envelope, "type") || !Object.hasOwn(envelope, "error") ||
+			(framing !== "" && !/^(?:Retry failed after [1-9][0-9]* attempts: )?(?:Error: )?424$/.test(framing)) ||
+			!Object.hasOwn(error, "type") || error.type !== "rate_limit_error" ||
+			!Object.hasOwn(error, "code") || error.code !== "bili_throttle_terminal" ||
+			!Object.hasOwn(error, "stage") || error.stage !== "forward" ||
+			!Object.hasOwn(error, "retryable") || error.retryable !== false
+		) return undefined;
+		return "rate_limit_error";
+	}
+	const providerType = error.type;
 	return typeof providerType === "string" ? providerType : undefined;
 }
 
@@ -250,6 +278,101 @@ export function upstreamFailureKindFromMessage(
 	return Object.hasOwn(UPSTREAM_FAILURE_MESSAGES, text)
 		? UPSTREAM_FAILURE_MESSAGES[text as keyof typeof UPSTREAM_FAILURE_MESSAGES]
 		: undefined;
+}
+
+/**
+ * Codex failures that pi-ai's Codex path produces as fixed text. pi-ai's
+ * catch keeps only `error.message`, so the `CodexApiError` code never reaches
+ * this extension as a field; the message is all there is. A kind is chosen by
+ * an exact message or a fixed prefix, and the text after a prefix is never
+ * kept: it can carry provider prose.
+ */
+export const CODEX_FAILURE_KINDS = [
+	"codex-event-error",
+	"codex-response-failed",
+	"codex-no-stop-reason",
+	"codex-sse-header-timeout",
+	"responses-no-terminal-event",
+	"responses-unfinished-tool-call",
+	"responses-incomplete",
+] as const;
+
+export type CodexFailureKind = (typeof CODEX_FAILURE_KINDS)[number];
+
+export const CODEX_FAILURE_KIND_SET: ReadonlySet<string> = new Set(CODEX_FAILURE_KINDS);
+
+const CODEX_EXACT_FAILURE_MESSAGES = Object.freeze({
+	"Codex response failed": "codex-response-failed",
+	"Codex stream ended without a stop reason": "codex-no-stop-reason",
+	"OpenAI Responses stream ended before a terminal response event": "responses-no-terminal-event",
+	"Response incomplete without a provider reason": "responses-incomplete",
+} as const satisfies Record<string, CodexFailureKind>);
+
+const CODEX_EVENT_ERROR_PREFIX = "Codex error: ";
+
+const CODEX_PREFIX_FAILURE_MESSAGES: ReadonlyArray<readonly [string, CodexFailureKind]> = Object.freeze([
+	[CODEX_EVENT_ERROR_PREFIX, "codex-event-error"],
+	["OpenAI Responses stream completed with an unfinished tool call: ", "responses-unfinished-tool-call"],
+	["Response incomplete: ", "responses-incomplete"],
+] as const);
+
+const CODEX_SSE_HEADER_TIMEOUT = /^Codex SSE response headers timed out after \d{1,12}ms$/;
+
+/** The trimmed message when it is a bounded string, else `undefined`. */
+function boundedFailureText(errorMessage: unknown): string | undefined {
+	if (typeof errorMessage !== "string") return undefined;
+	if (errorMessage.length > MAX_ENVELOPE_MESSAGE_LENGTH) return undefined;
+	return errorMessage.trim();
+}
+
+export function codexFailureKindFromMessage(
+	errorMessage: unknown,
+): CodexFailureKind | undefined {
+	const text = boundedFailureText(errorMessage);
+	if (text === undefined || text.length === 0) return undefined;
+	if (Object.hasOwn(CODEX_EXACT_FAILURE_MESSAGES, text)) {
+		return CODEX_EXACT_FAILURE_MESSAGES[text as keyof typeof CODEX_EXACT_FAILURE_MESSAGES];
+	}
+	if (CODEX_SSE_HEADER_TIMEOUT.test(text)) return "codex-sse-header-timeout";
+	for (const [prefix, kind] of CODEX_PREFIX_FAILURE_MESSAGES) {
+		if (text.startsWith(prefix)) return kind;
+	}
+	return undefined;
+}
+
+/**
+ * OpenAI and Codex error codes kept as failure evidence. A closed list taken
+ * from what pi-ai's Codex path and the OpenAI Responses error type name: a code
+ * the provider invents, or one that merely resembles these, is dropped.
+ */
+export const CODEX_ERROR_CODES = [
+	"context_length_exceeded",
+	"insufficient_quota",
+	"invalid_prompt",
+	"previous_response_not_found",
+	"rate_limit_exceeded",
+	"server_error",
+	"usage_limit_reached",
+	"usage_not_included",
+	"websocket_connection_limit_reached",
+] as const;
+
+export type CodexErrorCode = (typeof CODEX_ERROR_CODES)[number];
+
+export const CODEX_ERROR_CODE_SET: ReadonlySet<string> = new Set(CODEX_ERROR_CODES);
+
+/**
+ * pi-ai writes a Codex `error` event as `Codex error: <message or code>`. When
+ * the event had no message, the text after the prefix is the bare code. Only an
+ * exact member of the closed list is kept; anything else yields nothing.
+ */
+export function codexErrorCodeFromMessage(
+	errorMessage: unknown,
+): CodexErrorCode | undefined {
+	const text = boundedFailureText(errorMessage);
+	if (text === undefined || !text.startsWith(CODEX_EVENT_ERROR_PREFIX)) return undefined;
+	const code = text.slice(CODEX_EVENT_ERROR_PREFIX.length);
+	return CODEX_ERROR_CODE_SET.has(code) ? (code as CodexErrorCode) : undefined;
 }
 
 /**
@@ -453,7 +576,10 @@ export function classifyFailure(
 		return { category: "terminal-auth", accountAction: "invalidate-and-route" };
 	}
 
-	if (signal.code === "oauth_service_unavailable") {
+	if (
+		signal.code === "oauth_service_unavailable" ||
+		signal.code === "credential_unresolved"
+	) {
 		return cooldown("transient-auth", "auth-transient", signal);
 	}
 
@@ -473,7 +599,10 @@ export function classifyFailure(
 		};
 	}
 
-	if (isTransportFailure(signal)) {
+	// Server load, not account quota: route away for a short transport cooldown,
+	// but never record a limit streak or a fleet-wide exhaustion hold. A real 429
+	// is still a rate limit (checked first above).
+	if (isTransportFailure(signal) || signal.code === "overloaded") {
 		return cooldown("transport", "transport", signal);
 	}
 

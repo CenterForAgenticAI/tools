@@ -340,8 +340,22 @@ function windowEntries(
 function primaryReading(
 	windows: readonly UsageWindowReading[],
 ): UsageReading | undefined {
-	const usable = windows.find((window) => window.utilization !== undefined);
-	if (!usable || usable.utilization === undefined) return undefined;
+	const measured = windows.filter(
+		(window): window is UsageWindowReading & { utilization: number } =>
+			window.utilization !== undefined,
+	);
+	if (measured.length === 0) return undefined;
+	// The tightest window governs: a spent weekly allowance is not relieved by
+	// an unused five-hour one. Windows with a reset time are real rate-limit
+	// windows. A window without one (Anthropic's unused five_hour, or
+	// extra_usage overage credits) cannot say when it recovers, so it only
+	// counts when no window has a reset time. Reading the first listed window
+	// alone reported an account at 0% while its seven_day window was spent.
+	const timed = measured.filter((window) => window.resetAtMs !== undefined);
+	const candidates = timed.length > 0 ? timed : measured.slice(0, 1);
+	const governing = candidates.reduce((tightest, window) =>
+		window.utilization > tightest.utilization ? window : tightest,
+	);
 	// `recoveryAtMs` means "this account is out and recovers at T", and
 	// `snapshotIndicatesExhaustion` treats any future `recoveryAtMs` as
 	// exhaustion. A window's `resetAtMs` is its ROUTINE reset time and is present
@@ -350,12 +364,21 @@ function primaryReading(
 	// reset ~6 days out) exhausted and demoted `unified` to the owning-vendor API
 	// tier until that reset (#72). Only an actually-spent window contributes a
 	// recovery time; a window with capacity to spare recovers nothing.
-	const exhausted = usable.utilization >= 1 || usable.remainingFraction === 0;
+	const isSpent = (window: UsageWindowReading & { utilization: number }) =>
+		window.utilization >= 1 || window.remainingFraction === 0;
+	// The account recovers only when every spent window has reset.
+	const recoveryAtMs = candidates
+		.filter(isSpent)
+		.map((window) => window.resetAtMs)
+		.filter((resetAtMs): resetAtMs is number => resetAtMs !== undefined)
+		.reduce<number | undefined>(
+			(latest, resetAtMs) =>
+				latest === undefined || resetAtMs > latest ? resetAtMs : latest,
+			undefined,
+		);
 	return {
-		utilization: usable.utilization,
-		...(exhausted && usable.resetAtMs !== undefined
-			? { recoveryAtMs: usable.resetAtMs }
-			: {}),
+		utilization: governing.utilization,
+		...(recoveryAtMs === undefined ? {} : { recoveryAtMs }),
 		windows,
 	};
 }

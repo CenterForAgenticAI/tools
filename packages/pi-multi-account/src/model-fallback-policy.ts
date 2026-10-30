@@ -88,6 +88,7 @@ const AUTH_CODES: ReadonlySet<ProviderErrorCode> = new Set([
   "token_revoked",
   "oauth_refresh_rejected",
   "oauth_service_unavailable",
+  "credential_unresolved",
   "insufficient_permissions",
 ]);
 const REFUSAL_STOP_REASONS: ReadonlySet<string> = new Set([
@@ -138,6 +139,8 @@ export function classifyModelFallbackFailure(
   }
   // An unknown stop proves nothing about the model; it is never a fallback.
   if (code === "unknown_stop") return { kind: "unknown" };
+  // Server load proves nothing about the model, even beside a capability hint.
+  if (code === "overloaded") return { kind: "unknown" };
   // A server failure proves nothing about the model; it is never a fallback.
   if (httpStatus !== undefined && httpStatus >= 500) return { kind: "unknown" };
   if (code === "model_not_found") return { kind: "model_not_found" };

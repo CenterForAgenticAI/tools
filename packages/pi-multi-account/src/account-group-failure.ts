@@ -31,13 +31,17 @@ export interface AccountGroupFailureCandidate extends Pick<AccountGroupMemberAva
 	readonly authenticated?: boolean;
 	readonly exhausted?: boolean;
 	readonly coolingDown?: boolean;
+	/** Terminal-auth invalidation (a dead login), as a closed fact; never the record. */
+	readonly invalidated?: boolean;
+	/** Two or more recent limit errors made the usage snapshot untrusted. */
+	readonly usageDistrusted?: boolean;
 	readonly reason?: AccountGroupMemberAvailability["reason"];
 }
 
 export type AccountGroupFailureReason =
 	| AccountGroupFailureBlockReason | "policy-unavailable"
 	| "no-serving-members" | "no-managed-serving-members"
-	| "authentication-unavailable" | "cooldown" | "exhausted"
+	| "authentication-unavailable" | "cooldown" | "exhausted" | "usage-distrusted" | "mixed-causes"
 	| "authorization-snapshot-unavailable" | "availability-unresolved";
 
 export interface AccountGroupFailureView {
@@ -72,12 +76,27 @@ function managedProvider(providerId: string): boolean {
 	return MANAGED_FAMILIES.some((family) => providerId === family || providerId.startsWith(`${family}-account-`));
 }
 
+/** A dead login: unauthenticated, an authorization gap, or terminal-auth invalidation. */
+function loginRequired(row: { readonly authenticated?: boolean | undefined; readonly invalidated?: boolean | undefined; readonly reason?: string | undefined }): boolean {
+	return row.authenticated === false || row.invalidated === true || row.reason === "authentication unavailable";
+}
+
+/** Closed cause words for one member, in a fixed order. Never provider text. */
+function memberCauses(row: { readonly authenticated?: boolean | undefined; readonly invalidated?: boolean | undefined; readonly reason?: string | undefined; readonly exhausted?: boolean | undefined; readonly coolingDown?: boolean | undefined; readonly usageDistrusted?: boolean | undefined }): string[] {
+	return [
+		...(loginRequired(row) ? ["login required"] : []),
+		...(row.exhausted === true ? ["exhausted"] : []),
+		...(row.coolingDown === true ? ["cooling down"] : []),
+		...(row.usageDistrusted === true ? ["usage not trusted"] : []),
+	];
+}
+
 // Each cause names a recovery that exists. None tells the operator to repair
 // the store: no command does that, and the store may not be at fault.
 const CAUSE_TEXT: Readonly<Record<AccountGroupResolutionFailureCause, readonly [string, string]>> = {
 	"store-invalid": ["resolution-failed (store-invalid): the session account-group store failed validation", "Move session-account-groups.json aside (this clears saved group choices), then run /multi-account reload."],
 	"filesystem": ["resolution-failed (filesystem): the session account-group store could not be read or written", "Check the file's permissions and free disk space; this session retries the store automatically."],
-	"policy": ["resolution-failed (policy): two accountGroupCwdDefaults entries resolve to the same directory with different groups", "Correct accountGroupCwdDefaults in the global configuration and run /multi-account reload."],
+	"policy": ["resolution-failed (policy): two account-group folder rules resolve to the same directory with different groups", "Correct accountGroupCwdDefaults or accountGroupDirectoryDefaults in the global configuration and run /multi-account reload."],
 	"unknown": ["resolution-failed (unknown): the session policy could not be read safely", "Run /multi-account reload; if it still fails, check /multi-account log and restart Pi."],
 };
 
@@ -98,6 +117,9 @@ const REASON_TEXT: Readonly<Record<AccountGroupFailureReason, readonly [string, 
 	"cooldown": ["serving managed members are cooling down", "Wait for recovery or choose another group."],
 	"exhausted": ["serving managed members have exhausted their available usage", "Wait for usage to recover or choose another group."],
 	"authorization-snapshot-unavailable": ["the authorization snapshot is unavailable", "Check provider availability, then try again or choose another group."],
+	"usage-distrusted": ["serving managed members recently hit repeated usage limits, so their usage is not trusted", "Wait for the limit window to pass or choose another group."],
+	// The per-alias list is built by `mixedCausesText`; this entry is the closed help.
+	"mixed-causes": ["serving managed members are unavailable for different reasons", "Sign in with /login and run /multi-account rediscover for a login-required member, wait for the others to recover, or choose another group."],
 	"availability-unresolved": ["no eligible managed member is available; the cause is not established", "Check /multi-account group status, sign in if needed, or choose another group."],
 };
 
@@ -120,8 +142,10 @@ function failureView(
 	outsideEligible: boolean,
 	resolution?: Exclude<EffectiveAccountGroupResolution, { readonly source: "unrestricted" }>,
 	cause?: AccountGroupResolutionFailureCause,
+	detail?: string,
 ): AccountGroupFailureView {
-	const [text, help] = cause === undefined ? REASON_TEXT[reason] : CAUSE_TEXT[cause];
+	const [baseText, help] = cause === undefined ? REASON_TEXT[reason] : CAUSE_TEXT[cause];
+	const text = detail === undefined ? baseText : `${baseText} (${detail})`;
 	const model = safeLabel(modelId, 128, "selected-model");
 	const groupId = resolution === undefined ? undefined : safeLabel(resolution.groupId, 64, "selected-group");
 	const source = resolution?.source;
@@ -138,7 +162,8 @@ function failureView(
  * Format a failed unified selection from one call's already-authorized facts.
  * This observes nothing, changes no policy and grants no dispatch permission.
  * Undefined preserves the caller's existing unrestricted error byte-for-byte.
- * Mixed or unobserved causes stay unresolved, never guessed as missing auth.
+ * A cause shared by every serving managed member is named. Members that differ
+ * get a closed per-alias list; only a group with no known cause stays unresolved.
  */
 export function formatAccountGroupFailure(input: AccountGroupFailureInput): AccountGroupFailureView | undefined {
 	const policy = input.policy;
@@ -149,7 +174,7 @@ export function formatAccountGroupFailure(input: AccountGroupFailureInput): Acco
 	if (policy.kind !== "resolved") return failureView("policy-unavailable", input.modelId, false);
 	const resolution = policy.resolution;
 	if (resolution.source === "unrestricted") return undefined;
-	if (resolution.source !== "session-override" && resolution.source !== "cwd-default" && resolution.source !== "global-default") {
+	if (resolution.source !== "session-override" && resolution.source !== "cwd-default" && resolution.source !== "directory-default" && resolution.source !== "global-default") {
 		return failureView("policy-unavailable", input.modelId, false);
 	}
 	if (!Number.isInteger(input.accountLimit) || input.accountLimit < 1 || input.accountLimit > 32) {
@@ -164,6 +189,8 @@ export function formatAccountGroupFailure(input: AccountGroupFailureInput): Acco
 		authenticated: row.authenticated === false ? false : undefined,
 		exhausted: row.exhausted === true,
 		coolingDown: row.coolingDown === true,
+		invalidated: row.invalidated === true,
+		usageDistrusted: row.usageDistrusted === true,
 		reason: row.reason === "authentication unavailable" || row.reason === "authorization snapshot unavailable" ? row.reason : undefined,
 	}));
 	const inside = candidates.filter((row) => members.has(row.providerId));
@@ -175,10 +202,19 @@ export function formatAccountGroupFailure(input: AccountGroupFailureInput): Acco
 	if (inside.some((row) => row.reason === "authorization snapshot unavailable")) reason = "authorization-snapshot-unavailable";
 	else if (serving.length === 0) reason = "no-serving-members";
 	else if (managed.length === 0 || serving.some((row) => !managedProvider(row.providerId) && row.eligible === true)) reason = "no-managed-serving-members";
-	else if (managed.every((row) => row.authenticated === false || row.reason === "authentication unavailable")) reason = "authentication-unavailable";
+	else if (managed.every(loginRequired)) reason = "authentication-unavailable";
 	else if (managed.every((row) => row.exhausted === true)) reason = "exhausted";
 	else if (managed.every((row) => row.coolingDown === true)) reason = "cooldown";
-	else reason = "availability-unresolved";
+	else if (managed.every((row) => row.usageDistrusted === true)) reason = "usage-distrusted";
+	else if (managed.some((row) => memberCauses(row).length > 0)) {
+		// Members fail for different known reasons. List each alias with its
+		// closed cause words; a member with no known cause says so by name.
+		const detail = managed.map((row) => {
+			const causes = memberCauses(row);
+			return `${safeLabel(row.providerId, 64, "account")}: ${causes.length === 0 ? "cause not established" : causes.join(", ")}`;
+		}).join("; ");
+		return failureView("mixed-causes", input.modelId, outsideEligible, resolution, undefined, detail);
+	} else reason = "availability-unresolved";
 	return failureView(reason, input.modelId, outsideEligible, resolution);
 }
 /**
