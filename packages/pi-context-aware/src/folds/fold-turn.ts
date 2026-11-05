@@ -43,6 +43,7 @@ import { elideImageParts, planNativeMediaElision, type MediaElisionPlan, type Pr
 import { foldStateFromBranch } from "./fold-adapter.js";
 import { renderEarlierFoldCalls } from "./fold-call-render.js";
 import { foldRecordsOnBranch, type FoldRecord } from "./fold-entries.js";
+import { activeHides, planHides, withPointer } from "./hide-entries.js";
 import {
 	baseIdOf,
 	coveredMessageIds,
@@ -61,6 +62,7 @@ import {
 	type NudgeState,
 } from "./kernel/index.js";
 import { isSummaryMessageId, SUMMARY_HEADER } from "./kernel/prune.js";
+import { DEFAULT_PRESSURE_LADDER, type PressureLadderConfig } from "../policy/context-policy.js";
 import { countMessageTokens, renderVisibleRefs } from "./kernel/index.js";
 
 type Message = ContextEvent["messages"][number];
@@ -102,6 +104,10 @@ export interface FoldTurnMemory {
 	readonly hostSamples: number[];
 	scaleStale?: boolean;
 	meter?: SentViewMeter;
+	/** Consecutive requests the kernel found the context stuck above the last ladder step; the kernel's terminal-escape streak. */
+	terminalStreak?: number;
+	/** Emergency events (see FoldEmergencyEvent) already announced in the current stretch above the last ladder step. */
+	emergencyReported?: Set<FoldEmergencyEvent>;
 }
 
 export function createFoldTurnMemory(): FoldTurnMemory {
@@ -120,6 +126,8 @@ export function cloneFoldTurnMemory(memory: FoldTurnMemory): FoldTurnMemory {
 		hostSamples: [...memory.hostSamples],
 		...(memory.scaleStale !== undefined ? { scaleStale: memory.scaleStale } : {}),
 		...(memory.meter ? { meter: { ...memory.meter } } : {}),
+		...(memory.terminalStreak !== undefined ? { terminalStreak: memory.terminalStreak } : {}),
+		...(memory.emergencyReported ? { emergencyReported: new Set(memory.emergencyReported) } : {}),
 	};
 }
 
@@ -146,11 +154,43 @@ export interface FoldTurnInput {
 	readonly config?: Partial<Config>;
 	/** Also decide the nudge billion-context-pi 0.1.83 would send (parity evidence). */
 	readonly compatibility?: boolean;
+	/** The pressure ladder in force; the nudge, emergency and truncation thresholds come from it. Defaults to the starting ladder. */
+	readonly ladder?: PressureLadderConfig;
+}
+
+/**
+ * What the last ladder step did on this request (pi-context-aware#244). The kernel truncates
+ * oversized messages in the request when usage reaches `recoverableHideFraction`; it neither says
+ * so nor stops when nothing can be shortened. This carries what it did so the host can tell the user.
+ */
+export type FoldEmergencyEvent = "truncated" | "skipped" | "terminal";
+
+export interface FoldEmergency {
+	/** Kernel usage of the request: sent tokens over the context window. */
+	readonly usage: number;
+	/** The ladder's last step, which is where truncation starts. */
+	readonly threshold: number;
+	readonly tokenCount: number;
+	readonly limit: number;
+	/** Messages shortened in this request. The session entries keep their originals. */
+	readonly truncated: number;
+	/** The kernel's reason when truncation ran and reclaimed nothing. */
+	readonly skipped?: string;
+	/** The kernel's signal that nothing it does can bring the session under the limit. */
+	readonly terminalEscape?: string;
+	/** Session entries whose messages were shortened in this request and can be saved as recoverable hides (pi-context-aware#268). */
+	readonly hideCandidates: readonly string[];
+	/** The events not yet announced in this stretch above the threshold; announce each once. */
+	readonly announce: readonly FoldEmergencyEvent[];
 }
 
 /** A nudge that differs from billion-context-pi's only because of a fix above. */
 export interface NudgeFix {
-	readonly cause: "tier-trigger" | "emergency-defer";
+	/**
+	 * `denominator`: billion-context-pi takes the ladder as a share of the window less the output reserve, the native pass as a share of the window (pi-context-aware#244).
+	 * `tool-name`: the native nudge is billion-context-pi's with the fold tool renamed and nothing else changed (pi-context-aware#257).
+	 */
+	readonly cause: "tier-trigger" | "emergency-defer" | "denominator" | "tool-name";
 	/** The nudge sent; absent when none was. */
 	readonly sent?: string;
 	/** The nudge billion-context-pi 0.1.83 would send; absent when none. */
@@ -165,9 +205,41 @@ export interface FoldTurnResult {
 	readonly mediaElidedEntryIds?: readonly string[];
 	/** Rebuilt request messages immediately before their image parts were replaced. */
 	readonly mediaElisionBefore?: readonly { readonly entryId: string; readonly message: Message }[];
+	/**
+	 * Parity previews only (`compatibility`): entries whose shortened message now carries the pointer line a saved
+	 * hide adds (pi-context-aware#268, FP-205), and each message as billion-context-pi sends it, without the line.
+	 */
+	readonly hidePointerEntryIds?: readonly string[];
+	readonly hidePointerBefore?: readonly { readonly entryId: string; readonly message: Message }[];
 	/** Text of the nudge appended to the request, if any. */
 	readonly nudge?: string;
+	/** Set while usage is at or above the last ladder step. */
+	readonly emergency?: FoldEmergency;
 	readonly nudgeFix?: NudgeFix;
+	/** Set when billion-context-pi's own limit differs from the window; see DenominatorEvidence. */
+	readonly denominator?: DenominatorEvidence;
+	/** Token counts of this pass: what it measured on entry and the size of the view it produced (per-turn metrics). */
+	readonly tokens?: { readonly before: number; readonly after: number };
+	/** Which kind of nudge was appended; absent when none was. */
+	readonly nudgeKind?: NudgeKind;
+}
+
+export type NudgeKind = "tier1" | "tier2" | "tier3" | "emergency" | "fold";
+
+/**
+ * The native pass reads every ladder step as a share of the whole window; billion-context-pi reads it
+ * as a share of the window less the model's output reserve (pi-context-aware#244). When the two differ,
+ * this carries what billion-context-pi would have sent for the same session, so the parity register can
+ * tell that difference from other fixes: whether the last step truncates on one side only, and the
+ * request billion-context-pi's own limit produces.
+ */
+export interface DenominatorEvidence {
+	readonly window: number;
+	readonly bcpLimit: number;
+	/** The last step is crossed on one side only: one pass truncates and the other does not. */
+	readonly truncationStartDiffers: boolean;
+	/** The request billion-context-pi's limit produces, without any nudge. Set only when the last step is crossed on one side only. */
+	readonly bcpMessages?: readonly Message[];
 }
 
 /**
@@ -198,11 +270,17 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 	const state = foldStateFromBranch(input.branch, contextEntries);
 	// The kernel hides and protects fold calls by the name billion-context-pi gives them.
 	state.messages.forEach((message, i) => { if (message.toolName === FOLD_TOOL_NAME) state.messages[i] = { ...message, toolName: "compress" }; });
+	// A saved hide shortens its entry for good (pi-context-aware#268). The kernel reads entries as written, so
+	// it is given the hidden text: it counts the real size, and its marker keeps it from shortening the entry again.
+	for (const hide of activeHides(input.branch)) {
+		const at = state.messages.findIndex((message) => message.id === hide.record.targetId);
+		if (at >= 0) state.messages[at] = { ...state.messages[at]!, text: hide.text };
+	}
 	const memory = input.memory;
 	const kernel = restoreMemory(state.kernel, memory);
 	asBillionContextBlocks(kernel, state.messages);
 	const limit = headroomLimit(input.model);
-	const config = turnConfig(limit, input.config);
+	const config = turnConfig(input.model.contextWindow, input.config, input.ladder);
 	const core = createCore();
 	const allImages = imageTokens(input.projection.entries);
 	const sys = input.systemPromptTokens;
@@ -241,10 +319,15 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 	}
 	memory.scaleStale = stale;
 	const compatibleKernel = input.compatibility ? structuredClone(kernel) : undefined;
+	const windowKernel = input.compatibility && limit !== config.modelContextLimit ? structuredClone(kernel) : undefined;
+	const truncationKernel = windowKernel ? structuredClone(kernel) : undefined;
+	const textBefore = new Map(state.messages.map((message) => [message.id, message.text ?? ""]));
 	const turn = core.processTurn({ messages: state.messages, state: kernel, config, tokenCount });
+	const emergency = emergencyOf(memory, config, tokenCount, textBefore, turn);
 	memory.nudge = turn.state.nudge;
 	memory.tokenSnapshot = turn.state.tokenSnapshot;
 	memory.lastPassIds = turn.state.lastPassIds;
+	memory.terminalStreak = turn.state.terminalStreak;
 	const truncateBand = config.modelContextLimit > 0 ? Math.floor(config.truncate.threshold * config.modelContextLimit) : Number.MAX_SAFE_INTEGER;
 	memory.meter = {
 		viewTokens: estimateTokens(turn.messages, coveredMessageIds(turn.state), images) + sys,
@@ -258,13 +341,39 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 	const turnKey = lastTurnBoundaryId(input.contextEntries) ?? "";
 	const gate = nudgeGate(memory, turnKey, tokenCount, config);
 	const failed = lastAssistantFailed(input.contextEntries);
-	const decided = decideInjection(turn.nudge, gate, failed, turn.state.blocks);
+	const decided = decideInjection(turn.nudge, gate, failed, turn.state.blocks, true, FOLD_TOOL_NAME);
 	if (decided.text !== undefined && turn.nudge?.breakdown?.emergencyOverride !== 1) markShown(memory, turnKey, tokenCount);
 	let nudgeFix: NudgeFix | undefined;
 	if (compatibleKernel) {
 		const compatible = compatibleNudge(core, state.messages, compatibleKernel, limit, input.config, tokenCount, gate);
 		if (decided.deferred && compatible.text !== undefined) nudgeFix = { cause: "emergency-defer", compatible: compatible.text };
-		else if (compatible.text !== decided.text) nudgeFix = { cause: "tier-trigger", ...optionalText("sent", decided.text), ...optionalText("compatible", compatible.text) };
+		else if (compatible.text !== decided.text) {
+			const fixed = { ...optionalText("sent", decided.text), ...optionalText("compatible", compatible.text) };
+			// Same nudge, different tool name: not a trigger or denominator fix (pi-context-aware#257).
+			if (compatible.text !== undefined && decided.text === renameFoldTool(compatible.text, FOLD_TOOL_NAME)) nudgeFix = { cause: "tool-name", ...fixed };
+			else {
+				const atWindow = windowKernel ? compatibleNudge(core, state.messages, windowKernel, config.modelContextLimit, input.config, tokenCount, gate) : undefined;
+				// The denominator moves billion-context-pi's nudge: it is the cause only when billion-context-pi's
+				// rules at the window's size give the nudge the native pass sent. billion-context-pi's text names its
+				// own tool, so it is compared with the fold tool renamed. A mix of causes is left unexplained.
+				if (atWindow === undefined || atWindow.text === compatible.text) nudgeFix = { cause: "tier-trigger", ...fixed };
+				else if (atWindow.text === undefined ? decided.text === undefined : decided.text === renameFoldTool(atWindow.text, FOLD_TOOL_NAME)) nudgeFix = { cause: "denominator", ...fixed };
+			}
+		}
+	}
+	let denominator: DenominatorEvidence | undefined;
+	if (truncationKernel) {
+		const compat = defaultConfig(limit, input.config ?? {});
+		const bcpTruncates = tokenCount / limit >= compat.truncate.threshold;
+		const ourTruncates = tokenCount / config.modelContextLimit >= config.truncate.threshold;
+		const truncationStartDiffers = bcpTruncates !== ourTruncates;
+		let bcpMessages: Message[] | undefined;
+		if (truncationStartDiffers) {
+			const bcpTurn = core.processTurn({ messages: state.messages, state: truncationKernel, config: compat, tokenCount });
+			const bcpRebuilt = rebuild(messages, sources, contextEntries, bcpTurn.messages, new Set(state.active.map((record) => record.carrierId)));
+			bcpMessages = bcpRebuilt.messages;
+		}
+		denominator = { window: config.modelContextLimit, bcpLimit: limit, truncationStartDiffers, ...(bcpMessages ? { bcpMessages } : {}) };
 	}
 	if (decided.text !== undefined) {
 		const at = lastSourcedIndex(rebuilt.sources) + 1;
@@ -273,22 +382,105 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 	}
 	if (turn.state.blocks.length > 0) dropOrphanResults(rebuilt);
 	const appliedMedia = applyMediaElision(rebuilt, mediaElision);
+	// A parity preview shows the request after the hides are saved: the next request, which carries the pointer line.
+	const appliedHide = input.compatibility ? applyHidePointers(rebuilt, input.branch, emergency?.hideCandidates ?? []) : undefined;
 	return {
 		messages: rebuilt.messages,
 		sources: rebuilt.sources,
 		...(appliedMedia.entryIds.length > 0 ? { mediaElidedEntryIds: appliedMedia.entryIds, mediaElisionBefore: appliedMedia.before } : {}),
-		...(decided.text !== undefined ? { nudge: decided.text } : {}),
+		...(appliedHide && appliedHide.entryIds.length > 0 ? { hidePointerEntryIds: appliedHide.entryIds, hidePointerBefore: appliedHide.before } : {}),
+		...(decided.text !== undefined ? { nudge: decided.text, nudgeKind: nudgeKindOf(turn.nudge) } : {}),
+		tokens: { before: tokenCount, after: memory.meter.viewTokens },
+		...(emergency ? { emergency } : {}),
 		...(nudgeFix ? { nudgeFix } : {}),
+		...(denominator ? { denominator } : {}),
 	};
+}
+
+function nudgeKindOf(nudge: NudgeDecision | undefined): NudgeKind {
+	if (nudge?.breakdown?.emergencyOverride === 1) return "emergency";
+	return nudge?.tier === 1 ? "tier1" : nudge?.tier === 2 ? "tier2" : nudge?.tier === 3 ? "tier3" : "fold";
 }
 
 function optionalText<K extends "sent" | "compatible">(key: K, text: string | undefined): { [P in K]?: string } {
 	return (text === undefined ? {} : { [key]: text }) as { [P in K]?: string };
 }
 
-/** Engine settings for the per-turn pass: the engine defaults with the #629 tier triggers. */
-export function turnConfig(limit: number, overrides: Partial<Config> = {}): Config {
-	return defaultConfig(limit, { ...overrides, tiers: { ...defaultConfig(limit).tiers, ...TIER_TRIGGERS, ...overrides.tiers } });
+/**
+ * Engine settings for the per-turn pass: the engine defaults with the #629 tier triggers, and the
+ * pressure ladder's steps as the nudge, emergency-nudge and truncation thresholds
+ * (pi-context-aware#244). `limit` is the context window, the one denominator every ladder step
+ * uses; the output reserve is proactive compaction's generation-reserve trigger, not a shrunken limit.
+ * Settings in `overrides` still win.
+ */
+export function turnConfig(limit: number, overrides: Partial<Config> = {}, ladder: PressureLadderConfig = DEFAULT_PRESSURE_LADDER): Config {
+	const base = defaultConfig(limit);
+	return defaultConfig(limit, {
+		...overrides,
+		tiers: { ...base.tiers, ...TIER_TRIGGERS, ...overrides.tiers },
+		nudge: {
+			...base.nudge,
+			minContextLimitPct: ladder.foldNudgeStartFraction,
+			maxContextLimitPct: ladder.foldNudgeEndFraction,
+			emergencyThresholdPct: ladder.recoverableHideFraction,
+			...overrides.nudge,
+		},
+		truncate: { ...base.truncate, threshold: ladder.recoverableHideFraction, ...overrides.truncate },
+	});
+}
+
+/** Ids of the messages that are a whole entry. An assistant entry with several calls has no single text to hide, so its `<entry>#<call>` messages are left out. */
+export function wholeEntryIds(messages: readonly CoreMessage[]): string[] {
+	return [...new Set(messages.filter((message) => baseIdOf(message.id) === message.id).map((message) => message.id))];
+}
+
+/** The kernel's own marker on a message it truncated (kernel/truncate-tools.ts); a test pins this copy. */
+const TRUNCATION_MARKER = "[truncated for context space]";
+
+function emergencyOf(
+	memory: FoldTurnMemory,
+	config: Config,
+	tokenCount: number,
+	textBefore: ReadonlyMap<string, string>,
+	turn: { readonly messages: readonly CoreMessage[]; readonly truncationSkipped?: string; readonly terminalEscape?: { readonly message: string } },
+): FoldEmergency | undefined {
+	const reported = memory.emergencyReported ?? (memory.emergencyReported = new Set());
+	const usage = config.modelContextLimit > 0 ? tokenCount / config.modelContextLimit : 0;
+	if (usage < config.truncate.threshold) {
+		reported.clear();
+		return undefined;
+	}
+	const shortened = turn.messages.filter((message) => (message.text ?? "").includes(TRUNCATION_MARKER) && !(textBefore.get(message.id) ?? "").includes(TRUNCATION_MARKER));
+	const truncated = shortened.length;
+	const hideCandidates = wholeEntryIds(shortened);
+	const events: FoldEmergencyEvent[] = [
+		...(truncated > 0 ? ["truncated" as const] : []),
+		...(turn.truncationSkipped !== undefined ? ["skipped" as const] : []),
+		...(turn.terminalEscape ? ["terminal" as const] : []),
+	];
+	const announce = events.filter((event) => !reported.has(event));
+	for (const event of announce) reported.add(event);
+	return {
+		usage, threshold: config.truncate.threshold, tokenCount, limit: config.modelContextLimit, truncated, hideCandidates,
+		...(turn.truncationSkipped !== undefined ? { skipped: turn.truncationSkipped } : {}),
+		...(turn.terminalEscape ? { terminalEscape: turn.terminalEscape.message } : {}),
+		announce,
+	};
+}
+
+/** One log line for every request at or above the last ladder step. */
+export function emergencyLogLine(emergency: FoldEmergency): string {
+	return `emergency truncation usage=${Math.round(emergency.usage * 100)}% threshold=${Math.round(emergency.threshold * 100)}% tokens=${emergency.tokenCount}/${emergency.limit} truncated=${emergency.truncated}${emergency.skipped ? ` skipped="${emergency.skipped}"` : ""}${emergency.terminalEscape ? " terminal-escape" : ""}`;
+}
+
+/** The notices to show, one per event not yet announced in this stretch above the threshold. */
+export function emergencyNotices(emergency: FoldEmergency): string[] {
+	const where = `Context is at ${Math.round(emergency.usage * 100)}% of the window, past the pressure ladder's last step (${Math.round(emergency.threshold * 100)}%).`;
+	return emergency.announce.map((event) => {
+		if (event === "truncated") return `[context-aware] ${where} Emergency truncation shortened ${emergency.truncated} large message(s) in the request sent to the model; the session file keeps the originals. Fold older ranges with context_fold or compact to lower the size for good.`;
+		if (event === "skipped") return `[context-aware] ${where} Emergency truncation ran and reclaimed nothing: ${emergency.skipped ?? "no reason given"}. Fold older ranges with context_fold or compact now.`;
+		return `[context-aware] ${where} ${emergency.terminalEscape ?? "Compression and truncation cannot reduce this context any further."}`;
+	});
 }
 
 /** billion-context-pi's applyOutputHeadroom: reserve the model's output, at most a quarter of the window. */
@@ -316,6 +508,9 @@ function restoreMemory(kernel: CompressionState, memory: FoldTurnMemory): Compre
 	if (memory.nudge) kernel.nudge = structuredClone(memory.nudge);
 	if (memory.tokenSnapshot) kernel.tokenSnapshot = { ...memory.tokenSnapshot };
 	if (memory.lastPassIds) kernel.lastPassIds = [...memory.lastPassIds];
+	// The kernel's terminal-escape streak counts consecutive stuck requests; each pass rebuilds the
+	// kernel state from the branch, so without this it starts at 0 every time and never reaches the limit.
+	if (memory.terminalStreak !== undefined) kernel.terminalStreak = memory.terminalStreak;
 	if (created) {
 		// A new fold resets the growth baselines, as the kernel's applyCompression does.
 		kernel.nudge.lastPerMessageNudgeTokens = 0;
@@ -391,6 +586,41 @@ function applyMediaElision(rebuilt: Rebuilt, plan: MediaElisionPlan): AppliedMed
 		applied.add(source);
 	}
 	return { entryIds: [...applied], before };
+}
+
+/** The message with the pointer line of hide `hideId` after the kernel's marker line; undefined when it has no such line. */
+function pointerMessage(message: Message, hideId: string): Message | undefined {
+	const content = (message as { content?: unknown }).content;
+	if (typeof content === "string") {
+		const text = withPointer(content, hideId);
+		return text === content ? undefined : { ...message, content: text } as Message;
+	}
+	if (!Array.isArray(content)) return undefined;
+	let changed = false;
+	const parts = content.map((part: Part) => {
+		if (part?.type !== "text" || typeof part.text !== "string") return part;
+		const text = withPointer(part.text, hideId);
+		if (text === part.text) return part;
+		changed = true;
+		return { ...part, text };
+	});
+	return changed ? { ...message, content: parts } as Message : undefined;
+}
+
+function applyHidePointers(rebuilt: Rebuilt, branch: readonly SessionEntry[], candidates: readonly string[]): AppliedMediaElision {
+	const entryIds: string[] = [];
+	const before: AppliedMediaElision["before"][number][] = [];
+	for (const plan of planHides(branch, candidates)) {
+		const index = rebuilt.sources.indexOf(plan.targetId);
+		if (index < 0) continue;
+		const message = rebuilt.messages[index]!;
+		const next = pointerMessage(message, plan.hideId);
+		if (!next) continue;
+		before.push({ entryId: plan.targetId, message });
+		rebuilt.messages[index] = next;
+		entryIds.push(plan.targetId);
+	}
+	return { entryIds, before };
 }
 
 /** billion-context-pi's coreOutToAgentMessages, over the request Pi built. */
@@ -621,23 +851,38 @@ function markShown(memory: FoldTurnMemory, turnKey: string, tokenCount: number):
 	memory.shownTokens.set(turnKey, tokenCount);
 }
 
-function decideInjection(nudge: NudgeDecision | undefined, gate: Gate, turnFailed: boolean, blocks: readonly CompressionBlock[], deferEmergency = true): { text?: string; deferred: boolean } {
+function decideInjection(nudge: NudgeDecision | undefined, gate: Gate, turnFailed: boolean, blocks: readonly CompressionBlock[], deferEmergency: boolean, foldTool: string): { text?: string; deferred: boolean } {
 	if (!nudge?.shouldInject) return { deferred: false };
 	const emergency = nudge.breakdown?.emergencyOverride === 1;
 	const deferred = deferEmergency && emergency && turnFailed;
 	if (deferred || (!emergency && gate.shown && !gate.reInjectReady)) return { deferred };
-	return { text: nudgeText({ ...nudge, compressibleRanges: viableRanges(nudge.compressibleRanges) }, blocks.filter((block) => block.active)), deferred };
+	return { text: nudgeText({ ...nudge, compressibleRanges: viableRanges(nudge.compressibleRanges) }, blocks.filter((block) => block.active), foldTool), deferred };
 }
 
 /** The nudge billion-context-pi 0.1.83 would send: kernel tier triggers, no emergency deferral. */
 function compatibleNudge(core: CompressionCore, messages: CoreMessage[], kernel: CompressionState, limit: number, overrides: Partial<Config> | undefined, tokenCount: number, gate: Gate): { text?: string } {
 	const turn = core.processTurn({ messages, state: kernel, config: defaultConfig(limit, overrides ?? {}), tokenCount });
-	return decideInjection(turn.nudge, gate, false, turn.state.blocks, false);
+	// billion-context-pi's own text names its own tool.
+	return decideInjection(turn.nudge, gate, false, turn.state.blocks, false, KERNEL_FOLD_TOOL);
+}
+
+/** The fold tool the kernel's nudge text names: billion-context-pi's. */
+const KERNEL_FOLD_TOOL = "compress";
+
+/**
+ * The kernel's nudge with the fold tool the model can actually call. After cut-over
+ * `compress` is not a registered tool here, so a nudge that names it sends the
+ * model to a tool it cannot call (pi-context-aware#257). Both forms the kernel writes are
+ * renamed: the backticked name and a `compress({` call.
+ */
+export function renameFoldTool(text: string, tool: string): string {
+	if (tool === KERNEL_FOLD_TOOL) return text;
+	return text.replaceAll("`" + KERNEL_FOLD_TOOL + "`", "`" + tool + "`").replace(/(?<![A-Za-z])compress\(\{/gu, tool + "({");
 }
 
 /** billion-context-pi's nudgeMessage text: the kernel's nudge and a line on the active blocks. */
-export function nudgeText(nudge: NudgeDecision, blocks: readonly CompressionBlock[]): string {
-	const lines = [renderNudgeText(nudge, defaultPrompts, {}).text];
+export function nudgeText(nudge: NudgeDecision, blocks: readonly CompressionBlock[], foldTool: string = FOLD_TOOL_NAME): string {
+	const lines = [renameFoldTool(renderNudgeText(nudge, defaultPrompts, {}).text, foldTool)];
 	if (blocks.length > 0) {
 		const summary = blocks.reduce((sum, block) => sum + Math.ceil((block.summary || "").length / 4), 0);
 		const compressed = blocks.reduce((sum, block) => sum + (block.compressedTokens || 0), 0);

@@ -9,11 +9,23 @@ npm test
 
 Bun installs the dependencies and Node runs the scripts and tests. `bunfig.toml` selects Bun's hoisted layout, which gives the flat `node_modules` tree the checks expect. Bun copies packages from its global cache with hard links, so each worktree's install takes little extra disk.
 
+## Which runner runs what
+
+Bun only installs dependencies: it hard-links packages from one global cache, so each extra worktree costs little disk and few inodes (pi-context-aware!182). Node runs every script, test and the built extension, because Pi loads the extension in Node and the code uses Node built-ins such as `node:sqlite`. `bun run` and `npm run` only launch a script, and each place uses the runner below:
+
+- **Local builds use Bun.** Run `bun run build` after every pull or branch switch. The `dist/` rebuild hooks (`.githooks/lib/autobuild.sh`) run the same command.
+- **Gates and other package scripts use npm.** `npm test`, `npm run check` and `npm run hooks:install` run through npm, and so do the tracked hooks: pre-commit runs `npm run lint` and `npm run typecheck`, pre-push runs `npm run coverage`.
+- **`prepare` uses npm.** It runs `npm run build` during an install from source and during `npm pack`, where Bun may not be present.
+
+Either runner works for any script: `bun run build` and `npm run build` run the same `build` script and produce the same `dist/`. The choices above keep each place consistent; no script needs a particular runner.
+
 ## Pi SDK versions
 
 The Pi SDK ships as several `@earendil-works/*` packages released together. `package.json` pins `@earendil-works/pi-ai` and `@earendil-works/pi-coding-agent` as exact development dependencies. Its `overrides` point every other SDK package at those pins with `$` references, so an install without `bun.lock` still gets one copy of each SDK package at the pinned version. Overrides apply only to this package's own install; consumers are unaffected.
 
 `npm run sdk:check` fails when the lockfile or the installed tree disagrees with the pins, or holds a nested second copy of an SDK package. The release verifier runs `npm run release:verify`, which checks the installed tree before the tests. When a new SDK package appears in the lockfile, add an override for it.
+
+Tool schemas are built with `@earendil-works/pi-schema`, which requires Pi 1.5.0 or newer. `pi-schema` is an exact runtime dependency because Pi does not alias it for extension imports; the package does not depend on or import `typebox`. Register every tool through `schemaTool` (`src/schema-tool.ts`), which types `execute`, `prepareArguments` and `renderCall` from the schema. Decoding a JSON-encoded list stays in each tool's `prepareArguments`; it is distinct from Pi's single-value-to-array coercion.
 
 ## Safety-case mutation replay
 
@@ -60,7 +72,7 @@ the scripts must use the same source commit.
 ## Synthetic differential parity (REQ-PARITY-002)
 
 ```sh
-npm run build
+bun run build
 node scripts/parity-differential.mjs
 # Optional persistent download cache (tarball integrity is checked on every run):
 node scripts/parity-differential.mjs --cache /tmp/parity-bcp-cache

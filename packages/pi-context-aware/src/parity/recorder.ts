@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolveFoldConfig, type FoldEngine } from "../folds/fold-engine.js";
+import type { PressureLadderConfig } from "../policy/context-policy.js";
 import { configuredFoldFingerprint } from "./fingerprint.js";
 import { budgetDiff, estimateBytes, ParityBudget, processParityBudget, shareLease, type BudgetLimit, type FoldParityLimits, type Lease, type ParityRetention, type ParityTask } from "./budget.js";
 import { compareBatchRequestWithMemory, compareCompressCall, hashRequestMessages, MAX_BRANCH_ENTRIES, previewShadowTurnMemory, shortHash, type BatchCall, type BatchComparison, type PreviewInput, type PreviewTurn, type ShadowCall } from "./compare.js";
@@ -60,6 +61,8 @@ export interface FoldParityOptions {
 	readonly agentDir: string;
 	readonly fingerprint: string;
 	readonly now?: () => Date;
+	/** The pressure ladder the live pass reads, so a preview of the next request reads the same one. */
+	readonly ladder?: (ctx: ExtensionContext) => PressureLadderConfig;
 	/** Private bounds for this recorder alone (tests, embedders). Without `limits` or `budget`, the process-wide budget applies. */
 	readonly limits?: FoldParityLimits;
 	/** A budget shared with other recorders. Takes precedence over `limits`. */
@@ -115,9 +118,10 @@ function previewTask(comparison: BatchComparison, leases: readonly Lease[], reco
 }
 
 /** What the live per-turn pass would read from this request's context: model limits, prompt size, host usage. */
-function previewTurn(ctx: ExtensionContext): PreviewTurn {
+function previewTurn(ctx: ExtensionContext, ladder?: (ctx: ExtensionContext) => PressureLadderConfig): PreviewTurn {
 	const usage = ctx.getContextUsage?.();
 	return {
+		...(ladder ? { ladder: ladder(ctx) } : {}),
 		...(ctx.model?.maxTokens ? { maxOutputTokens: ctx.model.maxTokens } : {}),
 		...(ctx.model?.api ? { api: ctx.model.api } : {}),
 		vision: Array.isArray(ctx.model?.input) && ctx.model.input.includes("image"),
@@ -313,7 +317,7 @@ export function registerFoldParityRecorder(pi: ExtensionAPI, options: FoldParity
 				const before = snapshotSideFile(ctx.sessionManager.getSessionFile());
 				const bytes = estimateBytes([header, branch, before], limits.maxRetainedBytes);
 				if (branch.length > MAX_BRANCH_ENTRIES || !before.ok || !(bytes <= limits.maxRetainedBytes)) { state.turnMemory = undefined; return; }
-				const snapshot: PreviewInput = { sessionId: id, cwd: ctx.cwd, header: structuredClone(header), branch: structuredClone(branch), contextWindow: ctx.model?.contextWindow ?? 200_000, folds, turn: previewTurn(ctx), turnMemory: cloneFoldTurnMemory(state.turnMemory) };
+				const snapshot: PreviewInput = { sessionId: id, cwd: ctx.cwd, header: structuredClone(header), branch: structuredClone(branch), contextWindow: ctx.model?.contextWindow ?? 200_000, folds, turn: previewTurn(ctx, options.ladder), turnMemory: cloneFoldTurnMemory(state.turnMemory) };
 				state.turnMemory = previewShadowTurnMemory(snapshot, before);
 				return;
 			}
@@ -340,7 +344,7 @@ export function registerFoldParityRecorder(pi: ExtensionAPI, options: FoldParity
 			if (!work) return inconclusive([budgetDiff("queue")]);
 			let snapshot: PreviewInput;
 			try {
-				snapshot = { sessionId: id, cwd: ctx.cwd, header: structuredClone(header), branch: structuredClone(branch), contextWindow: ctx.model?.contextWindow ?? 200_000, folds, turn: previewTurn(ctx) };
+				snapshot = { sessionId: id, cwd: ctx.cwd, header: structuredClone(header), branch: structuredClone(branch), contextWindow: ctx.model?.contextWindow ?? 200_000, folds, turn: previewTurn(ctx, options.ladder) };
 			} catch (error) { work.release(); throw error; }
 			const shadowCalls: BatchCall[] = calls.map((call) => ({
 				...(call.evidence ?? { toolCallId: call.toolCallId, input: undefined, before: { ok: false, diff: { kind: "recorder-error", reason: "call evidence released" } } }),

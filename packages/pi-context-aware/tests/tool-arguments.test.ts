@@ -6,8 +6,8 @@ import { MAX_REPAIRABLE_ARGUMENT_CHARS, MAX_REPAIRABLE_ARRAY_ITEMS, prepareSessi
 
 // Some Claude models send list arguments as JSON strings. Pi validates tool
 // arguments after the tool's prepareArguments hook, exactly as below; without
-// the hook, Value.Convert wraps the string in a one-item array and validation
-// fails with "tasks.0: must be object".
+// the hook, coercion wraps the string in a one-item array and validation
+// rejects the first item instead of decoding the intended plan.
 
 interface RegisteredTool {
 	name: string;
@@ -45,10 +45,10 @@ const stringifiedPlan = {
 	tasks: JSON.stringify([{ title: "alpha", subtasks: JSON.stringify([{ title: "alpha-1" }]) }, { title: "beta", status: "active" }]),
 };
 
-test("without repair, a stringified tasks list fails Pi validation with the misleading error", async () => {
+test("without repair, a stringified tasks list is refused before execution", async () => {
 	const tool = (await registeredTools()).get("session_tasks");
 	assert.ok(tool);
-	assert.throws(() => piValidate({ ...tool, prepareArguments: undefined }, stringifiedPlan), /tasks\/?\.?0.*must be object|must be object/u);
+	assert.throws(() => piValidate({ ...tool, prepareArguments: undefined }, stringifiedPlan), /tasks\.0: expected object, got string/u);
 });
 
 test("session_tasks repairs a stringified tasks plan, including nested subtasks, before validation", async () => {

@@ -24,8 +24,11 @@ import {
 	MAX_MODE_TOOL_LENGTH,
 	MAX_MODE_TRANSITION_LENGTH,
 	MODE_DEFAULT_LAYER,
+	MODE_DEFAULT_LAYER_SLOT,
+	isModeLayerScope,
 	normalizeModeTrail,
 	normalizeModeUi,
+	modeDisplayText,
 	MODE_MESSAGE_TYPE,
 	MODE_STATE_ENTRY_TYPE,
 	replayModeState,
@@ -79,6 +82,11 @@ export interface ContextAwareModesRuntimeDeps {
 	readonly isActive?: () => boolean;
 	readonly interactiveConfirm?: (request: { mode: string; action: "enter" | "exit"; reason?: string }) => Promise<boolean | undefined>;
 	readonly onChange?: () => void;
+	/**
+	 * Called when a hook throws while a run-scoped layer is left because its run ended during another commit.
+	 * That failure is not the outer caller's: it is reported here (default `console.error`) and the outer call's result is unchanged.
+	 */
+	readonly onQueuedExitError?: (error: unknown, layer: { readonly id: string; readonly layer: string }) => void;
 }
 
 export interface ContextAwareModesRuntime extends ContextAwareModesV1 {
@@ -134,7 +142,7 @@ function normalizeToolPolicy(value: unknown): RuntimeToolPolicy | null {
 
 /** Copy only `name`, `rank` and `pinned`. An absent layer is the reserved default layer, which no definition may name. */
 function normalizeLayer(value: unknown): { layer: string; rank: number; pinned: boolean } | null {
-	if (value === undefined) return { layer: MODE_DEFAULT_LAYER, rank: 0, pinned: false };
+	if (value === undefined) return { ...MODE_DEFAULT_LAYER_SLOT };
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
 	const { name, rank, pinned } = value as { name?: unknown; rank?: unknown; pinned?: unknown };
 	const layer = normalizeText(name, MAX_MODE_LAYER_LENGTH);
@@ -179,15 +187,19 @@ function sanitizeReason(value: unknown, fallback: string): string {
 	return reason.length <= MAX_REASON_LENGTH ? reason : `${reason.slice(0, MAX_REASON_LENGTH - 1)}…`;
 }
 
+/** Mode ids are caller text, so a reason names one only through `modeDisplayText`. */
+function blockedByMode(toolName: string, definition: RuntimeDefinition): string {
+	return `Tool ${toolName} is blocked by mode ${modeDisplayText(definition.id)}.`;
+}
 function toolPolicyBlock(definition: RuntimeDefinition, toolName: string, input: Record<string, unknown> | undefined): ToolBlock | undefined {
 	const policy = definition.toolPolicy;
 	if (policy === undefined) return undefined;
 	let reason: string;
 	if (!policy.allowedTools.has(toolName)) {
-		reason = `Tool ${toolName} is not allowed by mode ${definition.id}.`;
+		reason = `Tool ${toolName} is not allowed by mode ${modeDisplayText(definition.id)}.`;
 	} else if (toolName === "bash" && policy.readOnlyShell && !isReadOnlyShellCommand(input?.command)) {
 		// The reason names the tool and mode only; the command may carry secrets.
-		reason = `Tool bash is not allowed by mode ${definition.id}: the command is not on the read-only shell list.`;
+		reason = `Tool bash is not allowed by mode ${modeDisplayText(definition.id)}: the command is not on the read-only shell list.`;
 	} else {
 		return undefined;
 	}
@@ -208,9 +220,9 @@ function guardBlock(definition: RuntimeDefinition, toolName: string, input: Reco
 	if (definition.guard === undefined) return undefined;
 	try {
 		const result = definition.guard(toolName, input);
-		if (result?.block === true) return { block: true, reason: sanitizeReason(result.reason, `Tool ${toolName} is blocked by mode ${definition.id}.`) };
+		if (result?.block === true) return { block: true, reason: sanitizeReason(result.reason, blockedByMode(toolName, definition)) };
 	} catch {
-		return { block: true, reason: `Tool ${toolName} is blocked by mode ${definition.id}.` };
+		return { block: true, reason: blockedByMode(toolName, definition) };
 	}
 	return undefined;
 }
@@ -288,34 +300,69 @@ export function createContextAwareModesV1(deps: ContextAwareModesRuntimeDeps): C
 			remove();
 		}
 	};
+	/** Nesting depth of `commit`: a run that ends inside one waits until the outermost commit has finished. */
+	let committing = 0;
+	const endedRuns: ModeLayerState[] = [];
+	const endRun = (slot: ModeLayerState): void => {
+		if (!active()) return;
+		// Only the enter this signal belongs to ends; a replacement keeps its layer.
+		const held = slotOf(slot.layer);
+		if (held?.mode.instanceId === slot.mode.instanceId) leave(held);
+	};
+	/**
+	 * Store and publish one transition. With `until`, the run watch is armed as soon as the
+	 * new layers are set, so a hook that throws afterwards cannot leave the layer unwatched.
+	 */
 	const commit = (
 		next: ModeLayerState[],
 		transition: { content: string; slot: ModeLayerState; action: "enter" | "exit" },
+		until?: AbortSignal,
 	): ContextAwareModeResultV1 => {
-		const transitionId = randomUUID();
-		const now = new Date().toISOString();
-		const sorted = [...next].sort(compareModeLayers);
-		deps.appendEntry(MODE_STATE_ENTRY_TYPE, createModeStateEntry(sorted, now, transitionId));
-		layers = sorted;
-		updatedAt = now;
-		revision += 1;
-		dropListeners();
-		const mode = transition.slot.mode;
-		deps.sendMessage(MODE_MESSAGE_TYPE, transition.content, {
-			id: mode.id,
-			owner: mode.owner,
-			action: transition.action,
-			...(transition.action === "enter" && mode.suggestedBy === "model" ? { suggestedBy: "model" as const } : {}),
-			// Ties the message to its state entry: Pi can deliver it after later entries.
-			transitionId,
-			instanceId: mode.instanceId,
-			layer: transition.slot.layer,
-		});
-		deps.onChange?.();
-		return { status: "ok" };
+		committing += 1;
+		try {
+			const transitionId = randomUUID();
+			const now = new Date().toISOString();
+			const sorted = [...next].sort(compareModeLayers);
+			deps.appendEntry(MODE_STATE_ENTRY_TYPE, createModeStateEntry(sorted, now, transitionId));
+			layers = sorted;
+			updatedAt = now;
+			revision += 1;
+			dropListeners();
+			if (until !== undefined) watchRun(transition.slot, until);
+			const mode = transition.slot.mode;
+			deps.sendMessage(MODE_MESSAGE_TYPE, transition.content, {
+				id: mode.id,
+				owner: mode.owner,
+				action: transition.action,
+				...(transition.action === "enter" && mode.suggestedBy === "model" ? { suggestedBy: "model" as const } : {}),
+				// Ties the message to its state entry: Pi can deliver it after later entries.
+				transitionId,
+				instanceId: mode.instanceId,
+				layer: transition.slot.layer,
+			});
+			deps.onChange?.();
+			return { status: "ok" };
+		} finally {
+			committing -= 1;
+			// A nested leave would store its entry before this commit sets `layers`, and this commit would then overwrite it.
+			if (committing === 0) {
+				for (let slot = endedRuns.shift(); slot !== undefined; slot = endedRuns.shift()) {
+					try {
+						endRun(slot);
+					} catch (error) {
+						// The exit's own transition is stored; its hook failure must not fail the unrelated outer call.
+						try {
+							(deps.onQueuedExitError ?? ((reported) => console.error(reported)))(error, { id: slot.mode.id, layer: slot.layer });
+						} catch {
+							// A failing reporter must not reach the outer caller either.
+						}
+					}
+				}
+			}
+		}
 	};
 	const leave = (slot: ModeLayerState): ContextAwareModeResultV1 =>
-		commit(layers.filter((candidate) => candidate !== slot), { content: `Exited mode ${slot.mode.id}.`, slot, action: "exit" });
+		commit(layers.filter((candidate) => candidate !== slot), { content: `Exited mode ${modeDisplayText(slot.mode.id)}.`, slot, action: "exit" });
 	const snapshotOf = (slot: ModeLayerState): ContextAwareModeSnapshotV1 => {
 		const definition = available(slot);
 		return snapshotLayer(slot, definition !== undefined, updatedAt, undefined, definition?.ui);
@@ -352,10 +399,8 @@ export function createContextAwareModesV1(deps: ContextAwareModesRuntimeDeps): C
 	const watchRun = (slot: ModeLayerState, signal: AbortSignal): void => {
 		const onAbort = (): void => {
 			runListeners.delete(slot.mode.instanceId);
-			if (!active()) return;
-			// Only the enter this signal belongs to ends; a replacement keeps its layer.
-			const held = slotOf(slot.layer);
-			if (held?.mode.instanceId === slot.mode.instanceId) leave(held);
+			if (committing > 0) endedRuns.push(slot);
+			else endRun(slot);
 		};
 		// The run can end while the enter is committed: appendEntry, sendMessage or onChange may abort it.
 		if (signal.aborted) {
@@ -371,7 +416,7 @@ export function createContextAwareModesV1(deps: ContextAwareModesRuntimeDeps): C
 		const existing = slotOf(definition.layer);
 		if (existing !== undefined && available(existing) === definition) return refused("ALREADY_ACTIVE", "The mode is already active.");
 		if (definition.pinned) {
-			if (request.until !== undefined) return refused("INVALID_REQUEST", "A pinned layer cannot be entered for one run.");
+			if (!isModeLayerScope(true, request.until !== undefined)) return refused("INVALID_REQUEST", "A pinned layer cannot be entered for one run.");
 			if (request.suggestion !== undefined) return refused("PINNED_LAYER", "A pinned layer is entered only by its owner at session start.");
 			if (!pinnedWindowOpen || existing !== undefined) return refused("PINNED_LAYER", "A pinned layer can be entered only before the session's first agent run.");
 		}
@@ -402,9 +447,7 @@ export function createContextAwareModesV1(deps: ContextAwareModesRuntimeDeps): C
 				enteredAt: new Date().toISOString(),
 			},
 		};
-		const result = commit([...layers.filter((candidate) => candidate !== existing), slot], { content: definition.transition, slot, action: "enter" });
-		if (request.until !== undefined) watchRun(slot, request.until);
-		return result;
+		return commit([...layers.filter((candidate) => candidate !== existing), slot], { content: definition.transition, slot, action: "enter" }, request.until);
 	};
 	const exitRecord = (definition: RuntimeDefinition, handle: ContextAwareModeHandleV1): ContextAwareModeResultV1 => {
 		if (!active()) return refused("STALE_RUNTIME", "The session runtime is no longer active.");
@@ -533,7 +576,7 @@ export function createContextAwareModesV1(deps: ContextAwareModesRuntimeDeps): C
 	const handleToolCall = (toolName: string, input: Record<string, unknown>): ToolBlock | undefined => {
 		const live = layers.map(available).filter((definition): definition is RuntimeDefinition => definition !== undefined);
 		for (const definition of live) {
-			if (definition.blockedTools.has(toolName)) return { block: true, reason: `Tool ${toolName} is blocked by mode ${definition.id}.` };
+			if (definition.blockedTools.has(toolName)) return { block: true, reason: blockedByMode(toolName, definition) };
 		}
 		for (const definition of live) {
 			const block = toolPolicyBlock(definition, toolName, input);

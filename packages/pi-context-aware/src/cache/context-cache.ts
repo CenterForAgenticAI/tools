@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import * as path from "node:path";
 import { erasedSessionIds } from "../erasure/database.js";
+import { isManifestLockFileName, withManifestLock } from "./manifest-lock.js";
 
 /** Only known profile pool layouts supply authority; arbitrary caller directories remain standalone. */
 export function erasedIdsForCacheDirectory(cacheDir: string): ReadonlySet<string> {
@@ -155,7 +156,7 @@ export const CACHE_MANIFEST_FILE_NAME = "_manifest.json";
  * write or be deleted as an orphan on cleanup. One rule guards every caller.
  */
 export function isReservedManifestName(file: string): boolean {
-	return file.toLowerCase() === CACHE_MANIFEST_FILE_NAME;
+	return file.toLowerCase() === CACHE_MANIFEST_FILE_NAME || isManifestLockFileName(file);
 }
 
 export function isSafeCacheFileName(file: string): boolean {
@@ -186,6 +187,16 @@ export function migrateCachePool(sourceDir: string, destinationDir: string): Cac
 	}
 	if (Object.keys(sourceManifest.files).length === 0) return { changed: false, migratedFiles: [], failedFiles: [] };
 
+	try {
+		return withManifestLock(destinationDir, () => migrateCachePoolLocked(sourceDir, destinationDir, sourceManifest));
+	} catch {
+		// Best-effort: a lock that cannot be taken leaves the destination untouched.
+		return { changed: false, migratedFiles: [], failedFiles: Object.keys(sourceManifest.files) };
+	}
+}
+
+function migrateCachePoolLocked(sourceDir: string, destinationDir: string, sourceManifest: CacheManifest): CacheMigrationResult {
+	// Read the destination under the lock so a concurrent writer's entry is merged, not replaced.
 	let destinationManifest = readManifest(destinationDir);
 	const migratedFiles: string[] = [];
 	const failedFiles: string[] = [];
@@ -343,6 +354,31 @@ export function readManifest(cacheDir: string): CacheManifest {
 		// absent or corrupt
 	}
 	return { version: 1, files: {} };
+}
+
+/**
+ * Read-modify-write the pool manifest under the pool lock. `mutate` receives the
+ * manifest as it is on disk now and returns the manifest to publish (or none to
+ * leave it), a result for the caller, and an optional rollback that runs when
+ * publication throws. Every mutator in src must go through this function; the
+ * raw `writeManifest` is for this module and for tests that seed fixtures.
+ */
+export function mutateManifest<T>(
+	cacheDir: string,
+	mutate: (manifest: CacheManifest) => { manifest?: CacheManifest; result: T; rollback?: () => void },
+): T {
+	return withManifestLock(cacheDir, () => {
+		const outcome = mutate(readManifest(cacheDir));
+		if (outcome.manifest) {
+			try {
+				writeManifest(cacheDir, outcome.manifest);
+			} catch (err) {
+				outcome.rollback?.();
+				throw err;
+			}
+		}
+		return outcome.result;
+	});
 }
 
 export function writeManifest(cacheDir: string, manifest: CacheManifest): void {

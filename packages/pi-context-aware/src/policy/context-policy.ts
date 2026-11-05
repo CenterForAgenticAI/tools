@@ -160,7 +160,7 @@ export function formatContextPolicyStatus(snapshot: ContextAwarePolicySnapshotV1
 		`Context policy: ${snapshot.value} (source: ${snapshot.source})`,
 		`Fold nudges: ${formatFraction(ladder.foldNudgeStartFraction)} to ${formatFraction(ladder.foldNudgeEndFraction)} (sources: ${ladderSources.foldNudgeStartFraction}, ${ladderSources.foldNudgeEndFraction})`,
 		`Seeded compaction: ${formatFraction(ladder.seededCompactionFraction)} (source: ${ladderSources.seededCompactionFraction})`,
-		`Recoverable hide, only when compaction cannot run: ${formatFraction(ladder.recoverableHideFraction)} (source: ${ladderSources.recoverableHideFraction})`,
+		`Recoverable hide: ${formatFraction(ladder.recoverableHideFraction)} (source: ${ladderSources.recoverableHideFraction})`,
 		`Telemetry bands: WARN from ${formatFraction(snapshot.bands.warnFraction)}, URGENT from ${formatFraction(snapshot.bands.urgentFraction)}`,
 	];
 	if (snapshot.diagnostic) lines.push(`Diagnostic: ${snapshot.diagnostic}`);

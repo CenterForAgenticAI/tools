@@ -9,13 +9,16 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager, type ExtensionAPI, type ExtensionContext, type ExtensionFactory, type SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { obj, str, type Static } from "@earendil-works/pi-schema";
 import { guardErasureWrites } from "../src/erasure/write-boundary.js";
 import { foldStateFromBranch } from "../src/folds/fold-adapter.js";
 import { FOLD_ENTRY_TYPE, coveredEntryIds, foldRecordsOnBranch } from "../src/folds/fold-entries.js";
 import { registerFoldEngine, type FoldEngine, type FoldRequestResult } from "../src/folds/fold-engine.js";
 import { FOLD_REQUEST_RECOVERY_KIND, foldRequestDetails, type FoldRequestRecovery } from "../src/folds/fold-recovery.js";
 import { fold, requestText, SAFETY_CONFIG, safetyRoot, safetySession, seedOpening, assistant, user } from "./fixtures/safety/session.js";
+
+const testToolParameters1 = obj({ start: str(), end: str(), summary: str() }, { open: true });
+const testToolParameters2 = obj({ start: str(), end: str(), summary: str(), requestId: str() }, { open: true });
 
 const SUMMARY = "SAFETY-RECOVERED-SUMMARY: alpha and beta were settled, so nothing before gamma needs to be read again.";
 const SUMMARY_LATER = "SAFETY-LATER-SUMMARY: the middle of the opening was folded by a request that finished first.";
@@ -27,8 +30,8 @@ function crashingProcess(): ExtensionFactory {
 	return (pi) => {
 		const engine = registerFoldEngine(inert, { config: SAFETY_CONFIG });
 		pi.registerTool({ name: "fold_crash", label: "fold_crash", description: "Accepts a fold request in a process that dies before the drain.",
-			parameters: Type.Object({ start: Type.String(), end: Type.String(), summary: Type.String() }),
-			async execute(id, params, _signal, _update, ctx) {
+			parameters: testToolParameters1,
+			async execute(id, params: Static<typeof testToolParameters1>, _signal, _update, ctx) {
 				const result = engine.request(ctx, { startRef: params.start, endRef: params.end, summary: params.summary, requestId: id + "#0" });
 				assert.ok(result.ok && result.queued && result.recovery, JSON.stringify(result));
 				return { content: [{ type: "text", text: "folded" }], details: foldRequestDetails([result.recovery]) as never };
@@ -51,8 +54,8 @@ function restartedProcess(live: Live): ExtensionFactory {
 			if (!pi.getActiveTools().includes("fold_replay")) pi.setActiveTools([...pi.getActiveTools(), "fold_replay"]);
 		});
 		pi.registerTool({ name: "fold_replay", label: "fold_replay", description: "Runs a fold request again with a given id.",
-			parameters: Type.Object({ start: Type.String(), end: Type.String(), summary: Type.String(), requestId: Type.String() }),
-			async execute(_id, params, _signal, _update, ctx) {
+			parameters: testToolParameters2,
+			async execute(_id, params: Static<typeof testToolParameters2>, _signal, _update, ctx) {
 				live.replays.push(live.engine.request(ctx, { startRef: params.start, endRef: params.end, summary: params.summary, requestId: params.requestId }));
 				return { content: [{ type: "text", text: "replayed" }], details: {} };
 			} });

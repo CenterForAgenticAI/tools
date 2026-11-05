@@ -234,7 +234,7 @@ test("status names the policy, every ladder step, the bands, and their sources",
 			"Context policy: summaries (source: default)",
 			"Fold nudges: 45% to 75% (sources: default, default)",
 			"Seeded compaction: 90% (source: default)",
-			"Recoverable hide, only when compaction cannot run: 95% (source: default)",
+			"Recoverable hide: 95% (source: default)",
 			"Telemetry bands: WARN from 45%, URGENT from 90%",
 		].join("\n"),
 	);

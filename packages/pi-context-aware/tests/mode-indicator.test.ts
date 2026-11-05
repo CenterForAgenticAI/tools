@@ -126,6 +126,23 @@ test("the indicator draws the trail after the chips and owners", () => {
 	assert.equal(renderModeIndicatorLine([], theme, 120), "", "no layer draws nothing");
 });
 
+test("with no layer, the indicator draws the trail alone, with no chip", () => {
+	const line = renderModeIndicatorLine([], theme, 60, "ship 4: 2 implement · 1 review");
+	assert.equal(visibleWidth(line), 60);
+	assert.match(stripAnsi(line), /^ › ship 4: 2 implement · 1 review ─+$/u);
+	assert.doesNotMatch(stripAnsi(line), /◆/u, "no chip without a layer");
+	for (const width of [1, 2, 7, 200]) assert.equal(visibleWidth(renderModeIndicatorLine([], theme, width, "trail")), width, `width ${width}`);
+	assert.equal(renderModeIndicatorLine([], theme, 0, "trail"), "");
+});
+
+test("with no layer, the indicator draws the trail's rule in muted", () => {
+	const line = renderModeIndicatorLine([], theme, 40, "build 2/5");
+	const start = (color: "muted" | "accent"): string => theme.style("X", { fg: color }).split("X")[0] ?? "";
+	assert.notEqual(start("muted"), start("accent"), "the theme tells the two colors apart");
+	assert.ok(line.includes(`${start("muted")} ─`), "the trail-only rule is muted");
+	assert.ok(!line.includes(`${start("accent")} ─`), "the trail-only rule does not take the default mode color");
+});
+
 test("the indicator fits any width", () => {
 	const modes = [snapshot("outer-mode", { layer: "stage", rank: 1 }), snapshot("a-very-long-mode-identifier", { layer: "stance", rank: 2 })];
 	for (const width of [1, 2, 7, 33, 200]) assert.equal(visibleWidth(renderModeIndicatorLine(modes, theme, width, "trail")), width, `width ${width}`);
@@ -236,6 +253,23 @@ test("the controller shows the indicator below the editor and clears it on exit 
 	assert.deepEqual(replacement.widgets.at(-1)?.slice(0, 2), [MODES_WIDGET_KEY, undefined]);
 });
 
+test("the controller draws a trail with no mode active and removes the widget when it clears", () => {
+	const { controller, context } = controllerHarness();
+	const session = context();
+	controller.start(session.ctx);
+	const modes = controller.capability();
+	assert.ok(modes);
+	assert.equal(session.widgets.at(-1)?.[1], undefined, "no mode and no trail set no widget");
+	assert.deepEqual(modes.setTrail?.("ship 4: 2 implement"), { status: "ok" });
+	const shown = session.widgets.at(-1);
+	assert.equal(shown?.[0], MODES_WIDGET_KEY);
+	assert.deepEqual(shown?.[2], { placement: "belowEditor" });
+	assert.match(renderWidget(shown, 80)?.[0] ?? "", /^ › ship 4: 2 implement ─+$/u);
+	assert.equal(session.statuses.at(-1), undefined, "the footer status describes modes only");
+	modes.setTrail?.(undefined);
+	assert.deepEqual(session.widgets.at(-1)?.slice(0, 2), [MODES_WIDGET_KEY, undefined], "clearing the trail removes the widget");
+});
+
 test("the footer status draws a mode id and owner without their control characters", async () => {
 	const { controller, context } = controllerHarness();
 	const session = context();
@@ -247,4 +281,18 @@ test("the footer status draws a mode id and owner without their control characte
 	if (defined.status !== "ok") return;
 	await defined.handle.enter();
 	assert.equal(session.statuses.at(-1), "mode: plan\uFFFD[2J · owner: evil\uFFFD\uFFFD[31mowner");
+});
+
+test("the footer status screens the control characters of every layer's mode, the outer layers included", async () => {
+	const { controller, context } = controllerHarness();
+	const session = context();
+	controller.start(session.ctx);
+	const modes = controller.capability();
+	assert.ok(modes);
+	const outer = modes.defineMode(definition(`outer${ESC}[H`, { layer: { name: "stage", rank: 1 } }));
+	const inner = modes.defineMode(definition(`plan${ESC}[2J`, { layer: { name: "stance", rank: 2 } }));
+	assert.ok(outer.status === "ok" && inner.status === "ok");
+	await outer.handle.enter();
+	await inner.handle.enter();
+	assert.equal(session.statuses.at(-1), "mode: stage: outer\uFFFD[H · owner: indicator-test | stance: plan\uFFFD[2J · owner: indicator-test");
 });

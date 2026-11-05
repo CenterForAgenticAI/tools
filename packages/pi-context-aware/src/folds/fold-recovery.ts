@@ -33,8 +33,9 @@
  * - Pass `requestId: "<tool call id>#<item index>"` for every item and call
  *   `FoldEngine.request` from the tool's `execute`. Save the `recovery` record of
  *   every accepted item in the tool result `details` with
- *   `foldRequestDetails`, and return the result with `isError` false. A result
- *   with `isError: true` is never read back.
+ *   `foldRequestDetails`. Return `isError: true` only when no item was accepted:
+ *   such a result carries no recovery record, and a result with `isError: true`
+ *   is never read back. A result with at least one accepted item has `isError` false.
  * - Running the same tool call again (a durable worker replays it) sends the
  *   same requestIds. That is a replay, not a new request. With the same refs,
  *   summary and topic the engine returns `ok: true, replayed: true`: the
@@ -62,6 +63,7 @@ import { createHash } from "node:crypto";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import { foldStateFromBranch, planFold, summaryLimitOf, type BranchFoldState, type FoldCondenser, type FoldPlan, type FoldRequest } from "./fold-adapter.js";
+import type { FoldHintView } from "./fold-hints.js";
 import type { FoldsConfig } from "../platform/config-layers.js";
 import {
 	FOLD_ENTRY_TYPE,
@@ -676,6 +678,7 @@ export interface ReplanInput {
 	/** Effective fold settings; the same ones a fresh request is planned with. */
 	readonly folds?: FoldsConfig;
 	readonly condenser?: FoldCondenser;
+	readonly hints?: FoldHintView;
 	readonly config?: Partial<Config>;
 }
 
@@ -751,6 +754,7 @@ export function replanAcceptedFold(input: ReplanInput): ReplannedFold {
 		modelContextLimit: input.modelContextLimit,
 		...(input.folds ? { folds: input.folds } : {}),
 		...(input.condenser ? { condenser: input.condenser } : {}),
+		...(input.hints ? { hints: input.hints } : {}),
 		...(input.config ? { config: input.config } : {}),
 	});
 	const shown = { startRef: accepted.reportStartRef ?? startRef, endRef: accepted.reportEndRef ?? endRef };

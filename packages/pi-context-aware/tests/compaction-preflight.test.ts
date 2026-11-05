@@ -71,6 +71,7 @@ function sha256(content: string | Buffer): string {
 // changed summary generation) without changing the code the port copies.
 const PORTED_COMPACTION_SHA256: Readonly<Record<string, string>> = {
 	"1.4.0": "f51e78ef1da66b5803fc91e185f07b968f8f989ab9326b7744958416aad3f6f6",
+	"1.5.0": "f51e78ef1da66b5803fc91e185f07b968f8f989ab9326b7744958416aad3f6f6",
 };
 const COMPACT_REFUSAL_SHA256 = "45cf1517a80f20070a3093814328135d3f25c82d7dda46e82b53f45718f09016";
 const REVERIFY = "Diff it against the copy in src/compaction/compaction-preflight.ts, update the port, then update this pin and VERIFIED_PI_VERSIONS.";
@@ -391,7 +392,7 @@ function messageEntry(id: string, parentId: string | null, message: Extract<Sess
 
 const USER = messageEntry("u1", null, { role: "user", content: "Start the migration.", timestamp: 1 });
 const CALL_ID = "compact-call";
-const CALL = messageEntry("a1", "u1", fauxAssistantMessage([fauxToolCall("compact_session", { seed_prompt: "next" }, { id: CALL_ID })], { stopReason: "toolUse" }));
+const CALL = messageEntry("a1", "u1", fauxAssistantMessage([fauxToolCall("context_compact", { seed_prompt: "next" }, { id: CALL_ID })], { stopReason: "toolUse" }));
 const TOO_SMALL_AT_CALL = [USER, CALL];
 const IDLE: CompactionPreflightBoundary = { kind: "idle" };
 const AT_CALL: CompactionPreflightBoundary = { kind: "tool-call", toolCallId: CALL_ID, resultText: "Compaction queued." };
@@ -441,7 +442,7 @@ test("keepRecentTokens resolves through Pi's settings, including a per-model ove
 	}).kind, "nothing-to-compact");
 });
 
-test("a session too small at compact_session is refused, counting the call's result and the margin", () => {
+test("a session too small at context_compact is refused, counting the call's result and the margin", () => {
 	assert.deepEqual(preflight(contextFor(TOO_SMALL_AT_CALL, { isIdle: () => false }), AT_CALL), NOTHING);
 	// State entries Pi or extensions write after the call add no context.
 	const usage: SessionEntry = { type: "custom", id: "s1", parentId: "a1", timestamp: TIMESTAMP, customType: "state", data: {} };
@@ -479,7 +480,7 @@ const PROCEED_CASES: Array<{ reason: string; result: () => CompactionPreflightRe
 	{
 		reason: "tool-call-not-last",
 		result: () => preflight(contextFor([USER, messageEntry("a1", "u1", fauxAssistantMessage([
-			fauxToolCall("compact_session", { seed_prompt: "next" }, { id: CALL_ID }),
+			fauxToolCall("context_compact", { seed_prompt: "next" }, { id: CALL_ID }),
 			fauxToolCall("read", { path: "x" }, { id: "read-call" }),
 		], { stopReason: "toolUse" }))]), AT_CALL),
 	},
@@ -502,11 +503,11 @@ for (const [index, { reason, result }] of PROCEED_CASES.entries()) {
 }
 
 // ---------------------------------------------------------------------------
-// compact_session tail margin
+// context_compact tail margin
 // ---------------------------------------------------------------------------
 
 function toolResultEntry(id: string, parentId: string, text: string): SessionEntry {
-	return messageEntry(id, parentId, { role: "toolResult", toolCallId: CALL_ID, toolName: "compact_session", content: [{ type: "text", text }], isError: false, timestamp: 0 });
+	return messageEntry(id, parentId, { role: "toolResult", toolCallId: CALL_ID, toolName: "context_compact", content: [{ type: "text", text }], isError: false, timestamp: 0 });
 }
 
 function customMessageEntry(id: string, parentId: string, content: string): SessionEntry {
@@ -542,7 +543,7 @@ function tailWithin(rng: Rng, leafId: string, resultText: string, budget: number
 	return tail;
 }
 
-test("compact_session tail estimate models generated tails within its token budget", () => {
+test("context_compact tail estimate models generated tails within its token budget", () => {
 	const rng = createRng(SEED);
 	const failures: unknown[] = [];
 	let refusals = 0;
@@ -551,7 +552,7 @@ test("compact_session tail estimate models generated tails within its token budg
 		const session = SessionManager.inMemory("/preflight-margin");
 		const steps = rng.int(14);
 		for (let step = 0; step < steps; step++) grow(session, rng, step);
-		session.appendMessage(fauxAssistantMessage([fauxToolCall("compact_session", { seed_prompt: "next" }, { id: CALL_ID })], { stopReason: "toolUse" }));
+		session.appendMessage(fauxAssistantMessage([fauxToolCall("context_compact", { seed_prompt: "next" }, { id: CALL_ID })], { stopReason: "toolUse" }));
 		if (rng.chance(0.3)) session.appendCustomEntry("state", { trial });
 		const branch = session.getBranch();
 		const keepRecentTokens = rng.pick([2_100, 2_600, 4_000, 8_000, 20_000, 60_000]);
@@ -564,7 +565,7 @@ test("compact_session tail estimate models generated tails within its token budg
 		const budget = estimateTokens({
 			role: "toolResult",
 			toolCallId: CALL_ID,
-			toolName: "compact_session",
+			toolName: "context_compact",
 			content: [{ type: "text", text: resultText }, { type: "text", text: " ".repeat(TOOL_CALL_TAIL_MARGIN_TOKENS * 4) }],
 			isError: false,
 			timestamp: 0,
@@ -583,7 +584,7 @@ test("compact_session tail estimate models generated tails within its token budg
 	assert.ok(tailsWithTurnStarts >= 50, `only ${tailsWithTurnStarts} tails held extension messages`);
 });
 
-test("compact_session margin is load-bearing: without it a small extension message would flip Pi's decision", () => {
+test("context_compact margin is load-bearing: without it a small extension message would flip Pi's decision", () => {
 	// A 3,000-token request, then the call: under a 1,500-token kept tail.
 	const user = messageEntry("u1", null, { role: "user", content: "u".repeat(12_000), timestamp: 1 });
 	const branch = [user, CALL];
@@ -600,14 +601,14 @@ test("compact_session margin is load-bearing: without it a small extension messa
 	);
 });
 
-test("compact_session proceeds when the estimated result alone fills keepRecentTokens, where Pi can cut past the call", () => {
+test("context_compact proceeds when the estimated result alone fills keepRecentTokens, where Pi can cut past the call", () => {
 	// With no user turn before the call, Pi has nowhere to cut until the tail
 	// alone reaches keepRecentTokens; then it cuts past the call and compacts.
-	const call = messageEntry("a1", null, fauxAssistantMessage([fauxToolCall("compact_session", { seed_prompt: "next" }, { id: CALL_ID })], { stopReason: "toolUse" }));
+	const call = messageEntry("a1", null, fauxAssistantMessage([fauxToolCall("context_compact", { seed_prompt: "next" }, { id: CALL_ID })], { stopReason: "toolUse" }));
 	const padded = estimateTokens({
 		role: "toolResult",
 		toolCallId: CALL_ID,
-		toolName: "compact_session",
+		toolName: "context_compact",
 		content: [{ type: "text", text: AT_CALL.resultText }, { type: "text", text: " ".repeat(TOOL_CALL_TAIL_MARGIN_TOKENS * 4) }],
 		isError: false,
 		timestamp: 0,

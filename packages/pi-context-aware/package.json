@@ -1,5 +1,5 @@
 {
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Context-budget and compaction handoff support for pi: pressure markers, seed rewriting, proactive compaction, prior-session search, and context cache.",
   "type": "module",
   "main": "dist/index.js",
@@ -31,7 +31,7 @@
     "test:run": "node scripts/with-temp-root.mjs node --test .test-dist/tests/*.test.js tests/*.test.mjs",
     "test": "npm run test:compile && npm run test:run",
     "test:unit": "npm test",
-    "coverage": "npm run test:compile && node scripts/with-temp-root.mjs c8 node --test .test-dist/tests/*.test.js tests/*.test.mjs && npm run coverage:verify",
+    "coverage": "npm run test:compile && node scripts/with-temp-root.mjs --v8-coverage c8 node --test .test-dist/tests/*.test.js tests/*.test.mjs && npm run coverage:verify",
     "pi:check": "node scripts/check-pi-dependencies.mjs",
     "extension-imports:check": "node scripts/check-extension-host-imports.mjs",
     "sdk:check": "node scripts/check-sdk-graph.mjs --lockfile --installed",
@@ -74,10 +74,13 @@
   "publishConfig": {
     "access": "public"
   },
+  "dependencies": {
+    "@earendil-works/pi-schema": "1.5.0"
+  },
   "devDependencies": {
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-coding-agent": "1.4.0",
-    "@earendil-works/pi-tui": "1.4.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.1.1",
     "c8": "^11.0.0",
@@ -85,14 +88,12 @@
     "eslint": "^10.7.0",
     "globals": "^17.7.0",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.64.0",
-    "typebox": "1.4.3"
+    "typescript-eslint": "^8.64.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "@earendil-works/pi-tui": "*"
   },
   "overrides": {
     "@earendil-works/chord": "$@earendil-works/pi-coding-agent",
@@ -101,6 +102,7 @@
     "@earendil-works/pi-codemode": "$@earendil-works/pi-coding-agent",
     "@earendil-works/pi-coding-agent": "$@earendil-works/pi-coding-agent",
     "@earendil-works/pi-mcp": "$@earendil-works/pi-coding-agent",
+    "@earendil-works/pi-schema": "$@earendil-works/pi-coding-agent",
     "@earendil-works/pi-telemetry": "$@earendil-works/pi-coding-agent",
     "@earendil-works/pi-tui": "$@earendil-works/pi-tui"
   }

@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { readManifest, writeManifest } from "../cache/context-cache.js";
+import { mutateManifest, readManifest } from "../cache/context-cache.js";
 import { paritySessionFile } from "../parity/records.js";
+import { metricsSessionFile } from "../metrics/records.js";
 import { SessionDatabase, SessionOpenError, sessionDatabaseFile, validateSessionId } from "./database.js";
 import { readStoreFile, readStoreHeader, removeStoreDirectory, removeStoreFile, storeDirectories, withStoreDirectory } from "./files.js";
 import { sessionIdFromFileName } from "./restored.js";
@@ -105,16 +106,17 @@ function cacheInventory(agentDir: string, ids: ReadonlySet<string>): { targets: 
 }
 function removeCacheTarget(agentDir: string, target: CacheTarget): void {
 	withStoreDirectory(agentDir, target.directory, (held) => {
-		const manifest = readManifest(held);
-		// Remove first; never hide a failed deletion by dropping its manifest entry.
-		removeStoreFile(agentDir, path.join(target.directory, target.file));
-		delete manifest.files[target.file];
-		writeManifest(held, manifest);
+		mutateManifest(held, (manifest) => {
+			// Remove first; never hide a failed deletion by dropping its manifest entry.
+			removeStoreFile(agentDir, path.join(target.directory, target.file));
+			delete manifest.files[target.file];
+			return { manifest, result: undefined };
+		});
 	});
 }
 function derivedTargets(agentDir: string, ids: ReadonlySet<string>): { files: string[]; directories: string[] } {
 	const inventory = registryInventory(agentDir, ids);
-	return { files: [...ids].map((id) => paritySessionFile(agentDir, id)).concat(inventory.files), directories: inventory.directories };
+	return { files: [...ids].flatMap((id) => [paritySessionFile(agentDir, id), metricsSessionFile(agentDir, id)]).concat(inventory.files), directories: inventory.directories };
 }
 
 /** User-only erasure, with a ledger committed before destructive file operations. */
@@ -233,7 +235,7 @@ function idsWithDerivedData(agentDir: string, sources: readonly ErasureSession[]
 	const ids = new Set(sources.map((source) => source.id));
 	const found = new Set<string>();
 	for (const source of sources) {
-		if (present(`${source.path}.acp.json`) || present(paritySessionFile(agentDir, source.id))) found.add(source.id);
+		if (present(`${source.path}.acp.json`) || present(paritySessionFile(agentDir, source.id)) || present(metricsSessionFile(agentDir, source.id))) found.add(source.id);
 	}
 	const registry = registryInventory(agentDir, ids);
 	for (const file of [...registry.files, ...registry.directories]) {

@@ -13,11 +13,11 @@ import {
 	type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
 import { fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { obj } from "@earendil-works/pi-schema";
 
 // End to end through a real Pi agent session. The stub stands in for
 // billion-context-pi: it registers the same tool pair and cancels every
-// compaction. Pi itself must then stop declaring compact_session to the model.
+// compaction. Pi itself must then stop declaring context_compact to the model.
 
 const billionContextStub: ExtensionFactory = (pi) => {
 	for (const name of ["compress", "acp_status"]) {
@@ -25,7 +25,7 @@ const billionContextStub: ExtensionFactory = (pi) => {
 			name,
 			label: name,
 			description: `Stub of billion-context-pi's ${name}.`,
-			parameters: Type.Object({}),
+			parameters: obj({}, { open: true }),
 			async execute() {
 				return { content: [{ type: "text", text: "stub" }], details: {} };
 			},
@@ -74,12 +74,12 @@ async function startSession(withBlocker: boolean): Promise<{ activeTools: string
 	}
 }
 
-test("a real Pi session stops declaring compact_session when an extension cancels every compaction", async () => {
+test("a real Pi session stops declaring context_compact when an extension cancels every compaction", async () => {
 	const blocked = await startSession(true);
 	assert.ok(blocked.activeTools.includes("compress"), JSON.stringify(blocked.activeTools));
-	assert.ok(!blocked.activeTools.includes("compact_session"), JSON.stringify(blocked.activeTools));
-	assert.doesNotMatch(blocked.systemPrompt, /compact_session/u);
+	assert.ok(!blocked.activeTools.includes("context_compact"), JSON.stringify(blocked.activeTools));
+	assert.doesNotMatch(blocked.systemPrompt, /context_compact/u);
 
 	const unblocked = await startSession(false);
-	assert.ok(unblocked.activeTools.includes("compact_session"), JSON.stringify(unblocked.activeTools));
+	assert.ok(unblocked.activeTools.includes("context_compact"), JSON.stringify(unblocked.activeTools));
 });

@@ -74,6 +74,7 @@ test("a run that outlives the drain budget refuses the commit instead of recordi
 	assert.deepEqual(decision, {
 		commit: false,
 		reason: "run-in-flight",
+		blocker: "run",
 		waitedMs: 100,
 		drainTimeoutMs: 100,
 	});
@@ -84,12 +85,27 @@ test("a run that outlives the drain budget refuses the commit instead of recordi
 	assert.ok(fake.notes.some((note) => /abandoning this commit instead of recording a boundary/.test(note)));
 });
 
+test("a finished run whose provider-drain settlement never completes is reported as a settlement blocker", async () => {
+	const fake = harness(() => false, () => false);
+	const decision = await decideCompactionCommit(fake.hooks, { drainTimeoutMs: 100, pollIntervalMs: 30 });
+	assert.deepEqual(decision, {
+		commit: false,
+		reason: "run-in-flight",
+		blocker: "settlement",
+		waitedMs: 100,
+		drainTimeoutMs: 100,
+	});
+	assert.equal(fake.drains, 0, "no run is in flight, so none is ended");
+	assert.ok(fake.notes.some((note) => /provider-drain settlement path was still active/.test(note)));
+});
+
 test("a zero budget refuses without waiting, after ending the run so the retry can commit", async () => {
 	const fake = harness(() => true);
 	const decision = await decideCompactionCommit(fake.hooks, { drainTimeoutMs: 0 });
 	assert.deepEqual(decision, {
 		commit: false,
 		reason: "run-in-flight",
+		blocker: "run",
 		waitedMs: 0,
 		drainTimeoutMs: 0,
 	});
@@ -136,4 +152,44 @@ test("the documented defaults are the ones the guard applies", async () => {
 		DEFAULT_COMMIT_DRAIN_TIMEOUT_MS / COMMIT_DRAIN_POLL_INTERVAL_MS,
 		"the default poll interval divides the default budget exactly",
 	);
+});
+
+test("a run that started during summarization is waited for, not aborted, and counts no refusal (#291)", async () => {
+	const fake = harness((poll) => poll < 15);
+	const decision = await decideCompactionCommit(fake.hooks, { drainTimeoutMs: 100, pollIntervalMs: 10, startedQuiet: true });
+	assert.deepEqual(
+		{ commit: decision.commit, path: decision.commit ? decision.path : undefined },
+		{ commit: true, path: "late-run-finished" },
+	);
+	assert.equal(fake.drains, 0, "the wake-started run is never aborted");
+	assert.ok(fake.elapsed() > 100, "it waited past the abort budget, which only the abort path uses");
+});
+
+test("a late run still going at the wall-clock cap is ended and judged by the drain budget (#291)", async () => {
+	const fake = harness(() => true);
+	const decision = await decideCompactionCommit(fake.hooks, {
+		drainTimeoutMs: 100,
+		pollIntervalMs: 10,
+		startedQuiet: true,
+		lateRunWaitMs: 200,
+	});
+	assert.equal(fake.drains, 1, "a run that outlives the cap is ended");
+	assert.equal(decision.commit, false);
+	assert.equal(decision.commit === false ? decision.blocker : undefined, "run");
+	assert.ok(fake.elapsed() >= 300, "the cap and then the drain budget are both spent");
+});
+
+test("a run already going when the compaction began is still aborted at once (#101, #55)", async () => {
+	const fake = harness((poll) => poll < 3);
+	const decision = await decideCompactionCommit(fake.hooks, { drainTimeoutMs: 100, pollIntervalMs: 10, startedQuiet: false });
+	assert.equal(decision.commit && decision.path, "drained");
+	assert.equal(fake.drains, 1);
+});
+
+test("a late run that ended but left its provider drain unsettled falls through to the drain wait (#291)", async () => {
+	const fake: Harness = harness((poll) => poll < 2, () => fake.elapsed() >= 50);
+	const decision = await decideCompactionCommit(fake.hooks, { drainTimeoutMs: 100, pollIntervalMs: 10, startedQuiet: true });
+	assert.ok(fake.notes.some((note) => /provider drain is still settling/.test(note)));
+	assert.equal(decision.commit && decision.path, "drained");
+	assert.equal(fake.drains, 0, "the run ended by itself, so nothing is aborted");
 });

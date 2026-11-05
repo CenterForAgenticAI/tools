@@ -4,13 +4,14 @@
  * it is how the file got that way.
  */
 
-import { Type } from "typebox";
+import { arr, obj, opt, str } from "@earendil-works/pi-schema";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { schemaTool } from "../schema-tool.js";
 import { prepareSessionTasksArguments, SESSION_TASKS_ACTIONS, stringEnum } from "../tool-arguments.js";
 
 import {
@@ -436,62 +437,62 @@ function renderTaskLine(task: Task, indent: string): string {
 // prepareSessionTasksArguments, and rules about notes, origins, and nesting in
 // the tool's own refusals, not in these descriptions: every request carries
 // this schema.
-const taskRefSchema = Type.String({
+const taskRefSchema = str({
 	maxLength: MAX_TASK_ID_CHARS,
 	pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$",
 });
 
 /** update: a goal id, or "" to clear the link. */
-const taskGoalUpdateSchema = Type.String({
+const taskGoalUpdateSchema = str({
 	maxLength: MAX_TASK_ID_CHARS,
 	pattern: "^([A-Za-z0-9][A-Za-z0-9._-]*)?$",
 });
 
-const taskIdSchema = Type.String({ maxLength: MAX_TASK_ID_CHARS });
+const taskIdSchema = str({ maxLength: MAX_TASK_ID_CHARS });
 const taskStatusSchema = stringEnum(TASK_STATUSES);
 
 const seedTaskFields = {
-	title: Type.String({ maxLength: MAX_TASK_TITLE_CHARS }),
-	note: Type.Optional(Type.String({ maxLength: MAX_TASK_NOTE_CHARS })),
-	ref: Type.Optional(taskRefSchema),
-	status: Type.Optional(taskStatusSchema),
+	title: str({ maxLength: MAX_TASK_TITLE_CHARS }),
+	note: opt(str({ maxLength: MAX_TASK_NOTE_CHARS })),
+	ref: opt(taskRefSchema),
+	status: opt(taskStatusSchema),
 };
-const seedTaskSchema = Type.Object(seedTaskFields);
+const seedTaskSchema = obj(seedTaskFields, { open: true });
 
-const tasksSchema = Type.Object({
+const tasksSchema = obj({
 	action: stringEnum(SESSION_TASKS_ACTIONS, { description: "plan replaces the whole list; update batches status changes." }),
-	tasks: Type.Optional(Type.Array(Type.Object({
+	tasks: opt(arr(obj({
 		...seedTaskFields,
-		goal: Type.Optional(taskRefSchema),
-		subtasks: Type.Optional(Type.Array(seedTaskSchema, { maxItems: 50 })),
-	}), { description: "plan: the whole list, in order.", maxItems: 100 })),
-	title: Type.Optional(Type.String({ description: "add: the new task.", maxLength: MAX_TASK_TITLE_CHARS })),
-	note: Type.Optional(Type.String({ maxLength: MAX_TASK_NOTE_CHARS })),
-	ref: Type.Optional(taskRefSchema),
-	goal: Type.Optional(taskRefSchema),
-	parent: Type.Optional(taskIdSchema),
-	after: Type.Optional(taskIdSchema),
-	before: Type.Optional(taskIdSchema),
-	updates: Type.Optional(Type.Array(Type.Object({
+		goal: opt(taskRefSchema),
+		subtasks: opt(arr(seedTaskSchema, { maxItems: 50 })),
+	}, { open: true }), { description: "plan: the whole list, in order.", maxItems: 100 })),
+	title: opt(str({ description: "add: the new task.", maxLength: MAX_TASK_TITLE_CHARS })),
+	note: opt(str({ maxLength: MAX_TASK_NOTE_CHARS })),
+	ref: opt(taskRefSchema),
+	goal: opt(taskRefSchema),
+	parent: opt(taskIdSchema),
+	after: opt(taskIdSchema),
+	before: opt(taskIdSchema),
+	updates: opt(arr(obj({
 		id: taskIdSchema,
-		status: Type.Optional(taskStatusSchema),
-		title: Type.Optional(Type.String({ maxLength: MAX_TASK_TITLE_CHARS })),
-		ref: Type.Optional(taskRefSchema),
-		goal: Type.Optional(taskGoalUpdateSchema),
-		note: Type.Optional(Type.String({ maxLength: MAX_TASK_NOTE_CHARS })),
-		ask: Type.Optional(Type.Object({
-			question: Type.String({ maxLength: MAX_ASK_QUESTION_CHARS }),
-			options: Type.Optional(Type.Array(Type.Object({
-				id: Type.String({ maxLength: MAX_TASK_ID_CHARS }),
-				label: Type.String({ maxLength: MAX_ASK_OPTION_LABEL_CHARS }),
-			}), { maxItems: MAX_ASK_OPTIONS })),
-		})),
-		answer: Type.Optional(Type.String({ maxLength: MAX_ASK_ANSWER_CHARS })),
-	}), { description: "update: one entry per task, all in one call.", maxItems: 100 })),
-	ids: Type.Optional(Type.Array(taskIdSchema, { description: "remove: tasks to drop; reorder: every id in order.", maxItems: 100 })),
-});
+		status: opt(taskStatusSchema),
+		title: opt(str({ maxLength: MAX_TASK_TITLE_CHARS })),
+		ref: opt(taskRefSchema),
+		goal: opt(taskGoalUpdateSchema),
+		note: opt(str({ maxLength: MAX_TASK_NOTE_CHARS })),
+		ask: opt(obj({
+			question: str({ maxLength: MAX_ASK_QUESTION_CHARS }),
+			options: opt(arr(obj({
+				id: str({ maxLength: MAX_TASK_ID_CHARS }),
+				label: str({ maxLength: MAX_ASK_OPTION_LABEL_CHARS }),
+			}, { open: true }), { maxItems: MAX_ASK_OPTIONS })),
+		}, { open: true })),
+		answer: opt(str({ maxLength: MAX_ASK_ANSWER_CHARS })),
+	}, { open: true }), { description: "update: one entry per task, all in one call.", maxItems: 100 })),
+	ids: opt(arr(taskIdSchema, { description: "remove: tasks to drop; reorder: every id in order.", maxItems: 100 })),
+}, { open: true });
 
-const TOOL_DESCRIPTION = "Session checklist that survives compaction. subtree reads current delegation state, not complete history. When delegate support is available, a dispatch can seed a worker's list with `handoff: { tasks: [...] }`.";
+const TOOL_DESCRIPTION = "Session checklist that survives compaction. Update with {action: \"update\", updates: [{id: \"t1\", status: \"done\"}]}. subtree reads current delegation state, not complete history. When delegate support is available, a dispatch can seed a worker's list with `handoff: { tasks: [...] }`.";
 
 const TOOL_PROMPT_SNIPPET = [
 	"Use session_tasks when a request contains several distinct pieces of work that will outlive one reply, not for a two-file edit.",
@@ -520,7 +521,7 @@ export interface SessionAsksHandle {
 
 export function registerSessionTasks(pi: ExtensionAPI, deps: TasksRuntimeDeps): SessionAsksHandle {
 	const asks = createAsksRuntime(pi, deps);
-	pi.registerTool({
+	pi.registerTool(schemaTool({
 		name: "session_tasks",
 		label: "Session Tasks",
 		description: TOOL_DESCRIPTION,
@@ -599,7 +600,7 @@ export function registerSessionTasks(pi: ExtensionAPI, deps: TasksRuntimeDeps): 
 				},
 			};
 		},
-	});
+	}));
 
 	pi.registerCommand("tasks", {
 		description: "Show or edit this session's task list: add, done, block, defer, reopen, clear, export, import, on/off.",
@@ -882,6 +883,16 @@ function handleAnswerCommand(deps: TasksRuntimeDeps, asks: AsksRuntime, ctx: Ext
 	ctx.ui.notify(`Answered ${taskId}; the agent will continue.\n${renderTaskList(currentTasks(deps, ctx))}`, "info");
 }
 
+const UPDATE_SHAPE = 'update needs updates: [{id: "t1", status: "done"}]';
+
+/** Name the wrong shape a caller sent to `update`, so the next call is right. */
+function updateShapeError(params: ToolParams): string {
+	const sent = params as unknown as Record<string, unknown>;
+	if (params.tasks !== undefined) return `${UPDATE_SHAPE}; tasks is for plan`;
+	if (sent.id !== undefined || sent.status !== undefined) return `${UPDATE_SHAPE}; id and status go inside updates`;
+	return UPDATE_SHAPE;
+}
+
 type ToolParams = {
 	action: "plan" | "add" | "update" | "remove" | "reorder" | "list" | "subtree";
 	tasks?: readonly { title: string; note?: string; ref?: string; goal?: string; status?: TaskStatus; subtasks?: readonly { title: string; note?: string; ref?: string; status?: TaskStatus }[] }[];
@@ -916,7 +927,7 @@ function applyAction(params: ToolParams, existing: readonly Task[], actor: TaskA
 			});
 		}
 		case "update": {
-			if (!params.updates || params.updates.length === 0) return { ok: false, reason: "update needs an updates array" };
+			if (!params.updates || params.updates.length === 0) return { ok: false, reason: updateShapeError(params) };
 			return applyUpdates(existing, params.updates, actor);
 		}
 		case "remove": {

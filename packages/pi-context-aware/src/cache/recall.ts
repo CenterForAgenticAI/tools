@@ -1,17 +1,17 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import * as path from "node:path";
-import { Type, type Static } from "typebox";
+import { bool, obj, opt, str, type Static } from "@earendil-works/pi-schema";
 import { frameCacheReference } from "../seed/seed-authority.js";
 import { redactText } from "../workstream/workstream-safety.js";
 import { erasedIdsForCacheDirectory } from "./context-cache.js";
 
 /** Public recall controls. Unknown properties are intentionally rejected. */
-export const recallSchema = Type.Object({
-	question: Type.String({ minLength: 1, maxLength: 2_000 }),
-	all_projects: Type.Optional(Type.Boolean()),
-	include_current: Type.Optional(Type.Boolean()),
-	include_worktrees: Type.Optional(Type.Boolean()),
-}, { additionalProperties: false });
+export const recallSchema = obj({
+	question: str({ minLength: 1, maxLength: 2_000 }),
+	all_projects: opt(bool()),
+	include_current: opt(bool()),
+	include_worktrees: opt(bool()),
+});
 
 export type RecallRequest = Static<typeof recallSchema>;
 

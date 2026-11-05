@@ -23,7 +23,7 @@ test("clear checklist item #3 fixture expands to a self-contained test-suite tas
 		"test and benchmark suite",
 		"agent/extensions/context-aware/index.ts",
 		"agent/extensions/context-aware/seed-expansion-spec.md",
-		"compact_session",
+		"context_compact",
 		"/compact-then",
 		"tsc -p agent/extensions/context-aware/tsconfig.json --noEmit --pretty false",
 	]) {

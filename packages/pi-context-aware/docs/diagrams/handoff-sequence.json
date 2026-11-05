@@ -26,7 +26,7 @@
     {
       "from": "agent",
       "to": "extension",
-      "label": "compact_session(seed)"
+      "label": "context_compact(seed)"
     },
     {
       "from": "extension",

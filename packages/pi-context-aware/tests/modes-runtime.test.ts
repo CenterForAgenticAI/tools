@@ -6,6 +6,7 @@ import {
 	MODE_STATE_ENTRY_TYPE_V1,
 	createContextAwareModesV1,
 } from "../src/modes/modes-runtime.js";
+import { MODE_DEFAULT_LAYER_SLOT, isModeDefaultLayerShape, replayModeState } from "../src/modes/modes-state.js";
 import {
 	supportsContextAwareModeInstanceIdsV1,
 	supportsContextAwareModeToolPoliciesV1,
@@ -900,19 +901,44 @@ test("a layer name is one token that /mode exit can type", () => {
 	}
 });
 
-test("replay refuses a state entry whose layer name /mode exit could not type, and keeps the last accepted one", () => {
+test("replay drops only a layer whose name /mode exit could not type, and keeps the entry's valid layers", () => {
 	const mode = (id: string, instanceId: string) => ({ id, owner: "a", enteredAt: "2026-10-09T00:00:00.000Z", updatedAt: "2026-10-09T00:00:00.000Z", instanceId });
-	const entry = (layer: string, id: string, instanceId: string) => ({
+	const entry = (...layers: Array<[layer: string, rank: number, id: string, instanceId: string]>) => ({
 		type: "custom",
 		customType: MODE_STATE_ENTRY_TYPE,
-		data: { schemaVersion: 2, layers: [{ layer, rank: 0, pinned: true, mode: mode(id, instanceId) }], updatedAt: "2026-10-09T00:00:00.000Z" },
+		data: { schemaVersion: 2, layers: layers.map(([layer, rank, id, instanceId]) => ({ layer, rank, mode: mode(id, instanceId) })), updatedAt: "2026-10-09T00:00:00.000Z" },
 	});
-	for (const layer of ["my role", "zero\u200bwidth", "tab\trole"]) {
-		const h = harness([entry("role", "kept", "i-1"), entry(layer, "stuck", "i-2")]);
-		assert.deepEqual(h.runtime.layers?.().map((slot) => [slot.layer, slot.id]), [["role", "kept"]], JSON.stringify(layer));
+	const resumed = (entries: unknown[]) => harness(entries).runtime.layers?.().map((slot) => [slot.layer, slot.id]);
+	for (const bad of ["my role", "zero\u200bwidth", "tab\trole"]) {
+		assert.deepEqual(resumed([
+			entry(["role", 1, "reviewer", "i-1"]),
+			entry(["role", 1, "reviewer", "i-1"], [bad, 2, "stuck", "i-2"], ["stance", 3, "skeptic", "i-3"]),
+		]), [["role", "reviewer"], ["stance", "skeptic"]], JSON.stringify(bad));
+		// The user exited stage/build: the entry after it holds only the invalid layer.
+		assert.deepEqual(resumed([
+			entry(["stage", 1, "build", "i-4"]),
+			entry(["stage", 1, "build", "i-4"], [bad, 2, "stuck", "i-5"]),
+			entry([bad, 2, "stuck", "i-5"]),
+		]), [], JSON.stringify(bad));
 	}
-	const padded = harness([entry("  role  ", "trimmed", "i-3")]);
+	const padded = harness([entry(["  role  ", 0, "trimmed", "i-6"])]);
 	assert.deepEqual(padded.runtime.layers?.().map((slot) => slot.layer), ["role"]);
+});
+
+test("replay still refuses a whole entry whose dropped layer has another malformed field", () => {
+	const mode = (id: string, instanceId: string) => ({ id, owner: "a", enteredAt: "2026-10-09T00:00:00.000Z", updatedAt: "2026-10-09T00:00:00.000Z", instanceId });
+	const entry = (layers: unknown[]) => ({ type: "custom", customType: MODE_STATE_ENTRY_TYPE, data: { schemaVersion: 2, layers, updatedAt: "2026-10-09T00:00:00.000Z" } });
+	const kept = { layer: "role", rank: 1, mode: mode("reviewer", "i-1") };
+	const stance = { layer: "stance", rank: 3, mode: mode("skeptic", "i-3") };
+	for (const bad of [
+		{ layer: "my role", rank: 1.5, mode: mode("stuck", "i-2") },
+		{ layer: "my role", rank: 2, mode: { id: "stuck" } },
+		{ layer: "my role", rank: 2, pinned: "yes", mode: mode("stuck", "i-2") },
+		{ layer: "my role", rank: 2, mode: mode("skeptic", "i-2") },
+	]) {
+		const h = harness([entry([kept]), entry([kept, bad, stance])]);
+		assert.deepEqual(h.runtime.layers?.().map((slot) => [slot.layer, slot.id]), [["role", "reviewer"]], JSON.stringify(bad));
+	}
 });
 
 
@@ -950,6 +976,51 @@ test("replay refuses a default layer that a definition could not create, and kee
 	}
 });
 
+test("replay refuses a state entry with a 17th layer, and keeps the last accepted state", () => {
+	const mode = (id: string) => ({ id, owner: "a", enteredAt: "2026-10-09T00:00:00.000Z", updatedAt: "2026-10-09T00:00:00.000Z", instanceId: `i-${id}` });
+	const entry = (count: number, prefix: string) => ({
+		type: "custom",
+		customType: MODE_STATE_ENTRY_TYPE,
+		data: {
+			schemaVersion: 2,
+			layers: Array.from({ length: count }, (_, index) => ({ layer: `layer-${index}`, rank: index, mode: mode(`${prefix}-${index}`) })),
+			updatedAt: "2026-10-09T00:00:00.000Z",
+		},
+	});
+	const sixteen = harness([entry(1, "kept"), entry(16, "full")]);
+	assert.equal(sixteen.runtime.layers?.().length, 16, "16 layers replay");
+	const seventeen = harness([entry(1, "kept"), entry(17, "over")]);
+	assert.deepEqual(seventeen.runtime.layers?.().map((slot) => slot.id), ["kept-0"]);
+});
+
+test("replay refuses a pinned layer stored for one run, and keeps the last accepted state", () => {
+	const mode = (id: string) => ({ id, owner: "a", enteredAt: "2026-10-09T00:00:00.000Z", updatedAt: "2026-10-09T00:00:00.000Z", instanceId: `i-${id}` });
+	const entry = (slot: Record<string, unknown>, id: string) => ({
+		type: "custom",
+		customType: MODE_STATE_ENTRY_TYPE,
+		data: { schemaVersion: 2, layers: [{ ...slot, mode: mode(id) }], updatedAt: "2026-10-09T00:00:00.000Z" },
+	});
+	// Accepted, the run-scoped layer would be dropped on replay and the session would resume empty.
+	const h = harness([entry({ layer: "stage", rank: 1 }, "kept"), entry({ layer: "role", rank: 2, pinned: true, scope: "run" }, "stuck")]);
+	assert.deepEqual(h.runtime.layers?.().map((slot) => slot.id), ["kept"]);
+});
+
+test("replay accepts a run-scoped default layer, which a layerless definition entered for one run creates", async () => {
+	const h = harness();
+	const plain = h.runtime.defineMode(definition("plain", "a"));
+	assert.ok(plain.status === "ok");
+	assert.deepEqual(await plain.handle.enter(), { status: "ok" });
+	const run = new AbortController();
+	const once = h.runtime.defineMode(definition("once", "b"));
+	assert.ok(once.status === "ok");
+	assert.deepEqual(await once.handle.enter({ until: run.signal }), { status: "ok" }, "enter replaces the default layer for one run");
+	const last = stateEntries(h.entries).at(-1) as { data: { layers: unknown[] } };
+	assert.deepEqual(last.data.layers.map((slot) => { const { layer, rank, scope } = slot as Record<string, unknown>; return { layer, rank, scope }; }), [{ layer: "default", rank: 0, scope: "run" }]);
+	// Replay drops run-scoped layers, so the accepted entry resumes empty; a refused one would resume `plain`.
+	const resumed = harness(h.entries.slice());
+	assert.deepEqual(resumed.runtime.layers?.().map((slot) => slot.id), []);
+});
+
 
 test("a run that ends while its enter is being committed still ends the run-scoped layer", async () => {
 	for (const hook of ["appendEntry", "sendMessage", "onChange"] as const) {
@@ -984,8 +1055,201 @@ test("a run that ends while its enter is being committed still ends the run-scop
 		assert.equal(run.signal.aborted, true, hook);
 		assert.deepEqual(runtime.layers().map((snapshot) => snapshot.id), ["build"], `the run-scoped layer ends when the run aborts inside ${hook}`);
 		assert.deepEqual(messages.slice(-2).map((message) => (message.details as { action: string }).action), ["enter", "exit"], hook);
-		const resumed = createContextAwareModesV1({ appendEntry: () => {}, sendMessage: () => {}, entries: () => entries.slice() });
-		assert.deepEqual(resumed.layers().map((snapshot) => snapshot.id), ["build"], `the stored state ends without the run-scoped layer (${hook})`);
+		assert.deepEqual(storedLayerIds(entries), ["build"], `the last stored entry holds only the stage layer (${hook})`);
 	}
 });
 
+/** The mode ids of the last stored state entry, run-scoped layers included: replay would drop those. */
+function storedLayerIds(entries: readonly unknown[]): string[] {
+	const last = stateEntries(entries).at(-1) as { data: { layers: { mode: { id: string } }[] } } | undefined;
+	return last === undefined ? [] : last.data.layers.map((layer) => layer.mode.id);
+}
+
+test("a run that aborts while another layer's exit is being committed leaves memory and the stored state in step", async () => {
+	for (const hook of ["appendEntry", "sendMessage", "onChange"] as const) {
+		const entries: unknown[] = [];
+		const run = new AbortController();
+		let armed = false;
+		const fire = (point: typeof hook): void => {
+			if (armed && point === hook) {
+				armed = false;
+				run.abort();
+			}
+		};
+		const runtime = createContextAwareModesV1({
+			appendEntry: (customType, data) => {
+				entries.push({ type: "custom", customType, data });
+				fire("appendEntry");
+			},
+			sendMessage: () => fire("sendMessage"),
+			entries: () => entries,
+			onChange: () => fire("onChange"),
+		});
+		const stage = runtime.defineMode(definition("build", "a", { layer: { name: "stage", rank: 1 } }));
+		const stance = runtime.defineMode(definition("review", "a", { layer: { name: "stance", rank: 2 } }));
+		assert.ok(stage.status === "ok" && stance.status === "ok");
+		await stage.handle.enter();
+		assert.deepEqual(await stance.handle.enter({ until: run.signal }), { status: "ok" }, hook);
+		armed = true;
+		assert.deepEqual(stage.handle.exit(), { status: "ok" }, hook);
+		assert.equal(run.signal.aborted, true, hook);
+		assert.deepEqual(runtime.layers().map((snapshot) => snapshot.id), [], `no layer stays in memory (${hook})`);
+		assert.deepEqual(storedLayerIds(entries), [], `the last stored entry holds no layer (${hook})`);
+	}
+});
+
+test("a run-scoped layer still ends with its run when a hook throws while its enter is committed", async () => {
+	for (const hook of ["sendMessage", "onChange"] as const) {
+		const entries: unknown[] = [];
+		const run = new AbortController();
+		let armed = false;
+		const fail = (point: typeof hook): void => {
+			if (armed && point === hook) {
+				armed = false;
+				throw new Error(`${hook} failed`);
+			}
+		};
+		const runtime = createContextAwareModesV1({
+			appendEntry: (customType, data) => { entries.push({ type: "custom", customType, data }); },
+			sendMessage: () => fail("sendMessage"),
+			entries: () => entries,
+			onChange: () => fail("onChange"),
+		});
+		const stage = runtime.defineMode(definition("build", "a", { layer: { name: "stage", rank: 1 } }));
+		const stance = runtime.defineMode(definition("review", "a", { layer: { name: "stance", rank: 2 } }));
+		assert.ok(stage.status === "ok" && stance.status === "ok");
+		await stage.handle.enter();
+		armed = true;
+		await assert.rejects(stance.handle.enter({ until: run.signal }), { message: `${hook} failed` });
+		assert.deepEqual(runtime.layers().map((snapshot) => snapshot.id), ["build", "review"], `the enter was stored before ${hook} threw`);
+		run.abort();
+		assert.deepEqual(runtime.layers().map((snapshot) => snapshot.id), ["build"], `the run-scoped layer ends with its run (${hook})`);
+		assert.deepEqual(storedLayerIds(entries), ["build"], `the last stored entry holds only the stage layer (${hook})`);
+	}
+});
+
+
+function queuedExitHarness(failOn: "sendMessage" | "onChange", onQueuedExitError?: (error: unknown, layer: { id: string; layer: string }) => void) {
+	const entries: unknown[] = [];
+	const runs = [new AbortController(), new AbortController()];
+	let armed = false;
+	let failing = false;
+	const reports: unknown[] = [];
+	const runtime = createContextAwareModesV1({
+		appendEntry: (customType, data) => { entries.push({ type: "custom", customType, data }); },
+		sendMessage: (_type, _content, details) => {
+			const action = (details as { action: string }).action;
+			if (armed && action === "enter") {
+				armed = false;
+				for (const run of runs) run.abort();
+			}
+			if (action === "exit") failing = true;
+			if (failing && action === "exit" && failOn === "sendMessage") throw new Error("exit hook failed");
+		},
+		entries: () => entries,
+		onChange: () => { if (failing && failOn === "onChange") throw new Error("exit hook failed"); },
+		onQueuedExitError: (error, layer) => { reports.push(error); onQueuedExitError?.(error, layer); },
+	});
+	return { runtime, entries, runs, reports, arm: () => { armed = true; } };
+}
+
+for (const hook of ["sendMessage", "onChange"] as const) {
+	test(`a queued run-end exit whose ${hook} throws does not fail the outer enter, and the queue keeps draining`, async () => {
+		const h = queuedExitHarness(hook);
+		const a = h.runtime.defineMode(definition("one", "a", { layer: { name: "l1", rank: 1 } }));
+		const b = h.runtime.defineMode(definition("two", "a", { layer: { name: "l2", rank: 2 } }));
+		const c = h.runtime.defineMode(definition("three", "a", { layer: { name: "l3", rank: 3 } }));
+		assert.ok(a.status === "ok" && b.status === "ok" && c.status === "ok");
+		await a.handle.enter({ until: h.runs[0].signal });
+		await b.handle.enter({ until: h.runs[1].signal });
+		h.arm();
+		assert.deepEqual(await c.handle.enter(), { status: "ok" });
+		assert.deepEqual(h.runtime.layers().map((snapshot) => snapshot.id), ["three"], "both ended layers left");
+		assert.deepEqual(storedLayerIds(h.entries), ["three"]);
+		assert.deepEqual(h.reports.map((error) => (error as Error).message), ["exit hook failed", "exit hook failed"], "one report per failed exit");
+	});
+}
+
+test("a queued run-end exit failure goes to console.error when no reporter is given", async () => {
+	const entries: unknown[] = [];
+	const run = new AbortController();
+	let abort = false;
+	const runtime = createContextAwareModesV1({
+		appendEntry: (customType, data) => { entries.push({ type: "custom", customType, data }); },
+		sendMessage: (_type, _content, details) => {
+			const action = (details as { action: string }).action;
+			if (abort && action === "enter") { abort = false; run.abort(); }
+			if (action === "exit") throw new Error("boom");
+		},
+		entries: () => entries,
+	});
+	const a = runtime.defineMode(definition("one", "a", { layer: { name: "l1", rank: 1 } }));
+	const b = runtime.defineMode(definition("two", "a", { layer: { name: "l2", rank: 2 } }));
+	assert.ok(a.status === "ok" && b.status === "ok");
+	await a.handle.enter({ until: run.signal });
+	const logged: unknown[] = [];
+	const original = console.error;
+	console.error = (...args: unknown[]) => { logged.push(args[0]); };
+	try {
+		abort = true;
+		assert.deepEqual(await b.handle.enter(), { status: "ok" });
+	} finally {
+		console.error = original;
+	}
+	assert.deepEqual(logged.map((error) => (error as Error).message), ["boom"]);
+});
+
+test("a throwing queued-exit reporter does not fail the outer enter", async () => {
+	const h = queuedExitHarness("sendMessage", () => { throw new Error("reporter failed"); });
+	const a = h.runtime.defineMode(definition("one", "a", { layer: { name: "l1", rank: 1 } }));
+	const b = h.runtime.defineMode(definition("two", "a", { layer: { name: "l2", rank: 2 } }));
+	assert.ok(a.status === "ok" && b.status === "ok");
+	await a.handle.enter({ until: h.runs[0].signal });
+	h.arm();
+	assert.deepEqual(await b.handle.enter(), { status: "ok" });
+	assert.deepEqual(h.runtime.layers().map((snapshot) => snapshot.id), ["two"]);
+});
+
+test("a mode id with control characters reaches block reasons and exit text only as display text", async () => {
+	const h = harness();
+	const id = "rev\u001b[2Jx";
+	const shown = "rev\uFFFD[2Jx";
+	const blocked = h.runtime.defineMode(definition(id, "a", { blockedTools: ["bash"], layer: { name: "stage", rank: 1 } }));
+	assert.ok(blocked.status === "ok");
+	assert.deepEqual(await blocked.handle.enter(), { status: "ok" });
+	assert.deepEqual(h.runtime.handleToolCall("bash", {}), { block: true, reason: `Tool bash is blocked by mode ${shown}.` });
+	assert.deepEqual(await blocked.handle.exit(), { status: "ok" });
+	assert.equal(h.messages.at(-1)?.content, `Exited mode ${shown}.`);
+
+	const policy = h.runtime.defineMode(definition(`${id}p`, "a", { toolPolicy: { allowedTools: ["bash", "read"], readOnlyShell: true }, layer: { name: "stance", rank: 2 } }));
+	assert.ok(policy.status === "ok");
+	assert.deepEqual(await policy.handle.enter(), { status: "ok" });
+	assert.deepEqual(h.runtime.handleToolCall("edit", {}), { block: true, reason: `Tool edit is not allowed by mode ${shown}p.` });
+	assert.deepEqual(h.runtime.handleToolCall("bash", { command: "rm -rf src" }), {
+		block: true,
+		reason: `Tool bash is not allowed by mode ${shown}p: the command is not on the read-only shell list.`,
+	});
+	assert.deepEqual(await policy.handle.exit(), { status: "ok" });
+
+	const guarded = h.runtime.defineMode(definition(`${id}g`, "a", {
+		guard: (toolName) => {
+			if (toolName === "edit") throw new Error("guard failed");
+			return toolName === "write" ? { block: true, reason: " " } : undefined;
+		},
+		layer: { name: "guard", rank: 3 },
+	}));
+	assert.ok(guarded.status === "ok");
+	assert.deepEqual(await guarded.handle.enter(), { status: "ok" });
+	assert.deepEqual(h.runtime.handleToolCall("edit", {}), { block: true, reason: `Tool edit is blocked by mode ${shown}g.` });
+	assert.deepEqual(h.runtime.handleToolCall("write", {}), { block: true, reason: `Tool write is blocked by mode ${shown}g.` });
+});
+
+test("a migrated mode@1 default layer has the shape of MODE_DEFAULT_LAYER_SLOT", () => {
+	const [layer] = replayModeState([legacyEntry("entry-a", legacyReview)]).layers;
+	assert.ok(layer);
+	assert.equal(layer.layer, MODE_DEFAULT_LAYER_SLOT.layer);
+	assert.equal(layer.rank, MODE_DEFAULT_LAYER_SLOT.rank);
+	assert.equal(layer.pinned === true, MODE_DEFAULT_LAYER_SLOT.pinned);
+	assert.ok(isModeDefaultLayerShape(layer.layer, layer.rank, layer.pinned === true));
+	assert.equal(layer.rank, 0, "behaviour is unchanged while the slot rank is 0");
+});

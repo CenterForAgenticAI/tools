@@ -17,14 +17,14 @@
  * Only the model's view changes. The session file keeps the call as written.
  * An item is rewritten only when a fold on the branch records its request id,
  * `<tool call id>#<item index>` (see fold-recovery.ts). The items are read from
- * the call's `content` argument, an array or the same array as a JSON string;
+ * the call's `content` argument (or its alias `ranges`), an array or the same array as a JSON string;
  * the shape is kept. An item whose fold was refused or not yet written keeps
  * its summary, so a failure stays visible.
  */
 
 import type { ContextEvent } from "@earendil-works/pi-coding-agent";
 
-import type { FoldRecord } from "./fold-entries.js";
+import { pickFoldRangesKey, type FoldRecord } from "./fold-entries.js";
 
 type ContextMessages = ContextEvent["messages"];
 
@@ -98,7 +98,8 @@ export function renderEarlierFoldCalls(messages: ContextMessages, records: reado
 type JsonObject = Record<string, unknown>;
 
 function renderArguments<T extends JsonObject>(callId: string, args: T, targets: ReadonlyMap<string, readonly string[]>): T | undefined {
-	const raw = args.content;
+	const key = pickFoldRangesKey(args);
+	const raw = args[key];
 	let items: unknown;
 	if (typeof raw === "string") {
 		try {
@@ -120,5 +121,5 @@ function renderArguments<T extends JsonObject>(callId: string, args: T, targets:
 		return { ...item, summary: foldPointer(blockIds, summary.trim().length) };
 	});
 	if (!changed) return undefined;
-	return { ...args, content: typeof raw === "string" ? JSON.stringify(next) : next };
+	return { ...args, [key]: typeof raw === "string" ? JSON.stringify(next) : next };
 }

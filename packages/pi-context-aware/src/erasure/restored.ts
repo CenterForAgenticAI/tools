@@ -3,6 +3,7 @@ import path from "node:path";
 import { erasedSessionIds } from "./database.js";
 import { readStoreHeader, storeDirectories, withStoreDirectory } from "./files.js";
 import { paritySessionFile } from "../parity/records.js";
+import { metricsSessionFile } from "../metrics/records.js";
 import type { ErasureSession } from "./session-erasure.js";
 
 export interface RestoredSession extends ErasureSession { readonly files: readonly string[] }
@@ -52,6 +53,7 @@ export function restoredErasedSessions(agentDir: string, current?: ErasureSessio
 	for (const id of ids) {
 		const transcript = [...candidates.values()].find((candidate) => candidate.id === id)?.path ?? path.join(agentDir, "sessions", `${id}.jsonl`);
 		add(id, transcript, paritySessionFile(agentDir, id));
+		add(id, transcript, metricsSessionFile(agentDir, id));
 	}
 	return [...candidates.values()];
 }

@@ -17,7 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager, type ExtensionAPI, type ExtensionContext, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { obj } from "@earendil-works/pi-schema";
 import { foldStateFromBranch } from "../src/folds/fold-adapter.js";
 import { FOLD_ENTRY_TYPE, coveredEntryIds, foldRecordsOnBranch } from "../src/folds/fold-entries.js";
 import { planQueuedFolds, registerFoldEngine, type FoldEngine, type FoldRequestResult } from "../src/folds/fold-engine.js";
@@ -48,7 +48,7 @@ interface Probe { engine?: FoldEngine; ctx?: ExtensionContext; leafAtRequest?: s
 function foldTool(probe: Probe, after: (manager: SessionManager) => void, requestId = false): ExtensionFactory {
 	return (pi) => {
 		probe.engine = registerFoldEngine(pi, { config: SAFETY_CONFIG });
-		pi.registerTool({ name: "fold_probe", label: "fold_probe", description: "Requests a fold, then changes the session before returning.", parameters: Type.Object({}),
+		pi.registerTool({ name: "fold_probe", label: "fold_probe", description: "Requests a fold, then changes the session before returning.", parameters: obj({}, { open: true }),
 			async execute(id, _params, _signal, _update, ctx) {
 				probe.ctx = ctx;
 				probe.leafAtRequest = ctx.sessionManager.getLeafId();

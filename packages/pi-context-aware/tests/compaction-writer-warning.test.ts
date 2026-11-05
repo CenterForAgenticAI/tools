@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -42,14 +43,18 @@ async function flushFabricClaims(fabric: FakeFabric | undefined): Promise<void> 
 	}
 }
 
-async function waitForClaimAbort(signal: AbortSignal): Promise<void> {
+async function waitForClaimAbort(signal: AbortSignal, timeoutMs = 6_000): Promise<void> {
 	if (signal.aborted) return;
 	await new Promise<void>((resolve, reject) => {
-		const timeout = setTimeout(() => reject(new Error("compaction owner claim did not settle within 6 s")), 6_000);
 		const onAbort = (): void => {
 			clearTimeout(timeout);
 			resolve();
 		};
+		// The guard removes the listener itself: `once` drops it only after an abort.
+		const timeout = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			reject(new Error(`compaction owner claim did not settle within ${timeoutMs / 1_000} s`));
+		}, timeoutMs);
 		signal.addEventListener("abort", onAbort, { once: true });
 	});
 }
@@ -493,4 +498,39 @@ test("the last committed writer appears in context status and the typed snapshot
 	} finally {
 		f.dispose();
 	}
+});
+
+test("#283: /context-status and the context_status tool report the same writer for the same branch", async () => {
+	const f = await fixture();
+	try {
+		await f.start();
+		const status = f.commands.get("context-status");
+		assert.ok(status);
+		const tool = f.host.tools.get("context_status") as { execute(id: string, params: Record<string, unknown>, signal: AbortSignal, onUpdate: undefined, ctx: ExtensionContext): Promise<{ content: { text: string }[]; details: { writer?: unknown } }> } | undefined;
+		assert.ok(tool, "session_start registers context_status");
+		const writerLine = /^Last committed compaction writer: (.+)$/mu;
+		for (const [entry, expected] of [
+			[undefined, { kind: "none", name: "none" }],
+			[fabricEngineEntry("same-fabric"), { kind: "fabric", name: "Fabric" }],
+			[anotherExtensionEntry("same-rival"), { kind: "extension", name: "rival-compactor" }],
+		] as const) {
+			if (entry !== undefined) await f.commit(entry);
+			f.notices.length = 0;
+			await status.handler("", f.session.ctx);
+			const commandName: string | undefined = writerLine.exec(f.notices.at(-1)?.message ?? "")?.[1];
+			const result: { content: { text: string }[]; details: { writer?: unknown } } = await tool.execute("c", { view: "compactions" }, new AbortController().signal, undefined, f.session.ctx);
+			const toolName: string | undefined = writerLine.exec(result.content[0]?.text ?? "")?.[1];
+			assert.equal(commandName, expected.name, "/context-status names the writer");
+			assert.equal(toolName, commandName, "the tool and /context-status agree");
+			assert.deepEqual(result.details.writer, expected);
+		}
+	} finally {
+		f.dispose();
+	}
+});
+
+test("the claim-abort wait removes its abort listener when the settlement guard fires", async () => {
+	const controller = new AbortController();
+	await assert.rejects(waitForClaimAbort(controller.signal, 10), /compaction owner claim did not settle within 0\.01 s/u);
+	assert.equal(getEventListeners(controller.signal, "abort").length, 0, "the rejected wait must not leave its listener on the signal");
 });

@@ -89,6 +89,32 @@ test("a verb message's skill is captured, but no request carries the condensed t
 	assert.doesNotMatch(text, new RegExp(CONDENSED_MARKER, "u"));
 });
 
+/** Every request Pi would send is built from these messages; scan each one, not only the joined text. */
+function requestMessages(manager: SessionManager): string[] {
+	return manager.buildSessionContext().messages.map((message) => JSON.stringify(message));
+}
+
+test("a /skill: message is captured, but no request carries the condensed text while the full body is shown", () => {
+	const { skillFile } = skillDir();
+	const slash = `<skill name="delivering-work" location="${skillFile}">\nReferences are relative to here.\n\n${FULL_MARKER}\n</skill>\n\nship it`;
+	const manager = session(slash);
+	assert.deepEqual(condensed(manager).capturePrompt(slash, [{ name: "delivering-work", filePath: skillFile }], manager), [skillFile]);
+	assert.equal(condensedSkillsOnBranch(manager.getBranch()).get(skillFile)?.record.source, "skill-message");
+	const requests = requestMessages(manager);
+	assert.ok(requests.some((message) => message.includes(FULL_MARKER)), "the full body is shown");
+	for (const message of requests) assert.doesNotMatch(message, new RegExp(CONDENSED_MARKER, "u"));
+});
+
+test("a skill registered through the service API is stored, but no request carries its condensed text while the full body is shown", () => {
+	const manager = session(verbMessage("pkg:delivering-work"));
+	const result = condensed(manager).register({ name: "delivering-work", location: "pkg:delivering-work", digest: DIGEST, condensed: `Short rules. ${CONDENSED_MARKER}`, ownerKey: "run-boundary" }, manager);
+	assert.deepEqual(result, { ok: true, stored: true });
+	assert.equal(condensedSkillsOnBranch(manager.getBranch()).get("pkg:delivering-work")?.record.source, "registered");
+	const requests = requestMessages(manager);
+	assert.ok(requests.some((message) => message.includes(FULL_MARKER)), "the full body is shown");
+	for (const message of requests) assert.doesNotMatch(message, new RegExp(CONDENSED_MARKER, "u"));
+});
+
 test("a /skill: message, whose block has no digest, condenses at a fold", () => {
 	const { skillFile } = skillDir();
 	const slash = `<skill name="delivering-work" location="${skillFile}">\nReferences are relative to here.\n\n${FULL_MARKER}\n</skill>\n\nship it`;
@@ -306,6 +332,25 @@ test("the post-compaction resend uses only the newest form when a location has t
 	assert.deepEqual(resend.locations, [skillFile]);
 	assert.equal(resend.content.match(/<skill /gu)?.length, 1);
 	assert.match(resend.content, new RegExp(`NEWEST-CAPTURED-FORM ${CONDENSED_MARKER}`, "u"));
+	assert.doesNotMatch(resend.content, /REGISTERED-FORM/u);
+});
+
+// Forms at one location sit in a map keyed by digest, in first-insertion order.
+// Here the newest form is the later key, so keeping the first live form instead
+// of the newest would resend the registered text.
+test("the post-compaction resend carries a form loaded after a registered one", () => {
+	const { skillFile, condensedFile } = skillDir();
+	const manager = session("x");
+	const skills = condensed(manager);
+	assert.deepEqual(skills.register({ name: "delivering-work", location: skillFile, digest: DIGEST, condensed: "REGISTERED-FORM", ownerKey: "run-resend-order" }, manager), { ok: true, stored: true });
+	fs.writeFileSync(condensedFile, `LOADED-LATER-FORM ${CONDENSED_MARKER}\n`);
+	assert.equal(skills.captureLoaded({ name: "delivering-work", filePath: skillFile }, manager), true);
+
+	const resend = skills.resendText(manager, () => false);
+	assert.ok(resend);
+	assert.deepEqual(resend.locations, [skillFile]);
+	assert.equal(resend.content.match(/<skill /gu)?.length, 1);
+	assert.match(resend.content, new RegExp(`LOADED-LATER-FORM ${CONDENSED_MARKER}`, "u"));
 	assert.doesNotMatch(resend.content, /REGISTERED-FORM/u);
 });
 

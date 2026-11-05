@@ -24,8 +24,10 @@
 
 import { readFileSync } from "node:fs";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { bool, obj, opt, str } from "@earendil-works/pi-schema";
 
+import { schemaTool } from "../schema-tool.js";
+import { renderLoadSkillResult } from "./load-skill-render.js";
 import type { SkillLoadHooks } from "./skill-registry.js";
 
 /** The fields of Pi's `Skill` this module uses. Structural, so tests need no host. */
@@ -136,7 +138,7 @@ export function resolveSkill(requested: string, skills: readonly DiscoveredSkill
 
 /** The slice of Pi's extension API this registration needs. */
 export interface LoadSkillToolAPI {
-	registerTool<TParams extends object>(tool: ToolDefinition<TParams>): void;
+	registerTool<TParams extends object, TDetails>(tool: ToolDefinition<TParams, TDetails>): void;
 	on(
 		event: "before_agent_start",
 		handler: (event: { systemPrompt: string; systemPromptOptions?: { skills?: readonly DiscoveredSkill[] } }, ctx: ExtensionContext) => unknown,
@@ -154,20 +156,27 @@ export type LoadSkillContext = Partial<Pick<ExtensionContext, "getSystemPrompt" 
 	readonly sessionManager?: Parameters<SkillLoadHooks["decide"]>[0]["sessionManager"];
 };
 
-const PARAMETERS = Type.Object({
-	name: Type.String({
+const PARAMETERS = obj({
+	name: str({
 		description:
 			"The skill's name, for example \"glab\" or \"test-execution\". Use the name from <available_skills> or from the prompt or skill that told you to load it; <available_skills> is not exhaustive. A name, never a path.",
 	}),
-	force: Type.Optional(Type.Boolean({
+	force: opt(bool({
 		description:
 			"Return the full body even when the skill is already loaded and unchanged. Use only when the earlier copy cannot be read or restored.",
 	})),
-});
+}, { open: true });
 
 export interface LoadSkillParams {
 	name: string;
 	force?: boolean;
+}
+
+/** Lines in a file's text; a final newline does not start another line. */
+function lineCount(text: string): number {
+	if (text.length === 0) return 0;
+	const breaks = text.split("\n").length - 1;
+	return text.endsWith("\n") ? breaks : breaks + 1;
 }
 
 /** One text result, in the shape Pi's tool protocol expects. */
@@ -302,7 +311,7 @@ export function registerLoadSkillTool(
 	};
 	if (options.listen !== false) pi.on("before_agent_start", capture);
 
-	pi.registerTool({
+	pi.registerTool(schemaTool({
 		name: "load_skill",
 		label: "Load Skill",
 		description:
@@ -314,6 +323,9 @@ export function registerLoadSkillTool(
 			"If load_skill says a skill is already loaded, follow the pointer it gives: re-read the result it names, or restore the block it names as the pointer says. Do not load the skill again.",
 		],
 		parameters: PARAMETERS,
+		// Collapse a delivered body to one line in the transcript; the model's
+		// content is unchanged.
+		renderResult: (result, options, theme) => renderLoadSkillResult(result, options, theme),
 		async execute(toolCallId: string, params: LoadSkillParams, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: LoadSkillContext) {
 			const declared = captured.length > 0
 				? captured
@@ -380,10 +392,11 @@ export function registerLoadSkillTool(
 				name: skill.name,
 				path: skill.filePath,
 				bytes: new TextEncoder().encode(body).length,
+				lines: lineCount(body),
 				shadowed,
 				...(decision?.kind === "body" && decision.changed ? { changed: true } : {}),
 			});
 		},
-	});
+	}));
 	return capture;
 }

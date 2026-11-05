@@ -7,25 +7,25 @@ import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep } from "@eare
 import { NOTHING_TO_COMPACT_TOOL_MESSAGE } from "../src/compaction/compaction-outcome.js";
 import { compactionStarts, largeHistory, NOTHING_TO_COMPACT, SEED, settle, smallHistory, waitFor, withSession } from "./compaction-preflight-harness.js";
 
-// The compaction preflight in a real Pi session, for compact_session,
+// The compaction preflight in a real Pi session, for context_compact,
 // /compact-then and the compaction owner claim. The service's cases are in
 // tests/context-service.test.ts.
 
 function compactSessionCall(): FauxResponseStep {
 	return fauxAssistantMessage(
-		[fauxToolCall("compact_session", { seed_prompt: SEED, rewrite_seed: false }, { id: "preflight-call" })],
+		[fauxToolCall("context_compact", { seed_prompt: SEED, rewrite_seed: false }, { id: "preflight-call" })],
 		{ stopReason: "toolUse" },
 	);
 }
 
 function compactSessionEnd(events: readonly AgentSessionEvent[]): Extract<AgentSessionEvent, { type: "tool_execution_end" }> {
 	const end = events.find((event): event is Extract<AgentSessionEvent, { type: "tool_execution_end" }> =>
-		event.type === "tool_execution_end" && event.toolName === "compact_session");
-	assert.ok(end, "compact_session ran");
+		event.type === "tool_execution_end" && event.toolName === "context_compact");
+	assert.ok(end, "context_compact ran");
 	return end;
 }
 
-test("compact_session on a session Pi refuses answers at once and the run goes on", async () => {
+test("context_compact on a session Pi refuses answers at once and the run goes on", async () => {
 	await withSession(() => {}, [compactSessionCall(), fauxAssistantMessage("Nothing was compacted; carrying on.")], async ({ session, faux, events }) => {
 		await session.prompt("Hand off to the next phase.");
 		await settle(session);
@@ -34,7 +34,7 @@ test("compact_session on a session Pi refuses answers at once and the run goes o
 		assert.equal(end.isError, false);
 		assert.deepEqual(end.result.content, [{ type: "text", text: NOTHING_TO_COMPACT_TOOL_MESSAGE }]);
 		assert.deepEqual(end.result.details, { status: "nothing-to-compact" });
-		const updates = events.filter((event) => event.type === "tool_execution_update" && event.toolName === "compact_session");
+		const updates = events.filter((event) => event.type === "tool_execution_update" && event.toolName === "context_compact");
 		assert.doesNotMatch(JSON.stringify(updates), /queued/iu, "no queued report before the refusal");
 		// The result did not end the run: the model was asked again.
 		assert.equal(faux.state.callCount, 2);
@@ -45,7 +45,7 @@ test("compact_session on a session Pi refuses answers at once and the run goes o
 	});
 });
 
-test("compact_session on a session Pi compacts is queued and Pi then compacts it", async () => {
+test("context_compact on a session Pi compacts is queued and Pi then compacts it", async () => {
 	await withSession(largeHistory, [compactSessionCall()], async ({ session, faux, events, preparations }) => {
 		await session.prompt("Hand off to the next phase.");
 		await session.waitForIdle();
@@ -73,9 +73,9 @@ async function asFabricChild(body: () => Promise<void>): Promise<void> {
 	}
 }
 
-// A Fabric child ends when its run ends, so a compact_session handoff there
+// A Fabric child ends when its run ends, so a context_compact handoff there
 // would never deliver its seed and the rest of the work would be lost silently.
-test("compact_session in a Fabric child does not end the run or compact", async () => {
+test("context_compact in a Fabric child does not end the run or compact", async () => {
 	await asFabricChild(async () => {
 		let secondRequest = "";
 		const carryOn: FauxResponseStep = (context) => {
@@ -83,7 +83,7 @@ test("compact_session in a Fabric child does not end the run or compact", async 
 			return fauxAssistantMessage("Kept working in this run.");
 		};
 		await withSession(largeHistory, [compactSessionCall(), carryOn], async ({ session, faux, events, preparations }) => {
-			assert.equal(session.getActiveToolNames().includes("compact_session"), false, "a child is not offered compact_session");
+			assert.equal(session.getActiveToolNames().includes("context_compact"), false, "a child is not offered context_compact");
 			// A model that calls it anyway gets Pi's not-found error and keeps going;
 			// the next test covers a call that reaches the tool.
 			await session.prompt("Hand off to the next phase.");
@@ -93,22 +93,22 @@ test("compact_session in a Fabric child does not end the run or compact", async 
 			assert.equal(end.isError, true, "the model sees an error, not a queued handoff");
 			assert.doesNotMatch(JSON.stringify(end.result), /Compaction queued/u);
 			assert.equal(faux.state.callCount, 2, "the run went on: the model was asked again");
-			assert.match(JSON.stringify(end.result), /Tool compact_session not found/u);
-			assert.match(secondRequest, /Tool compact_session not found/u, "the model sees the error in the next request");
+			assert.match(JSON.stringify(end.result), /Tool context_compact not found/u);
+			assert.match(secondRequest, /Tool context_compact not found/u, "the model sees the error in the next request");
 			assert.equal(compactionStarts(events), 0, "nothing was queued for Pi to compact");
 			assert.equal(preparations.length, 0);
 		});
 	});
 });
 
-test("compact_session called directly in a Fabric child refuses with a reason and queues nothing", async () => {
+test("context_compact called directly in a Fabric child refuses with a reason and queues nothing", async () => {
 	await asFabricChild(async () => {
 		await withSession(largeHistory, [], async ({ session, events, preparations }) => {
-			const tool = session.extensionRunner.getToolDefinition("compact_session");
-			assert.ok(tool, "compact_session stays registered");
+			const tool = session.extensionRunner.getToolDefinition("context_compact");
+			assert.ok(tool, "context_compact stays registered");
 			await assert.rejects(
 				tool.execute("child-call", { seed_prompt: SEED, rewrite_seed: false }, new AbortController().signal, undefined, session.extensionRunner.createToolContext("child-call", undefined)),
-				/^Error: Refused: compact_session is unavailable in a Fabric child session..*Nothing was compacted. Keep working/su,
+				/^Error: Refused: context_compact is unavailable in a Fabric child session..*Nothing was compacted. Keep working/su,
 			);
 			await settle(session);
 			assert.equal(compactionStarts(events), 0);

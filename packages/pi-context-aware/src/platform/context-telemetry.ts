@@ -36,7 +36,7 @@ export interface ContextTelemetryOptions {
 	compactionAvailable?: boolean;
 	/**
 	 * Tool that still reduces context when compaction is unavailable, such as
-	 * billion-context-pi's `compress`. The URGENT action then names it.
+	 * billion-context-pi's fold tool. The URGENT action then names it.
 	 */
 	replacementTool?: string;
 	/** Band edges from the session's pressure ladder. Defaults to the default ladder. */

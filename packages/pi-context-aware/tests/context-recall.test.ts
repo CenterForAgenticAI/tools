@@ -15,10 +15,10 @@ import {
 	type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
 import { fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { compile, obj } from "@earendil-works/pi-schema";
 
 import { contextCacheDirectory } from "../src/cache/context-cache.js";
-import { recallQuery, type ContextRecallHost, type ContextRecallResult } from "../src/context-tools/context-recall.js";
+import { contextRecallSchema, recallQuery, type ContextRecallHost, type ContextRecallResult } from "../src/context-tools/context-recall.js";
 import { SessionDatabase } from "../src/erasure/database.js";
 import { createHostPi, createSession, type FakeHostPi } from "./compaction-owner-harness.js";
 
@@ -107,6 +107,9 @@ async function fixture(options: { billionContextPi?: boolean } = {}): Promise<Fi
 	Object.assign(host.api, {
 		registerTool(tool: { name: string }) {
 			registrations.push(tool.name);
+			// Pi keeps the first tool registered under a name. A bare { name } entry is billion-context-pi's, from another extension.
+			const held = host.tools.get(tool.name) as { execute?: unknown } | undefined;
+			if (held && typeof held.execute !== "function") return;
 			registerTool(tool as Parameters<ExtensionAPI["registerTool"]>[0]);
 		},
 	});
@@ -259,7 +262,7 @@ test("REQ-193-7: an erased session is not returned even when the host still list
 	} finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("REQ-193-7: through the extension, an erased prior session is not returned by any recall name", async () => {
+test("REQ-193-7: through the extension, an erased prior session is not returned by context_recall", async () => {
 	const f = await fixture();
 	try {
 		const db = new SessionDatabase(f.agentDir);
@@ -268,8 +271,6 @@ test("REQ-193-7: through the extension, an erased prior session is not returned 
 		await f.start();
 		for (const [name, params] of [
 			["context_recall", { query: "MARKER-PRIOR", scope: "all-projects" }],
-			["search_prior_sessions", { query: "MARKER-PRIOR" }],
-			["session_recall", { question: "MARKER-PRIOR" }],
 		] as const) {
 			const result = await f.call(name, params);
 			assert.deepEqual(result.details.transcripts.results, [], name);
@@ -278,80 +279,37 @@ test("REQ-193-7: through the extension, an erased prior session is not returned 
 	} finally { f.restore(); }
 });
 
-test("REQ-193-2: each alias returns what context_recall returns for the translated request", async () => {
-	const f = await fixture();
-	try {
-		await f.start();
-		const cases: Array<[alias: string, aliasParams: Record<string, unknown>, recallParams: Record<string, unknown>, expectedTranscripts: string[]]> = [
-			["search_prior_sessions", { query: "marker" }, { query: "marker", scope: "prior" }, ["prior.jsonl"]],
-			["search_prior_sessions", { query: "marker", all_projects: true, include_current: true, max_sessions: 2 }, { query: "marker", scope: "all-projects", include_current: true, max_sessions: 2 }, ["current.jsonl", "prior.jsonl"]],
-			["search_prior_sessions", { query: "MARKER-(PRIOR|OTHER)", regex: true, case_sensitive: true, include_worktrees: false }, { query: "MARKER-(PRIOR|OTHER)", scope: "prior", regex: true, case_sensitive: true, include_worktrees: false }, ["prior.jsonl"]],
-			["session_recall", { question: "marker" }, { query: "marker", scope: "prior" }, ["prior.jsonl"]],
-			["session_recall", { question: "marker", all_projects: true, include_current: true, include_worktrees: false }, { query: "marker", scope: "all-projects", include_current: true, include_worktrees: false }, ["current.jsonl", "other.jsonl", "prior.jsonl"]],
-			["search_context", { query: "marker", limit: 1 }, { query: "marker", scope: "session" }, ["current.jsonl"]],
-		];
-		for (const [alias, aliasParams, recallParams, expectedTranscripts] of cases) {
-			const viaAlias = await f.call(alias, aliasParams);
-			const direct = await f.call("context_recall", recallParams);
-			assert.deepEqual(transcriptFiles(direct), expectedTranscripts, `${alias} ${JSON.stringify(aliasParams)}`);
-			assert.deepEqual(viaAlias, direct, `${alias} ${JSON.stringify(aliasParams)}`);
-		}
-	} finally { f.restore(); }
-});
+const REMOVED_ALIASES = ["search_prior_sessions", "session_recall", "session_compaction_history", "compact_session", "compress", "decompress", "search_context", "acp_status"];
 
-test("REQ-193-3: session_start registers context_recall direct and its aliases deferred", async () => {
+test("REQ-193-3: session_start registers context_recall direct and none of the removed names", async () => {
 	const f = await fixture();
 	try {
 		assert.equal(f.host.tools.has("context_recall"), false, "nothing registers before the surface decision");
-		assert.equal(f.host.tools.has("search_prior_sessions"), false);
 		await f.start();
 		assert.equal(f.tool("context_recall").exposure, "direct");
-		assert.equal(f.tool("search_prior_sessions").exposure, "deferred");
-		assert.equal(f.tool("session_recall").exposure, "deferred");
-		assert.equal(f.tool("search_context").exposure, "deferred");
-		assert.equal(f.tool("decompress").exposure, "deferred");
-		for (const owned of ["context_status", "context_compact", "context_fold"]) assert.equal(f.host.tools.has(owned), owned === "context_fold", `${owned}: only context_fold registers beside context_recall (pi-context-aware#189)`);
+		for (const removed of REMOVED_ALIASES) assert.equal(f.host.tools.has(removed), false, removed);
+		for (const owned of ["context_status", "context_compact", "context_fold"]) assert.equal(f.host.tools.has(owned), true, `${owned} registers beside context_recall (pi-context-aware#189, #194)`);
 		assert.match(JSON.stringify(f.tool("context_recall")), /memory\.recall/u, "the description points programs to Fabric memory.recall");
 	} finally { f.restore(); }
 });
 
-test("REQ-193-3: with billion-context-pi loaded, search_context is left to it", async () => {
+test("REQ-193-3: with billion-context-pi loaded, this extension registers none of the removed names", async () => {
 	const f = await fixture({ billionContextPi: true });
 	try {
 		await f.start();
 		assert.equal(f.tool("context_recall").exposure, "direct");
-		assert.equal(f.tool("search_prior_sessions").exposure, "deferred");
-		assert.equal(f.registrations.includes("search_context"), false);
-		assert.equal(f.registrations.includes("decompress"), false);
+		for (const removed of REMOVED_ALIASES) assert.equal(f.registrations.includes(removed), false, removed);
 	} finally { f.restore(); }
 });
 
-test("REQ-193-3: a second session_start neither registers a name twice nor leaves a withdrawn alias", async () => {
+test("REQ-193-3: a second session_start registers each tool once", async () => {
 	const f = await fixture();
 	try {
 		await f.start();
+		await f.start({ ...f.ctx } as ExtensionContext);
 		const count = (name: string) => f.registrations.filter((registered) => registered === name).length;
 		assert.equal(count("context_recall"), 1);
-		assert.equal(count("search_context"), 1);
-
-		await f.start({ ...f.ctx } as ExtensionContext);
-		for (const name of ["context_recall", "search_prior_sessions", "session_recall", "search_context"]) assert.equal(count(name), 1, `${name} after an unchanged decision`);
-
-		// billion-context-pi appears: its search_context must not stay shadowed by ours.
-		for (const name of ["compress", "acp_status"]) f.host.tools.set(name, { name });
-		await f.start({ ...f.ctx } as ExtensionContext);
-		assert.equal(f.tool("search_context").exposure, "hidden");
-		assert.equal(count("search_context"), 2);
-		assert.equal(count("context_recall"), 1);
-
-		await f.start({ ...f.ctx } as ExtensionContext);
-		assert.equal(count("search_context"), 2, "an alias already withdrawn is not registered again");
-
-		// billion-context-pi goes away again: the alias comes back.
-		for (const name of ["compress", "acp_status"]) f.host.tools.delete(name);
-		await f.start({ ...f.ctx } as ExtensionContext);
-		assert.equal(f.tool("search_context").exposure, "deferred");
-		assert.equal(count("search_context"), 3);
+		for (const removed of REMOVED_ALIASES) assert.equal(count(removed), 0, removed);
 	} finally { f.restore(); }
 });
 
@@ -370,29 +328,36 @@ async function realSession(withBillionContextPi: boolean) {
 	modelRuntime.registerNativeProvider(faux.provider);
 	await modelRuntime.setRuntimeApiKey("context-recall", "test-only");
 	let stub: ExtensionAPI | undefined;
+	const registered = new Set<string>();
 	const contextAware: ExtensionFactory = async (pi) => {
 		const extension = await import(`../src/index.js?context-recall-session=${Date.now()}-${++loads}`);
-		extension.default(pi);
+		extension.default(new Proxy(pi, {
+			get: (target, key) => key === "registerTool"
+				? (tool: Parameters<ExtensionAPI["registerTool"]>[0]) => { registered.add(tool.name); target.registerTool(tool); }
+				: Reflect.get(target, key),
+		}));
 	};
 	// Stands in for billion-context-pi when it is loaded: its signature pair and its own search_context.
 	const billionContextStub: ExtensionFactory = (pi) => {
 		stub = pi;
 		if (!withBillionContextPi) return;
 		registerSignature(pi);
-		pi.registerTool({ name: "search_context", label: "search_context", description: STUB_PATH_NOTE, parameters: Type.Object({}), async execute() { return { content: [{ type: "text", text: "stub" }], details: {} }; } });
+		pi.registerTool({ name: "search_context", label: "search_context", description: STUB_PATH_NOTE, parameters: obj({}, { open: true }), async execute() { return { content: [{ type: "text", text: "stub" }], details: {} }; } });
 	};
 	const services = await createAgentSessionServices({
 		cwd,
 		agentDir,
 		modelRuntime,
 		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
-		resourceLoaderOptions: { extensionFactories: [contextAware, billionContextStub], noExtensions: true },
+		// billion-context-pi loads first: Pi lists the first tool registered under a name, so its pair outranks our aliases of them.
+		resourceLoaderOptions: { extensionFactories: [billionContextStub, contextAware], noExtensions: true },
 	});
 	const { session } = await createAgentSessionFromServices({ services, sessionManager: SessionManager.inMemory(cwd), model: faux.getModel() });
 	await session.bindExtensions({});
 	return {
 		session,
 		stub: () => { assert.ok(stub); return stub; },
+		registered,
 		tool: (name: string) => session.getAllTools().find((tool) => tool.name === name),
 		cleanup() {
 			session.dispose();
@@ -405,22 +370,16 @@ async function realSession(withBillionContextPi: boolean) {
 
 function registerSignature(pi: ExtensionAPI): void {
 	for (const name of ["compress", "acp_status"]) {
-		pi.registerTool({ name, label: name, description: `${STUB_PATH_NOTE}'s ${name}.`, parameters: Type.Object({}), async execute() { return { content: [{ type: "text", text: "stub" }], details: {} }; } });
+		pi.registerTool({ name, label: name, description: `${STUB_PATH_NOTE}'s ${name}.`, parameters: obj({}, { open: true }), async execute() { return { content: [{ type: "text", text: "stub" }], details: {} }; } });
 	}
 }
 
-test("REQ-193-3: a real Pi session declares context_recall and defers its aliases", async () => {
+test("REQ-193-3: a real Pi session declares context_recall and none of the removed names", async () => {
 	const absent = await realSession(false);
 	try {
 		assert.equal(absent.tool("context_recall")?.exposure, "direct");
-		assert.equal(absent.tool("search_prior_sessions")?.exposure, "deferred");
-		assert.equal(absent.tool("session_recall")?.exposure, "deferred");
-		assert.equal(absent.tool("search_context")?.exposure, "deferred");
-		assert.equal(absent.tool("decompress")?.exposure, "deferred");
-		const active = absent.session.getActiveToolNames();
-		assert.ok(active.includes("context_recall"), JSON.stringify(active));
-		for (const alias of ["search_prior_sessions", "session_recall", "search_context", "decompress"]) assert.ok(!active.includes(alias), alias);
-		assert.doesNotMatch(absent.session.systemPrompt, /\bsearch_prior_sessions\b|\bsession_recall\b/u, "no injected guidance names a tool the model cannot call");
+		for (const removed of REMOVED_ALIASES) assert.equal(absent.tool(removed), undefined, removed);
+		assert.ok(absent.session.getActiveToolNames().includes("context_recall"));
 		assert.match(absent.session.systemPrompt, /\bcontext_recall\b/u);
 	} finally { absent.cleanup(); }
 
@@ -432,19 +391,12 @@ test("REQ-193-3: a real Pi session declares context_recall and defers its aliase
 	} finally { loaded.cleanup(); }
 });
 
-test("REQ-193-3: in a real Pi session, an alias the next session_start withdraws becomes hidden", async () => {
-	const s = await realSession(false);
-	try {
-		assert.equal(s.tool("search_context")?.exposure, "deferred");
-		// billion-context-pi's pair registers after load; then session_start fires again
-		// in the same process, the way Pi fires it on reload.
-		registerSignature(s.stub());
-		await s.session.extensionRunner.emit({ type: "session_start", reason: "reload" });
-		const withdrawn = s.tool("search_context");
-		assert.equal(withdrawn?.exposure, "hidden", JSON.stringify(withdrawn));
-		assert.equal(s.tool("decompress")?.exposure, "hidden");
-		assert.ok(!s.session.getActiveToolNames().includes("search_context"));
-		assert.equal(s.tool("context_recall")?.exposure, "direct");
-		assert.equal(s.tool("search_prior_sessions")?.exposure, "deferred");
-	} finally { s.cleanup(); }
+test("recall numeric fields retain finite-number admission", () => {
+	const validator = compile(contextRecallSchema);
+	for (const field of ["offset", "max_sessions"] as const) {
+		for (const value of [Infinity, -Infinity, NaN]) {
+			assert.equal(validator.check({ [field]: value }), false);
+		}
+		assert.equal(validator.check({ [field]: Number.MAX_VALUE }), true);
+	}
 });

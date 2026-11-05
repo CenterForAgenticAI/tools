@@ -48,7 +48,7 @@ fs.symlinkSync(path.join(root, "node_modules"), path.join(bcp, "node_modules"), 
 
 const { createAgentSessionFromServices, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager } = await import("@earendil-works/pi-coding-agent");
 const { fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall, InMemoryCredentialStore } = await import("@earendil-works/pi-ai");
-const { Type } = await import("typebox");
+const { num, obj } = await import("@earendil-works/pi-schema");
 const { PARITY_RECORD_VERSION, readParityRecords } = await import("../dist/parity/records.js");
 const { processParityBudget } = await import("../dist/parity/budget.js");
 const { configuredFoldFingerprint, foldEngineFingerprint } = await import("../dist/parity/fingerprint.js");
@@ -152,8 +152,8 @@ async function runCase(item) {
 	const nestedAt = (step) => item.nested || (item.nestedSteps ?? []).includes(step);
 	let current = 0;
 	const observer = (pi) => {
-		pi.registerTool({ name: "archive_probe", label: "synthetic archive", description: "Synthetic fixture tool", parameters: Type.Object({ item: Type.Number() }), async execute() { return { content: [{ type: "text", text: "Synthetic archive result." }], details: {} }; } });
-		if (item.nested || item.nestedSteps) pi.registerTool({ name: "nested_probe", label: "nested synthetic", description: "Execute a synthetic compress through the real host boundary", parameters: Type.Object({}), async execute(_id, _params, _signal, _update, ctx) {
+		pi.registerTool({ name: "archive_probe", label: "synthetic archive", description: "Synthetic fixture tool", parameters: obj({ item: num() }), async execute() { return { content: [{ type: "text", text: "Synthetic archive result." }], details: {} }; } });
+		if (item.nested || item.nestedSteps) pi.registerTool({ name: "nested_probe", label: "nested synthetic", description: "Execute a synthetic compress through the real host boundary", parameters: obj({}), async execute(_id, _params, _signal, _update, ctx) {
 			return (await ctx.executeTool("compress", compressArgs(item.steps[current]))).result;
 		} });
 	};

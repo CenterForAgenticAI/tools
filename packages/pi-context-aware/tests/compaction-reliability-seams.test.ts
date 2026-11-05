@@ -284,7 +284,7 @@ test("compaction caller honours cancellation without recording proactive failure
 		},
 	} as unknown as ExtensionContext;
 
-	const compactTool = tools.get("compact_session") as {
+	const compactTool = tools.get("context_compact") as {
 		execute: (
 			toolCallId: string,
 			params: { seed_prompt: string; rewrite_seed: boolean },

@@ -712,6 +712,20 @@ test("REQ-CLAIM-004: with the fallback setting off, a failed model summary retur
 	});
 });
 
+test("REQ-CLAIM-004: an untrusted project file cannot turn the Fabric fallback off", async () => {
+	await withFaux("owner-claim-fallback-untrusted", MODEL_FAILURE, async (faux) => {
+		await withFixture({ config: CLAIM_ON, model: faux.getModel() }, async (f) => {
+			fs.mkdirSync(path.join(f.env.root, ".pi"), { recursive: true });
+			fs.writeFileSync(path.join(f.env.root, ".pi", "context-aware.json"), JSON.stringify({ compactionClaim: { fabricFallback: false } }));
+			(f.session.ctx as unknown as { isProjectTrusted: () => boolean }).isProjectTrusted = () => false;
+			await f.start();
+			const result = await f.beforeCompact();
+			assert.equal(f.fabric!.fallbackCalls.length, 1, "Fabric's summary is still used");
+			assert.equal((result as CompactionOutcome | undefined)?.compaction?.summary, "Fabric deterministic summary");
+		});
+	});
+});
+
 test("REQ-CLAIM-004: when Fabric's fallback also fails, no result is returned so Pi's summarizer runs", async () => {
 	await withFaux("owner-claim-fallback-fails", MODEL_FAILURE, async (faux) => {
 		await withFixture({ config: CLAIM_ON, model: faux.getModel() }, async (f) => {

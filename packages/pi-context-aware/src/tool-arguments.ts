@@ -4,8 +4,8 @@
  *
  * Several Claude models sometimes send a list argument as a JSON string
  * (`"tasks": "[{...}]"`) instead of an array. Pi does not parse strings for
- * TypeBox schemas: Value.Convert wraps the string in a one-item array, and
- * validation then fails with a misleading "tasks.0: must be object". Pi's own
+ * array schemas: its coercion wraps the string in a one-item array, and
+ * validation then rejects "tasks.0: expected object, got string". Pi's own
  * edit tool repairs the same mistake in its prepareArguments hook; these hooks
  * do the same for session_tasks and session_focus. The advertised schema is
  * unchanged, so the prompt cache is not affected.
@@ -18,18 +18,14 @@
  * their descriptions.
  */
 
-import { Type } from "typebox";
+import { oneOf, type Schema } from "@earendil-works/pi-schema";
 import { isValidTaskRef, MAX_TASK_ID_CHARS, TASK_STATUSES } from "./session-tasks/session-tasks.js";
 import { MAX_BRIEF_CHARS } from "./workstream/session-brief.js";
 import { REF_KINDS, WORKSTREAM_STATUSES } from "./workstream/workstream-schema.js";
 
-/**
- * A string enum as a plain JSON Schema `enum`. A TypeBox union of literals
- * sends every value as its own `{ type, const }` branch, which costs about
- * three times the characters and fails with "must be equal to constant".
- */
-export function stringEnum<const T extends readonly string[]>(values: T, options: { description?: string } = {}) {
-	return Type.Unsafe<T[number]>({ type: "string", enum: [...values], ...options });
+/** Advertise string enums explicitly for providers that require a primitive type. */
+export function stringEnum<const T extends readonly string[]>(values: T, options: { description?: string } = {}): Schema<T[number]> {
+	return { type: "string", ...oneOf([...values], options) };
 }
 
 /** Name the valid values when a caller sends one the tool does not know. */

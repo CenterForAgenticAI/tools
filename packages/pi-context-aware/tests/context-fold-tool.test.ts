@@ -147,3 +147,26 @@ test("#189: the same tool call run again is answered as a replay and writes noth
 		assert.equal((results[0]!.details as { requestId?: string } | undefined)?.requestId, "fold-call-r#0");
 	} finally { live.dispose(); }
 });
+
+// pi-context-aware#287: the call a model sent, ranges as a JSON string with from/to bounds, was refused by
+// the schema ("content: must have required properties content") before the tool ran.
+test("#287: a ranges string with from/to bounds passes Pi's validation and folds", async () => {
+	const live = await liveSession();
+	try {
+		const call = { ranges: JSON.stringify([{ from: "m00002", to: "m00003", topic: "Opening", summary: SUMMARY_ONE }]) };
+		await live.prompt("Fold the archive, please.", [
+			fauxAssistantMessage(fauxToolCall("context_fold", call, { id: "fold-call-287" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Folded."),
+		]);
+		await live.prompt("What next?", [fauxAssistantMessage("Next.")]);
+		const text = resultText(live.requests[1]!, "fold-call-287");
+		assert.doesNotMatch(text, /Validation failed/u);
+		assert.match(text, /range 1 \(m00002\.\.m00003\) accepted; written at the end of this turn\./u);
+		assert.deepEqual(foldRecordsOnBranch(live.manager.getBranch()).map(({ record }) => [record.blockId, record.requestId]), [["b1", "fold-call-287#0"]]);
+		// The earlier call keeps its `ranges` argument and shows the pointer in place of the summary.
+		const shown = live.requests.at(-1)!.flatMap((message) => message.role === "assistant" ? message.content : []).find((part) => part.type === "toolCall" && part.id === "fold-call-287");
+		const args = shown?.type === "toolCall" ? shown.arguments : undefined;
+		assert.equal(typeof args?.ranges, "string", "the argument keeps its name and string shape");
+		assert.deepEqual(JSON.parse(args!.ranges as string), [{ from: "m00002", to: "m00003", topic: "Opening", summary: "summary kept in block b1 (" + SUMMARY_ONE.length + " chars)" }]);
+	} finally { live.dispose(); }
+});

@@ -18,7 +18,9 @@ export const ALLOWED_ROOT_ENTRIES = new Set([
 	".graft", // Repository workflow records.
 	".work", // pi-work workspecs and drafts.
 	".public-release.json",
+	"AGENTS.md", // Agent working notes; the public-release exporter never exports it.
 	".spec", // Design record: briefs, plans, measurements.
+	"CHANGELOG.md", // Release notes; the 0.7.0 entry records the removed tool names.
 	"LICENSE",
 	"README.md",
 	"docs", // Published documentation and the service contract.

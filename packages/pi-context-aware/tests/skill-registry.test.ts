@@ -53,7 +53,7 @@ function rig(options: { pointersEnabled?: boolean; manager?: SessionManager; roo
 	const registry = createSkillRegistry({
 		append: (customType, data) => { manager.appendCustomEntry(customType, data); },
 		pointersEnabled: () => options.pointersEnabled ?? true,
-		restoreInvocation: () => "decompress",
+		restoreInvocation: () => "context_recall",
 		now: () => new Date("2026-10-20T00:00:00.000Z"),
 	});
 	registry.reset(manager.getBranch());
@@ -151,6 +151,8 @@ test("a load made by another tool is recorded as partial, so the next direct loa
 		assert.equal(r.registry.isToolProtected("load_skill", nested.text), false, "a body that went to a program has no transcript copy to protect");
 		const direct = await r.load("load-2");
 		assert.match(direct.text, new RegExp(BODY_MARKER, "u"));
+		assert.doesNotMatch(direct.text, /already loaded/u, "a pointer here would leave the model without the body");
+		assert.equal(direct.details.pointer, undefined);
 		assert.equal(r.registry.isToolProtected("load_skill", direct.text), true);
 	} finally { r.dispose(); }
 });
@@ -202,7 +204,7 @@ test("the fold kernel keeps a recorded load_skill result out of a fold, but fold
 	} finally { r.dispose(); }
 });
 
-test("a folded load returns the compressor's block id and the exact decompress call", async () => {
+test("a folded load returns the compressor's block id and the exact context_recall call", async () => {
 	const r = rig();
 	try {
 		r.chat("start");
@@ -218,7 +220,7 @@ test("a folded load returns the compressor's block id and the exact decompress c
 		const second = await r.load("load-2");
 		assert.doesNotMatch(second.text, new RegExp(BODY_MARKER, "u"));
 		assert.equal(second.details.blockId, blockId, "registry and compressor must agree on the block");
-		assert.match(second.text, new RegExp(`decompress\\(\\{ blockId: "${blockId}" \\}\\)`, "u"));
+		assert.match(second.text, new RegExp(`context_recall\\(\\{ ref: "${blockId}" \\}\\)`, "u"));
 	} finally { r.dispose(); }
 });
 

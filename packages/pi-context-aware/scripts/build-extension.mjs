@@ -11,7 +11,7 @@
 // relative to its module, which no longer exists inside a bundle.
 //
 // Packages stay external, so the host's own module instances still serve
-// `@earendil-works/*` and `typebox`. The bundle sits directly in `dist/`, so
+// the declared runtime dependencies and host `@earendil-works/*` packages. The bundle sits directly in `dist/`, so
 // paths resolved from `import.meta.url` (`./folds/`, the package root two
 // levels up from `dist/compaction/`) keep their meaning.
 import { realpathSync } from "node:fs";

@@ -3,13 +3,14 @@ import { SessionManager, type SessionBoundaryDraft, type SessionEntry, type Sess
 import { importAcpSideFile } from "../folds/acp-import.js";
 import { entryToCoreMessages, foldStateFromBranch, keptFirstUserId, planFold, summaryLimitOf, type BranchFoldState, type FoldRequest } from "../folds/fold-adapter.js";
 import type { FoldsConfig } from "../platform/config-layers.js";
+import type { PressureLadderConfig } from "../policy/context-policy.js";
 import { applyFoldDrafts } from "../folds/fold-engine.js";
 import { cloneFoldTurnMemory, createFoldTurnMemory, previewFoldTurnState, type FoldTurnMemory, type FoldTurnModel, type FoldTurnResult } from "../folds/fold-turn.js";
 import { coveredEntryIds, foldDrafts, isEditableEntry, readFoldRecord, type FoldRecord } from "../folds/fold-entries.js";
 import { parseCompressArgs } from "../folds/kernel/parse-compress-input.js";
 import { baseIdOf, SUMMARY_HEADER } from "../folds/kernel/prune.js";
 import { bcpOutcome, compareOutcomes, nativeOutcome, rejectedUnknownRef, type ObservedResult } from "./outcome.js";
-import { verdictFor, type BlockEvidence, type Verdict, type OutcomeEvidence, type ParityDiff, type RefusalOutcome, type RefusedCall, type RequestDelta, type RequestDeltaReason, type RequestHashes, type ToolCallHash, type ToolResultHash, type MessageHash, type NudgeFixHashes, type MediaElisionHashes } from "./records.js";
+import { verdictFor, type BlockEvidence, type Verdict, type OutcomeEvidence, type ParityDiff, type RefusalOutcome, type RefusedCall, type RequestDelta, type RequestDeltaReason, type RequestHashes, type ToolCallHash, type ToolResultHash, type MessageHash, type NudgeFixHashes, type DenominatorHashes, type MediaElisionHashes } from "./records.js";
 import type { SideSnapshot } from "./side-file.js";
 
 export const MAX_BRANCH_ENTRIES = 50_000;
@@ -45,6 +46,8 @@ export interface PreviewTurn {
 	readonly vision?: boolean;
 	readonly systemPromptTokens?: number;
 	readonly hostTokens?: number;
+	/** The ladder the live pass reads (pi-context-aware#244); the preview must read the same one. */
+	readonly ladder?: PressureLadderConfig;
 }
 /** Full digest of the canonical sorted list, not the diagnostic prefix. */
 export function coverageHash(ids: readonly string[]): string {
@@ -325,7 +328,7 @@ export function previewShadowCalls(input: PreviewInput, calls: readonly ShadowCa
 			// This manager is already isolated. Plan sequentially without cloning it again,
 			// binding each accepted record to its own input rather than a rendered draft.
 			const plan = planFold({ ...request, branch: preview.getBranch(), contextEntries: preview.buildContextEntries(),
-				modelContextLimit: input.contextWindow, folds: input.folds });
+				modelContextLimit: input.contextWindow, folds: input.folds, protectedZone: "all-user-role" });
 			if (!plan.ok) { dropped++; droppedErrors.push(...plan.errors); continue; }
 			records.push(...plan.records);
 			created += plan.records.length;
@@ -576,8 +579,15 @@ type Projection = { readonly entries: readonly { readonly sourceEntry: { readonl
  * image bytes and message text never cross the parity normalization boundary.
  */
 function mediaElisionHashes(result: FoldTurnResult): MediaElisionHashes | undefined {
-	if (!result.mediaElidedEntryIds?.length || !result.mediaElisionBefore?.length) return undefined;
-	const beforeByEntry = new Map(result.mediaElisionBefore.map((entry) => [entry.entryId, entry.message]));
+	return substitutionHashes(result, result.mediaElidedEntryIds, result.mediaElisionBefore);
+}
+/** The pointer line a saved recoverable hide adds to a shortened message (FP-205), as the same substitution hashes. */
+function hidePointerHashes(result: FoldTurnResult): MediaElisionHashes | undefined {
+	return substitutionHashes(result, result.hidePointerEntryIds, result.hidePointerBefore);
+}
+function substitutionHashes(result: FoldTurnResult, entryIds: readonly string[] | undefined, before: FoldTurnResult["mediaElisionBefore"]): MediaElisionHashes | undefined {
+	if (!entryIds?.length || !before?.length) return undefined;
+	const beforeByEntry = new Map(before.map((entry) => [entry.entryId, entry.message]));
 	const sent = new Map<string, RequestMessage[]>();
 	result.messages.slice(0, MAX_MESSAGE_HASHES).forEach((message, index) => {
 		const source = result.sources[index];
@@ -591,12 +601,12 @@ function mediaElisionHashes(result: FoldTurnResult): MediaElisionHashes | undefi
 		const hash = hashRequestMessages([message]).messages[0];
 		return hash && !hash.summary ? contentKey(hash) : undefined;
 	};
-	for (const id of result.mediaElidedEntryIds) {
-		const before = beforeByEntry.get(id);
+	for (const id of entryIds) {
+		const was = beforeByEntry.get(id);
 		const after = sent.get(id);
 		if (after === undefined) continue;
-		if (before === undefined || after.length !== 1) return undefined;
-		const original = keyOf(before);
+		if (was === undefined || after.length !== 1) return undefined;
+		const original = keyOf(was);
 		const replacement = keyOf(after[0]!);
 		if (!original || !replacement || original === replacement) return undefined;
 		originals.push(original);
@@ -628,7 +638,7 @@ function withCompressCallId(drafts: readonly SessionBoundaryDraft[], compressCal
  * the per-turn pass (ref tags, hidden absorbed calls, nudge). Undefined when the pass cannot line
  * the request up with the preview's projection.
  */
-function liveRequest(preview: SessionManager, input: PreviewInput): { messages: RequestMessage[]; sources: string[]; turnMemory: FoldTurnMemory; nudgeFix?: NudgeFixHashes; mediaElision?: MediaElisionHashes } | undefined {
+function liveRequest(preview: SessionManager, input: PreviewInput): { messages: RequestMessage[]; sources: string[]; turnMemory: FoldTurnMemory; nudgeFix?: NudgeFixHashes; denominator?: DenominatorHashes; mediaElision?: MediaElisionHashes; hidePointer?: MediaElisionHashes } | undefined {
 	// Without its projection the request cannot be traced to entries; the caller fails closed.
 	if (typeof (preview as Partial<SessionManager>).buildSessionProjection !== "function") return undefined;
 	const turn = input.turn ?? {};
@@ -639,6 +649,7 @@ function liveRequest(preview: SessionManager, input: PreviewInput): { messages: 
 		messages: preview.buildSessionContext().messages.filter((message) => message.role !== "system"), projection, branch: preview.getBranch(), contextEntries: preview.buildContextEntries(),
 		model, systemPromptTokens: turn.systemPromptTokens ?? 0, ...(turn.hostTokens !== undefined ? { hostTokens: turn.hostTokens } : {}), memory: input.turnMemory ?? createFoldTurnMemory(),
 		compatibility: true,
+		...(turn.ladder ? { ladder: turn.ladder } : {}),
 	});
 	const result = prepared.result;
 	if (!result) return undefined;
@@ -650,13 +661,27 @@ function liveRequest(preview: SessionManager, input: PreviewInput): { messages: 
 		...(fix.compatible !== undefined ? { compatible: nudgeHash(fix.compatible).hash } : {}),
 	} : undefined;
 	const mediaElision = mediaElisionHashes(result);
+	const hidePointer = hidePointerHashes(result);
+	const denominator = denominatorHashes(result);
 	// The nudge and a live-only tail have no entry; attribution reads them as the empty id.
 	return {
 		messages: result.messages,
 		sources: result.sources.slice(0, MAX_MESSAGE_HASHES).map((id) => id ?? ""),
 		turnMemory: prepared.memory,
 		...(nudgeFix ? { nudgeFix } : {}),
+		...(denominator ? { denominator } : {}),
 		...(mediaElision ? { mediaElision } : {}),
+		...(hidePointer ? { hidePointer } : {}),
+	};
+}
+/** What billion-context-pi's own limit would have sent, hashed; no message text crosses this boundary. */
+function denominatorHashes(result: FoldTurnResult): DenominatorHashes | undefined {
+	const found = result.denominator;
+	if (!found) return undefined;
+	const limit = found.bcpMessages ? hashRequestMessages(found.bcpMessages as unknown as RequestMessage[]) : undefined;
+	return {
+		window: found.window, bcpLimit: found.bcpLimit, truncationStartDiffers: found.truncationStartDiffers,
+		...(limit ? { limitKeys: contentKeys(limit), limitToolResultKeys: toolResultKeys(limit) } : {}),
 	};
 }
 /** Hash one preview's request; the preview session is dropped when this returns. */
@@ -670,7 +695,9 @@ function previewRequest(preview: typeof previewShadowCalls, input: PreviewInput,
 		ours: {
 			...ours,
 			...(live?.nudgeFix ? { nudgeFix: live.nudgeFix } : {}),
+			...(live?.denominator ? { denominator: live.denominator } : {}),
 			...(live?.mediaElision ? { mediaElision: live.mediaElision } : {}),
+			...(live?.hidePointer ? { hidePointer: live.hidePointer } : {}),
 		},
 		diffs: planned.diffs,
 		...(sources ? { sources } : {}),
@@ -703,8 +730,8 @@ const overlaps = (ids: readonly string[], set: ReadonlySet<string>) => ids.some(
  * Check that the full native request is the counterfactual one with only the refused calls' own folds
  * applied: the counterfactual messages from entries those folds cover are gone, each surviving refused
  * fold's summary stands at its carrier, and every other message is identical by hash, source entry and
- * order. Accepted siblings must fold the same way in both previews, and no refused fold may cover or
- * absorb a sibling's fold. Anything else is `other`. Works on hashes and entry ids only.
+ * order. Accepted siblings must fold the same way in both previews. A sibling wholly inside the refused
+ * coverage is subsumed by the refused fold; a partial overlap, or a sibling absorbing a refused block, is `other`. Anything else is `other`. Works on hashes and entry ids only.
  */
 function refusedFoldDelta(full: PreviewedRequest, counterfactual: PreviewedRequest, refusedIds: ReadonlySet<string>): RequestDelta {
 	const refused = full.folds.filter((fold) => refusedIds.has(fold.callId));
@@ -715,13 +742,25 @@ function refusedFoldDelta(full: PreviewedRequest, counterfactual: PreviewedReque
 	if (!full.sources || !counterfactual.sources) return other("attribution-unavailable");
 	if (full.ours.total > MAX_MESSAGE_HASHES || counterfactual.ours.total > MAX_MESSAGE_HASHES) return other("too-large");
 	if (counterfactual.folds.some((fold) => refusedIds.has(fold.callId)) || refused.some((fold) => !fold.summary?.summary)) return other("unattributed-fold");
-	if ([...siblings, ...counterfactual.folds].some((fold) => overlaps(fold.covered, covered))) return other("sibling-covered");
+	// A sibling whose whole coverage lies inside the refused coverage has no summary of its own in the
+	// full request: the refused fold's summary replaces its entries (or the native preview rejects it
+	// as consumed). Any other overlap is a partial one and stays unexplained.
+	const subsumed = (fold: PreviewFold) => fold.covered.length > 0 && fold.covered.every((id) => covered.has(id));
+	const keptSiblings = siblings.filter((fold) => !subsumed(fold));
+	const keptCounterfactual = counterfactual.folds.filter((fold) => !subsumed(fold));
+	if ([...keptSiblings, ...keptCounterfactual].some((fold) => overlaps(fold.covered, covered))) return other("sibling-covered");
 	const refusedBlocks = new Set(refused.map((fold) => fold.blockId));
-	const siblingBlocks = new Set(siblings.map((fold) => fold.blockId));
+	const siblingBlocks = new Set(keptSiblings.map((fold) => fold.blockId));
 	if (refused.some((fold) => overlaps(fold.directBlockIds, siblingBlocks)) || siblings.some((fold) => overlaps(fold.directBlockIds, refusedBlocks))) return other("sibling-absorbed");
 	// Block ids are allocated per preview, so siblings are compared by call, tier, coverage and summary.
 	const sibling = (fold: PreviewFold) => canonicalJson([fold.callId, fold.tier, fold.covered, fold.summary ?? null]);
-	if (siblings.length !== counterfactual.folds.length || siblings.some((fold, i) => sibling(fold) !== sibling(counterfactual.folds[i]!))) return other("sibling-changed");
+	// A subsumed sibling in the full preview must be the counterfactual's fold; the native preview may also have rejected it.
+	const counterfactualSiblings = new Set(counterfactual.folds.map(sibling));
+	if (
+		keptSiblings.length !== keptCounterfactual.length ||
+		keptSiblings.some((fold, i) => sibling(fold) !== sibling(keptCounterfactual[i]!)) ||
+		siblings.some((fold) => subsumed(fold) && !counterfactualSiblings.has(sibling(fold)))
+	) return other("sibling-changed");
 	// A refused fold absorbed by a later refused fold has no summary of its own in the request.
 	const absorbed = new Set(refused.flatMap((fold) => fold.directBlockIds));
 	const carriers = new Map(refused.filter((fold) => !absorbed.has(fold.blockId)).map((fold) => [fold.carrierId, fold.summary!]));

@@ -158,6 +158,20 @@ export function observedCompactionWriter(entries: readonly unknown[]): Compactio
 	return entry === undefined ? NONE : compactionWriterOf(entry);
 }
 
+/** Read the newest committed writer from a session's active branch; an unreadable branch reports none. */
+export function committedCompactionWriter(sessionManager: { getBranch(): readonly unknown[] }): CompactionWriterObservation {
+	try {
+		return observedCompactionWriter(sessionManager.getBranch());
+	} catch {
+		return NONE;
+	}
+}
+
+/** The status line `/context-status` and the `context_status` tool both print. */
+export function formatCommittedCompactionWriter(writer: CompactionWriterObservation): string {
+	return `Last committed compaction writer: ${writer.name}`;
+}
+
 export function compactionWriterWarning(writer: CompactionWriterObservation): string | undefined {
 	if (writer.kind !== "fabric" && writer.kind !== "extension") return undefined;
 	return `Unexpected committed compaction writer: ${writer.name}. Context-aware held the compaction claim, but another writer won. Check the loaded compaction extensions and their order.`;

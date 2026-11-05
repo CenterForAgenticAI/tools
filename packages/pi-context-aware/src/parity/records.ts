@@ -127,11 +127,31 @@ export interface RequestHashes {
 	 * nudges, as `hashRequestMessages` hashes a user message. An absent hash means no nudge.
 	 */
 	readonly nudgeFix?: NudgeFixHashes;
+	/** Set when billion-context-pi's limit differs from the window (pi-context-aware#244). */
+	readonly denominator?: DenominatorHashes;
 	/** Exact content substitutions made by the native request-only media pass. */
 	readonly mediaElision?: MediaElisionHashes;
+	/**
+	 * The pointer line a saved recoverable hide adds to a message both sides shortened (pi-context-aware#268,
+	 * FP-205): content keys before and after, paired by index.
+	 */
+	readonly hidePointer?: MediaElisionHashes;
+}
+/**
+ * billion-context-pi reads the pressure ladder as a share of the window less the model's output reserve;
+ * the native pass reads it as a share of the whole window. `limitKeys` are the content keys of the request
+ * billion-context-pi's limit produces (before any nudge), recorded only when the last step is crossed on
+ * one side only.
+ */
+export interface DenominatorHashes {
+	readonly window: number;
+	readonly bcpLimit: number;
+	readonly truncationStartDiffers: boolean;
+	readonly limitKeys?: readonly string[];
+	readonly limitToolResultKeys?: readonly string[];
 }
 export interface NudgeFixHashes {
-	readonly cause: "tier-trigger" | "emergency-defer";
+	readonly cause: "tier-trigger" | "emergency-defer" | "denominator" | "tool-name";
 	readonly sent?: string;
 	readonly compatible?: string;
 }
@@ -228,7 +248,7 @@ function findDescriptorRoot(dir: FileHandle): Promise<string | undefined> {
 	return probe;
 }
 /** A directory held open and verified; names below it are resolved through `path`, its descriptor's magic link. */
-interface HeldDir { readonly handle: FileHandle; readonly path: string }
+export interface HeldDir { readonly handle: FileHandle; readonly path: string }
 const DIR_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY;
 /** Open `name` below a held directory without following a symlink, and check that it is a private real directory. */
 async function openChildDir(parent: string, name: string, create: boolean): Promise<FileHandle | undefined> {
@@ -261,7 +281,7 @@ async function openChildDir(parent: string, name: string, create: boolean): Prom
  * is rejected rather than followed. Returns undefined when the store does not exist and `create`
  * is false. The caller closes the returned handle.
  */
-async function openStoreDir(agentDir: string, create: boolean): Promise<HeldDir | undefined> {
+export async function openStoreDir(agentDir: string, create: boolean, dirs: readonly string[] = STORE_DIRS): Promise<HeldDir | undefined> {
 	if (create) await mkdir(agentDir, { recursive: true, mode: 0o700 });
 	let current: FileHandle | undefined;
 	try { current = await open(agentDir, DIR_FLAGS); } catch (error) {
@@ -271,7 +291,7 @@ async function openStoreDir(agentDir: string, create: boolean): Promise<HeldDir 
 	try {
 		const root = await findDescriptorRoot(current);
 		if (!root) throw new ParityStoreError("this platform cannot open files relative to a verified directory");
-		for (const part of STORE_DIRS) {
+		for (const part of dirs) {
 			const parent: FileHandle = current;
 			current = undefined;
 			try { current = await openChildDir(`${root}/${parent.fd}`, part, create); } finally { await parent.close(); }
@@ -283,7 +303,7 @@ async function openStoreDir(agentDir: string, create: boolean): Promise<HeldDir 
 	} finally { await current?.close(); }
 }
 /** Open a session file in a held directory without following a symlink; accept only a regular, singly linked, own file. */
-async function openStoreFile(dir: HeldDir, name: string, flags: number, mode?: number): Promise<FileHandle> {
+export async function openStoreFile(dir: HeldDir, name: string, flags: number, mode?: number): Promise<FileHandle> {
 	let handle: FileHandle;
 	try { handle = await open(`${dir.path}/${name}`, flags | constants.O_NOFOLLOW | constants.O_NONBLOCK, mode); } catch (error) {
 		const code = errorCode(error);

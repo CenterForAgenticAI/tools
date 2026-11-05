@@ -25,6 +25,23 @@ export const MAX_MODE_LAYERS = 16;
 export const MAX_MODE_TRAIL_LENGTH = 64;
 export const MODE_DEFAULT_LAYER = CONTEXT_AWARE_MODE_DEFAULT_LAYER_V1;
 
+/** What a definition without `layer` gets. Replay accepts the default layer only in this shape. */
+export const MODE_DEFAULT_LAYER_SLOT: Readonly<{ layer: string; rank: number; pinned: boolean }> = Object.freeze({
+	layer: MODE_DEFAULT_LAYER,
+	rank: 0,
+	pinned: false,
+});
+
+/** False for the default layer in a shape that no definition creates (see MODE_DEFAULT_LAYER_SLOT). */
+export function isModeDefaultLayerShape(layer: string, rank: number, pinned: boolean): boolean {
+	return layer !== MODE_DEFAULT_LAYER || (rank === MODE_DEFAULT_LAYER_SLOT.rank && pinned === MODE_DEFAULT_LAYER_SLOT.pinned);
+}
+
+/** False for a pinned layer entered for one run: a pinned layer is held for the whole session. */
+export function isModeLayerScope(pinned: boolean, runScoped: boolean): boolean {
+	return !(pinned && runScoped);
+}
+
 const MODE_HEX_COLOR = /^#[0-9a-f]{6}$/iu;
 // Control and format characters would let a label move the cursor, recolor the
 // footer, or reorder text, so a label may contain neither.
@@ -49,6 +66,47 @@ const MODE_LAYER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/u;
 export function isModeLayerName(value: string): boolean {
 	return value.length <= MAX_MODE_LAYER_LENGTH && MODE_LAYER_NAME.test(value);
 }
+
+// The layer-name rule written as data, so another implementation of it can be
+// checked against the same cases: pi-stack's review-mode test double mirrors
+// `isModeLayerName` and cannot import it. `tests/modes-layer-name-cases.test.ts`
+// fails when the rule and these cases disagree, so a change to one needs the other.
+const LAYER_NAME_LEAD = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const LAYER_NAME_INNER = `${LAYER_NAME_LEAD}_.-`;
+// `xx` is both a first-character and a later-character case; list it once.
+const unique = (names: readonly string[]): string[] => [...new Set(names)];
+const PRINTABLE_ASCII = Array.from({ length: 0x7e - 0x21 + 1 }, (_, index) => String.fromCharCode(0x21 + index));
+
+/**
+ * Trimmed layer names that `isModeLayerName` accepts and refuses. Every printable
+ * ASCII character other than space appears once as a name's first character
+ * (`<c>x`) and once after it (`x<c>`), and the length bound appears on both sides.
+ */
+export const MODE_LAYER_NAME_CASES: { readonly accepted: readonly string[]; readonly rejected: readonly string[] } = Object.freeze({
+	accepted: Object.freeze(unique([
+		...PRINTABLE_ASCII.filter((character) => LAYER_NAME_LEAD.includes(character)).map((character) => `${character}x`),
+		...PRINTABLE_ASCII.filter((character) => LAYER_NAME_INNER.includes(character)).map((character) => `x${character}`),
+		"stage",
+		"Stage_2",
+		"review.stance",
+		"a-b",
+		"x".repeat(MAX_MODE_LAYER_LENGTH),
+	])),
+	rejected: Object.freeze(unique([
+		...PRINTABLE_ASCII.filter((character) => !LAYER_NAME_LEAD.includes(character)).map((character) => `${character}x`),
+		...PRINTABLE_ASCII.filter((character) => !LAYER_NAME_INNER.includes(character)).map((character) => `x${character}`),
+		"",
+		"x".repeat(MAX_MODE_LAYER_LENGTH + 1),
+		"my role",
+		"my\tstance",
+		"my\nstance",
+		"nb\u00a0sp",
+		"st\u00e4nce",
+		"stan\u200bce",
+		"bidi\u202estage",
+		"\u00fcnicode",
+	])),
+});
 
 /** True for a layer rank: an integer from -MAX_MODE_RANK to MAX_MODE_RANK. */
 export function isModeRank(value: unknown): value is number {
@@ -236,28 +294,33 @@ function parseV1Entry(value: unknown): StoredEntryData | null {
 	return {
 		version: 1,
 		held: [current, outer].filter((reference): reference is StoredReference => reference !== null),
-		layers: current === null ? [] : [{ layer: MODE_DEFAULT_LAYER, rank: 0, mode: current }],
+		layers: current === null ? [] : [{ layer: MODE_DEFAULT_LAYER_SLOT.layer, rank: MODE_DEFAULT_LAYER_SLOT.rank, ...(MODE_DEFAULT_LAYER_SLOT.pinned ? { pinned: true as const } : {}), mode: current }],
 		updatedAt: data.updatedAt,
 		...(transition.transitionId === undefined ? {} : { transitionId: transition.transitionId }),
 	};
 }
 
-/** A `mode@2` entry. Every layer needs an instance id; names, mode ids and instance ids are unique. */
+/**
+ * A `mode@2` entry. Every layer needs an instance id; names, mode ids and
+ * instance ids are unique. A layer whose name `/mode exit` could not type is
+ * dropped and the entry's other layers are kept, so one such name neither loses
+ * a valid layer nor brings back the state an earlier entry held. Its instance
+ * counts as ended. Any other malformed field still refuses the whole entry.
+ */
 function parseV2Entry(value: unknown): StoredEntryData | null {
 	const data = entryData(value);
 	if (data === null || data.schemaVersion !== MODE_STATE_SCHEMA_VERSION || !isIsoTimestamp(data.updatedAt)) return null;
 	if (!Array.isArray(data.layers) || data.layers.length > MAX_MODE_LAYERS) return null;
-	const layers: StoredSlot[] = [];
+	const stored: StoredSlot[] = [];
 	for (const raw of data.layers) {
-		if (!isRecord(raw) || !boundedString(raw.layer, MAX_MODE_LAYER_LENGTH) || !isModeLayerName(raw.layer.trim()) || !isModeRank(raw.rank)) return null;
+		if (!isRecord(raw) || !boundedString(raw.layer, MAX_MODE_LAYER_LENGTH) || !isModeRank(raw.rank)) return null;
 		if (raw.pinned !== undefined && raw.pinned !== true) return null;
 		if (raw.scope !== undefined && raw.scope !== "run") return null;
-		if (raw.pinned === true && raw.scope === "run") return null;
-		// The default layer is what a definition without `layer` gets: rank 0, never pinned.
-		if (raw.layer.trim() === MODE_DEFAULT_LAYER && (raw.rank !== 0 || raw.pinned === true)) return null;
+		if (!isModeLayerScope(raw.pinned === true, raw.scope === "run")) return null;
+		if (!isModeDefaultLayerShape(raw.layer.trim(), raw.rank, raw.pinned === true)) return null;
 		const mode = parseReference(raw.mode);
 		if (mode === null || mode.instanceId === undefined) return null;
-		layers.push({
+		stored.push({
 			layer: raw.layer.trim(),
 			rank: raw.rank,
 			...(raw.pinned === true ? { pinned: true as const } : {}),
@@ -266,7 +329,8 @@ function parseV2Entry(value: unknown): StoredEntryData | null {
 		});
 	}
 	const unique = (values: readonly string[]): boolean => new Set(values).size === values.length;
-	if (!unique(layers.map((slot) => slot.layer)) || !unique(layers.map((slot) => slot.mode.id))) return null;
+	if (!unique(stored.map((slot) => slot.layer)) || !unique(stored.map((slot) => slot.mode.id))) return null;
+	const layers = stored.filter((slot) => isModeLayerName(slot.layer));
 	const transition = parseTransitionId(data);
 	if (!transition.ok) return null;
 	layers.sort(compareModeLayers);

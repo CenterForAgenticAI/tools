@@ -24,6 +24,8 @@ export type CompactionCommitPath =
 	| "no-run-in-flight"
 	/** A run was in flight, was ended, and the loop finished inside the budget. */
 	| "drained"
+	/** A run that started after the compaction began finished by itself; nothing was aborted. */
+	| "late-run-finished"
 	/** The host does not report run liveness; committing preserves its behaviour. */
 	| "liveness-unknown";
 
@@ -36,6 +38,11 @@ export type CompactionCommitDecision =
 	| {
 		readonly commit: false;
 		readonly reason: "run-in-flight";
+		/**
+		 * What was still active when the budget ran out: the ended run itself, or
+		 * only its provider-drain settlement (the run had already finished).
+		 */
+		readonly blocker: "run" | "settlement";
 		readonly waitedMs: number;
 		readonly drainTimeoutMs: number;
 	};
@@ -63,7 +70,18 @@ export interface CompactionCommitGuardOptions {
 	/** How long to wait for the ended run to finish before abandoning the commit. */
 	readonly drainTimeoutMs?: number;
 	readonly pollIntervalMs?: number;
+	/**
+	 * True when no run was in flight when the compaction began. A run seen at
+	 * commit time then started inside the summarization window (a wake message),
+	 * and is waited for rather than aborted (issue #291).
+	 */
+	readonly startedQuiet?: boolean;
+	/** Wall-clock cap on waiting for such a late run before the abort path takes over. */
+	readonly lateRunWaitMs?: number;
 }
+
+/** Five minutes: long enough for a wake-started turn, short enough that a hung run is still ended. */
+export const DEFAULT_LATE_RUN_WAIT_MS = 300_000;
 
 /**
  * Ten seconds: ending a run is signal-based and normally unwinds in
@@ -99,7 +117,33 @@ export async function decideCompactionCommit(
 	const isDrainSettled = hooks.isDrainSettled ?? (() => true);
 	if (!initial && isDrainSettled()) return { commit: true, path: "no-run-in-flight", waitedMs: 0 };
 
-	if (initial) {
+	let drainStartedAt = startedAt;
+	let runToEnd = initial;
+	if (initial && options.startedQuiet === true) {
+		// The run began after the compaction did, so aborting it would only cost
+		// the user's work and a refusal attempt. Let it finish, up to a cap.
+		const lateRunWaitMs = options.lateRunWaitMs ?? DEFAULT_LATE_RUN_WAIT_MS;
+		hooks.note(`commit guard: a run started during summarization; waiting for it to finish instead of aborting it (cap ${lateRunWaitMs}ms)`);
+		for (;;) {
+			const elapsedMs = Math.max(0, hooks.now() - startedAt);
+			const inFlight = hooks.isRunInFlight();
+			if (inFlight !== true) {
+				if (!isDrainSettled()) {
+					runToEnd = false;
+					break;
+				}
+				hooks.note(`commit guard: the late run finished after ${elapsedMs}ms; committing against a quiet session`);
+				return { commit: true, path: inFlight === null ? "liveness-unknown" : "late-run-finished", waitedMs: elapsedMs };
+			}
+			if (elapsedMs >= lateRunWaitMs) {
+				hooks.note(`commit guard: the late run was still going after ${elapsedMs}ms; ending it`);
+				break;
+			}
+			await hooks.sleep(Math.min(pollIntervalMs, lateRunWaitMs - elapsedMs));
+		}
+		drainStartedAt = hooks.now();
+	}
+	if (runToEnd) {
 		hooks.note(`commit guard: an agent run is in flight at commit time; ending it before the boundary (budget ${drainTimeoutMs}ms)`);
 		hooks.drainInFlightRun();
 	} else {
@@ -107,7 +151,7 @@ export async function decideCompactionCommit(
 	}
 
 	for (;;) {
-		const elapsedMs = Math.max(0, hooks.now() - startedAt);
+		const elapsedMs = Math.max(0, hooks.now() - drainStartedAt);
 		const inFlight = hooks.isRunInFlight();
 		const settled = isDrainSettled();
 		if (inFlight === null && settled) {
@@ -119,8 +163,9 @@ export async function decideCompactionCommit(
 			return { commit: true, path: initial ? "drained" : "no-run-in-flight", waitedMs: elapsedMs };
 		}
 		if (elapsedMs >= drainTimeoutMs) {
-			hooks.note(`commit guard: an agent run or its settlement path was still active ${elapsedMs}ms after it was ended; abandoning this commit instead of recording a boundary the live context never crossed`);
-			return { commit: false, reason: "run-in-flight", waitedMs: elapsedMs, drainTimeoutMs };
+			const blocker = inFlight ? "run" : "settlement";
+			hooks.note(`commit guard: ${blocker === "run" ? "an agent run" : "the provider-drain settlement path"} was still active ${elapsedMs}ms after it was ended; abandoning this commit instead of recording a boundary the live context never crossed`);
+			return { commit: false, reason: "run-in-flight", blocker, waitedMs: elapsedMs, drainTimeoutMs };
 		}
 		await hooks.sleep(Math.min(pollIntervalMs, drainTimeoutMs - elapsedMs));
 	}

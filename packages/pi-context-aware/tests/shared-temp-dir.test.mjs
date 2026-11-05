@@ -313,17 +313,40 @@ test("the wrapper forwards a later cancellation signal", async () => {
 });
 
 test("a signal delivered during run-root cleanup still cancels the wrapper", async () => {
+	// Handshake instead of a timer: the wrapper writes the started file as run-root
+	// cleanup begins and holds cleanup open until the gate file exists, so the
+	// signal below always lands inside cleanup, whatever the host load.
+	const handshake = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-signal-"));
+	const startedFile = path.join(handshake, "started");
+	const gateFile = path.join(handshake, "gate");
 	const childScript = [
-		'import { spawn } from "node:child_process";',
 		'import fs from "node:fs";',
 		'import path from "node:path";',
 		'for (let index = 0; index < 5000; index += 1) fs.writeFileSync(path.join(process.env.TMPDIR, `entry-${index}`), "x");',
-		'const wrapperPid = process.ppid;',
-		'const killer = spawn(process.execPath, ["--input-type=module", "-e", `setTimeout(() => { try { process.kill(${wrapperPid}, "SIGTERM"); } catch {} }, 25);`], { detached: true, stdio: "ignore" });',
-		"killer.unref();",
+		'console.log("WRITTEN");',
 	].join("\n");
 
-	const result = await runWrapper([process.execPath, "--input-type=module", "-e", childScript], { timeoutMs: 10000 });
+	let driven = false;
+	let result;
+	try {
+		result = await runWrapper([process.execPath, "--input-type=module", "-e", childScript], {
+			env: { PI_TEST_CLEANUP_STARTED_FILE: startedFile, PI_TEST_CLEANUP_GATE_FILE: gateFile },
+			timeoutMs: 15000,
+			onStdout(stdout, child) {
+				if (driven || !stdout.includes("WRITTEN")) return;
+				driven = true;
+				void (async () => {
+					const deadline = Date.now() + 10000;
+					while (!fs.existsSync(startedFile) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+					child.kill("SIGTERM");
+					fs.writeFileSync(gateFile, "go\n");
+				})();
+			},
+		});
+	} finally {
+		fs.rmSync(handshake, { recursive: true, force: true });
+	}
+	assert.ok(driven, "the child never reported that it had written its entries");
 
 	assert.ok(result.signal === "SIGTERM" || result.code === 143, `expected cleanup-time SIGTERM cancellation, got ${JSON.stringify(result)}`);
 });

@@ -21,10 +21,16 @@ import { resolveTempRoot } from "./temp-root.mjs";
  * directory `tmux` uses, which leaks the same way.
  *
  * Set PI_KEEP_TEST_TMP=1 to keep the directory for inspection after a failure.
+ *
+ * `--v8-coverage` before the command points NODE_V8_COVERAGE at a directory
+ * inside the run root. c8 takes that as its default temp directory, so the raw
+ * V8 data (about 900 MB per full run) is deleted with the run root instead of
+ * staying in the checkout. The reports c8 writes to `coverage/` are unaffected.
  */
 
-const command = process.argv[2];
-const args = process.argv.slice(3);
+const v8Coverage = process.argv[2] === "--v8-coverage";
+const command = process.argv[v8Coverage ? 3 : 2];
+const args = process.argv.slice(v8Coverage ? 4 : 3);
 
 if (!command) {
 	console.error("with-temp-root: usage: with-temp-root.mjs <command> [args...]");
@@ -77,6 +83,24 @@ const keep = process.env.PI_KEEP_TEST_TMP === "1";
 let cleaned = false;
 
 /**
+ * Test hook: let a test hit the cleanup window deterministically.
+ *
+ * With PI_TEST_CLEANUP_STARTED_FILE set, the file is written as cleanup begins.
+ * With PI_TEST_CLEANUP_GATE_FILE set, cleanup then waits (up to 10 s) for that
+ * file to appear. A test waits for the started file, signals the wrapper, then
+ * creates the gate file, so the signal always lands inside cleanup whatever the
+ * host load. Both are inert when unset.
+ */
+async function announceCleanup() {
+	const startedFile = process.env.PI_TEST_CLEANUP_STARTED_FILE;
+	const gateFile = process.env.PI_TEST_CLEANUP_GATE_FILE;
+	if (startedFile) fs.writeFileSync(startedFile, "started\n");
+	if (!gateFile) return;
+	const deadline = Date.now() + 10_000;
+	while (!fs.existsSync(gateFile) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+}
+
+/**
  * Remove the run root without blocking the event loop.
  *
  * Deliberately asynchronous. A synchronous rmSync holds the loop for as long as
@@ -87,6 +111,7 @@ let cleaned = false;
 async function cleanup() {
 	if (cleaned) return;
 	cleaned = true;
+	await announceCleanup();
 	if (keep) {
 		console.error(`with-temp-root: keeping ${runRoot} (PI_KEEP_TEST_TMP=1)`);
 		return;
@@ -153,6 +178,7 @@ const child = spawn(command, args, {
 		TMP: runRoot,
 		TEMP: runRoot,
 		TMUX_TMPDIR: runRoot,
+		...(v8Coverage ? { NODE_V8_COVERAGE: path.join(runRoot, "v8-coverage") } : {}),
 	},
 });
 

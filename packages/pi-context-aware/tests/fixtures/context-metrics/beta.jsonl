@@ -1,0 +1,3 @@
+{"v":1,"seq":1,"at":"2026-01-01T00:00:00.000Z","sessionId":"beta","leafId":"l","modelId":"m","window":1000,"tokensBefore":0,"tokensAfter":0,"pressure":0.6,"band":"ok","nudge":null,"emergency":null,"passFailed":false,"folds":{"requested":3,"accepted":1,"refused":{"unknown-ref":2},"dropped":{},"tiers":[]},"compaction":null,"usage":{"input":100,"output":5,"cacheRead":100,"cacheWrite":0}}
+{"v":2,"sessionId":"beta","seq":2}
+{"v":1,"seq":3,"at":"2026-01-01T00:00:00.000Z","sessionId":"beta","leafId":"l","modelId":"m","window":1000,"tokensBefore":0,"tokensAfter":0,"pressure":0.3,"band":"ok","nudge":null,"emergency":null,"passFailed":false,"folds":{"requested":0,"accepted":0,"refused":{},"dropped":{},"tiers":[]},"compaction":null,"usage":null}

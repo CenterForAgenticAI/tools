@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	createEventBus,
 	type EventBus,
@@ -10,6 +11,9 @@ import {
 // A stand-in for the Fabric side of `pi-fabric:compaction-owner:v1`. It never imports
 // Fabric. Each behaviour a test relies on follows pi-fabric commit b67da914; the comment
 // above each part names the source file and function it follows.
+
+/** This file compiles to <root>/.test-dist/tests/, so the package root is two levels up. */
+const OWN_ENTRY_FILE = path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".."), "src", "index.ts");
 
 export const OWNER_EVENT = "pi-fabric:compaction-owner:v1";
 // src/protocol.ts: FABRIC_COMPACTION_OWNER_REQUEST_FIELDS, FABRIC_COMPACTION_OWNER_CARRY_FIELDS,
@@ -670,7 +674,14 @@ export function createHostPi(sharedBus?: EventBus): FakeHostPi {
 		sendMessage(message: Json, options?: unknown) { messages.push({ message, options }); },
 		sendUserMessage(message: unknown) { userMessages.push(message); },
 		getActiveTools() { return [...activeTools]; },
-		getAllTools() { return [...tools.values()].map((tool) => ({ name: (tool as { name: string }).name, description: "", parameters: {} })); },
+		// Pi gives every tool the source of the extension that registered it. A tool this extension registers has an
+		// execute function and carries its own entry file; a bare { name } is another extension's (billion-context-pi in a test).
+		getAllTools() {
+			return [...tools.values()].map((tool) => ({
+				name: (tool as { name: string }).name, description: "", parameters: {},
+				...(typeof (tool as { execute?: unknown }).execute === "function" ? { sourceInfo: { path: OWN_ENTRY_FILE } } : {}),
+			}));
+		},
 		setActiveTools(names: string[]) { activeTools = [...names]; },
 		async setModel() { return true; },
 		appendEntry(customType: string, data: unknown) { entries.push({ customType, data }); },

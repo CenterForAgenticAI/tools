@@ -29,6 +29,7 @@ import {
 import {
 	DEFAULT_CONTEXT_POLICY,
 	DEFAULT_PRESSURE_LADDER,
+	effectivePressureLadder,
 	parseContextPolicyValue,
 	parsePressureLadderFraction,
 	type ContextPolicyValue,
@@ -176,10 +177,36 @@ export interface ModesConfig {
  * what the model is sent. While another extension manages context (today
  * billion-context-pi), stripping stays inert and says so once.
  */
+export interface ToolOutputCapConfig {
+	/** Largest tool-result text in UTF-8 bytes; 0 turns the cap off. */
+	maxBytes: number;
+	/** Tools whose results are never capped. */
+	skipTools: string[];
+}
+
+export interface RepetitionGuardConfig {
+	/** Warn (never abort) on the 3rd identical consecutive direct tool call. */
+	enabled: boolean;
+}
+
+export interface OverflowRecoveryConfig {
+	/** Request one compaction after a real main-turn context overflow. */
+	enabled: boolean;
+}
+
 export interface ImageStrippingConfig {
 	enabled: boolean;
 	/** How many of the newest image-bearing messages keep their images. */
 	keepRecent: number;
+}
+
+/** The per-turn metrics log (pi-context-aware#286). It records only while this extension runs the folds. */
+export interface ContextMetricsConfig {
+	enabled: boolean;
+	/** Largest one session file grows before its oldest records are dropped. */
+	maxBytes: number;
+	/** Largest the metrics directory grows before the oldest session files are removed. */
+	maxDirBytes: number;
 }
 
 export type FirstUserMessageMode = "keep" | "fold" | "keep-under-tokens";
@@ -215,6 +242,10 @@ export interface Config {
 	busyProbe?: BusyProbeConfig;
 	modes?: ModesConfig;
 	imageStripping?: ImageStrippingConfig;
+	contextMetrics?: ContextMetricsConfig;
+	toolOutputCap?: ToolOutputCapConfig;
+	repetitionGuard?: RepetitionGuardConfig;
+	overflowRecovery?: OverflowRecoveryConfig;
 	/** How the session keeps its history. Read from the current branch. */
 	contextPolicy?: ContextPolicyValue;
 	/** Pressure thresholds of the context policy; the telemetry bands derive from them. */
@@ -248,9 +279,24 @@ export const DEFAULT_COMPACTION_CLAIM_CONFIG: CompactionClaimConfig = {
 	fabricFallback: true,
 };
 
+export const PROACTIVE_THRESHOLD_PATH = "proactiveCompaction.thresholdFraction";
+
+/** The range `proactiveCompaction.thresholdFraction` accepts. */
+export const PROACTIVE_THRESHOLD_MIN = 0.25;
+export const PROACTIVE_THRESHOLD_MAX = 0.95;
+
+/**
+ * Where proactive compaction triggers when no layer sets `proactiveCompaction.thresholdFraction`:
+ * the pressure ladder's seeded-compaction step (pi-context-aware#244), held to the range the
+ * setting accepts. An explicit `thresholdFraction` in any layer still wins.
+ */
+export function ladderProactiveThreshold(ladder: PressureLadderConfig): number {
+	return Math.min(PROACTIVE_THRESHOLD_MAX, Math.max(PROACTIVE_THRESHOLD_MIN, ladder.seededCompactionFraction));
+}
+
 export const DEFAULT_PROACTIVE_COMPACTION_CONFIG: ProactiveCompactionConfig = {
 	enabled: true,
-	thresholdFraction: 0.78,
+	thresholdFraction: ladderProactiveThreshold(DEFAULT_PRESSURE_LADDER),
 	outputReserveTokens: DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS,
 	preparationStallTimeoutMs: 30_000,
 	preparationFirstOutputGraceMs: 90_000,
@@ -280,9 +326,25 @@ export const DEFAULT_MODES_CONFIG: ModesConfig = {
 	suggestTool: true,
 };
 
+export const DEFAULT_TOOL_OUTPUT_CAP_CONFIG: ToolOutputCapConfig = {
+	maxBytes: 50_000,
+	// Tools that cap their own output, plus load_skill (a skill body can exceed the cap) and fabric_exec.
+	skipTools: ["bash", "read", "grep", "find", "ls", "fabric_exec", "load_skill"],
+};
+
+export const DEFAULT_REPETITION_GUARD_CONFIG: RepetitionGuardConfig = { enabled: true };
+
+export const DEFAULT_OVERFLOW_RECOVERY_CONFIG: OverflowRecoveryConfig = { enabled: true };
+
 export const DEFAULT_IMAGE_STRIPPING_CONFIG: ImageStrippingConfig = {
 	enabled: false,
 	keepRecent: 5,
+};
+
+export const DEFAULT_CONTEXT_METRICS_CONFIG: ContextMetricsConfig = {
+	enabled: true,
+	maxBytes: 4 * 1024 * 1024,
+	maxDirBytes: 64 * 1024 * 1024,
 };
 
 export const DEFAULT_SESSION_NAMING_CONFIG: SessionNamingConfig = {
@@ -315,6 +377,10 @@ export const DEFAULT_CONFIG: Config = {
 	busyProbe: DEFAULT_BUSY_PROBE_CONFIG,
 	modes: DEFAULT_MODES_CONFIG,
 	imageStripping: DEFAULT_IMAGE_STRIPPING_CONFIG,
+	contextMetrics: DEFAULT_CONTEXT_METRICS_CONFIG,
+	toolOutputCap: DEFAULT_TOOL_OUTPUT_CAP_CONFIG,
+	repetitionGuard: DEFAULT_REPETITION_GUARD_CONFIG,
+	overflowRecovery: DEFAULT_OVERFLOW_RECOVERY_CONFIG,
 	contextPolicy: DEFAULT_CONTEXT_POLICY,
 	pressureLadder: DEFAULT_PRESSURE_LADDER,
 	folds: DEFAULT_FOLDS_CONFIG,
@@ -384,6 +450,21 @@ function positiveInteger(min: number): LeafParser {
 	return (value) => (typeof value === "number" && Number.isSafeInteger(value) && value >= min ? value : undefined);
 }
 
+/** An array of non-empty tool names; empty is allowed (cap every tool). */
+function toolNameList(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const names: string[] = [];
+	for (const item of value) {
+		if (typeof item !== "string" || item.trim().length === 0) return undefined;
+		names.push(item.trim());
+	}
+	return names;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
 /** A non-empty array of `provider/model-id` references, e.g. "z-ai/glm-5.3-flash". */
 function modelRefList(value: unknown): string[] | undefined {
 	if (!Array.isArray(value) || value.length === 0) return undefined;
@@ -402,7 +483,7 @@ function modelRefList(value: unknown): string[] | undefined {
 export function normalizeProactiveThreshold(value: unknown): number | undefined {
 	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
 	const fraction = value > 1 && value <= 100 ? value / 100 : value;
-	return fraction >= 0.25 && fraction <= 0.95 ? fraction : undefined;
+	return fraction >= PROACTIVE_THRESHOLD_MIN && fraction <= PROACTIVE_THRESHOLD_MAX ? fraction : undefined;
 }
 
 export const CONFIG_LEAVES: readonly LeafDescriptor[] = [
@@ -466,6 +547,13 @@ export const CONFIG_LEAVES: readonly LeafDescriptor[] = [
 	{ path: "busyProbe.override", parse: oneOf(["auto", "idle", "busy"]), fallback: DEFAULT_BUSY_PROBE_CONFIG.override },
 	{ path: "busyProbe.unattributableStaleMs", parse: positiveInteger(1), fallback: DEFAULT_BUSY_PROBE_CONFIG.unattributableStaleMs },
 	{ path: "modes.suggestTool", parse: bool, fallback: DEFAULT_MODES_CONFIG.suggestTool },
+	{ path: "toolOutputCap.maxBytes", parse: nonNegativeInteger, fallback: DEFAULT_TOOL_OUTPUT_CAP_CONFIG.maxBytes },
+	{ path: "toolOutputCap.skipTools", parse: toolNameList, fallback: DEFAULT_TOOL_OUTPUT_CAP_CONFIG.skipTools },
+	{ path: "repetitionGuard.enabled", parse: bool, fallback: DEFAULT_REPETITION_GUARD_CONFIG.enabled },
+	{ path: "overflowRecovery.enabled", parse: bool, fallback: DEFAULT_OVERFLOW_RECOVERY_CONFIG.enabled },
+	{ path: "contextMetrics.enabled", parse: bool, fallback: DEFAULT_CONTEXT_METRICS_CONFIG.enabled },
+	{ path: "contextMetrics.maxBytes", parse: positiveInteger(4096), fallback: DEFAULT_CONTEXT_METRICS_CONFIG.maxBytes },
+	{ path: "contextMetrics.maxDirBytes", parse: positiveInteger(4096), fallback: DEFAULT_CONTEXT_METRICS_CONFIG.maxDirBytes },
 	{ path: "imageStripping.enabled", parse: bool, fallback: DEFAULT_IMAGE_STRIPPING_CONFIG.enabled },
 	// At least 1: with 0 the image the user just attached would be stripped too.
 	{ path: "imageStripping.keepRecent", parse: positiveInteger(1), fallback: DEFAULT_IMAGE_STRIPPING_CONFIG.keepRecent },
@@ -746,6 +834,16 @@ export function resolveConfigLayers(inputs: readonly ConfigLayerInput[]): Resolv
 
 	const config = {} as Record<string, unknown>;
 	for (const entry of entries) assignPath(config, entry.path, entry.value);
+
+	// No layer set the proactive threshold: it follows the ladder in force (pi-context-aware#244),
+	// so moving `pressureLadder.seededCompactionFraction` moves compaction with it.
+	const thresholdAt = entries.findIndex((entry) => entry.path === PROACTIVE_THRESHOLD_PATH);
+	const threshold = thresholdAt < 0 ? undefined : entries[thresholdAt];
+	if (threshold && threshold.layer === "default") {
+		const derived = ladderProactiveThreshold(effectivePressureLadder(config as { pressureLadder?: PressureLadderConfig }).ladder);
+		entries[thresholdAt] = { ...threshold, value: derived };
+		assignPath(config, PROACTIVE_THRESHOLD_PATH, derived);
+	}
 
 	return {
 		config: config as unknown as Config,

@@ -32,7 +32,7 @@
     {
       "from": "agent",
       "to": "extension",
-      "label": "compact_session"
+      "label": "context_compact"
     },
     {
       "from": "extension",

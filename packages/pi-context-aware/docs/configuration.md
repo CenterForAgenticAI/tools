@@ -25,6 +25,31 @@ declares how that session must behave. Host policy beats a command-line flag on
 purpose: a worker must not be knocked off its declared behaviour by a flag it
 inherited from its parent process.
 
+### Host-owned skill loading
+
+Hosts that already own skill reads can prevent this extension from registering
+`load_skill`:
+
+```sh
+PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL=1 pi
+```
+
+The value `1` disables registration; unset or `0` keeps the standalone default.
+Each extension instance reads this process policy before Pi assembles its tool
+catalog. Project/session settings cannot override it. Recreate existing
+extension instances to apply a changed value.
+
+SDK sessions observe the environment when their factories run. Hosts must also
+forward the variable to separately spawned workers; a foreground
+`--exclude-tools` flag does not configure a separate SDK session.
+
+The opt-out registers no loader and does not change active tools, preserving
+unrelated deferred tools on resume. The outgoing context boundary uses the
+host's canonical `read` tool in matching extension-generated skill guidance.
+This covers both new and saved condensed/stub blocks, including older captures
+when new condensation is off. Stored text, rule bodies and user-authored
+lookalikes stay unchanged. The host must provide `read`.
+
 ### `sessionRole`
 
 `"foreground"` — default — or `"worker"`. A creating process sets it to say what
@@ -132,8 +157,8 @@ Default shape:
   },
   "proactiveCompaction": {
     "enabled": true,
-    "thresholdFraction": 0.78,
-    "outputReserveTokens": 16384
+    "thresholdFraction": 0.9,
+    "outputReserveTokens": 32768
   },
   "modes": {
     "suggestTool": true
@@ -229,6 +254,13 @@ Values:
 "auto-gen" | "user-approve"
 ```
 
+The config file accepts only these two. `autonomous` is a preset, not a stored
+`seedMode` value (`src/platform/config-layers.ts` rejects it in the file). Set it
+with `--context-aware-mode autonomous` or `/context-aware-seed-mode autonomous`
+for the current session. It turns on auto-gen, seed rewrite and
+`always-proceed` ambiguity together, and `/context-aware-seed-mode status`
+reports it while those settings hold.
+
 ### `"auto-gen"` — default
 
 When `/compact-then` is run without a seed:
@@ -272,7 +304,7 @@ Before a generated handoff or task-continuation reminder is used, a
 deterministic check—a fixed-rule check rather than another model
 judgement—compares it with the authority already in the session.
 
-Every `compact_session` seed is a generated handoff, because the agent writes
+Every `context_compact` seed is a generated handoff, because the agent writes
 it as a tool argument. A seed typed into `/compact-then` is not: it is a literal
 user message and keeps user authority. When the approval editor is shown, the
 exact approved bytes are re-evaluated as an explicit raw seed before persistence;
@@ -673,9 +705,9 @@ Controls whether context-aware claims Pi's `session_before_compact` hook and ret
 
 `enabled` defaults to `true`, preserving the existing summary, context-cache, transcript-reference, and workstream augmentation behavior. Set it to `false` when another extension owns summarization. In that mode context-aware does not claim unrelated threshold or manual compactions and never supplies a summary. If ownership changes after context-aware already initiated a proactive compaction, it may return `{ "cancel": true }` only to cancel that stale context-aware attempt and its generated handoff. Tasks, durable focus, telemetry, recall, and the other non-summary features remain available.
 
-Context-aware's explicit handoff flows depend on its summary contract, so while summarization is deferred, neither `compact_session` nor `/compact-then` is registered. Registration normally happens at extension load. When the current project's `.pi/context-aware.json` sets `summarizer.enabled`, it waits for `session_start`, because only a session can tell whether that project is trusted. The context-awareness guidance, telemetry actions, and check-in prompt stop telling the agent to compact. Tasks, focus, telemetry, and `search_prior_sessions` stay available. A `summarizer.enabled: false` set by a session policy entry after load cannot unregister the tool, so it still fails before starting compaction and tells you to set `summarizer.enabled` to `true`. Use the other compactor's own handoff command while this switch is off.
+Context-aware's explicit handoff flows depend on its summary contract, so while summarization is deferred, neither `context_compact` nor `/compact-then` is registered. Registration normally happens at extension load. When the current project's `.pi/context-aware.json` sets `summarizer.enabled`, it waits for `session_start`, because only a session can tell whether that project is trusted. The context-awareness guidance, telemetry actions, and check-in prompt stop telling the agent to compact. Tasks, focus, telemetry, and `context_recall` stay available. A `summarizer.enabled: false` set by a session policy entry after load cannot unregister the tool, so it still fails before starting compaction and tells you to set `summarizer.enabled` to `true`. Use the other compactor's own handoff command while this switch is off.
 
-An extension that cancels every compaction, such as `billion-context-pi`, has the same effect on these surfaces without any setting. Context-aware detects it at session start and hides `compact_session` instead of unregistering it. See [compaction blocked by another extension](commands-and-concepts.md#compaction-blocked-by-another-extension).
+An extension that cancels every compaction, such as `billion-context-pi`, has the same effect on these surfaces without any setting. Context-aware detects it at session start and hides `context_compact` instead of unregistering it. See [compaction blocked by another extension](commands-and-concepts.md#compaction-blocked-by-another-extension).
 
 This leaf participates in global, trusted-project, session-policy, and host-policy precedence. An untrusted project's `.pi/context-aware.json` cannot change summary ownership; its `summarizer.enabled` leaf is ignored until the project is trusted. There is no CLI flag or setter command for it; edit `~/.pi/agent/context-aware.json`, a trusted project `.pi/context-aware.json`, or a host/session policy entry.
 
@@ -692,7 +724,7 @@ Controls whether context-aware claims compaction from pi-fabric, so that this ex
 }
 ```
 
-`enabled` defaults to `false`. With it off, context-aware sends nothing to pi-fabric and compaction behaves exactly as it did before this setting existed. Leave it off while `billion-context-pi` is in the profile: that extension stays the only live context manager until it is removed, and the claim is meant to be turned on at that point. Turning it on while `billion-context-pi` is loaded does nothing, because context-aware cannot compact there. The setting, like `summarizer.enabled`, is ignored in an untrusted project's `.pi/context-aware.json`.
+`enabled` defaults to `false`. With it off, context-aware sends nothing to pi-fabric and compaction behaves exactly as it did before this setting existed. Leave it off while `billion-context-pi` is in the profile: that extension stays the only live context manager until it is removed, and the claim is meant to be turned on at that point. Turning it on while `billion-context-pi` is loaded does nothing, because context-aware cannot compact there. Both `enabled` and `fabricFallback`, like `summarizer.enabled`, are ignored in an untrusted project's `.pi/context-aware.json`.
 
 With `enabled: true`, context-aware sends one claim on the `pi-fabric:compaction-owner:v1` channel at `session_start`. It names `pi-context-aware`, its version, and the actions it supports: `request`, `status`, `pressure`, `carry` and `cancel`. pi-fabric may answer during the send or a little later, because it loads its claim code on the first claim. Until it answers, the claim is pending: it is not held, pi-fabric's own compactor keeps compacting, and no second claim is sent. If nobody answers within 5 seconds, context-aware cancels the claim, treats pi-fabric as not loaded for that session, and nothing changes: Pi's own summarizer runs as usual. A grant that arrives after that, or after the setting is turned off, the session ends or a new session starts, is withdrawn at once. The next session asks again. The claim does not take `/tree` branch summaries; pi-fabric keeps those.
 
@@ -705,9 +737,9 @@ While the claim is held:
 - `compact.pressure` reports the stage of the [pressure ladder](#pressureladder) and its four thresholds. `compact.status` reports whether the fallback is on, the carry count, and any queued request.
 - The model that writes the summary also sees an index of the active folds: each fold's topic, range and message refs, with a pointer to `context_recall` for the original text.
 
-`fabricFallback` decides what happens when the model summary fails or no model is available. With `true` (the default), the summary comes from pi-fabric's deterministic compactor, which also renders the carry list. With `false`, or when pi-fabric cannot produce one, context-aware returns no result and Pi's own summarizer runs. This also applies when overflow recovery or transient retries are exhausted: without the claim context-aware cancels the compaction in those cases, but while the claim is held pi-fabric has stood down, so a cancel would leave nobody to compact. Only if both fail is the last step of the [pressure ladder](#pressureladder), the recoverable hide at `recoverableHideFraction` (95%), left to act. That step is configured and reported but not yet acted on by this extension.
+`fabricFallback` decides what happens when the model summary fails or no model is available. With `true` (the default), the summary comes from pi-fabric's deterministic compactor, which also renders the carry list. With `false`, or when pi-fabric cannot produce one, context-aware returns no result and Pi's own summarizer runs. This also applies when overflow recovery or transient retries are exhausted: without the claim context-aware cancels the compaction in those cases, but while the claim is held pi-fabric has stood down, so a cancel would leave nobody to compact. Only if both fail is the last step of the [pressure ladder](#pressureladder), at `recoverableHideFraction` (95%), left to act. That step is not the recoverable hide the policy promises: it is the fold engine's emergency truncation of the request, which shortens large old messages and tells you so. See [What the last step does](#what-the-last-step-does).
 
-After each committed compaction, context-aware reads the newest compaction entry on the active branch, the same source used by `/context-status`. Only a live held claim creates an expectation that context-aware writes: no-Fabric, refused, faulted, released, and other non-held states leave Fabric or Pi in charge and do not warn. While the claim is held, a summary written by Fabric's engine or another extension produces one warning per session. A named extension is shown only when its bounded metadata name contains no control, format, line/paragraph separator, surrogate, or private-use characters; otherwise it is reported as `another extension`. A `fromHook: true` entry with missing or non-object details is also a valid unnamed extension commit and warns. Context-aware's own summaries, Fabric fallbacks carrying `claimOwner: "pi-context-aware"`, Pi's intentional last-resort summary, and truly malformed metadata do not warn. `/context-status` and the typed context snapshot report the newest committed writer.
+After each committed compaction, context-aware reads the newest compaction entry on the active branch, the same source used by `/context-status`. Only a live held claim creates an expectation that context-aware writes: no-Fabric, refused, faulted, released, and other non-held states leave Fabric or Pi in charge and do not warn. While the claim is held, a summary written by Fabric's engine or another extension produces one warning per session. A named extension is shown only when its bounded metadata name contains no control, format, line/paragraph separator, surrogate, or private-use characters; otherwise it is reported as `another extension`. A `fromHook: true` entry with missing or non-object details is also a valid unnamed extension commit and warns. Context-aware's own summaries, Fabric fallbacks carrying `claimOwner: "pi-context-aware"`, Pi's intentional last-resort summary, and truly malformed metadata do not warn. `/context-status`, the typed context snapshot and the `context_status` tool report the newest committed writer. The tool's `compactions` view (also part of a call with no view) prints `Last committed compaction writer: <name>`, or `none` when the branch has no compaction, from the same observation as `/context-status`. Its `details` carry the same value as `writer: { kind, name }`, and each listed boundary carries the writer of that compaction.
 
 The claim is withdrawn, and pi-fabric's compactor compacts again, when `enabled` becomes `false` (at the next turn or settled boundary), when the session shuts down, when the extension unloads, and when an action fails for a reason other than its input, returns a result pi-fabric would reject, or runs past pi-fabric's 30-second bound. A call that the calling program cancels keeps the claim. After such a failure context-aware does not claim again until the next session. Another extension that already holds the claim keeps it; context-aware does not take it over and does not ask again until the next session.
 
@@ -721,8 +753,8 @@ Shape:
 {
   "proactiveCompaction": {
     "enabled": true,
-    "thresholdFraction": 0.78,
-    "outputReserveTokens": 16384,
+    "thresholdFraction": 0.9,
+    "outputReserveTokens": 32768,
     "preparationStallTimeoutMs": 30000,
     "preparationFirstOutputGraceMs": 90000,
     "commitDrainTimeoutMs": 10000
@@ -733,8 +765,8 @@ Shape:
 When enabled, after each provider-completed assistant turn, context-aware:
 
 1. reads current usage including trailing tool results;
-2. computes a usable generation reserve as `min(outputReserveTokens, model.maxTokens) + 2,048 protocol-overhead tokens` (bounded by the context window);
-3. triggers when either `thresholdFraction` is crossed or headroom is below that reserve;
+2. computes a usable generation reserve as `min(outputReserveTokens, model.maxTokens) + 2,048 protocol-overhead tokens` (bounded by the context window). `model.maxTokens` is the model's real maximum output; `outputReserveTokens` is only the cap (see "How much reply space is held back" below);
+3. triggers when either `thresholdFraction` is crossed or headroom is below that reserve. `thresholdFraction` is a share of the full context window. When no layer sets it, it follows the pressure ladder's `seededCompactionFraction` (90% by default), held to the 25%–95% range this setting accepts. A value you set in any layer wins over the ladder, and `/context-status` shows which one applies;
 4. records or coalesces the pending trigger, starts the cancellation drain, and returns from `turn_end` without a model wait;
 5. waits for Pi's public `agent_settled` boundary and verifies `ctx.isIdle()` before launching background seed preparation;
 6. generates a raw next-phase seed from the conversation and rewrites it into a self-contained prompt using non-blocking ambiguity handling; thinking/tool-call events count as liveness during `preparationFirstOutputGraceMs`, text output then uses `preparationStallTimeoutMs`, and the absolute preparation ceiling is five minutes;
@@ -752,7 +784,7 @@ Right after a compaction or an overflow recovery, Pi reports no context size unt
 - A stale marker does not survive. Once the cooldown that set the marker has expired, or a later cooldown (for example after a genuine failure) has replaced it, the next idle boundary discards the marker. This happens even when the size is still unknown.
 - A measured size ends the wait. The next check then uses the normal threshold and reserve rules, including the cooldown.
 
-The wait has no time limit of its own: the extension stays proactively idle until Pi reports a valid size. A measured size comes from Pi's own report or from the first later assistant reply that completed without an error and was not aborted; the usage on an error or aborted reply is partial and is not used. Waiting does not recover an overflow. While the size is unknown, recovery depends on Pi's native automatic compaction settings. If Pi's automatic compaction is turned off, nothing compacts the session until the size is measured or you run `/compact` or `compact_session` yourself.
+The wait has no time limit of its own: the extension stays proactively idle until Pi reports a valid size. A measured size comes from Pi's own report or from the first later assistant reply that completed without an error and was not aborted; the usage on an error or aborted reply is partial and is not used. Waiting does not recover an overflow. While the size is unknown, recovery depends on Pi's native automatic compaction settings. If Pi's automatic compaction is turned off, nothing compacts the session until the size is measured or you run `/compact` or `context_compact` yourself.
 
 The check runs after normal, tool-use, length-limited, and error turns, but not after a user-aborted turn. This matters for internal tool loops: Pi can otherwise proceed directly from a large tool result to another provider request without reaching an outer user-message boundary. Generation-reserve and threshold triggers share the proactive-compaction cooldown, whose full duration restarts when compaction completes. This prevents an ineffective compaction from immediately re-arming the provider drain. The separate one-shot output-limit recovery carries explicit state from the discarded length-limited response into its turn completion, so it may cross the ordinary proactive cooldown once without restoring a general generation-reserve exemption.
 
@@ -765,14 +797,15 @@ Generating a summary takes minutes, and idleness at queue time does not survive 
 Liveness is therefore re-checked when the summary is ready to commit, not only when the work was queued:
 
 - **No run in flight.** The prepared boundary is returned unchanged and nothing is aborted. This includes Pi's own automatic compaction after a run has ended, where the session still reports itself busy but no loop holds the array.
+- **A run that started during summarization.** When no run was going as the compaction began, a run found at commit time came from a wake message (a `tmux-job` completion or an intercom message). It is waited for, not aborted, for up to five minutes, and the wait counts as no refused attempt. A run that outlives the five minutes is ended as in the next item.
 - **A run in flight.** The run is ended through the same provider drain the trigger path uses, and the commit waits up to `commitDrainTimeoutMs` for that run to finish before applying the boundary.
-- **A run that outlives the budget.** The compaction is refused: Pi records no compaction entry, the extension reports it as unapplied rather than completed, the generated summary is retained so a retry on the same branch does not pay for it twice, and the work is queued again for the next idle boundary. A compaction refused twice in a row is abandoned with an error instead of looping through another summary.
+- **A run that outlives the budget.** The compaction is refused: Pi records no compaction entry, the extension reports it as unapplied rather than completed, the generated summary is retained so a retry on the same branch does not pay for it twice, and the work is queued again for the next idle boundary. After two refusals in a row the notice says so and the compaction stays queued with a fresh two-attempt budget; it runs at the next idle boundary, never in a tight loop. If it still does not apply, run `/compact` once the session is idle. The stop text of an interrupted turn names its real cause: a threshold trip, or a queued compaction being applied.
 
 Verify a real reduction the way the issue's evidence was gathered: on the assistant messages either side of a compaction entry, a boundary that landed shows `cacheRead` dropping to `0` with a large `cacheWrite` (a rebuilt prefix), while a boundary that changed nothing shows `cacheRead` continuing with a small incremental `cacheWrite`.
 
 `commitDrainTimeoutMs` defaults to `10000` (10 seconds); ending a run is signal-based and normally unwinds in milliseconds. Raise it for sessions whose tool calls take longer to unwind, or set `0` to never wait and always re-queue instead.
 
-`outputReserveTokens` defaults to `16384` and is configurable independently of the percentage threshold. `preparationStallTimeoutMs` defaults to `30000` (30 seconds) after text output begins. `preparationFirstOutputGraceMs` defaults to `90000` (90 seconds) so reasoning models can think before their first text token. Both values are resolved through the normal configuration layers and appear with provenance in `/context-status` and the typed service snapshot. The absolute five-minute ceiling bounds total preparation even while thinking or text events continue. It is an intended generation allowance, not a promise that every response will use that many tokens. Models advertising a smaller maximum output automatically use the smaller limit; models advertising a larger maximum still use the configured allowance unless you raise it.
+`outputReserveTokens` defaults to `32768` and is configurable independently of the percentage threshold. It is a cap on the reply space the trigger holds back, not the amount itself: the amount is the model's own maximum output when that is smaller. `preparationStallTimeoutMs` defaults to `30000` (30 seconds) after text output begins. `preparationFirstOutputGraceMs` defaults to `90000` (90 seconds) so reasoning models can think before their first text token. Both values are resolved through the normal configuration layers and appear with provenance in `/context-status` and the typed service snapshot. The absolute five-minute ceiling bounds total preparation even while thinking or text events continue. It is an intended generation allowance, not a promise that every response will use that many tokens. Models advertising a smaller maximum output automatically use the smaller limit; models advertising a larger maximum still use the configured allowance unless you raise it.
 
 ### Commands
 
@@ -780,7 +813,7 @@ Verify a real reduction the way the issue's evidence was gathered: on the assist
 /context-aware-proactive status
 /context-aware-proactive on
 /context-aware-proactive off
-/context-aware-proactive 78%
+/context-aware-proactive 85%
 /context-aware-proactive 0.8
 /context-aware-proactive reserve 16384
 /context-aware-proactive reserve=32k
@@ -789,7 +822,7 @@ Verify a real reduction the way the issue's evidence was gathered: on the assist
 /context-aware-proactive commit-drain 10s
 ```
 
-Thresholds accept either fractions (`0.78`) or percentages (`78`, `78%`). Valid range is 25%–95%. Reserve values accept exact tokens or `k`/`m` suffixes. Stall, first-output and commit-drain values accept milliseconds, seconds, or minutes (for example, `stall 30s`, `first-output 90s` and `commit-drain 10s`); only commit-drain accepts `0`, meaning never wait for an in-flight run. The equivalent ephemeral CLI override is `--context-aware-proactive reserve=32k`.
+Thresholds accept either fractions (`0.85`) or percentages (`85`, `85%`). Valid range is 25%–95%. Setting one writes `proactiveCompaction.thresholdFraction` to the config file and so pins it: the ladder no longer moves it. Other commands that save the config file leave an unset threshold unset. Reserve values accept exact tokens or `k`/`m` suffixes. Stall, first-output and commit-drain values accept milliseconds, seconds, or minutes (for example, `stall 30s`, `first-output 90s` and `commit-drain 10s`); only commit-drain accepts `0`, meaning never wait for an in-flight run. The equivalent ephemeral CLI override is `--context-aware-proactive reserve=32k`.
 
 The status output includes the effective values, their sources, and the current proactive lifecycle (`idle`, `pending`, `generating`, `queued`, `compacting`, `cooldown`, `failed`, or `cancelled`). It also shows the most recent proactive failure while a static fallback or cooldown remains active. A CLI threshold sets only `enabled` and `thresholdFraction`; a CLI reserve sets only `outputReserveTokens`. Unnamed values continue to come from their own winning layers, so the summary source can be `mixed`. Run `/context-status layers` for the full six-layer attribution.
 
@@ -800,6 +833,30 @@ Controls the model-facing `suggest_mode` tool. The default is `true`. Set
 `--context-aware-modes-suggest-tool=off`, to hide the tool declaration. The
 layered resolver applies the same default → global → project → CLI → session →
 host precedence as the other leaves.
+
+## `contextMetrics`
+
+Records one line of numbers per model request, so the cut-over step 5 and pilot sessions can be compared afterwards. On by default. It records only while this extension runs the folds; while billion-context-pi manages context, nothing is written.
+
+Shape:
+
+```json
+{
+  "contextMetrics": {
+    "enabled": true,
+    "maxBytes": 4194304,
+    "maxDirBytes": 67108864
+  }
+}
+```
+
+The file is `<agent dir>/context-aware/metrics/v1/<session-id>.jsonl`, mode 0600 in a directory only you can use; a symlinked or foreign-owned path is refused. Each line is a record with `v: 1` holding: time, session id, branch leaf id, model id, window; tokens before and after the per-turn pass, pressure fraction and ladder band (`ok`, `warn`, `urgent`); the kind of nudge sent; emergency truncation and hide counts; folds requested, accepted, refused and dropped at turn end (counts by reason code); a compaction that committed since the last record (writer, tokens before and after); and the previous turn's provider usage (input, output, cache read, cache write). Each field is copied by name and checked. No message text, summary, tool argument or error text is written.
+
+When a file would pass `maxBytes`, the oldest records are dropped first. When the directory would pass `maxDirBytes`, the oldest other session files are removed. `/session-erase` removes the session's file.
+
+The default is on for every profile. Profile-specific defaults are not implemented; set `contextMetrics.enabled` to `false` to switch it off.
+
+Summarise a set of sessions with `node scripts/context-metrics-summary.mjs <metrics-dir | file.jsonl>...` (add `--json` for machine output): folds per session, refusal reasons, pressure at each fold, compactions and cache-read share. A torn last line and records of another version are skipped.
 
 ## `imageStripping`
 
@@ -821,6 +878,54 @@ When `enabled` is `true`, only the newest `keepRecent` image-bearing messages ke
 The wire format is read from the request body, not from the session model's api. Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses bodies are supported, so stripping also works when the model api is a logical name such as `unified` or an alias such as `hypha-anthropic-oauth`. When stripping is enabled but a request body has another shape (for example Google `contents`), the request is sent unchanged and context-aware warns once per session. Only the first unsupported shape is reported: a later request with a different unsupported shape is also sent unchanged, without a new warning. The warning is shown again after the session restarts.
 
 While billion-context-pi manages context in the session, stripping stays inactive and context-aware says so once. `/context-status` shows the effective state on its `Image stripping:` line.
+
+## `toolOutputCap`
+
+Head-truncates the text of a tool result that is larger than `maxBytes` and appends one notice. It protects the context from a runaway MCP or extension result. Default on.
+
+```json
+{
+  "toolOutputCap": {
+    "maxBytes": 50000,
+    "skipTools": ["bash", "read", "grep", "find", "ls", "fabric_exec", "load_skill"]
+  }
+}
+```
+
+- `maxBytes` counts UTF-8 bytes of the text parts. `0` turns the cap off. The cut never splits a character. Images pass through. A result that already carries the notice, or that Pi reports as truncated, is not cut again.
+- `skipTools` lists tools that are never capped: the ones that cap their own output, plus `load_skill` (a skill body can be longer than the cap) and `fabric_exec`. An empty list caps every tool.
+- Calls made inside a Fabric or Jev program (ids `fabric_…`, `jev:…`, `component:…`, `<parent>/<n>`) are never capped, because no model reads them.
+- An untrusted project's `.pi/context-aware.json` cannot set `maxBytes` or `skipTools`.
+
+## `repetitionGuard`
+
+Appends a warning to the result when the model makes the same direct tool call three times in a row with identical arguments. Warn only: no call is ever blocked or aborted. On by default.
+
+```json
+{
+  "repetitionGuard": { "enabled": true }
+}
+```
+
+- The count covers the model's own calls. Calls inside a Fabric or Jev program (ids `fabric_…`, `jev:…`, `component:…`, `<parent>/<n>`) are never counted and do not break the model's run.
+- A changed argument, a different tool, or new user input starts the count again.
+- Set `enabled` to `false` to turn the guard off. This replaces billion-context-pi's guard, which aborted the turn at five repeats and ended polling Fabric programs (pi-context-aware#169).
+
+## `overflowRecovery`
+
+After a real main-turn context overflow, requests one compaction at the next idle point. Default on.
+
+```json
+{
+  "overflowRecovery": { "enabled": true }
+}
+```
+
+- An overflow is what pi-ai's `isContextOverflow` reports for the assistant message. Throttles, 429s, quota and network errors do not count.
+- It acts only when Pi's own automatic compaction is off (Pi recovers an overflow itself when it is on) and no compaction is already running.
+- It runs once. If the next reply also overflows, the error is shown and no second compaction starts. A reply that succeeds ends the episode.
+- It learns no context window and reserves no headroom: `proactiveCompaction.outputReserveTokens` already does the second.
+- An untrusted project's `.pi/context-aware.json` cannot switch it off.
 
 ## `contextPolicy`
 
@@ -939,8 +1044,8 @@ These are starting defaults and may change after pilot runs.
 | Below the ladder | — | under 45% | `OK` | none |
 | Fold nudges | `foldNudgeStartFraction` to `foldNudgeEndFraction` | 45% to 75% | `WARN`, from `foldNudgeStartFraction` | `gate-broad-work` |
 | Between the last fold nudge and compaction | — | 75% to 90% | `WARN` | `gate-broad-work` |
-| Seeded compaction | `seededCompactionFraction` | 90% | `URGENT`, from `seededCompactionFraction` | `compact-before-tool` when `compact_session` is reachable; otherwise `finish-atomic-work` |
-| Recoverable hide, only when compaction cannot run | `recoverableHideFraction` | 95% | `URGENT` | `compress-before-tool` when the replacement is reachable; otherwise `finish-atomic-work` |
+| Seeded compaction | `seededCompactionFraction` | 90% | `URGENT`, from `seededCompactionFraction` | `compact-before-tool` when `context_compact` is reachable; otherwise `finish-atomic-work` |
+| Last step: recoverable hide (shorten with a `context_recall` pointer, saved at the next boundary) | `recoverableHideFraction` | 95% | `URGENT` | `compress-before-tool` when the replacement is reachable; otherwise `finish-atomic-work` |
 
 So the band edges are:
 
@@ -966,10 +1071,110 @@ URGENT. With the new defaults, 50% changes from `not-advised` to `advised`,
 and 85% changes from `required` to `advised`. This affects consumers of the
 existing snapshot field even if they do not use the new `policy` capability.
 
-In this release only the telemetry bands and phase-boundary advice read the
-ladder. Proactive compaction still triggers at
-`proactiveCompaction.thresholdFraction`, which defaults to
-78%. Fold nudges and the recoverable hide are not acted on yet.
+### What each step drives
+
+The ladder is the one source of truth. Every step is a share of the **context
+window**, the same denominator for all of them:
+
+| Ladder value | Drives |
+| --- | --- |
+| `foldNudgeStartFraction` | The fold pass starts nudging the model to fold (the kernel's `nudge.minContextLimitPct`), and the `WARN` band. |
+| `foldNudgeEndFraction` | The nudge becomes the forced over-limit nudge (`nudge.maxContextLimitPct`). |
+| `seededCompactionFraction` | Proactive compaction, unless `proactiveCompaction.thresholdFraction` is set (below), and the `URGENT` band. |
+| `recoverableHideFraction` | The emergency nudge (`nudge.emergencyThresholdPct`) and the emergency truncation (`truncate.threshold`). |
+
+Change a value in `pressureLadder` and the nudges, compaction and the last step
+all move with it. An engine setting passed in code still beats the ladder.
+`proactiveCompaction.thresholdFraction`, when set in any layer, beats the
+ladder for compaction only. The fold nudges and the last step have no setting of
+their own.
+
+**Why the window.** Telemetry, proactive compaction and the ladder settings
+already read the full window, and a share of the window is what a person means
+by "90% full". The fold pass used to take each step as a share of a smaller
+limit, the window less the model's output reserve (at most a quarter of it).
+That made one percentage mean different token counts in different places, and
+on models with a large output cap the 95% truncation ran before the 90%
+compaction. The output reserve now has its own control, the generation-reserve
+trigger of proactive compaction (`outputReserveTokens`), which compacts when
+headroom for a reply runs short. It no longer moves the fold steps.
+
+**How much reply space is held back.** The generation-reserve trigger holds back
+`min(outputReserveTokens, the model's maximum output) + 2,048` tokens. The first term is the
+model's real limit, so a model that can write 8,000 tokens holds back 8,000, not a fixed figure.
+The default cap is 32,768 tokens, about 25,000 words in a single reply. Without a cap, a model
+with a 128,000-token output limit would start compaction when 47% of a 272,000-token window was
+used, for a reply that is almost never that long. A cap of 32,768 keeps 87% or more of a window
+that size usable and still leaves room for a long reply. Raise it (`/context-aware-proactive reserve 64k`)
+if your work routinely asks for very long single replies.
+
+Worked examples from the pinned model data (`@earendil-works/pi-ai` 1.5.0), with the default cap:
+
+| Model | Window | Maximum output | Held back (cap + 2,048) | Trigger fires above | Window left usable |
+| --- | --- | --- | --- | --- | --- |
+| openai gpt-5.2 | 400,000 | 128,000 | 34,816 | 365,184 | 91% |
+| openai gpt-5.5 | 272,000 | 128,000 | 34,816 | 237,184 | 87% |
+| anthropic claude-opus-4-5 | 200,000 | 64,000 | 34,816 | 165,184 | 83% |
+| anthropic claude-opus-4-8 | 1,000,000 | 128,000 | 34,816 | 965,184 | 97% |
+| google gemini-2.5-pro | 1,048,576 | 65,536 | 34,816 | 1,013,760 | 97% |
+
+The trigger is checked only after a completed turn, and not for a worker role, a Fabric child,
+or during the cooldown. In those cases the per-request fold steps are the only guard, so a
+very large output limit on a model that can fill the rest of the window in one reply can still
+overrun between checks. The fold steps are fractions of the whole window and do not hold back
+a reply.
+
+If a layer sets the ladder out of order the whole ladder falls back to the
+defaults, so the nudges, compaction and the last step all use the defaults
+together.
+
+### What the last step does
+
+At `recoverableHideFraction` the fold engine runs a **recoverable hide**
+(pi-context-aware#268). It runs whenever usage reaches the step. It is not gated on
+whether compaction can run; this replaces the "only when compaction cannot run"
+wording of pi-context-aware#114 and #129.
+
+The hide picks the same messages the fold engine's emergency truncation picks: large
+old tool results, and large old user and assistant messages, outside the newest few
+messages. Fold summaries are never touched. Each picked message keeps its first and
+last 2,000 characters and the `[truncated for context space]` marker, plus a pointer line:
+
+```text
+[Recover the original with context_recall({ ref: "h1" }).]
+```
+
+How it runs:
+
+- On the first request above the step, the message is shortened in that request only,
+  as emergency truncation always did, and the engine queues it.
+- At the next boundary (`turn_end` or `agent_before_settle`) the engine writes, for each
+  queued message, a `context-aware.hide.v1` custom entry (ids `h1`, `h2`, ...) and a
+  `context_edit` that replaces the message with the shortened text and the pointer line.
+  From then on Pi applies the hide to every request, and it does not repeat.
+- `context_recall({ ref: "h1" })` returns the original entry, read from the session, in
+  pages. The hide stays in place.
+- A hide is not a fold. The fold engine does not count it, nudge about it, number it
+  among the `b<N>` blocks or absorb it into a higher tier. A later fold that covers a hidden
+  message ends the hide: the fold's summary replaces it.
+- If Pi refuses a hide at the boundary, it is left out; the fold drafts and the other hides
+  still go through, the session stays consistent, and the next request above the step
+  queues it again.
+- The session file keeps every original. Nothing is deleted.
+
+It is no longer silent. Each time it acts:
+
+- one line goes to `context-aware-debug.log` on every request at or above the
+  step: `fold pass: emergency truncation usage=… threshold=… tokens=…/… truncated=N`,
+  with `skipped="…"` when it found nothing to shorten and `terminal-escape` when
+  the engine reports that nothing it does can bring the session under the limit;
+- one warning is shown in the interface for each of three events, once per
+  stretch above the step: messages were shortened, shortening ran and reclaimed
+  nothing, and the context is stuck (no range worth folding, nothing to
+  shorten, three requests in a row). The notice repeats only after usage has
+  dropped below the step and risen again. The terminal escape stays the last resort.
+
+Without an interface the log line is the only record.
 
 Each value must be a number greater than 0 and at most 1. A value outside that
 range is ignored, like any other invalid setting, and a lower layer supplies

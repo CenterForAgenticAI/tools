@@ -7,6 +7,7 @@ import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-cod
 import { SessionDatabase } from "../src/erasure/database.js";
 import { registerSessionErasure } from "../src/erasure/extension.js";
 import { paritySessionFile } from "../src/parity/records.js";
+import { metricsSessionFile } from "../src/metrics/records.js";
 import { eraseSession } from "../src/erasure/session-erasure.js";
 import { restoredErasedSessions } from "../src/erasure/restored.js";
 
@@ -15,7 +16,7 @@ let exitCodeBefore: typeof process.exitCode;
 beforeEach(() => { exitCodeBefore = process.exitCode; });
 afterEach(() => { process.exitCode = exitCodeBefore; });
 
-for (const kind of ["transcript", "orphan", "side", "parity"] as const) {
+for (const kind of ["transcript", "orphan", "side", "parity", "metrics"] as const) {
 	test(`startup and refused shutdown report restored ${kind} without deleting it; re-erasure needs consent`, async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "erasure-restored-"));
 		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<unknown>>();
@@ -25,7 +26,7 @@ for (const kind of ["transcript", "orphan", "side", "parity"] as const) {
 		let confirmations = 0;
 		let shutdowns = 0;
 		const file = path.join(root, "sessions", "project", "2026-01-01T00-00-00-000Z_gone.jsonl");
-		const restored = kind === "transcript" || kind === "orphan" ? file : kind === "side" ? `${file}.acp.json` : paritySessionFile(root, "gone");
+		const restored = kind === "transcript" || kind === "orphan" ? file : kind === "side" ? `${file}.acp.json` : kind === "metrics" ? metricsSessionFile(root, "gone") : paritySessionFile(root, "gone");
 		const contents = kind === "transcript" ? '{"type":"session","version":3,"id":"gone","timestamp":"2026-01-01","cwd":"/test"}\n' : kind === "orphan" ? '{"type":"thinking_level_change","thinkingLevel":"off"}\n' : "Restored backup";
 		const pi = { on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<unknown>) => handlers.set(name, handler), registerCommand: (name: string, command: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => commands.set(name, command) } as unknown as ExtensionAPI;
 		const ctx = { hasUI: true, sessionManager: { getSessionId: () => "gone", getSessionFile: () => file }, shutdown: () => { shutdowns++; }, ui: { notify: (message: string) => notices.push(message), confirm: async () => { confirmations++; return consent; } } } as unknown as ExtensionContext;

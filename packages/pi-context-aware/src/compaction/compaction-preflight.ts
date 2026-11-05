@@ -30,10 +30,10 @@ import { ALREADY_COMPACTED_TOOL_MESSAGE, NOTHING_TO_COMPACT_TOOL_MESSAGE } from 
 // minimum (PI_MINIMUM_VERSION in scripts/check-pi-dependencies.mjs), so no
 // compatibility job reinstalls them to recheck the pin. On them the preflight
 // proceeds and Pi's own refusal stays handled by decideCompactionError().
-export const VERIFIED_PI_VERSIONS: ReadonlySet<string> = new Set(["1.4.0"]);
+export const VERIFIED_PI_VERSIONS: ReadonlySet<string> = new Set(["1.4.0", "1.5.0"]);
 
 /**
- * Estimated tokens for this compact_session call's persisted result and the
+ * Estimated tokens for this context_compact call's persisted result and the
  * nearby tail that commonly lands before Pi compacts. Later entries from
  * turn_end, agent_before_settle, or other extensions are outside the snapshot
  * contract and may exceed this estimate.
@@ -186,7 +186,7 @@ export type CompactionPreflightBoundary =
 	/** Pi compacts now, before anything else can change the session. */
 	| { kind: "idle" }
 	/**
-	 * compact_session is executing. Pi compacts after this run settles, so the
+	 * context_compact is executing. Pi compacts after this run settles, so the
 	 * branch will also hold this call's result, whose text is `resultText`.
 	 */
 	| { kind: "tool-call"; toolCallId: string; resultText: string };

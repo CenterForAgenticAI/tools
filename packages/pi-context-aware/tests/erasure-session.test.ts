@@ -6,6 +6,7 @@ import path from "node:path";
 import { eraseSession, sweepMissingSessions } from "../src/erasure/session-erasure.js";
 import { SessionDatabase } from "../src/erasure/database.js";
 import { paritySessionFile } from "../src/parity/records.js";
+import { metricsSessionFile } from "../src/metrics/records.js";
 import { answerRecall } from "../src/cache/recall.js";
 import { boundCacheDocuments, migrateCachePool, promoteCacheFile, readManifest, writeCacheFile, writeManifest } from "../src/cache/context-cache.js";
 import { sessionDatabaseFile } from "../src/erasure/database.js";
@@ -34,9 +35,12 @@ function fixture() {
 	const parity = paritySessionFile(root, "old");
 	fs.mkdirSync(path.dirname(parity), { recursive: true });
 	fs.writeFileSync(parity, "parity evidence\n");
+	const metrics = metricsSessionFile(root, "old");
+	fs.mkdirSync(path.dirname(metrics), { recursive: true });
+	fs.writeFileSync(metrics, "metrics evidence\n");
 	const cache = path.join(root, "context-cache", "pool");
 	writeManifest(cache, writeCacheFile(cache, { version: 1, files: {} }, "old", "note.md", "ORCHID evidence", "a note"));
-	return { root, file, parity, cache, sessions: [{ id: "old", path: file }] };
+	return { root, file, parity, metrics, cache, sessions: [{ id: "old", path: file }] };
 }
 
 test("whole-session erasure deletes transcript, ACP, parity and confirmed cache; recall finds nothing", async () => {
@@ -48,7 +52,7 @@ test("whole-session erasure deletes transcript, ACP, parity and confirmed cache;
 		db.close();
 		const receipt = await eraseSession({ agentDir: f.root, sessionId: "old", currentSessionId: "current", sessions: f.sessions, confirm: async () => true });
 		assert.equal(receipt.status, "complete");
-		for (const file of [f.file, `${f.file}.acp.json`, f.parity, path.join(f.cache, "note.md")]) assert.equal(fs.existsSync(file), false, file);
+		for (const file of [f.file, `${f.file}.acp.json`, f.parity, f.metrics, path.join(f.cache, "note.md")]) assert.equal(fs.existsSync(file), false, file);
 		assert.deepEqual(readManifest(f.cache).files, {});
 		assert.match(receipt.untouched.join("\n"), /Fabric.*not erased/u);
 		assert.equal(answerRecall({ question: "ORCHID" }, { cachePools: [{ cacheDir: f.cache, originScope: "test" }], sessions: f.sessions }).details.citations.length, 0);
@@ -232,7 +236,7 @@ test("missing source detection reports ACP, parity and registry without deleting
 		const sweep = sweepMissingSessions(f.root, undefined, (missing) => { reported.push(...missing.map((source) => source.id)); return true; });
 		assert.deepEqual(sweep, { forgotten: [], reported: ["old"], failed: [] });
 		assert.deepEqual(reported, ["old"]);
-		for (const file of [f.parity, `${f.file}.acp.json`, store.filePath("old")]) assert.equal(fs.existsSync(file), true);
+		for (const file of [f.parity, f.metrics, `${f.file}.acp.json`, store.filePath("old")]) assert.equal(fs.existsSync(file), true);
 		const reopened = new SessionDatabase(f.root);
 		assert.deepEqual(reopened.sources(), [{ id: "old", path: f.file }]);
 		assert.equal(reopened.isErased("old"), false);

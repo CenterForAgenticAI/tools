@@ -8,10 +8,13 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { SessionManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { bool, obj, type Static } from "@earendil-works/pi-schema";
 import { registerFoldEngine, type FoldRequestResult } from "../src/folds/fold-engine.js";
 import { foldStateFromBranch } from "../src/folds/fold-adapter.js";
 import { assistant, requestText, SAFETY_CONFIG, safetyRoot, safetySession, seedOpening, user } from "./fixtures/safety/session.js";
+
+const testToolParameters1 = obj({ later: bool() }, { open: true });
+const testToolParameters2 = obj({}, { open: true });
 
 const FULL_SUMMARY = "SAFETY-FULL-SUMMARY: The agreed plan is to keep alpha immutable, validate beta offline, and retain the task and focus authority in their transcript records. "
 	+ "The second phase must inspect every tool pair, preserve branch isolation, and reconstruct the same request after restarting the session. "
@@ -28,8 +31,8 @@ for (const nested of [false, true]) {
 		const tools: ExtensionFactory = (pi) => {
 			const engine = registerFoldEngine(pi, { config: SAFETY_CONFIG });
 			pi.registerTool({ name: "compress", label: "compress", description: "Synthetic native fold entry point.",
-				parameters: Type.Object({ later: Type.Boolean() }),
-				async execute(id, params, _signal, _update, ctx) {
+				parameters: testToolParameters1,
+				async execute(id, params: Static<typeof testToolParameters1>, _signal, _update, ctx) {
 					calls.push(id);
 					accepted.push(engine.request(ctx, params.later
 						? { startRef: "m00009", endRef: "m00012", summary: LATER_SUMMARY }
@@ -37,8 +40,8 @@ for (const nested of [false, true]) {
 					// Deliberately no summary in the result: only the persisted carrier can pass.
 					return { content: [{ type: "text", text: "Fold queued." }], details: {} };
 				} });
-			pi.registerTool({ name: "nested_compress", label: "nested", description: "Synthetic executeTool caller.", parameters: Type.Object({}),
-				async execute(_id, _params, _signal, _update, ctx) {
+			pi.registerTool({ name: "nested_compress", label: "nested", description: "Synthetic executeTool caller.", parameters: testToolParameters2,
+				async execute(_id, _params: Static<typeof testToolParameters2>, _signal, _update, ctx) {
 					const executed = await ctx.executeTool("compress", { later: false });
 					return executed.result;
 				} });

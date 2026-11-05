@@ -13,9 +13,10 @@ import {
 	type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { obj } from "@earendil-works/pi-schema";
 
 import { CONFIG_POLICY_ENTRY_TYPE, configPolicyEntry, type FirstUserMessageMode } from "../src/platform/config-layers.js";
+import { createFoldHints } from "../src/folds/fold-hints.js";
 import { FOLD_ENTRY_TYPE } from "../src/folds/fold-entries.js";
 import { foldModeFor, registerFoldEngine, type FoldRequestResult, type DroppedFold } from "../src/folds/fold-engine.js";
 
@@ -31,7 +32,7 @@ const billionContextStub: ExtensionFactory = (pi) => {
 			name,
 			label: name,
 			description: `Stub of billion-context-pi's ${name}.`,
-			parameters: Type.Object({}),
+			parameters: obj({}, { open: true }),
 			async execute() {
 				return { content: [{ type: "text", text: "stub" }], details: {} };
 			},
@@ -49,7 +50,8 @@ interface Run {
 	engineRegistrations: string[];
 }
 
-async function run(withBillionContext: boolean, duplicate = false, firstUserMessage: FirstUserMessageMode = "fold"): Promise<Run> {
+/** `toolsThrow`: `getAllTools` throws, as Pi does while extensions load, so the mode stays unknown. `askRange`: the session holds an ask call and result, and the request covers only them. The built-in hints keep both word for word. */
+async function run(withBillionContext: boolean, duplicate = false, firstUserMessage: FirstUserMessageMode = "fold", askRange = false, toolsThrow = false): Promise<Run> {
 	const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-fold-engine-")));
 	const faux = fauxProvider({
 		provider: "fold-engine",
@@ -79,6 +81,11 @@ async function run(withBillionContext: boolean, duplicate = false, firstUserMess
 			get(target, key, receiver) {
 				const value = Reflect.get(target, key, receiver) as unknown;
 				if (typeof value !== "function") return value;
+				if (key === "getAllTools" && toolsThrow) {
+					return () => {
+						throw new Error("Pi rejects tool lookups while extensions load");
+					};
+				}
 				if (key === "registerTool" || key === "registerCommand" || key === "registerFlag" || key === "registerShortcut") {
 					return (...args: unknown[]) => {
 						engineRegistrations.push(String(key));
@@ -88,7 +95,9 @@ async function run(withBillionContext: boolean, duplicate = false, firstUserMess
 				return (value as (...a: unknown[]) => unknown).bind(target);
 			},
 		});
+		const hints = createFoldHints();
 		const engine = registerFoldEngine(recording, {
+			hints: () => hints,
 			config: { compress: { minCompressRange: 0, maxSummaryLength: 20_000, minSummaryLength: 10 }, preserveRecentMessages: 2, preserveRecentTokens: 0 },
 		});
 		// Test-only trigger; the engine itself registers no tools.
@@ -96,12 +105,12 @@ async function run(withBillionContext: boolean, duplicate = false, firstUserMess
 			name: "fold_probe",
 			label: "fold_probe",
 			description: "Test-only fold trigger.",
-			parameters: Type.Object({}),
+			parameters: obj({}, { open: true }),
 			async execute(_id, _params, _signal, _update, ctx) {
 				results.push(
 					engine.request(ctx, {
-						startRef: "m00001",
-						endRef: "m00004",
+						startRef: askRange ? "m00002" : "m00001",
+						endRef: askRange ? "m00003" : "m00004",
 						summary: "FOLD-SUMMARY: alpha and beta were settled.",
 						topic: "opening",
 					}),
@@ -115,7 +124,12 @@ async function run(withBillionContext: boolean, duplicate = false, firstUserMess
 
 	const sessionManager = SessionManager.inMemory(cwd);
 	sessionManager.appendMessage({ role: "user", content: "ALPHA-QUESTION", timestamp: Date.now() });
-	sessionManager.appendMessage(fauxAssistantMessage("ALPHA-ANSWER"));
+	if (askRange) {
+		sessionManager.appendMessage(fauxAssistantMessage(fauxToolCall("ask", { questions: [] }, { id: "ask-1" }), { stopReason: "toolUse" }));
+		sessionManager.appendMessage({ role: "toolResult", toolCallId: "ask-1", toolName: "ask", content: [{ type: "text", text: "ASK-ANSWER" }], isError: false, timestamp: Date.now() });
+	} else {
+		sessionManager.appendMessage(fauxAssistantMessage("ALPHA-ANSWER"));
+	}
 	sessionManager.appendMessage({ role: "user", content: "BETA-QUESTION", timestamp: Date.now() });
 	sessionManager.appendMessage(fauxAssistantMessage("BETA-ANSWER"));
 	sessionManager.appendCustomEntry(CONFIG_POLICY_ENTRY_TYPE, configPolicyEntry("session", { "folds.firstUserMessage": firstUserMessage }));
@@ -162,6 +176,24 @@ test("shadow mode: with billion-context-pi loaded, a fold is planned but nothing
 	assert.equal(shadow.foldEntries, 0, "shadow mode wrote fold metadata");
 	assert.equal(shadow.contextEdits, 0, "shadow mode wrote context edits");
 	assert.match(shadow.provider[1] ?? "", /ALPHA-QUESTION/u, "shadow mode changed model context");
+});
+
+test("#295: in shadow mode a fold request is planned without hints; live mode refuses the same range", async () => {
+	const shadow = await run(true, false, "fold", true);
+	const [shadowResult] = shadow.results;
+	assert.ok(shadowResult?.ok, `shadow mode applied a hint: ${JSON.stringify(shadowResult)}`);
+	const live = await run(false, false, "fold", true);
+	const [liveResult] = live.results;
+	assert.equal(liveResult?.ok, false, "control: live mode keeps the ask pair word for word");
+	assert.match(JSON.stringify(liveResult), /kept word for word by a fold hint/u);
+});
+
+test("#295: with the tool lookup rejected the mode is unknown and a fold request applies no hint", async () => {
+	const unknown = await run(false, false, "fold", true, true);
+	const [result] = unknown.results;
+	assert.ok(result?.ok, `unknown mode applied a hint: ${JSON.stringify(result)}`);
+	assert.equal(result.mode, "shadow");
+	assert.equal(result.queued, false);
 });
 
 test("live mode: the fold is written at turn_end and the next request sees only the summary", async () => {

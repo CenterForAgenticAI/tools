@@ -5,16 +5,18 @@
  * `session_before_compact` call, and Pi stops at the first cancel, so no
  * compaction can finish while it is loaded. Pi does not let one extension read
  * another's event handlers, so detection uses the tools billion-context-pi
- * registers: `compress` and `acp_status`, from the same extension.
+ * registers. Either of two signatures marks it as loaded:
+ *   - `compress` and `acp_status`, from the same extension; or
+ *   - `acp_cache`, a name only billion-context-pi registers (0.1.83 registers
+ *     `compress`, `decompress`, `search_context`, `acp_status` and `acp_cache`
+ *     in its factory). This extension never registers it.
  *
  * billion-context-pi stops cancelling in three documented cases: when
  * `BILLION_CONTEXT_NATIVE` or `BILLION_CONTEXT_PROXY` is set, and when the model
  * base URL routes through the billion-context wire proxy (`/bili/https://...`).
  * In those cases compaction still works, so it is not reported as a blocker.
  *
- * This extension registers `compress` and `acp_status` aliases of its own while
- * billion-context-pi is absent, so tools from this package's own source path are
- * never counted.
+ * Tools from this package's own source path are never counted.
  */
 
 import { realpathSync } from "node:fs";
@@ -46,6 +48,9 @@ export const BILLION_CONTEXT_PI_BLOCKER: CompactionBlocker = Object.freeze({
 
 const BILLION_CONTEXT_PI_SIGNATURE = ["compress", "acp_status"] as const;
 
+/** A tool only billion-context-pi registers; this extension has no alias for it. */
+const BILLION_CONTEXT_PI_OWN_TOOL = "acp_cache";
+
 export function detectCompactionBlocker(
 	tools: readonly RegisteredToolView[],
 	host: CompactionBlockerHost,
@@ -56,10 +61,12 @@ export function detectCompactionBlocker(
 }
 
 /**
- * True when billion-context-pi's tool pair comes from one extension, whether or
- * not it currently cancels compaction.
+ * True when billion-context-pi's tool pair comes from one extension, or when its
+ * own `acp_cache` tool is listed from outside this package, whether or not it
+ * currently cancels compaction.
  */
 export function isBillionContextPiLoaded(tools: readonly RegisteredToolView[]): boolean {
+	if (tools.some((tool) => tool.name === BILLION_CONTEXT_PI_OWN_TOOL && !isOwnTool(tool))) return true;
 	const signature = BILLION_CONTEXT_PI_SIGNATURE.map((name) => tools.find((tool) => tool.name === name && !isOwnTool(tool)));
 	if (signature.some((tool) => tool === undefined)) return false;
 	// Two unrelated extensions that each register one of these names are not
@@ -74,7 +81,7 @@ export function isBillionContextPiLoaded(tools: readonly RegisteredToolView[]): 
 
 /**
  * The root of the package this module belongs to: `<root>/dist/extension.js` (the
- * bundle Pi loads), `<root>/dist/compaction/` (the tsc build), `<root>/src/compaction/`
+ * bundle, the entry Pi loads), `<root>/dist/compaction/` (the tsc build), `<root>/src/compaction/`
  * (the source) or `<root>/.test-dist/src/compaction/` (the test build). Undefined
  * anywhere else, and then no tool counts as this extension's own.
  */

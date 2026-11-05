@@ -75,6 +75,20 @@ export function cleanRequestId(value: unknown): string | undefined {
 /** Most items one fold tool call may carry: the item index in a request id has at most three digits. */
 export const MAX_FOLD_ITEMS_PER_CALL = 1000;
 
+const hasFoldRanges = (value: unknown): boolean =>
+	Array.isArray(value) ? value.length > 0 : typeof value === "string" ? value.trim() !== "" : value !== undefined && value !== null;
+
+/**
+ * The argument key a fold call's items are read from. `content` wins when it is non-empty, then `ranges`.
+ * When both are empty, `content` is named if it was set (so its empty-array message stays), else `ranges`.
+ * The fold tool and the call renderer both use this, so they read the same key.
+ */
+export function pickFoldRangesKey(params: { readonly content?: unknown; readonly ranges?: unknown }): "content" | "ranges" {
+	if (hasFoldRanges(params.content)) return "content";
+	if (hasFoldRanges(params.ranges)) return "ranges";
+	return params.content !== undefined && params.content !== null ? "content" : "ranges";
+}
+
 /** Longest tool call id that still leaves room for `#<index>` (at most four characters) inside MAX_REQUEST_ID_LENGTH. */
 export const MAX_CALL_ID_LENGTH = MAX_REQUEST_ID_LENGTH - 4;
 
@@ -152,8 +166,9 @@ export function isEditableEntry(entry: SessionEntry): boolean {
 	return role === "user" || role === "assistant" || role === "toolResult";
 }
 
-const BLOCK_ID = /^b[1-9]\d*$/u;
-const RUN_ID = /^r[1-9]\d*$/u;
+// At most nine digits: the number stays a safe integer, so a hand-edited record cannot make the next id `bInfinity`. Such a record is ignored.
+const BLOCK_ID = /^b[1-9]\d{0,8}$/u;
+const RUN_ID = /^r[1-9]\d{0,8}$/u;
 
 /**
  * Read fold metadata from a custom entry's data. Session files are not

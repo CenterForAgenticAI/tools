@@ -50,15 +50,38 @@ function canonical(value: unknown): string {
 	return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonical(object[key])}`).join(",")}}`;
 }
 
+interface TieKeys {
+	readonly snapshot: string;
+	readonly metadata: string;
+	readonly mutation: string;
+}
+
+/** Canonical tie-break strings, computed once per candidate instead of once per comparison. */
+const tieKeyCache = new WeakMap<ReplayCandidate, TieKeys>();
+
+function tieKeys(candidate: ReplayCandidate): TieKeys {
+	let keys = tieKeyCache.get(candidate);
+	if (keys === undefined) {
+		keys = {
+			snapshot: canonical(candidate.snapshot),
+			metadata: canonical({ priorRevision: candidate.priorRevision, previousEventId: candidate.previousEventId }),
+			// Mutation provenance is authoritative and must not be selected by input order.
+			mutation: canonical(candidate.mutation ?? null),
+		};
+		tieKeyCache.set(candidate, keys);
+	}
+	return keys;
+}
+
 function candidateTie(a: ReplayCandidate, b: ReplayCandidate): number {
 	if (a.snapshot.revision !== b.snapshot.revision) return a.snapshot.revision - b.snapshot.revision;
-	const snapshotOrder = canonical(a.snapshot).localeCompare(canonical(b.snapshot));
+	const keysA = tieKeys(a);
+	const keysB = tieKeys(b);
+	const snapshotOrder = keysA.snapshot.localeCompare(keysB.snapshot);
 	if (snapshotOrder !== 0) return snapshotOrder;
-	const metadataOrder = canonical({ priorRevision: a.priorRevision, previousEventId: a.previousEventId })
-		.localeCompare(canonical({ priorRevision: b.priorRevision, previousEventId: b.previousEventId }));
+	const metadataOrder = keysA.metadata.localeCompare(keysB.metadata);
 	if (metadataOrder !== 0) return metadataOrder;
-	// Mutation provenance is authoritative and must not be selected by input order.
-	const mutationOrder = canonical(a.mutation ?? null).localeCompare(canonical(b.mutation ?? null));
+	const mutationOrder = keysA.mutation.localeCompare(keysB.mutation);
 	if (mutationOrder !== 0) return mutationOrder;
 	if (a.entryId !== b.entryId) return a.entryId.localeCompare(b.entryId);
 	return a.timestamp.localeCompare(b.timestamp);

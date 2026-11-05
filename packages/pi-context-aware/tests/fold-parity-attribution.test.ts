@@ -396,18 +396,68 @@ test("changed arguments of a retained read outside both ranges, in the full prev
 	assert.equal(report.ready, false);
 });
 
-test("a refused fold that covers or absorbs an accepted sibling's block is not explained", async () => {
+test("a refused fold that covers or absorbs an accepted sibling's block is explained", async () => {
 	// The refused fold of entries 1-8 comes first, so the native preview rejects the sibling as consumed.
 	const covering = await recordSiblingBatch([{ ...DEAD_FIRST, input: range(1, 8) }, ACCEPTED_SECOND]);
 	assert.equal(covering.compress.find((call) => call.toolCallId === ACCEPTED_SECOND.id)?.verdict, "match");
 	assert.deepEqual(covering.request.counterfactual?.diffs, []);
-	assert.deepEqual(covering.request.counterfactual?.delta, { verdict: "other", reason: "sibling-covered", refusedFolds: 1, coveredEntries: 8 });
-	assert.deepEqual(covering.report.counts, { match: 498, explained: 0, diff: 2, inconclusive: 0 });
+	assert.deepEqual(covering.request.counterfactual?.delta, { verdict: "refused-folds-only", refusedFolds: 1, coveredEntries: 8, removedMessages: 5 });
+	assert.deepEqual(covering.report.counts, { match: 498, explained: 2, diff: 0, inconclusive: 0 });
+	assert.equal(covering.report.ready, true);
 	// The sibling folds first; the refused fold of entries 1-10 then absorbs its block.
 	const absorbing = await recordSiblingBatch([ACCEPTED_SECOND, { ...DEAD_FIRST, input: range(1, 10) }]);
 	assert.deepEqual(absorbing.request.counterfactual?.diffs, []);
-	assert.deepEqual(absorbing.request.counterfactual?.delta, { verdict: "other", reason: "sibling-covered", refusedFolds: 1, coveredEntries: 10 });
-	assert.deepEqual(absorbing.report.counts, { match: 498, explained: 0, diff: 2, inconclusive: 0 });
+	assert.deepEqual(absorbing.request.counterfactual?.delta, { verdict: "refused-folds-only", refusedFolds: 1, coveredEntries: 10, removedMessages: 7 });
+	assert.deepEqual(absorbing.report.counts, { match: 498, explained: 2, diff: 0, inconclusive: 0 });
+	assert.equal(absorbing.report.ready, true);
+});
+
+test("a refused fold that overlaps an accepted sibling only in part stays sibling-covered", async () => {
+	// Refused 1-6 then accepted 5-8: the sibling extends past the refused coverage.
+	const partial = await recordSiblingBatch([{ ...DEAD_FIRST, input: range(1, 6) }, ACCEPTED_SECOND]);
+	assert.equal(partial.request.counterfactual?.delta?.verdict, "other");
+	assert.equal((partial.request.counterfactual?.delta as { reason?: string } | undefined)?.reason, "sibling-covered");
+	assert.equal(partial.report.ready, false);
+});
+
+test("a wrong refused summary in an absorbing batch is not explained", async () => {
+	const { rerun } = await recordSiblingBatch([ACCEPTED_SECOND, { ...DEAD_FIRST, input: range(1, 10) }]);
+	const { compared, report } = rerun(fullOnly((messages) => {
+		const refusedSummary = messages.find((message) => message.content === `${SUMMARY_HEADER}\n${SUMMARY}`);
+		assert.ok(refusedSummary, "the full preview holds the refused fold's summary");
+		refusedSummary.content = `${SUMMARY_HEADER}\nA summary the refused fold never wrote.`;
+	}));
+	assert.equal(compared.counterfactual?.delta?.verdict, "other");
+	assert.equal(report.ready, false);
+});
+
+test("a changed message outside an absorbing batch's ranges is not explained", async () => {
+	const { rerun } = await recordSiblingBatch([ACCEPTED_SECOND, { ...DEAD_FIRST, input: range(1, 10) }]);
+	const { compared, report } = rerun(wrongRetainedRead);
+	assert.equal(compared.counterfactual?.delta?.verdict, "other");
+	assert.equal(report.ready, false);
+});
+
+test("a subsumed sibling whose fold differs in the full preview is not explained", async () => {
+	// In the covering shape the native preview rejects the sibling, so only the absorbing shape keeps its fold.
+	const { rerun } = await recordSiblingBatch([ACCEPTED_SECOND, { ...DEAD_FIRST, input: range(1, 10) }]);
+	const { compared, report } = rerun((input, calls, omit) => {
+		const planned = previewShadowCalls(input, calls, omit);
+		return omit ? planned : { ...planned, folds: planned.folds.map((fold) => fold.callId === ACCEPTED_SECOND.id ? { ...fold, tier: 2 } : fold) };
+	});
+	assert.equal(compared.counterfactual?.delta?.verdict, "other");
+	assert.equal(report.ready, false);
+});
+
+test("a wrong refused summary in a covering batch is not explained", async () => {
+	const { rerun } = await recordSiblingBatch([{ ...DEAD_FIRST, input: range(1, 8) }, ACCEPTED_SECOND]);
+	const { compared, report } = rerun(fullOnly((messages) => {
+		const refusedSummary = messages.find((message) => message.content === `${SUMMARY_HEADER}\n${SUMMARY}`);
+		assert.ok(refusedSummary, "the full preview holds the refused fold's summary");
+		refusedSummary.content = `${SUMMARY_HEADER}\nA summary the refused fold never wrote.`;
+	}));
+	assert.equal(compared.counterfactual?.delta?.verdict, "other");
+	assert.equal(report.ready, false);
 });
 
 test("a refused summary in the request that differs from the summary its fold wrote is not explained", async () => {

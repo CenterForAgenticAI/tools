@@ -46,6 +46,7 @@ import {
 	getAgentDir,
 	SessionManager,
 	type ExtensionAPI,
+	type CustomMessageEntryDraft,
 	type ExtensionContext,
 	type SessionBoundaryDraft,
 	type SessionEntry,
@@ -53,8 +54,11 @@ import {
 
 import { isBillionContextPiLoaded, type RegisteredToolView } from "../compaction/compaction-blocker.js";
 import { foldStateFromBranch, planFold, summaryLimitOf, validFoldRefs, type FoldCondenser } from "./fold-adapter.js";
+import { FOLD_NOTICE_TYPE, type FoldHintView } from "./fold-hints.js";
 import { renderEarlierFoldCalls } from "./fold-call-render.js";
-import { cloneFoldTurnMemory, createFoldTurnMemory, prepareFoldTurn, type FoldTurnMemory } from "./fold-turn.js";
+import type { PressureLadderConfig } from "../policy/context-policy.js";
+import { cloneFoldTurnMemory, createFoldTurnMemory, prepareFoldTurn, type FoldEmergency, type FoldTurnMemory, type FoldTurnResult } from "./fold-turn.js";
+import { planHides } from "./hide-entries.js";
 import {
 	checkFoldRequestId,
 	foldRecordsOnBranch,
@@ -105,22 +109,7 @@ export type FoldMode = "live" | "shadow";
 
 /** Shadow while billion-context-pi owns context management; live otherwise. */
 export function foldModeFor(tools: readonly RegisteredToolView[]): FoldMode {
-	return isBillionContextPiLoaded(foldToolViews(tools)) ? "shadow" : "live";
-}
-
-/**
- * The tool list as billion-context-pi detection must read it once this extension's
- * compress alias is registered (pi-context-aware#189). Pi lists the first tool registered
- * under a name, so when billion-context-pi loads later (a reload) our alias stands in
- * front of its compress. The alias comes from the same source as our context_fold;
- * with acp_status from another source, that compress is read as billion-context-pi's.
- */
-export function foldToolViews(tools: readonly RegisteredToolView[]): readonly RegisteredToolView[] {
-	const own = tools.find((tool) => tool.name === "context_fold")?.sourceInfo?.path;
-	const status = tools.find((tool) => tool.name === "acp_status");
-	const compress = tools.find((tool) => tool.name === "compress");
-	if (!own || !status || !compress || compress.sourceInfo?.path !== own || status.sourceInfo?.path === own) return tools;
-	return tools.map((tool) => (tool === compress ? { name: "compress", ...(status.sourceInfo ? { sourceInfo: status.sourceInfo } : {}) } : tool));
+	return isBillionContextPiLoaded(tools) ? "shadow" : "live";
 }
 
 /** A request the engine refused. `code` is set when the refusal is not a planner error. */
@@ -166,6 +155,28 @@ export interface FoldEngineOptions {
 	 * for a branch, or `undefined` when the feature is off or nothing condenses.
 	 */
 	readonly condenser?: (ctx: ExtensionContext, branch: readonly SessionEntry[]) => FoldCondenser | undefined;
+	/**
+	 * The pressure ladder in force for this session. The per-turn pass takes its nudge,
+	 * emergency-nudge and truncation thresholds from it (pi-context-aware#244). Without it the
+	 * starting ladder applies.
+	 */
+	readonly ladder?: (ctx: ExtensionContext) => PressureLadderConfig;
+	/** Called on every request at or above the ladder's last step, with what emergency truncation did. */
+	readonly onEmergency?: (ctx: ExtensionContext, emergency: FoldEmergency) => void;
+	/** Fold hints for this session (pi-context-aware#281). Every plan of one request reads the same view. */
+	readonly hints?: (ctx: ExtensionContext) => FoldHintView | undefined;
+	/** Observers for the per-turn metrics log (pi-context-aware#286). They only read; a throw never changes a request. */
+	readonly metrics?: FoldEngineMetrics;
+}
+
+/** What the engine reports to the per-turn metrics recorder. */
+export interface FoldEngineMetrics {
+	/** Once per live model request, with the pass result; undefined when the pass failed or did not line up. */
+	readonly onTurn?: (ctx: ExtensionContext, turn: FoldTurnResult | undefined) => void;
+	/** Once per fold request, with the engine's answer. */
+	readonly onRequest?: (ctx: ExtensionContext, result: FoldRequestResult) => void;
+	/** Once per turn boundary at which queued folds were planned, with the requests that were not written. */
+	readonly onDrain?: (ctx: ExtensionContext, dropped: readonly DroppedFold[]) => void;
 }
 
 export interface DroppedFold {
@@ -202,10 +213,17 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 	const modes = new WeakMap<SessionKey, FoldMode>();
 	const queues = new WeakMap<SessionKey, QueuedFold[]>();
 	const dropped = new WeakMap<SessionKey, DroppedFold[]>();
+	/** Drops a restart or tree change found that no notice on the branch names yet; the next drain reports them. */
+	const scanNotices = new WeakMap<SessionKey, DroppedFold[]>();
 	/** Records the last queue rebuild could not queue. Kept until the next rebuild. */
 	const scanDrops = new WeakMap<SessionKey, DroppedFold[]>();
 	/** What the per-turn pass carries between turns. Reset with the queue. */
 	const turnMemory = new WeakMap<SessionKey, FoldTurnMemory>();
+	/**
+	 * Entries the last step shortened in a request and no hide covers yet (pi-context-aware#268). The next
+	 * boundary writes them as recoverable hides. Not durable: a request that is shortened again re-queues.
+	 */
+	const hideQueues = new WeakMap<SessionKey, Set<string>>();
 
 	const modeOf = (ctx: ExtensionContext): FoldMode => {
 		const known = modes.get(ctx.sessionManager);
@@ -241,11 +259,21 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 		queues.delete(manager);
 		dropped.delete(manager);
 		scanDrops.delete(manager);
+		scanNotices.delete(manager);
 		turnMemory.delete(manager);
+		hideQueues.delete(manager);
 		if (modeOf(ctx) !== "live") return;
 		const scan = scanFoldRequests(manager.getBranch());
 		if (scan.recovered.length > 0) queues.set(manager, scan.recovered);
-		if (scan.dropped.length > 0) scanDrops.set(manager, scan.dropped.map(droppedFromScan));
+		if (scan.dropped.length > 0) {
+			const drops = scan.dropped.map(droppedFromScan);
+			scanDrops.set(manager, drops);
+			// Report a restart or tree-change drop once in the next turn, as a drained drop is (pi-context-aware#284).
+			// A drop an earlier notice on this branch already named is not reported again on every restart.
+			const told = noticedDropKeys(manager.getBranch());
+			const fresh = drops.filter((drop) => !told.has(dropKey(drop)));
+			if (fresh.length > 0) scanNotices.set(manager, fresh);
+		}
 	};
 
 	pi.on("session_start", (_event, ctx) => {
@@ -256,13 +284,56 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 	// queued for the old branch must not be written to the new one.
 	pi.on("session_tree", (_event, ctx) => rebuildQueue(ctx));
 
+	/**
+	 * The drafts that store the recoverable hides queued since the last boundary (pi-context-aware#268). The
+	 * queue is emptied whatever happens: a hide that is not written is queued again by the next request that
+	 * shortens the entry. Each hide is written on a copy of the branch first; one Pi would refuse is left out,
+	 * so a refused hide never takes the fold drafts or another hide down with it.
+	 */
+	const hideDrafts = (ctx: ExtensionContext, pending: readonly SessionBoundaryDraft[]): SessionBoundaryDraft[] => {
+		const manager = ctx.sessionManager;
+		const queued = hideQueues.get(manager);
+		hideQueues.delete(manager);
+		if (!queued || queued.size === 0) return [];
+		try {
+			const branch = manager.getBranch();
+			const plans = planHides(branch, [...queued], pending);
+			const header = manager.getHeader();
+			if (plans.length === 0 || !header) return [];
+			const preview = SessionManager.inMemory(manager.getCwd(), undefined, [header, ...branch]);
+			applyFoldDrafts(preview, pending.filter((draft) => draft.type === "custom" || draft.type === "context_edit"));
+			const accepted: SessionBoundaryDraft[] = [];
+			for (const plan of plans) {
+				try {
+					applyFoldDrafts(preview, plan.drafts);
+					accepted.push(...plan.drafts);
+				} catch {
+					// Pi would refuse this hide. The preview may hold its metadata entry; it is only a copy.
+				}
+			}
+			return accepted;
+		} catch {
+			return [];
+		}
+	};
 	const drain = (entries: readonly SessionBoundaryDraft[], ctx: ExtensionContext) => {
 		const queued = queues.get(ctx.sessionManager);
 		queues.delete(ctx.sessionManager);
-		if (!queued || queued.length === 0 || modeOf(ctx) !== "live") return undefined;
-		const planned = planQueuedFolds(ctx.sessionManager, queued, contextWindow(ctx), options.config, resolveFoldConfig(ctx), condenserFor(ctx));
-		dropped.set(ctx.sessionManager, planned.dropped);
-		return planned.drafts.length > 0 ? { entries: [...entries, ...planned.drafts] } : undefined;
+		if (modeOf(ctx) !== "live") return undefined;
+		let planned: QueuedFoldPlan | undefined;
+		if (queued && queued.length > 0) {
+			planned = planQueuedFolds(ctx.sessionManager, queued, contextWindow(ctx), options.config, resolveFoldConfig(ctx), condenserFor(ctx), options.hints?.(ctx));
+			dropped.set(ctx.sessionManager, planned.dropped);
+			try { options.metrics?.onDrain?.(ctx, planned.dropped); } catch { /* Metrics never change a boundary. */ }
+		}
+		const earlier = Array.isArray(entries) ? entries : [];
+		const hides = hideDrafts(ctx, [...earlier, ...(planned?.drafts ?? [])]);
+		// The caller was told these folds were accepted; say in the next turn that they were not written (pi-context-aware#282).
+		const unreported = scanNotices.get(ctx.sessionManager) ?? [];
+		scanNotices.delete(ctx.sessionManager);
+		const notice = foldDropNotice([...unreported, ...(planned?.dropped ?? [])]);
+		const added = [...(planned?.drafts ?? []), ...hides, ...(notice ? [notice] : [])];
+		return added.length > 0 ? { entries: [...earlier, ...added] } : undefined;
 	};
 	pi.on("turn_end", (event, ctx) => drain(event.entries, ctx));
 	pi.on("agent_before_settle", (event, ctx) => drain(event.entries, ctx));
@@ -290,10 +361,21 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 				...(typeof usage?.tokens === "number" ? { hostTokens: usage.tokens } : {}),
 				memory,
 				...(options.config ? { config: options.config } : {}),
+				...(options.ladder ? { ladder: options.ladder(ctx) } : {}),
 			});
+			if (turn?.emergency?.hideCandidates.length) {
+				const queued = hideQueues.get(manager) ?? new Set<string>();
+				for (const id of turn.emergency.hideCandidates) queued.add(id);
+				hideQueues.set(manager, queued);
+			}
+			if (turn?.emergency) {
+				try { options.onEmergency?.(ctx, turn.emergency); } catch { /* A failed notice never changes the request. */ }
+			}
+			try { options.metrics?.onTurn?.(ctx, turn); } catch { /* Metrics never change a request. */ }
 			if (turn) return { messages: turn.messages };
 		} catch {
 			// The pass failed: still send the block pointers, so no summary is repeated.
+			try { options.metrics?.onTurn?.(ctx, undefined); } catch { /* Metrics never change a request. */ }
 		}
 		const records = foldRecordsOnBranch(branch).map(({ record }) => record);
 		const messages = renderEarlierFoldCalls(event.messages, records);
@@ -346,6 +428,7 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 			modelContextLimit: contextWindow(ctx),
 			folds: resolveFoldConfig(ctx),
 			...condenserField(condenserFor(ctx)?.(branch)),
+			...hintsField(options.hints?.(ctx)),
 			...(options.config ? { config: options.config } : {}),
 		});
 		if (!plan.ok) {
@@ -382,6 +465,14 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 		pending: (ctx) => queues.get(ctx.sessionManager)?.length ?? 0,
 		dropped: (ctx) => [...(scanDrops.get(ctx.sessionManager) ?? []), ...(dropped.get(ctx.sessionManager) ?? [])],
 		request(ctx, request) {
+			const result = requestFold(ctx, request);
+			try { options.metrics?.onRequest?.(ctx, result); } catch { /* Metrics never change an answer. */ }
+			return result;
+		},
+	};
+
+	function requestFold(ctx: ExtensionContext, request: FoldRequest): FoldRequestResult {
+		{
 			let requestId: string | undefined;
 			if (request.requestId !== undefined) {
 				const checked = checkFoldRequestId(request.requestId);
@@ -395,6 +486,9 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 			}
 			const branch = ctx.sessionManager.getBranch();
 			const contextEntries = ctx.sessionManager.buildContextEntries();
+			const folds = resolveFoldConfig(ctx);
+			// One condenser for every plan of this request (see FoldPlanInput.condenser).
+			const condenser = { ...condenserField(condenserFor(ctx)?.(branch)), ...hintsField(mode === "live" ? options.hints?.(ctx) : undefined) };
 			const plan = planFold({
 				startRef: request.startRef,
 				endRef: request.endRef,
@@ -404,8 +498,8 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 				branch,
 				contextEntries,
 				modelContextLimit: contextWindow(ctx),
-				folds: resolveFoldConfig(ctx),
-				...condenserField(condenserFor(ctx)?.(branch)),
+				folds,
+				...condenser,
 				...(options.config ? { config: options.config } : {}),
 			});
 			if (!plan.ok) return plan;
@@ -431,6 +525,21 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 					...copy,
 					accepted: { source, leafId, ...(recovery ? { recovery } : {}) },
 				};
+				// Run the check the boundary runs, now (pi-context-aware#282). The plan above counts the
+				// whole named range toward the size minimum; the boundary plans again over only the
+				// entries this fold would hide, so a range the protected zone trims below the minimum
+				// passed above and was dropped there. Accept only what the branch as it is now would write.
+				const acceptedFold = acceptedFoldOf(accepted);
+				const probe = acceptedFold ? replanAcceptedFold({
+					accepted: acceptedFold,
+					branch,
+					contextEntries,
+					modelContextLimit: contextWindow(ctx),
+					folds,
+					...condenser,
+					...(options.config ? { config: options.config } : {}),
+				}) : undefined;
+				if (probe && !probe.ok) return fail(ctx, probe.errors.map(withoutRefusedPrefix));
 				queues.set(ctx.sessionManager, [...(queues.get(ctx.sessionManager) ?? []), accepted]);
 			}
 			return {
@@ -441,8 +550,8 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 				warnings: plan.warnings,
 				...(recovery ? { recovery } : {}),
 			};
-		},
-	};
+		}
+	}
 }
 
 function isRecoveredItem(item: QueuedFold): item is RecoveredFoldRequest {
@@ -501,6 +610,7 @@ export function planQueuedFolds(
 	config?: Partial<Config>,
 	folds?: FoldsConfig,
 	condenserFor?: (branch: readonly SessionEntry[]) => FoldCondenser | undefined,
+	hints?: FoldHintView,
 ): QueuedFoldPlan {
 	const header = manager.getHeader();
 	if (!header) return { drafts: [], dropped: requests.map((request) => ({
@@ -543,6 +653,7 @@ export function planQueuedFolds(
 					modelContextLimit,
 					...(folds ? { folds } : {}),
 					...condenserField(condenserFor?.(preview.getBranch())),
+					...hintsField(hints),
 					...(config ? { config } : {}),
 				});
 				if (!replanned.ok) {
@@ -563,6 +674,7 @@ export function planQueuedFolds(
 					modelContextLimit,
 					...(folds ? { folds } : {}),
 					...condenserField(condenserFor?.(preview.getBranch())),
+					...hintsField(hints),
 					...(config ? { config } : {}),
 				});
 				if (!plan.ok) {
@@ -587,8 +699,67 @@ export function planQueuedFolds(
 	return { drafts, dropped };
 }
 
+/** Custom message type of the notice that accepted folds were not written (pi-context-aware#282). */
+export { FOLD_NOTICE_TYPE };
+/** Dropped folds named one by one in a notice; the rest are counted. */
+const MAX_NOTICE_FOLDS = 3;
+const MAX_NOTICE_REASON_CHARS = 300;
+const MAX_NOTICE_REF_CHARS = 40;
+
+/** The planner's refusal without the drop-code prefix the boundary adds. */
+function withoutRefusedPrefix(error: string): string {
+	return error.startsWith("refused: ") ? error.slice("refused: ".length) : error;
+}
+
+function clip(text: string, max: number): string {
+	return text.length > max ? text.slice(0, max - 3) + "..." : text;
+}
+
+/** Most drop keys one notice records, so a later restart does not report the same drops again. */
+const MAX_NOTICE_KEYS = 64;
+const MAX_DROP_KEY_CHARS = 300;
+
+/** What identifies one drop across restarts: its request id, else its refs and code. */
+function dropKey(drop: DroppedFold): string {
+	return clip(drop.requestId ?? `${drop.startRef}..${drop.endRef}:${drop.code ?? ""}`, MAX_DROP_KEY_CHARS);
+}
+
+/** The drop keys earlier notices on this branch recorded. A notice without well-formed details names none. */
+function noticedDropKeys(branch: readonly SessionEntry[]): Set<string> {
+	const keys = new Set<string>();
+	for (const entry of branch) {
+		if (entry.type !== "custom_message" || entry.customType !== FOLD_NOTICE_TYPE) continue;
+		const details = entry.details as { version?: unknown; drops?: unknown } | undefined;
+		if (!details || details.version !== 1 || !Array.isArray(details.drops)) continue;
+		for (const key of details.drops.slice(0, MAX_NOTICE_KEYS)) if (typeof key === "string") keys.add(key);
+	}
+	return keys;
+}
+
+/**
+ * One custom message for a drained batch that dropped folds, or `undefined` when it dropped none.
+ * The fold tool told the caller these folds were accepted. The message reaches the model with the
+ * next request and is never a user turn. It names at most MAX_NOTICE_FOLDS folds and counts the rest.
+ */
+export function foldDropNotice(dropped: readonly DroppedFold[]): CustomMessageEntryDraft | undefined {
+	if (dropped.length === 0) return undefined;
+	const lines = dropped.slice(0, MAX_NOTICE_FOLDS).map((drop) => {
+		const span = clip(drop.startRef, MAX_NOTICE_REF_CHARS) + ".." + clip(drop.endRef, MAX_NOTICE_REF_CHARS);
+		const reason = drop.errors.map(withoutRefusedPrefix).join(" ").trim() || drop.code || "no reason was given";
+		return "Fold " + span + " was not written: " + clip(reason, MAX_NOTICE_REASON_CHARS);
+	});
+	const more = dropped.length - lines.length;
+	if (more > 0) lines.push(more + " more fold" + (more === 1 ? " was" : "s were") + " not written; context_status({ view: \"folds\" }) lists them.");
+	const keys = dropped.slice(0, MAX_NOTICE_KEYS).map(dropKey);
+	return { type: "custom_message", customType: FOLD_NOTICE_TYPE, content: lines.join("\n"), display: true, details: { version: 1, drops: keys } };
+}
+
 function condenserField(condenser: FoldCondenser | undefined): { condenser?: FoldCondenser } {
 	return condenser ? { condenser } : {};
+}
+
+function hintsField(hints: FoldHintView | undefined): { hints?: FoldHintView } {
+	return hints ? { hints } : {};
 }
 
 function optionalId(requestId: string | undefined): { requestId?: string } {
@@ -606,14 +777,15 @@ function droppedRefs(request: QueuedFold): { startRef: string; endRef: string } 
 	return { startRef: request.startRef, endRef: request.endRef };
 }
 
-/** Append fold drafts the way Pi appends boundary drafts. Used for previews and tests. */
+/** Append fold drafts the way Pi appends boundary drafts, the drop notice included. Used for previews and tests. */
 export function applyFoldDrafts(
-	manager: Pick<SessionManager, "appendContextEdit" | "appendCustomEntry">,
+	manager: Pick<SessionManager, "appendContextEdit" | "appendCustomEntry" | "appendCustomMessageEntry">,
 	drafts: readonly SessionBoundaryDraft[],
 ): void {
 	for (const draft of drafts) {
 		if (draft.type === "context_edit") manager.appendContextEdit(draft.targetId, draft.replacement);
 		else if (draft.type === "custom") manager.appendCustomEntry(draft.customType, draft.data);
+		else if (draft.type === "custom_message") manager.appendCustomMessageEntry(draft.customType, draft.content, draft.display, draft.details);
 		else throw new Error(`fold drafts never contain ${draft.type} entries`);
 	}
 }

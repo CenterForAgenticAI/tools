@@ -1,7 +1,7 @@
 import { STUB_SUMMARY_CODE } from "../folds/stub-summary.js";
 import { compareNextRequest, contentKey, contentKeys, expectedSummariesMatch, toolResultKeys } from "./compare.js";
 import { isRequestHashes, refusalEvidence, type RefusalEvidence } from "./evidence.js";
-import type { CompressRecord, DiffKind, NextRequestRecord, ParityDiff, RefusalOutcome, RequestHashes } from "./records.js";
+import type { CompressRecord, DiffKind, MediaElisionHashes, NextRequestRecord, ParityDiff, RefusalOutcome, RequestHashes } from "./records.js";
 
 export interface ParityRegisterEntry {
 	readonly id: `FP-${number}`;
@@ -112,7 +112,7 @@ function refusedStubSummary(diff: ParityDiff, record: CompressRecord): boolean {
  * taking the native nudge out and putting billion-context-pi 0.1.83's in makes the non-summary
  * content equal. Both nudges come from the same preview (fold-turn.ts), as body hashes.
  */
-function nudgeFixOnly(cause: "tier-trigger" | "emergency-defer") {
+function nudgeFixOnly(cause: "tier-trigger" | "emergency-defer" | "denominator" | "tool-name") {
 	return (diff: ParityDiff, _call: CompressRecord, request?: NextRequestRecord): boolean => {
 		const fix = request?.ours?.nudgeFix;
 		if (diff.kind !== "content" || !fix || fix.cause !== cause || !request?.bcp || !complete(request.ours!) || !complete(request.bcp)) return false;
@@ -127,9 +127,48 @@ function nudgeFixOnly(cause: "tier-trigger" | "emergency-defer") {
 	};
 }
 
+/** True when `keys` are `base` plus at most one more key: the nudge, which each side decides for itself. */
+function equalsAllowingNudge(keys: readonly string[], base: readonly string[]): boolean {
+	const rest = [...keys];
+	for (const key of base) {
+		const at = rest.indexOf(key);
+		if (at < 0) return false;
+		rest.splice(at, 1);
+	}
+	return rest.length <= 1 && rest.every((key) => key.startsWith("user:"));
+}
+
+/**
+ * True when the request differs only because billion-context-pi's last step starts at a different
+ * token count (pi-context-aware#244). The preview also builds the request billion-context-pi's own
+ * limit gives for the same session; that simulation differs from the native pass by the limit alone.
+ * If billion-context-pi's actual request is that simulation (bar its nudge), the limit explains the
+ * difference. A request that differs from it in any other way stays unexplained.
+ */
+function truncationStartOnly(diff: ParityDiff, request?: NextRequestRecord): boolean {
+	const evidence = request?.ours?.denominator;
+	if ((diff.kind !== "content" && diff.kind !== "tool-results") || !evidence?.truncationStartDiffers || !evidence.limitKeys || !evidence.limitToolResultKeys) return false;
+	if (!request?.ours || !request.bcp || !complete(request.ours) || !complete(request.bcp)) return false;
+	return diff.kind === "content"
+		? equalsAllowingNudge(contentKeys(request.bcp), evidence.limitKeys)
+		: JSON.stringify(toolResultKeys(request.bcp)) === JSON.stringify([...evidence.limitToolResultKeys].sort());
+}
+
 function mediaElisionOnly(diff: ParityDiff, request?: NextRequestRecord): boolean {
+	return substitutionOnly(diff, request, request?.ours?.mediaElision);
+}
+
+/** FP-205: the pointer line a saved recoverable hide adds to a message both sides shortened, and nothing else. */
+function hidePointerOnly(diff: ParityDiff, request?: NextRequestRecord): boolean {
+	return substitutionOnly(diff, request, request?.ours?.hidePointer);
+}
+
+/**
+ * True when swapping each recorded original key in billion-context-pi's request for its replacement makes
+ * the two requests equal: the substitutions explain the difference exactly, and nothing else is hidden by them.
+ */
+function substitutionOnly(diff: ParityDiff, request: NextRequestRecord | undefined, evidence: MediaElisionHashes | undefined): boolean {
 	if ((diff.kind !== "content" && diff.kind !== "tool-results") || !request?.ours || !request.bcp || !complete(request.ours) || !complete(request.bcp)) return false;
-	const evidence = request.ours.mediaElision;
 	if (!evidence || evidence.originals.length === 0 || evidence.originals.length !== evidence.replacements.length) return false;
 	const messages = request.bcp.messages.map((message) => ({ ...message }));
 	for (let index = 0; index < evidence.originals.length; index++) {
@@ -156,9 +195,24 @@ const NUDGE_FIXES: readonly ParityRegisterEntry[] = [
 		matches: nudgeFixOnly("tier-trigger"),
 	},
 	{
+		id: "FP-203", title: "Ladder steps are shares of the whole window", issue: "pi-context-aware#244",
+		reason: "billion-context-pi reads each nudge step as a share of the window less the model's output reserve (at most a quarter of the window, none on anthropic-messages); the native pass reads every ladder step as a share of the whole window, so the nudge appears at a different token count. Only a nudge that billion-context-pi's own rules send at the window's size is explained; the cause is not the tier-2 trigger of FP-201.",
+		matches: nudgeFixOnly("denominator"),
+	},
+	{
+		id: "FP-204", title: "Truncation starts at a share of the whole window", issue: "pi-context-aware#244",
+		reason: "billion-context-pi starts emergency truncation at the last ladder step of the window less the output reserve; the native pass starts it at the same step of the whole window, so one side truncates oversized messages where the other does not.",
+		matches: (diff, _call, request) => truncationStartOnly(diff, request),
+	},
+	{
 		id: "FP-202", title: "Emergency nudge deferred after a failed turn", issue: "pi-context-aware#201",
 		reason: "billion-context-pi 0.1.83 sends the emergency nudge again on every failed model turn (ranxianglei/billion-context-pi#666); the native engine defers it until a turn completes.",
 		matches: nudgeFixOnly("emergency-defer"),
+	},
+	{
+		id: "FP-257", title: "Nudge names the live fold tool", issue: "pi-context-aware#257",
+		reason: "billion-context-pi's nudge tells the model to call compress; compress is not a tool of this package, so the native nudge names context_fold. The nudge is otherwise the same.",
+		matches: nudgeFixOnly("tool-name"),
 	},
 ];
 
@@ -209,6 +263,11 @@ const KNOWN_REQUEST_DIFFERENCES: readonly ParityRegisterEntry[] = [
 		id: "FP-163", title: "Native request media elision", issue: "pi-context-aware#163",
 		reason: "The native engine replaces old image parts with entry-addressed text placeholders in image-heavy requests; billion-context-pi sends every image.",
 		matches: (diff, _call, request) => mediaElisionOnly(diff, request),
+	},
+	{
+		id: "FP-205", title: "Recoverable hide pointer", issue: "pi-context-aware#268",
+		reason: "billion-context-pi truncates an oversized old message in the request and leaves no way back to the original; the native engine saves the shortening as a recoverable hide, so the message also carries a context_recall pointer line after the truncation marker.",
+		matches: (diff, _call, request) => hidePointerOnly(diff, request),
 	},
 	...NUDGE_FIXES,
 ];

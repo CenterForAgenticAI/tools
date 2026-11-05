@@ -13,7 +13,8 @@ import { decideContextToolSurface } from "../src/context-tools/surface.js";
 
 // This file compiles to <root>/.test-dist/tests/, so the package root is two levels up.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-// Pi gives a package-loaded extension the path of its pi.extensions entry.
+// Pi gives a package-loaded extension the path of its pi.extensions entry, the
+// .ts wrapper; `pi -e ./dist/extension.js` gives the bundle's path.
 const OWN_BUNDLE = path.join(PACKAGE_ROOT, "dist", "extension.js");
 const OWN_SOURCE_ENTRY = path.join(PACKAGE_ROOT, "src", "index.ts");
 const BCP_PATH = "/profile/node_modules/billion-context-pi/dist/index.js";
@@ -58,83 +59,75 @@ const bcpAbsent: RegisteredToolView[] = [{ name: "read", sourceInfo: { path: "bu
 const exposures = (tools: readonly RegisteredToolView[], host = plainHost) =>
 	Object.fromEntries(decideContextToolSurface(tools, detectCompactionBlocker(tools, host)).map((entry) => [entry.name, entry.exposure]));
 
-test("REQ-192-2: with billion-context-pi loaded, the new names and our old names register, and none of its names", () => {
+const ALL_EIGHT = [
+	"search_prior_sessions",
+	"session_recall",
+	"session_compaction_history",
+	"compact_session",
+	"compress",
+	"decompress",
+	"search_context",
+	"acp_status",
+];
+
+test("AC-196-1: with billion-context-pi loaded, only the three context tools register", () => {
 	const surface = decideContextToolSurface(bcpLoaded, detectCompactionBlocker(bcpLoaded, plainHost));
-	assert.deepEqual(surface.map((entry) => entry.name).sort(), [
-		"compact_session",
-		"context_compact",
-		"context_recall",
-		"context_status",
-		"search_prior_sessions",
-		"session_compaction_history",
-		"session_recall",
-	]);
+	assert.deepEqual(surface.map((entry) => entry.name).sort(), ["context_compact", "context_recall", "context_status"]);
 });
 
-test("REQ-192-2: billion-context-pi standing down still keeps its names, because they are still registered", () => {
-	const names = Object.keys(exposures(bcpLoaded, { env: { BILLION_CONTEXT_NATIVE: "1" }, modelBaseUrl: "https://api.anthropic.com" }));
-	for (const name of ["compress", "decompress", "search_context", "acp_status"]) assert.ok(!names.includes(name), name);
-});
-
-test("REQ-192-3: without billion-context-pi, its four names also register, and every old name is deferred", () => {
+test("AC-196-1: without billion-context-pi, only the four context tools register, all direct", () => {
 	assert.deepEqual(exposures(bcpAbsent), {
 		context_recall: "direct",
 		context_status: "direct",
 		context_compact: "direct",
 		context_fold: "direct",
-		search_prior_sessions: "deferred",
-		session_recall: "deferred",
-		session_compaction_history: "deferred",
-		compact_session: "deferred",
-		compress: "deferred",
-		decompress: "deferred",
-		search_context: "deferred",
-		acp_status: "deferred",
 	});
 });
 
-test("REQ-192-3: our own compress and acp_status aliases do not withdraw billion-context-pi's names at the next session", () => {
-	const afterOwnAliases = [...bcpAbsent, ...signatureFrom(OWN_BUNDLE).slice(1)];
-	assert.deepEqual(exposures(afterOwnAliases), exposures(bcpAbsent));
-});
-
-test("REQ-192-3: each alias names the new tool it stands for", () => {
-	const aliases = Object.fromEntries(decideContextToolSurface(bcpAbsent, undefined).map((entry) => [entry.name, entry.aliasOf]));
-	assert.deepEqual(aliases, {
-		context_recall: undefined,
-		context_status: undefined,
-		context_compact: undefined,
-		context_fold: undefined,
-		search_prior_sessions: "context_recall",
-		session_recall: "context_recall",
-		session_compaction_history: "context_status",
-		compact_session: "context_compact",
-		compress: "context_fold",
-		decompress: "context_recall",
-		search_context: "context_recall",
-		acp_status: "context_status",
-	});
-});
-
-test("REQ-192-4: acp_cache is never listed; context_fold only without billion-context-pi (pi-context-aware#189)", () => {
+test("AC-196-1: none of the eight old names is listed in any mode, with or without a blocker", () => {
 	for (const tools of [bcpLoaded, bcpAbsent]) {
 		for (const blocker of [undefined, BILLION_CONTEXT_PI_BLOCKER]) {
-			const names = decideContextToolSurface(tools, blocker).map((entry) => entry.name);
-			assert.ok(!names.includes("acp_cache" as never));
+			const names = decideContextToolSurface(tools, blocker).map((entry) => entry.name as string);
+			for (const old of ALL_EIGHT) assert.ok(!names.includes(old), old);
+		}
+	}
+});
+
+test("AC-196-2: context_fold registers only without billion-context-pi; acp_cache is never listed (pi-context-aware#189)", () => {
+	for (const tools of [bcpLoaded, bcpAbsent]) {
+		for (const blocker of [undefined, BILLION_CONTEXT_PI_BLOCKER]) {
+			const names = decideContextToolSurface(tools, blocker).map((entry) => entry.name as string);
+			assert.ok(!names.includes("acp_cache"));
 			assert.equal(names.includes("context_fold"), tools === bcpAbsent);
 		}
 	}
 });
 
-test("REQ-192-4: context_compact and compact_session are hidden while a compaction blocker is present", () => {
+test("REQ-192-4: context_compact is hidden while a compaction blocker is present, and the other tools stay direct", () => {
 	const blocked = exposures(bcpLoaded);
 	assert.equal(blocked.context_compact, "hidden");
-	assert.equal(blocked.compact_session, "hidden");
 	assert.equal(blocked.context_recall, "direct");
 	assert.equal(blocked.context_status, "direct");
-	assert.equal(blocked.search_prior_sessions, "deferred");
 
 	const standingDown = exposures(bcpLoaded, { env: { BILLION_CONTEXT_NATIVE: "1" }, modelBaseUrl: "https://api.anthropic.com" });
 	assert.equal(standingDown.context_compact, "direct");
-	assert.equal(standingDown.compact_session, "deferred");
+});
+
+// pi-context-aware#272. This extension no longer registers compress or acp_status, so a tool list that holds them
+// comes from billion-context-pi. Its acp_cache is listed whichever extension registered first.
+test("foldModeFor over each shape of billion-context-pi's tool list", () => {
+	const at = (name: string, sourcePath: string): RegisteredToolView => ({ name, sourceInfo: { path: sourcePath } });
+	const bcp = (names: string[]) => names.map((name) => at(name, BCP_PATH));
+	assert.equal(foldModeFor([]), "live");
+	assert.equal(foldModeFor([at("context_fold", OWN_BUNDLE)]), "live");
+	assert.equal(foldModeFor(signatureFrom(BCP_PATH)), "shadow");
+	assert.equal(foldModeFor([at("context_fold", OWN_BUNDLE), ...bcp(["compress", "acp_status"])]), "shadow");
+	assert.equal(foldModeFor(bcp(["compress", "decompress", "search_context", "acp_status", "acp_cache"])), "shadow");
+	// Half a pair is not billion-context-pi.
+	assert.equal(foldModeFor([at("compress", BCP_PATH)]), "live");
+	// Two unrelated extensions that each register one of the names are not billion-context-pi.
+	assert.equal(foldModeFor([at("compress", BCP_PATH), at("acp_status", "/other/index.js")]), "live");
+	// An acp_cache from a file of this package is not billion-context-pi's; one from any other source is.
+	assert.equal(foldModeFor([at("acp_cache", OWN_BUNDLE)]), "live");
+	assert.equal(foldModeFor([at("acp_cache", BCP_PATH)]), "shadow");
 });

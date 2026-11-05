@@ -95,7 +95,7 @@ To choose the model for the next phase, add a trailing model option:
 
 Context-aware resolves the model through Pi's registry, respects any model scope configured for the session, and verifies authentication before seed preparation or compaction starts. A missing, malformed, unknown, out-of-scope, or unavailable model is rejected without compacting. After compaction and any queued input finish, the extension awaits Pi's public model setter and sends the seed only when selection succeeds. Pi persists this active-model change for later turns.
 
-This command option is separate from `compactionModel`: it neither changes that setting nor chooses the model that generates the compaction summary. It applies only to `/compact-then`; the `compact_session` tool has no model option.
+This command option is separate from `compactionModel`: it neither changes that setting nor chooses the model that generates the compaction summary. It applies only to `/compact-then`; the `context_compact` tool has no model option.
 
 You can also use a loaded Pi prompt template as the explicit seed:
 
@@ -103,9 +103,9 @@ You can also use a loaded Pi prompt template as the explicit seed:
 /compact-then /review-auth src/auth.ts
 ```
 
-Before seed rewriting starts, context-aware finds `/review-auth` through Pi's command registry, reads the loaded template body, and applies its argument placeholders. The rewrite model receives that resolved body, not the slash-command name. This makes the combination deterministic instead of relying on the model to infer what `/review-auth` means.
+The seed is an invocation, not text. Before compacting, context-aware checks that `/review-auth` is registered with Pi (`pi.getCommands()`); an unknown command stops the run with an error and nothing is compacted. After compaction completes, it delivers exactly one message, `/review-auth src/auth.ts`, as a follow-up with `expandPromptTemplates: true`. Pi then runs it as it would a direct invocation: prompt template frontmatter controls apply, and registered extension or skill commands are dispatched. The arguments are forwarded as typed, the compacted summary is the context, and no separate seed message is sent. The invocation is not rewritten by the seed rewrite model.
 
-This resolves the prompt text only. It does not execute template frontmatter controls such as `model`, `thinking`, `skill`, `loop`, `chain`, `subagent`, or deterministic shell steps. A registered extension or skill command without a matching loaded prompt template is rejected because it has no prompt body that context-aware can safely use as a handoff seed.
+If Pi cannot dispatch the command after compaction, context-aware reports an error naming the command and the cause. It never falls back to sending the command text as a seed. Free-text seeds are unchanged.
 
 ### 3. Compact without writing a seed
 
@@ -120,7 +120,7 @@ With no seed, the extension first generates a raw next-phase seed from the conve
 Agents can call:
 
 ```ts
-compact_session({
+context_compact({
   seed_prompt: "continue with item #3",
   summary_focus: "Preserve exact file paths and validation commands."
 })
@@ -148,7 +148,7 @@ Autonomous mode is useful for unattended agents that should self-compact and con
 
 ### 6. Let context-aware preempt unseeded auto-compaction
 
-By default, proactive compaction is enabled at **78%** context usage with a **16,384-token output allowance plus 2,048 tokens of protocol overhead**. After every completed provider turn—including `toolUse`, `length`, and error turns—context-aware estimates the newly appended tool results and other trailing context. The `turn_end` handler records the trigger, arms the cancellation drain, and returns without awaiting seed generation. After Pi emits `agent_settled`, context-aware restores the exact active-tool set and launches seed preparation in the background only while `ctx.isIdle()` is true. It compacts before the next model call when either the percentage threshold is crossed or remaining headroom is below the generation reserve. The output allowance is capped at the active model's advertised `maxTokens` when that limit is smaller.
+By default, proactive compaction is enabled at **90%** context usage (the pressure ladder's seeded-compaction step; `proactiveCompaction.thresholdFraction` overrides it) with a **16,384-token output allowance plus 2,048 tokens of protocol overhead**. After every completed provider turn—including `toolUse`, `length`, and error turns—context-aware estimates the newly appended tool results and other trailing context. The `turn_end` handler records the trigger, arms the cancellation drain, and returns without awaiting seed generation. After Pi emits `agent_settled`, context-aware restores the exact active-tool set and launches seed preparation in the background only while `ctx.isIdle()` is true. It compacts before the next model call when either the percentage threshold is crossed or remaining headroom is below the generation reserve. The output allowance is capped at the active model's advertised `maxTokens` when that limit is smaller.
 
 This closes the same-turn gap where a large tool result could leave only a few thousand tokens for the automatic follow-up response. Repeated pressure while preparation is pending or generating is coalesced into that attempt; a later active run is drained without starting a duplicate model call. A competing Pi threshold/overflow compaction is cancelled while preparation owns the seeded handoff, so the same pressure event cannot produce an unseeded compaction followed by a duplicate. Seed generation plus rewriting uses a first-output grace period and a resettable stall timeout, with an absolute five-minute preparation ceiling. A provider that ignores cancellation may finish its detached request later, but it cannot hold `turn_end`, `agent_settled`, shutdown, or a replacement session open, and its late result cannot queue work. The reserve check takes priority when selecting the trigger, but generation-reserve and threshold triggers share the proactive cooldown. A queued attempt starts the guard, and completion resets its full duration; when before/after usage confirms that compaction did not reduce context, context-aware warns instead of immediately re-arming the drain. If Pi has not made post-compaction usage measurable yet, context-aware records a pending measurement, keeps the cooldown active, and checks the first later assistant result before warning. A reply that ended in an error or was aborted is skipped, because its usage is partial; the measurement stays pending until a valid reply (or Pi's own measured size) arrives. If model-generated seed preparation is unavailable at that safety boundary, context-aware records the failure, falls back to a deterministic recovery seed, and still starts compaction instead of allowing the under-budget normal turn.
 
@@ -190,7 +190,7 @@ For seeded automatic handoffs, enable context-aware proactive compaction and dis
 }
 ```
 
-Pi's `compaction.enabled` switch gates only its automatic threshold/overflow checks. Manual `/compact`, `compact_session`, `/compact-then`, and context-aware's `ctx.compact()` path remain available when it is off.
+Pi's `compaction.enabled` switch gates only its automatic threshold/overflow checks. Manual `/compact`, `context_compact`, `/compact-then`, and context-aware's `ctx.compact()` path remain available when it is off.
 
 At `session_start`, context-aware reads Pi's public `SettingsManager` with the active cwd, agent directory, and project-trust decision. This mirrors Pi's default/global/project precedence for a normal file-backed Pi CLI startup. The extension API does not expose Pi's live settings manager or a settings-change event, so changing Pi's auto-compaction option in `/settings` requires `/reload` (or a restart) before this warning and the ownership status are refreshed. Context-aware's own `/context-aware-proactive` command re-evaluates ownership immediately against that startup snapshot. SDK hosts that inject an in-memory/custom settings manager or runtime `applyOverrides()` are not observable through `ExtensionContext`; their ownership status is therefore limited to the same file-backed approximation.
 
@@ -218,14 +218,14 @@ The configured proactive value is retained, but its effective state is inactive 
 
 ### Compaction blocked by another extension
 
-`billion-context-pi` returns `{ "cancel": true }` from Pi's `session_before_compact` hook for every compaction, so no compaction can finish while it is loaded. Context-aware detects it at `session_start` by its tool pair: `compress` and `acp_status`, registered from the same extension. It does not report a block when `billion-context-pi` stands down: when `BILLION_CONTEXT_NATIVE` or `BILLION_CONTEXT_PROXY` is set, or when the active model's base URL routes through its `/bili/` proxy.
+`billion-context-pi` returns `{ "cancel": true }` from Pi's `session_before_compact` hook for every compaction, so no compaction can finish while it is loaded. Context-aware detects it at `session_start` by either of two signatures: the tool pair `compress` and `acp_status` (billion-context-pi's own tools) registered from the same extension, or an `acp_cache` tool registered from outside this package. Only billion-context-pi registers `acp_cache`, and the check uses the name alone, apart from skipping this package's own tools. Another extension that registered a tool named `acp_cache` would also be treated as billion-context-pi: the fold engine would run in shadow mode and the compaction advisory would show. The `acp_cache` signature means the order in which the tools register does not change the result. It does not report a block when `billion-context-pi` stands down: when `BILLION_CONTEXT_NATIVE` or `BILLION_CONTEXT_PROXY` is set, or when the active model's base URL routes through its `/bili/` proxy.
 
 While the block lasts:
 
-- `compact_session` stays registered with `hidden` exposure. Pi does not declare it to the model, and code-mode executors do not list it. A call that still arrives fails with the reason.
+- `context_compact` stays registered with `hidden` exposure. Pi does not declare it to the model, and code-mode executors do not list it. A call that still arrives fails with the reason.
 - `/compact-then` and the context service's handoff request fail with the reason instead of starting a compaction.
 - Proactive compaction is inactive, and `/context-status` reports `Automatic compaction owner: blocked by billion-context-pi, which cancels every compaction`.
-- The context-awareness guidance and the `URGENT` telemetry action name `compress` instead of compaction.
+- When the current session can reach billion-context-pi's own `compress` tool, the context-awareness guidance and the `URGENT` telemetry action name it instead of compaction. Otherwise they do not name it. The `context-tools` section names only our own tools.
 
 The tool list is read once per session start. To restore compaction, remove `billion-context-pi` from the profile's packages and reload Pi.
 
@@ -277,7 +277,7 @@ Envelope format:
 </context-telemetry>
 ```
 
-The `action` attribute is omitted in the `OK` band and is `gate-broad-work` in `WARN`. In `URGENT`, it is `compact-before-tool` only when `compact_session` is reachable in the current session. When compaction is unavailable, the action is `compress-before-tool` only if an extension that cancels every compaction supplies a reachable `compress`; otherwise it is `finish-atomic-work`. The stable guidance block and generated check-in prompt use the same reachability decision, including `extensions.<tool>(...)` invocations when Pi Fabric is the available route. Usage percentage and headroom are intentionally rounded.
+The `action` attribute is omitted in the `OK` band and is `gate-broad-work` in `WARN`. In `URGENT`, it is `compact-before-tool` only when `context_compact` is reachable in the current session. When compaction is unavailable, the action is `compress-before-tool` only if an extension that cancels every compaction supplies a reachable `compress` (billion-context-pi's tool); otherwise it is `finish-atomic-work`. The stable guidance block and generated check-in prompt use the same reachability decision, including `extensions.<tool>(...)` invocations when Pi Fabric is the available route. Usage percentage and headroom are intentionally rounded.
 
 Pi currently converts extension custom messages to an LLM-facing `user` role. The envelope is therefore deliberately self-describing: it identifies `pi-extension:context-aware` as its source, states that it is not user input, and tells the model to continue the preceding request or tool loop without acknowledgement. Its snapshot includes the newly submitted user prompt, then remains byte-identical while tool results and later model calls append after it. A new envelope is appended only when the next user turn starts.
 
@@ -290,7 +290,7 @@ Interpretation is intentionally graduated:
 - `OK`: compact only at natural phase boundaries.
 - `WARN`: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, the agent should either compact at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context. For delegated work, prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, give it explicit scope/stop rules, and ask it for a short result. Compact first for broad or full-context delegation.
 - `URGENT`: compact before nontrivial tool use unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
-- `UNKNOWN`: Pi has not measured the context size yet, for example right after a compaction or an overflow. The envelope reports `usage-percent="unknown"` instead of a number nobody measured (with `pressureTelemetry.mode` `"band"` it reports only `band="UNKNOWN"`, and with `"off"` there is no envelope), and the agent keeps the next action small until a measured band arrives. The marker entry's `details` are then `{ band: "UNKNOWN", percent: null, headroom: null }`. The footer, `/context-status`, compaction notices, the `compact_session` receipt (`tokens_before: null`), the check-in prompt, and the context service (`band: "UNKNOWN"`) also report the size as unknown.
+- `UNKNOWN`: Pi has not measured the context size yet, for example right after a compaction or an overflow. The envelope reports `usage-percent="unknown"` instead of a number nobody measured (with `pressureTelemetry.mode` `"band"` it reports only `band="UNKNOWN"`, and with `"off"` there is no envelope), and the agent keeps the next action small until a measured band arrives. The marker entry's `details` are then `{ band: "UNKNOWN", percent: null, headroom: null }`. The footer, `/context-status`, compaction notices, the `context_compact` receipt (`tokens_before: null`), the check-in prompt, and the context service (`band: "UNKNOWN"`) also report the size as unknown.
 
 ### Raw seed vs expanded seed
 
@@ -395,7 +395,7 @@ When a check finds one, the history is repaired rather than sent:
 
 Each repair is reported once per session at warning level, naming the tool and the tool-call id, so a silent repair cannot hide the defect that caused it. A provider rejection that still matches either wording above is treated as repairable rather than terminal: extension-owned model calls retry it, and a main-loop rejection is named as repairable, because the next request is repaired before it goes out.
 
-When an explicit seed came from a prompt template, details also record `promptTemplateInvocation`, `promptTemplateName`, `promptTemplatePath`, and `resolvedPromptTemplateSeed`. This distinguishes the text Pi resolved from any later model rewrite.
+When an explicit seed is a command invocation, details also record `commandInvocation` and `commandName`.
 
 ## Main commands
 
@@ -423,18 +423,17 @@ With no seed:
 
 The no-seed path generates a seed from the current conversation, then applies the same rewrite/approval/ambiguity behavior.
 
-### `compact_session` tool
+### `context_compact` tool
 
-LLM-callable equivalent of `/compact-then`.
+LLM-callable equivalent of `/compact-then`. It has no `ambiguity_mode` parameter.
 
 Parameters:
 
 ```ts
-compact_session({
+context_compact({
   seed_prompt: string,
   summary_focus?: string,
-  rewrite_seed?: boolean,
-  ambiguity_mode?: "inherit" | "ask" | "cautious-proceed" | "always-proceed"
+  rewrite_seed?: boolean
 })
 ```
 
@@ -445,23 +444,33 @@ compact_session({
 
 When rewriting is enabled, the expanded seed replaces the raw seed for both purposes.
 
-A successful `compact_session` call is a terminating tool action: Pi ends the current agent run without an extra LLM continuation, then the extension starts compaction from the `agent_settled` lifecycle boundary. After compaction, the extension sends the expanded seed automatically, so the user does not need to repeat the prompt. The agent should call `compact_session` as the only tool in its response because Pi only terminates a mixed tool batch when every result in that batch is terminating.
+A successful `context_compact` call is a terminating tool action: Pi ends the current agent run without an extra LLM continuation, then the extension starts compaction from the `agent_settled` lifecycle boundary. After compaction, the extension sends the expanded seed automatically, so the user does not need to repeat the prompt. The agent should call `context_compact` as the only tool in its response because Pi only terminates a mixed tool batch when every result in that batch is terminating.
 
 `/compact-then` follows the same no-reprompt handoff contract. As an extension command it waits for an idle boundary, compacts, and auto-sends its captured or generated seed.
 
-When Pi would refuse the compaction, `compact_session` returns `Nothing to compact (session too small); the conversation is unchanged.` (or `Already compacted; …` when the newest entry is a compaction) as its result, without reporting `queued` first. That result does not end the run. `/compact-then`, the typed service's `requestHandoff` (status `nothing-to-compact`), and a Pi Fabric `compact.request` under the owner claim (`queued: false`) refuse the same way, before any seed is generated or queued. The check reproduces Pi's refusal for the session snapshot as it stands when asked. The `compact_session` snapshot includes an estimate for this call's own persisted result; entries that land after the check are not covered and may change Pi's eventual decision. Unverified Pi versions, missing settings, queued input, pending context edits, and an estimated result that already reaches the kept tail all leave the request to Pi.
+When Pi would refuse the compaction, `context_compact` returns `Nothing to compact (session too small); the conversation is unchanged.` (or `Already compacted; …` when the newest entry is a compaction) as its result, without reporting `queued` first. That result does not end the run. `/compact-then`, the typed service's `requestHandoff` (status `nothing-to-compact`), and a Pi Fabric `compact.request` under the owner claim (`queued: false`) refuse the same way, before any seed is generated or queued. The check reproduces Pi's refusal for the session snapshot as it stands when asked. The `context_compact` snapshot includes an estimate for this call's own persisted result; entries that land after the check are not covered and may change Pi's eventual decision. Unverified Pi versions, missing settings, queued input, pending context edits, and an estimated result that already reaches the kept tail all leave the request to Pi.
 
-In a Pi Fabric child session, `compact_session` refuses with an error and does not end the run. A child ends as soon as its run ends, so nothing would deliver the seed and the rest of its work would be lost. The error says that nothing was compacted and tells the model to keep working, and names `context_fold` or `compress` when one is reachable. A child is a session whose `PI_FABRIC_LINEAGE` marks a worker or a depth above 0, or whose `PI_FABRIC_DEPTH` is above 0; an unreadable value also counts as a child. In a child, `compact_session` is registered with `hidden` exposure, and the per-turn guidance, telemetry action and check-in prompt do not offer it. Proactive compaction and output-limit recovery also stay off in a child, because both end the run to compact; Pi's own overflow recovery still applies.
+In a Pi Fabric child session, `context_compact` refuses with an error and does not end the run. A child ends as soon as its run ends, so nothing would deliver the seed and the rest of its work would be lost. The error says that nothing was compacted and tells the model to keep working, and names `context_fold`, or billion-context-pi's `compress`, when one is reachable. A child is a session whose `PI_FABRIC_LINEAGE` marks a worker or a depth above 0, or whose `PI_FABRIC_DEPTH` is above 0; an unreadable value also counts as a child. A persistent Fabric actor is refused too: it keeps its session file between prompts, but each activation is a child run that Fabric closes once it settles, so nothing would deliver the seed. In a child, `context_compact` is registered with `hidden` exposure, and the per-turn guidance, telemetry action and check-in prompt do not offer it. Proactive compaction and output-limit recovery also stay off in a child, because both end the run to compact; Pi's own overflow recovery still applies.
 
 ### Prior-session search
 
-Use `search_prior_sessions` when compacted-away or prior-session transcript text is needed. Set `include_current: true` to search the active session's compacted-away text; it defaults to `false` for cross-session recall. Use `session_compaction_history` when you need the current branch's compaction count or boundary identifiers. Project-scoped searches include sessions from same-repo Git worktrees by default.
+Use `context_recall` when compacted-away or prior-session transcript text is needed. Set `include_current: true` (or `scope: "session"`) to search the active session's compacted-away text; it defaults to `false` for cross-session recall. Pass `ref` (a fold id such as `b5`) to get the original entries behind a fold. Use `context_status({ view: "compactions" })` when you need the current branch's compaction count, boundary identifiers, or the extension that wrote the last committed compaction (`Last committed compaction writer: …`, the same line `/context-status` prints; `details.writer` holds it as `{ kind, name }`). Project-scoped searches include sessions from same-repo Git worktrees by default.
 
-The prompt's compaction projection contains only the current-branch count; compaction boundaries contain metadata, not summary text. Summaries are not retained by this mechanism. Use `search_prior_sessions` with `include_current: true` to retrieve earlier summaries or other compacted-away transcript text.
+The prompt's compaction projection contains only the current-branch count; compaction boundaries contain metadata, not summary text. Summaries are not retained by this mechanism. Use `context_recall` with `include_current: true` to retrieve earlier summaries or other compacted-away transcript text.
 
-#### Recall tool-name migration
+#### Context tool guidance
 
-Call the bounded cache-and-session lookup tool as `session_recall`. It replaces the former `recall` call name. There is no `recall` alias because another plugin may own that name. Existing session history is not rewritten, so recorded calls keep their original text; new calls must use `session_recall`.
+One prompt section, `context-tools`, covers `context_status`, `context_recall`, `context_fold` and `context_compact`. The `context_fold` lines render only when that tool is reachable. Each tool's own prompt snippet and guidelines are short. The section, snippets and guidelines of the six context tools (those four plus `session_focus` and `session_tasks`) together stay at or under 1,500 tokens, counted with `defaultCountTokens`; `tests/context-tool-guidance.test.ts` fails above that. Tool descriptions are not counted.
+
+#### `context_fold` replies
+
+`context_fold` answers with one line per range. An accepted range says `accepted; written at the end of this turn`: Pi writes new session entries only at the end of a turn, so the fold waits in a queue until then.
+
+A range is accepted only if the end-of-turn check would write it with the branch as it is when you call. The engine plans the range, removes the protected recent messages and any entry they would split, and then runs the end-of-turn check on what is left, including the minimum size (`minCompressRange`, 5,000 characters). When too little is left, the range is refused at once with the same message the end of the turn would give, for example `Total compressible content too small (1530 chars across 1 range(s), min 5000)`, and the valid refs. Nothing is queued.
+
+A call in which every range is refused, or which names no readable range, is an error result. A call with at least one accepted range is not, and lists the refused ranges in its text.
+
+A queued fold can still be dropped at the end of the turn for a reason that did not exist when you called, for example when an earlier fold in the same batch already hid part of its range. The turn then ends with one notice that names each dropped range and the reason, such as `Fold m00004..m00018 was not written: Total compressible content too small (1530 chars across 1 range(s), min 5000).` The notice is a custom message entry (`context-aware.fold-notice`), not a turn the user typed. Pi sends it to the model as a user-role message with the next request, and, like other injected messages, it is ordinary history for the fold engine: only a message you typed moves the boundary of the protected zone, so the notice does not stop earlier messages of the turn from being folded. It names at most three folds and counts the rest; `context_status({ view: "folds" })` lists every fold dropped in the last batch.
 
 ### `/session-erase <session-id>`
 
@@ -524,6 +533,8 @@ To erase the unavailable session's profile stores, name its id with `/session-er
 ### Context cache management
 
 The context cache stores curated, scoped reference documents that survive compaction and future sessions. By default, files live under `~/.pi/agent/context-cache/<sha256(scopePath).slice(0,32)>/`, where `scopePath` is the current Git worktree root. The `contextCache.scope` setting can select the session directory, repository common Git directory, or absolute current directory instead. Each pool has an `_manifest.json` tracking descriptions and metadata; unrelated worktrees do not share a pool.
+
+Manifest entries follow a fixed rule when `_manifest.json` is read. Each entry has six required fields: `description`, `createdBy`, `updatedBy`, `created` and `updated` (strings) and `sizeBytes` (a non-negative safe integer). `artifactId` is optional: a missing, empty or duplicate value is replaced with a stable id derived from the cache path and file name, with a `-2`, `-3` suffix on a collision, so the same manifest always reads to the same ids. An entry that lacks any required field, has a wrong type, or has an unsafe file name is malformed. Reading drops it from the manifest view. Its file stays on disk until the normal orphan cleanup handles it. Malformed entries are not quarantined and not migrated. Only the named fields are kept: unknown properties on the manifest or on an entry do not survive reading, writing or pool migration.
 
 Explicit context-cache artifact promotion is create-only: tracked, untracked, symlinked, and concurrently created destinations are refused rather than overwritten. Callers are responsible for choosing a fresh safe cache filename before retrying. The chosen filename may not be the reserved manifest name `_manifest.json` in any case variant. Promotion stages the complete document privately before atomically publishing it, so the final destination does not expose partial bytes. The cache is a UTF-8 text store: a source that is not valid UTF-8 is rejected before anything is staged or published rather than being decoded lossily, and valid UTF-8 (including a leading byte-order mark) is preserved byte-for-byte.
 

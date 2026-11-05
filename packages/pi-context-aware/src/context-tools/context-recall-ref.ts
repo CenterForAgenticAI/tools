@@ -1,27 +1,19 @@
 /**
- * `context_recall({ ref })`: the original entries behind one fold.
+ * `context_recall({ ref })`: the original entries behind one fold or one recoverable hide.
  *
  * A fold hides its covered entries with `context_edit` entries; the entries
- * themselves stay on the branch. Ref mode reads them from the branch, never from
- * the folded context view, and writes nothing: the fold stays in effect.
+ * themselves stay on the branch. A recoverable hide (`h1`, ..., pi-context-aware#268) shortens one
+ * entry the same way. Ref mode reads the originals from the branch, never from
+ * the folded context view, and writes nothing: the fold or hide stays in effect.
  */
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { Type, type Static } from "typebox";
 
 import { coveredEntryIds, foldRecordsOnBranch, type FoldRecord } from "../folds/fold-entries.js";
+import { hideRecordsOnBranch, isHideId, type HideRecord } from "../folds/hide-entries.js";
 
 /** Most characters of original text one call returns. Longer folds page with `offset`. */
 export const MAX_REF_PAGE_CHARACTERS = 12_000;
-
-/** billion-context-pi 0.1.83's `decompress` parameters. */
-export const decompressSchema = Type.Object({
-	blockId: Type.String({ description: "Fold block id to restore, for example \"b5\". The fold stays in place." }),
-	full: Type.Optional(Type.Boolean({ description: "Accepted for compatibility with billion-context-pi and ignored: the original entries are always returned." })),
-	toFile: Type.Optional(Type.String({ description: "Accepted for compatibility with billion-context-pi and ignored: the content is returned in pages." })),
-	inline: Type.Optional(Type.Boolean({ description: "Accepted for compatibility with billion-context-pi and ignored: the content is returned in pages." })),
-});
-export type DecompressParams = Static<typeof decompressSchema>;
 
 export interface ContextRecallRefRequest {
 	readonly ref: string;
@@ -50,10 +42,6 @@ export interface ContextRecallRefResult {
 	isError?: boolean;
 }
 
-export function decompressRequest(params: DecompressParams): ContextRecallRefRequest {
-	return { ref: params.blockId };
-}
-
 function refusal(ref: string, error: ContextRecallRefError, text: string): ContextRecallRefResult {
 	return {
 		content: [{ type: "text", text }],
@@ -70,7 +58,7 @@ export function refuseBillionContextPiFolds(ref: string): ContextRecallRefResult
 	return refusal(
 		ref,
 		"folds owned by billion-context-pi",
-		`billion-context-pi is loaded, so the folds in this session are its own and context_recall has no record of them. Call decompress({ blockId: ${JSON.stringify(ref)} }) instead.`,
+		`billion-context-pi is loaded, so the folds in this session are its own and context_recall has no record of them. Use its own tool to restore ${JSON.stringify(ref)}.`,
 	);
 }
 
@@ -115,15 +103,31 @@ function pageStart(value: number | undefined): number {
 }
 
 /** Resolve one fold ref against the branch entries and return one page of the original text. */
+/** The newest record for a hide id on this branch. */
+function hideFor(branch: readonly SessionEntry[], ref: string): HideRecord | undefined {
+	let found: HideRecord | undefined;
+	for (const { record } of hideRecordsOnBranch(branch)) if (record.hideId === ref) found = record;
+	return found;
+}
+
 export function recallRef(request: ContextRecallRefRequest, branch: readonly SessionEntry[]): ContextRecallRefResult {
 	const ref = typeof request.ref === "string" ? request.ref.trim() : "";
-	const record = recordFor(branch, ref);
-	if (!record) {
+	const hide = isHideId(ref) ? hideFor(branch, ref) : undefined;
+	const record = hide ? undefined : recordFor(branch, ref);
+	if (!hide && !record) {
 		const known = [...new Set(foldRecordsOnBranch(branch).map(({ record: folded }) => folded.blockId))];
-		return refusal(ref, "unknown ref", `No fold ${JSON.stringify(ref)} on this branch. ${known.length > 0 ? `Folds on this branch: ${known.join(", ")}.` : "This branch has no folds."}`);
+		const hides = [...new Set(hideRecordsOnBranch(branch).map(({ record: hidden }) => hidden.hideId))];
+		const listed = [
+			known.length > 0 ? `Folds on this branch: ${known.join(", ")}.` : "This branch has no folds.",
+			...(hides.length > 0 ? [`Hides on this branch: ${hides.join(", ")}.`] : []),
+		].join(" ");
+		return refusal(ref, "unknown ref", `No fold or hide ${JSON.stringify(ref)} on this branch. ${listed}`);
 	}
+	const label = hide ? `Hide ${hide.hideId}` : `Fold ${record!.blockId}${record!.topic ? ` (${record!.topic})` : ""}`;
+	const refId = hide ? hide.hideId : record!.blockId;
+	const stays = hide ? "The hide stays in place." : "The fold stays in place.";
 	const byId = new Map(branch.map((entry) => [entry.id, entry]));
-	const covered = coveredEntryIds(record);
+	const covered = hide ? [hide.targetId] : coveredEntryIds(record!);
 	const entries = covered.map((id) => byId.get(id)).filter((entry): entry is SessionEntry => entry !== undefined);
 	const missing = covered.filter((id) => !byId.has(id));
 	const full = entries.map(renderEntry).join("\n\n");
@@ -131,16 +135,16 @@ export function recallRef(request: ContextRecallRefRequest, branch: readonly Ses
 	const end = Math.min(full.length, offset + MAX_REF_PAGE_CHARACTERS);
 	const more = end < full.length;
 	const lines = [
-		`Fold ${record.blockId}${record.topic ? ` (${record.topic})` : ""}: ${entries.length} original entr${entries.length === 1 ? "y" : "ies"}, characters ${offset}-${end} of ${full.length}. The fold stays in place.`,
+		`${label}: ${entries.length} original entr${entries.length === 1 ? "y" : "ies"}, characters ${offset}-${end} of ${full.length}. ${stays}`,
 		full.slice(offset, end),
 	];
 	if (missing.length > 0) lines.push(`[Not on this branch: ${missing.join(", ")}]`);
-	if (more) lines.push(`[More: call context_recall({ ref: ${JSON.stringify(record.blockId)}, offset: ${end} }) for the next page.]`);
+	if (more) lines.push(`[More: call context_recall({ ref: ${JSON.stringify(refId)}, offset: ${end} }) for the next page.]`);
 	return {
 		content: [{ type: "text", text: lines.join("\n") }],
 		details: {
 			mode: "ref",
-			ref: record.blockId,
+			ref: refId,
 			entry_ids: entries.map((entry) => entry.id),
 			missing_entry_ids: missing,
 			offset,

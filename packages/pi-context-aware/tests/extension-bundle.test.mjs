@@ -13,6 +13,7 @@ const manifest = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "ut
 
 test("Pi loads the bundled entry, every build writes it, and the exports stay on tsc output", () => {
 	assert.deepEqual(manifest.pi?.extensions, [`./${ENTRY_OUTFILE}`]);
+	assert.ok(!existsSync(join(PACKAGE_ROOT, "pi-extension.ts")), "the removed .ts wrapper stays removed");
 	assert.match(manifest.scripts.build, /^tsc -p tsconfig\.build\.json && .* && node scripts\/build-extension\.mjs$/u);
 	assert.equal(manifest.scripts.prepare, "npm run build");
 	assert.ok(manifest.files.includes(dirname(ENTRY_OUTFILE)), "the bundle's directory ships");

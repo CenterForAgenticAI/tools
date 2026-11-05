@@ -31,7 +31,7 @@ warning rewrite cannot produce a parity difference:
 - The recorder listens only to the `compress` tool while the engine is in shadow
   mode (`src/parity/recorder.ts:172-174`, `src/parity/recorder.ts:197-198`, and
   `src/parity/recorder.ts:235-247`). The rewritten warning is rendered by the
-  native live `context_fold` tool or its `compress` alias
+  native live `context_fold` tool
   (`src/context-tools/context-fold.ts:91-118`); the shadow preview never renders
   that warning as a tool result. It therefore cannot enter the provider-request
   tool-result hashes compared in `src/parity/compare.ts:525-538`.
@@ -482,6 +482,10 @@ predicate that matches only that difference.
 | FP-163 | Native request media elision | In image-heavy requests, the native engine keeps the newest five image parts and replaces every older image part with a placeholder that names the original session entry, including within a partially elided boundary entry; billion-context-pi sends every image. Applies only when paired before/after content hashes account exactly for a content or tool-result difference. Unrelated differences remain unexplained. Raw text and image bytes are not recorded. | pi-context-aware#163 |
 | FP-201 | Tier-2 nudge reachable | billion-context-pi 0.1.83 keeps the kernel's `tier2Trigger` 1000 and `tier3Trigger` 2000, which make the tier-2 nudge unreachable (ranxianglei/billion-context-pi#628). The native per-turn pass uses 10 and 20, as ranxianglei/billion-context-pi#629 proposes. Applies only to a `content` difference, and only when the preview recorded a `tier-trigger` nudge fix and swapping its native nudge for billion-context-pi's makes the non-summary content equal. | pi-context-aware#201 |
 | FP-202 | Emergency nudge deferred after a failed turn | billion-context-pi 0.1.83 sends the emergency nudge again on every failed model turn (ranxianglei/billion-context-pi#666). The native per-turn pass sends no emergency nudge while the latest model turn ended in `error` or `aborted`, and sends it on the first turn after one completes. Applies only to a `content` difference, and only when the preview recorded an `emergency-defer` fix and billion-context-pi's emergency nudge is the only extra message. | pi-context-aware#201 |
+| FP-203 | Ladder steps are shares of the whole window | billion-context-pi reads each nudge step as a share of the window less the model's output reserve (the smaller of the model's maximum output and a quarter of the window; none on `anthropic-messages`). The native pass reads every ladder step as a share of the whole window (pi-context-aware#244), so on a model with a large output limit the nudge appears at a different token count. Applies only to a `content` difference, and only when the preview recorded a `denominator` nudge fix: billion-context-pi's own rules at the window's size send the nudge the native pass sent, and swapping its nudge for billion-context-pi's makes the non-summary content equal. The tier-2 trigger of FP-201 is not the cause, and a nudge that depends on both is left unexplained. | pi-context-aware#244 |
+| FP-204 | Truncation starts at a share of the whole window | billion-context-pi starts emergency truncation at the last ladder step of the window less the output reserve; the native pass starts it at the same step of the whole window, so one side shortens oversized messages where the other does not. Applies only to a `content` or `tool-results` difference, and only when the preview recorded `ours.denominator` with `truncationStartDiffers` and the content keys of the request billion-context-pi's limit produces: billion-context-pi's request must equal that request (its nudge aside). Any other difference stays unexplained. | pi-context-aware#244 |
+| FP-205 | Recoverable hide pointer | billion-context-pi truncates oversized old messages in the request at the last ladder step and leaves no way back to the original. The native engine does the same shortening (the same candidates, the same head, tail and marker), and also saves it as a recoverable hide (pi-context-aware#268): a `context_edit` plus a `context-aware.hide.v1` record, written at the next boundary. The saved message therefore carries one more line after the marker, `[Recover the original with context_recall({ ref: "h1" }).]`. Applies only to a `content` or `tool-results` difference, and only when the preview recorded `ours.hidePointer`: swapping each recorded original content key in billion-context-pi's request for its replacement makes the two requests equal. Any other difference stays unexplained. | pi-context-aware#268 |
+| FP-257 | Nudge names the live fold tool | billion-context-pi's nudge tells the model to call `compress`. After cut-over the tool is `context_fold`, so the native nudge names it. Applies only to a `content` difference, and only when the preview recorded a `tool-name` nudge fix: the native nudge is billion-context-pi's with the fold tool renamed and nothing else changed. | pi-context-aware#257 |
 
 Every shadow next-request comparison requires expected-summary evidence. An
 explicit empty body and topic list certifies that no summaries were planned;
@@ -509,10 +513,58 @@ recorded turns run through one recorder and therefore one shadow replay state. R
 preview or `/fold-parity` cannot shift a live growth baseline or mark its nudge as shown.
 
 When the native nudge differs from the one billion-context-pi 0.1.83 would send
-only because of FP-201 or FP-202, the preview records `ours.nudgeFix`: the
+only because of FP-201, FP-202 or FP-257, the preview records `ours.nudgeFix`: the
 cause and the body hashes of both nudges. A `nudgeFix` that names no nudge,
 names the same nudge twice, or for `emergency-defer` names a sent nudge, is a
 recorder fault.
+
+### The protected zone (pi-context-aware#284)
+
+The live native engine counts only a message a person typed as the most recent user
+message. billion-context-pi counts every user-role message, an extension-injected
+`custom_message` included. The parity preview plans with `protectedZone: "all-user-role"`,
+so it applies billion-context-pi's rule and the two engines are compared on the same
+zone. The difference therefore never reaches a comparison, and it has no register entry:
+an entry whose predicate cannot match would be dead. If the preview ever planned with the
+native rule, a `protected-zone` refusal by billion-context-pi against a native fold would
+need an entry and a row in the table above.
+
+### The recoverable hide (FP-205)
+
+At the last ladder step both engines shorten the same oversized old messages. The native
+engine also saves each shortening: the preview of the next live request shows the shortened
+message with its pointer line, so `ours.hidePointer` holds the content key of the message
+before the line and after it, paired by index (hashes only; no message text is stored). The
+evidence is valid when both lists have the same length and every entry is a content key. A
+hide is not a fold: it adds no block, tier or summary, so only the `content` and
+`tool-results` differences above can carry it.
+
+### The ladder denominator (FP-203 and FP-204)
+
+The native pass reads each pressure-ladder step as a share of the whole context
+window (pi-context-aware#244). billion-context-pi reads it as a share of the window
+less the model's output reserve: the smaller of the model's maximum output and a
+quarter of the window, and nothing on `anthropic-messages`. For a model with a
+large output limit the two disagree about where the nudge and the emergency
+truncation start. For example, on a 200,000-token window with a 100,000-token
+output limit, billion-context-pi's limit is 150,000 and its last step (95%) is
+142,500 tokens; the native last step is 190,000.
+
+When the two limits differ, the preview records two things, so this difference is
+not filed under FP-201:
+
+- A nudge that differs only because of the limit has `ours.nudgeFix.cause` of
+  `denominator`. The recorder reaches that cause by running billion-context-pi's
+  nudge rules at the window's size: when those send the nudge the native pass
+  sent, the limit is the cause. If the nudge also depends on the tier-2 trigger,
+  the preview records no fix and the difference stays unexplained (FP-203).
+- `ours.denominator` carries both limits and `truncationStartDiffers`, true when
+  one side's last step is crossed and the other's is not. Then it also carries
+  the content and tool-result keys of the request billion-context-pi's limit
+  produces. The keys are hashes; no message text is stored. FP-204 explains a
+  request only when billion-context-pi's request equals that simulation, its
+  nudge aside. A `denominator` note with equal limits, or with keys on one side
+  of the flag only, is a recorder fault.
 Historical records without exact shortened-argument hashes or folded-opening
 evidence stay unexplained. No raw arguments or opening text are stored.
 Call coverage excludes bcp's metadata-only pinned opening when the native policy
@@ -561,8 +613,8 @@ summary hashes. Anything else fails, with a closed reason:
 | `attribution-unavailable` | A request message cannot be traced to its session entry. |
 | `too-large` | A request exceeds 2,000 messages. |
 | `unattributed-fold` | A refused fold has no summary, or a fold appears for a call the counterfactual omitted. |
-| `sibling-covered` | A refused fold covers an entry that an accepted sibling's fold covers, in either preview. This includes a refused fold that absorbs a sibling's block. |
-| `sibling-absorbed` | A refused fold absorbs a sibling's block, or a sibling absorbs a refused block. |
+| `sibling-covered` | A refused fold covers only part of an accepted sibling's coverage, in either preview. A sibling wholly inside the refused coverage is not this reason (see below). |
+| `sibling-absorbed` | A refused fold absorbs the block of a sibling that is not wholly inside the refused coverage, or a sibling absorbs a refused block. |
 | `sibling-changed` | An accepted sibling folds differently with and without the refused calls. |
 | `summary-missing` | A refused fold's carrier has no message in the counterfactual request. |
 | `message-changed` | Some other message differs, is missing, is extra, or is out of order. |
@@ -637,15 +689,18 @@ calls or keeping them as blockers, so the gate can pass while each case stays
 counted. The native engine still lacks these guards; whether it needs them is a
 separate question.
 
-One known limit stays a blocker. In one batch, a refused fold can cover an
-entry that an accepted fold covers, or absorb the accepted fold's block. The
-native engine does both with no fault injected: a refused fold of entries 1-8
-before an accepted fold of entries 5-8, or an accepted fold of entries 5-8
-before a refused fold of entries 1-10. The check then fails with
-`sibling-covered`, so that request stays unexplained and the gate is not ready.
-This is deliberate (decided 2026-10-11): the rule above cannot prove what the
-accepted fold's summary becomes in these shapes. pi-context-aware#177 tracks explaining
-them or giving the native engine the same guards.
+In one batch, a refused fold can cover an accepted sibling's whole coverage or
+absorb its block. The native engine does both with no fault injected: a refused
+fold of entries 1-8 before an accepted fold of entries 5-8, or an accepted fold
+of entries 5-8 before a refused fold of entries 1-10. The check treats such a
+sibling as subsumed: the refused fold's summary replaces its entries, so it has
+no summary of its own in the full request. A subsumed sibling must still be a
+fold of the counterfactual preview (same call, tier, covered entries and
+summary), and every other message must still match. The request is then
+`refused-folds-only`. A sibling that extends past the refused coverage stays
+`sibling-covered`, and any fault in the summary or in another message stays
+`other` (pi-context-aware#177). Giving the native engine the same guards is a separate
+question.
 
 Each control below was removed in the generated test build only. The named
 test in `tests/fold-parity-attribution.test.ts` then failed an assertion
@@ -658,6 +713,8 @@ test in `tests/fold-parity-attribution.test.ts` then failed an assertion
 | Entries judge the counterfactual's own evidence | a refusal after a compress call with a long summary, and after the opening user message was folded, is explained |
 | Recomputation from the counterfactual's evidence | a stored clean counterfactual cannot hide a difference its own evidence shows |
 | Counterfactual evidence is required | a counterfactual without its request evidence explains nothing, even when its stored list is empty |
+| A sibling counts as subsumed only when all its entries lie inside the refused coverage (`every`, not `some`) | a refused fold that overlaps an accepted sibling only in part stays sibling-covered |
+| A subsumed sibling must still be a fold of the counterfactual preview | a subsumed sibling whose fold differs in the full preview is not explained |
 | Validation of `counterfactualOurs` | malformed counterfactual request evidence is a recorder fault |
 | Active-fold bound on the counterfactual request | a dead-range refusal with an accepted sibling fold is explained when the full request differs only by the refused fold |
 | Refused calls confirmed by their compress records | a refused list that names an accepted call cannot take that call's block ids out of the active-fold bound |
@@ -716,6 +773,39 @@ them. The session file keeps the original arguments. The match is by request id
 (`<tool call id>#<item index>`). A shadow session has no native fold calls, so
 the preview and FP-002 do not change.
 
+## Dropped on purpose
+
+billion-context-pi behaviour that pi-context-aware does not carry over, with the reason (pi-context-aware#255). Kept guards are documented in `docs/configuration.md`: `toolOutputCap`, `repetitionGuard` (warn only), `overflowRecovery`.
+
+- Bash default timeout: bcp injected a 60 s bash timeout. Dropped: Pi's bash tool has no default by design, and Fabric's hang notice and background mode cover hung commands.
+- Repetition abort: bcp aborted a turn after 5 identical consecutive tool calls and could not tell a Fabric program's nested calls from the model's (pi-context-aware#169). Dropped: the abort. The native guard only warns, at the 3rd call, and never counts nested calls.
+- Degeneration guard: bcp collapsed runs of 200 or more repeated characters in earlier assistant output (bcp issue 351). Dropped: no occurrence in 8,510 local sessions; it rewrites earlier model output.
+- Provider throttle retry: bcp retried Bedrock "Too many tokens" throttles with its own sleep loop. Dropped: Pi retries rate limits and 5xx; the Bedrock phrasing is the only gap, and no Bedrock provider is configured.
+- Context window learning: bcp learned the real context window from overflow errors. Dropped: pca reads the registered window; no occurrence in 8,510 sessions.
+- Output headroom reservation: bcp reserved up to 25% of the window for the reply. Dropped: `proactiveCompaction.outputReserveTokens` does this.
+- Bodyless 400/413 heuristic: bcp armed emergency mode on a 4xx without a body. Dropped: zero occurrences, and pi-ai already treats that text as overflow.
+- Orphaned tool-result sanitizer, stale-usage floor, delegate watchdog, self-update and request-rebuild shims: covered by `src/compaction/history-integrity.ts` and `src/compaction/usage-view.ts`, or tied to bcp's own engine or delegate. Dropped with bcp.
+- Image stripping copy: replaced by `imageStripping`. bcp's `compress.stripImages` does not migrate; set `imageStripping.enabled: true` at cut-over (pi-context-aware#137).
+- Unverifiable user-quote detector in compress summaries: not ported; only the `\uXXXX` decode is (`src/folds/summary-sanitize.ts`).
+
+### billion-context-pi `acp.json` keys
+
+Native pca has no reader for `~/.pi/acp.json` or `<project>/.pi/acp.json`. Checked 2026-10-27 on main 666f6fa: the only `acp.json` text in `src/` is the per-session `<session>.jsonl.acp.json` side file (`src/folds/acp-startup-import.ts`, `src/parity/side-file.ts`). The kernel builds its settings with `defaultConfig` (`src/folds/kernel/config.ts`), fed from pca's own config, never from `acp.json`. Every key in bcp's `UserAcpConfig` (`dist/user-config.d.ts`, 0.1.83) is therefore dropped on purpose. A value left in `acp.json` after cut-over does nothing.
+
+- `enabled`, `debug`, `autoUpdate`, `hostSession`: tied to bcp's own engine, updater and host session. No native key.
+- `modelContextLimit`: pca reads the registered model window.
+- `protectedTools`, `protectedLatestTools`, `neverPreserveRecentTools`, `preserveRecentTools`: no native config key; the kernel uses its built-in defaults (empty lists, 5 recent messages).
+- `toolBashDefaultTimeout`: dropped (see above).
+- `toolOutputMaxBytes`: replaced by `toolOutputCap.maxBytes`.
+- `outputHeadroomMaxPct`: replaced by `proactiveCompaction.outputReserveTokens`.
+- `repetitionGuard`: replaced by `repetitionGuard.enabled` (warn only).
+- `throttleRetry`, `degenerationGuard`: dropped (see above).
+- `delegate`, `delegatePrompt`: pca has no delegate tools. Delegation stays with the delegation extension.
+- `compress`, `displayUsage`, `rules`: no native key.
+- `prompts`, `acknowledgePromptsRisk`, `promptSections`, `nudgeSections`, `toolPrompts`: bcp prompt overrides leave with bcp's prompt (pi-context-aware#195).
+
+`contextPolicy` is **not** in this list. Something does read it: `/context-policy status`, `/context-status`, and the typed service `policy.current()` report the resolved value (`src/policy/context-policy.ts`, `src/context-service.ts`). Its only accepted value is `summaries`, so no code path branches on it yet. It is a reported setting with no effect, and later releases add values.
+
 ## Storage, privacy, and erasure
 
 Diagnostics live outside the session:
@@ -751,5 +841,32 @@ the record schema version.
 
 Delete a session's JSONL file to erase its diagnostics. Issue pi-context-aware#151 must also
 delete `fold-parity/v1/sessions/<id>.jsonl` when erasing that session. This
-recorder does not import folds into any persisted session; that remains blocked
-until pi-context-aware#151 lands.
+recorder does not import folds into any persisted session.
+
+The persisted import is separate (pi-context-aware#254, `src/folds/acp-startup-import.ts`).
+At `session_start`, when this extension owns folding (billion-context-pi is not loaded),
+a session with a `<session>.jsonl.acp.json` side file and no native fold entries gets its
+active folds written once, through `importAcpSideFileFromProfile`, so an erased session is
+never imported. Once the folds exist the side file is no longer read, and it is never written.
+A side file that is corrupt, oversized, or of an unknown schema gives one warning at that
+start and leaves the session as it was. Nothing is retried on later turns. In shadow mode
+nothing is imported.
+
+The import is bounded. Blocks are deduplicated by `blockId` (a repeat is skipped). A side file with
+more than 1,000 distinct blocks, or whose folds would write more than four times the branch's entry
+count plus two per kept block, gives one warning and nothing is imported; the import is never
+partial. A warning reason is cut to 200 characters.
+
+The folds are first applied to an in-memory copy of the branch, so a draft that Pi refuses cannot
+leave half the folds in the session file; only then are they written. Pi has no batch append and its
+`appendContextEdit` walks the whole branch to check each target, which made the apply quadratic
+(31 s to 189 s on a 24,000-entry session). `src/folds/branch-cache.ts` keeps the branch array and
+an id index for the length of one apply, so the walk happens once and the apply is linear: about
+0.3 s for a whole-session fold and 0.8 s for a three-tier fold over 24,000 entries, copy included.
+Pi still runs its own checks on every draft.
+
+A side file may cover only part of a session, for example a session branched after the folds were
+made. The blocks that cover entries on the active branch are folded and written. Native fold entries
+then exist, so the side file is never read again: blocks that cover only another branch are not
+imported, even if that branch is opened later. A forked Pi session has a new file and id, so it has
+no side file and imports nothing.

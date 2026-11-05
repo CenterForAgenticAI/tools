@@ -20,8 +20,11 @@ import type { ContextEditableContent, ContextEditEntryDraft, SessionBoundaryDraf
 import { assignRefs, baseIdOf, countMessageTokens, createCore, createInitialState, defaultConfig, defaultCountTokens, emptyRefMap } from "./kernel/index.js";
 import type { CompressionBlock, CompressionState, Config, CoreMessage } from "./kernel/index.js";
 import { BoundaryNotFoundError, resolveBoundaries } from "./kernel/boundaries.js";
+import { computeProtectedRefs } from "./kernel/recommend.js";
+import { contentLength, MAX_VERBATIM_CHARS, renderOneLineSection, type FoldHintView, type ResolvedFoldHint } from "./fold-hints.js";
 import { widenFoldCoverage } from "./fold-coverage.js";
 import { stubSummaryError } from "./stub-summary.js";
+import { sanitizeSummary } from "./summary-sanitize.js";
 import { DEFAULT_FOLDS_CONFIG, type FoldsConfig } from "../platform/config-layers.js";
 import {
 	coveredEntryIds,
@@ -293,6 +296,19 @@ export interface FoldPlanInput extends FoldRequest {
 	readonly modelContextLimit: number;
 	/** Engine settings that differ from its defaults. */
 	readonly config?: Partial<Config>;
+	/**
+	 * Fold hints (pi-context-aware#281). `verbatim` entries stay out of the fold, `one-line` ones are
+	 * listed as one line under the summary, `condensed` ones show their condensed text, and
+	 * `drop-after-read` ones are hidden without a line.
+	 */
+	readonly hints?: FoldHintView;
+	/**
+	 * Which messages the protected zone counts as the user's (pi-context-aware#284). `typed` (the
+	 * default) counts only a message a person typed: an extension-injected `custom_message` is
+	 * ordinary history. `all-user-role` counts every user-role message, as billion-context-pi
+	 * does; the parity preview sets it so both engines are compared on the same rule.
+	 */
+	readonly protectedZone?: "typed" | "all-user-role";
 }
 
 export type FoldPlan =
@@ -349,7 +365,9 @@ function withdrawSplitEntries(messages: readonly CoreMessage[], ids: readonly st
 export function planFold(input: FoldPlanInput): FoldPlan {
 	const state = foldStateFromBranch(input.branch, input.contextEntries);
 	const config: Config = defaultConfig(input.modelContextLimit, input.config ?? {});
-	const stub = stubSummaryError(input.summary);
+	// Double-escaped \uXXXX runs are decoded before anything reads or stores the summary (bcp issue 309).
+	const summary = sanitizeSummary(input.summary).text;
+	const stub = stubSummaryError(summary);
 	if (stub) return { ok: false, errors: [stub], validRefs: validFoldRefs(state) };
 	const core = createCore();
 	// billion-context-pi plans on the prepared turn (pi-context-aware#186): folded messages pruned
@@ -383,13 +401,14 @@ export function planFold(input: FoldPlanInput): FoldPlan {
 		}
 	}
 	const before = new Set(turn.state.blocks.map((block) => block.blockId));
+	const hintsById = hintsOnBranch(input.branch, input.hints);
 	const summaryMaxChars = summaryLimitOf(input.summaryMaxChars);
 	const result = core.applyCompression({
 		ranges: [
 			{
 				startRef,
 				endRef,
-				summary: input.summary,
+				summary,
 				...(input.topic ? { topic: input.topic } : {}),
 				...(summaryMaxChars !== undefined ? { summaryMaxChars } : {}),
 			},
@@ -397,6 +416,7 @@ export function planFold(input: FoldPlanInput): FoldPlan {
 		messages: turn.messages,
 		state: turn.state,
 		config,
+		...protectedField(turn.messages, turn.state, config, input.branch, input.protectedZone ?? "typed"),
 	});
 	const created = result.state.blocks.filter((block) => !before.has(block.blockId));
 	const kernelWarnings = result.result.warnings.map(adaptKernelWarning);
@@ -434,8 +454,16 @@ export function planFold(input: FoldPlanInput): FoldPlan {
 	const summaryById = new Map(turn.state.blocks.map((block) => [block.blockId, block.summary]));
 	for (const block of created) {
 		const selected = withdrawSplitEntries(state.messages, block.effectiveMessageIds);
+		// A verbatim entry an earlier fold already hides stays hidden: taking it out would change that fold's coverage.
+		const kept = [...selected].filter((id) => hintsById.get(baseIdOf(id))?.policy === "verbatim" && !alreadyFolded.has(baseIdOf(id)));
+		const folding = kept.length > 0 ? withdrawSplitEntries(state.messages, [...selected].filter((id) => !kept.includes(id))) : selected;
+		for (const id of new Set([...folding].map(baseIdOf))) {
+			const hint = hintsById.get(id);
+			const entry = entryById.get(id);
+			if (hint?.policy === "condensed" && entry && !alreadyFolded.has(id) && !swaps.has(id) && isEditableEntry(entry)) swaps.set(id, hint.condensed!);
+		}
 		if (input.condenser) {
-			for (const id of new Set([...selected].map(baseIdOf))) {
+			for (const id of new Set([...folding].map(baseIdOf))) {
 				const entry = entryById.get(id);
 				if (!entry || alreadyFolded.has(id) || swaps.has(id) || !isEditableEntry(entry)) continue;
 				const content = input.condenser.condense(entry);
@@ -448,10 +476,10 @@ export function planFold(input: FoldPlanInput): FoldPlan {
 		}
 		// Tokens this fold hides, counted on the session's own text: the prepared turn carries
 		// rendered ref tags, which the engine's own count includes.
-		const hiddenTokens = block.directMessageIds.filter((id) => selected.has(id) && id !== keptFirst && !swaps.has(baseIdOf(id)))
+		const hiddenTokens = block.directMessageIds.filter((id) => folding.has(id) && id !== keptFirst && !swaps.has(baseIdOf(id)))
 			.reduce((sum, id) => sum + (messageById.has(id) ? countMessageTokens(messageById.get(id)!) : 0), 0)
 			+ block.directBlockIds.reduce((sum, id) => sum + defaultCountTokens(summaryById.get(id) ?? ""), 0);
-		const covered = [...new Set([...selected].map(baseIdOf))]
+		const covered = [...new Set([...folding].map(baseIdOf))]
 			.filter((id) => {
 				const entry = entryById.get(id);
 				return entry !== undefined && isEditableEntry(entry) && id !== keptFirst && !swaps.has(id);
@@ -459,7 +487,9 @@ export function planFold(input: FoldPlanInput): FoldPlan {
 			.sort((a, b) => (indexById.get(a) ?? 0) - (indexById.get(b) ?? 0));
 		const [carrierId, ...hiddenIds] = covered;
 		if (!carrierId) {
-			const error = swaps.size > 0
+			const error = kept.length > 0
+				? "Every entry in this range is kept word for word by a fold hint; there is nothing to fold."
+				: swaps.size > 0
 				? "Every other entry in this range carries skill text that condenses instead of folding; there is nothing to fold."
 				: keptFirst && block.effectiveMessageIds.includes(keptFirst)
 				? "Keeping the first user message leaves nothing else to fold (covers no session entry)."
@@ -486,10 +516,71 @@ export function planFold(input: FoldPlanInput): FoldPlan {
 			origin: "fold",
 		};
 		records.push(record);
-		drafts.push(...foldDrafts(record, renderFoldSummary(block.summary, block.topic)));
+		const oneLines = covered.flatMap((id) => {
+			const hint = hintsById.get(id);
+			return hint?.policy === "one-line" && hint.line ? [hint.line] : [];
+		});
+		const section = renderOneLineSection(oneLines);
+		const rendered = renderFoldSummary(block.summary, block.topic);
+		drafts.push(...foldDrafts(record, section ? `${rendered}\n\n${section}` : rendered));
 	}
 	drafts.push(...swapDrafts(input.branch, swaps));
 	return { ok: true, records, drafts, warnings };
+}
+
+/** The hint each entry on the branch resolves to. Empty without hints. */
+function hintsOnBranch(branch: readonly SessionEntry[], hints: FoldHintView | undefined): Map<string, ResolvedFoldHint> {
+	const found = new Map<string, ResolvedFoldHint>();
+	if (!hints) return found;
+	for (const entry of branch) {
+		const hint = hints.forEntry(entry);
+		if (hint) found.set(entry.id, hint);
+	}
+	dropOversizedPairs(branch, found);
+	return found;
+}
+
+/**
+ * A `verbatim` call keeps its result visible, so a small call would pin a result over the cap.
+ * Such a call folds with its result: drop the hint from the call's entry and from every result
+ * that pairs with it, so the entry and its results fold together.
+ */
+function dropOversizedPairs(branch: readonly SessionEntry[], found: Map<string, ResolvedFoldHint>): void {
+	const resultOf = new Map<string, { id: string; size: number }>();
+	for (const entry of branch) {
+		if (entry.type !== "message" || entry.message.role !== "toolResult") continue;
+		resultOf.set(entry.message.toolCallId, { id: entry.id, size: contentLength(entry.message.content) });
+	}
+	for (const entry of branch) {
+		if (entry.type !== "message" || entry.message.role !== "assistant" || found.get(entry.id)?.policy !== "verbatim") continue;
+		const callIds = entry.message.content.flatMap((part) => (part.type === "toolCall" ? [part.id] : []));
+		const results = callIds.flatMap((id) => resultOf.get(id) ?? []);
+		if (!results.some((result) => result.size > MAX_VERBATIM_CHARS)) continue;
+		found.delete(entry.id);
+		for (const result of results) found.delete(result.id);
+	}
+}
+
+/**
+ * The protected zone when an extension-injected message would be "the most recent user message"
+ * (pi-context-aware#284). Pi sends a `custom_message` as a user-role message, but only a message a
+ * person typed moves the boundary: the engine's own rules run with every `custom_message` counted
+ * as the assistant's. Typed user messages are unchanged. In `all-user-role` mode, or without a
+ * `custom_message` on the branch, the engine computes the zone itself.
+ */
+function protectedField(
+	messages: CoreMessage[],
+	state: CompressionState,
+	config: Config,
+	branch: readonly SessionEntry[],
+	mode: "typed" | "all-user-role",
+): { protectedMessageIds?: Set<string> } {
+	if (mode === "all-user-role") return {};
+	const injected = new Set(branch.filter((entry) => entry.type === "custom_message").map((entry) => entry.id));
+	const extension = (message: CoreMessage) => message.role === "user" && injected.has(baseIdOf(message.id)) && !message.toolCallId;
+	if (!messages.some(extension)) return {};
+	const projected = messages.map((message) => (extension(message) ? { ...message, role: "assistant" as const } : message));
+	return { protectedMessageIds: computeProtectedRefs(projected, state, config, defaultCountTokens) };
 }
 
 /** Context edits that show condensed skill text, skipping an entry already showing the same content. */

@@ -113,3 +113,23 @@ test("no environment variable src/ reads reaches a test run unchanged from the h
 	const leaked = names.filter((name) => seen[name] === sentinel);
 	assert.deepEqual(leaked, [], "add these to HOST_SESSION_ENV_PREFIXES or HOST_SESSION_ENV_NAMES in scripts/with-temp-root.mjs, or replace them there as HOME is");
 });
+
+test("--v8-coverage puts V8 coverage data inside the run root and removes it afterwards", () => {
+	const result = spawnSync(
+		process.execPath,
+		[wrapper, "--v8-coverage", process.execPath, "-e", "process.stdout.write(JSON.stringify({ cov: process.env.NODE_V8_COVERAGE, tmp: process.env.TMPDIR }))"],
+		{ env: { ...process.env, NODE_V8_COVERAGE: "" }, encoding: "utf8" },
+	);
+	assert.equal(result.status, 0, result.stderr);
+	const { cov, tmp } = JSON.parse(result.stdout);
+	assert.equal(path.dirname(cov), tmp);
+	assert.equal(fs.existsSync(cov), false, "coverage data outlived the run");
+	assert.equal(fs.existsSync(tmp), false, "run root outlived the run");
+});
+
+test("the coverage script keeps c8's raw data out of the checkout", () => {
+	const pkg = JSON.parse(fs.readFileSync(path.join(path.dirname(wrapper), "..", "package.json"), "utf8"));
+	// The public-release export keeps only allowlisted package.json keys, so c8 can be absent there.
+	assert.equal(pkg.c8?.["temp-directory"], undefined, "a configured temp-directory overrides NODE_V8_COVERAGE");
+	assert.match(pkg.scripts.coverage, /with-temp-root\.mjs --v8-coverage c8 /);
+});

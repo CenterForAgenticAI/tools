@@ -5,6 +5,7 @@ import type { ContextAwareModeDefinitionV1 } from "../src/context-service.js";
 import { createModesExtensionController } from "../src/modes/modes-extension.js";
 
 type ModeCommand = { handler: (args: string, ctx: ExtensionContext) => Promise<void> };
+type SuggestTool = { execute: (id: string, params: unknown, signal: undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<{ details: unknown }> };
 
 function definition(id: string, extra: Partial<ContextAwareModeDefinitionV1> = {}): ContextAwareModeDefinitionV1 {
 	return { id, owner: "controller-test", transition: `${id} is active.`, blockedTools: [], ...extra };
@@ -16,12 +17,14 @@ const LATE = { status: "refused", code: "PINNED_LAYER", message: "A pinned layer
 /** A controller on a fake Pi whose session branch is `entries`; appended mode state lands there too. */
 function harness(entries: unknown[] = []) {
 	const commands = new Map<string, unknown>();
+	const tools = new Map<string, unknown>();
+	const confirms: Array<[string, string]> = [];
 	const pi = {
 		appendEntry: (customType: string, data: unknown) => { entries.push({ type: "custom", customType, data }); },
 		sendMessage: () => {},
 		on: () => {},
 		registerCommand: (name: string, command: unknown) => { commands.set(name, command); },
-		registerTool: () => {},
+		registerTool: (tool: { name: string }) => { tools.set(tool.name, tool); },
 	} as unknown as ExtensionAPI;
 	const controller = createModesExtensionController(pi, { suggestToolEnabled: () => true });
 	controller.register();
@@ -32,7 +35,7 @@ function harness(entries: unknown[] = []) {
 			setStatus: () => {},
 			setWidget: () => {},
 			notify: (message: string, level?: string) => { notifications.push([message, level]); },
-			confirm: async () => false,
+			confirm: async (title: string, message: string) => { confirms.push([title, message]); return false; },
 		},
 		sessionManager: { getBranch: () => entries },
 	} as unknown as ExtensionContext;
@@ -47,7 +50,9 @@ function harness(entries: unknown[] = []) {
 		assert.ok(read, "the layered runtime exposes its layers");
 		return read();
 	};
-	return { controller, ctx, entries, notifications, mode, modes, layers };
+	const suggest = (params: { action: "enter" | "exit"; mode: string; reason?: string }) =>
+		(tools.get("suggest_mode") as SuggestTool).execute("call-1", params, undefined, undefined, ctx);
+	return { controller, ctx, entries, notifications, confirms, mode, modes, layers, suggest };
 }
 
 const userMessage = { type: "message", message: { role: "user", content: "hello" } };
@@ -188,4 +193,15 @@ test("/mode exit <layer> clears a resumed pinned layer whose definition is gone"
 	await resumed.mode("exit role");
 	assert.deepEqual(resumed.notifications.at(-1), ["ok", "info"]);
 	assert.deepEqual(resumed.layers(), []);
+});
+
+test("the suggest_mode confirm dialog shows the mode id and the model's reason only as display text", async () => {
+	const h = harness();
+	h.controller.start(h.ctx, "startup");
+	const id = "rev\u001b[2Jx";
+	const stage = h.modes().defineMode(definition(id, { layer: { name: "stage", rank: 1 } }));
+	assert.ok(stage.status === "ok");
+	const result = await h.suggest({ action: "enter", mode: id, reason: "why\u001b[31m\u202Enow" });
+	assert.equal((result.details as { code?: string }).code, "CONFIRMATION_DECLINED");
+	assert.deepEqual(h.confirms, [["Confirm mode enter", "Allow the model to enter mode rev\uFFFD[2Jx?\nReason: why\uFFFD[31m\uFFFDnow"]]);
 });

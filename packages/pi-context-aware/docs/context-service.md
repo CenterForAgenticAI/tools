@@ -84,8 +84,8 @@ The proactive-compaction snapshot is the same resolved representation used by ru
   "effectiveMode": {
     "proactiveCompaction": {
       "enabled": true,
-      "thresholdFraction": 0.78,
-      "outputReserveTokens": 16384,
+      "thresholdFraction": 0.9,
+      "outputReserveTokens": 32768,
       "preparationStallTimeoutMs": 30000,
       "preparationFirstOutputGraceMs": 90000,
       "commitDrainTimeoutMs": 10000,
@@ -237,7 +237,7 @@ const receipt = await service.requestHandoff({
 });
 ```
 
-The operation uses the same `prepareSeedForCompaction` and compaction runner as `compact_session`:
+The operation uses the same `prepareSeedForCompaction` and compaction runner as `context_compact`:
 
 1. validate the explicit purpose, seed, mode, and character bounds;
 2. reject immediately when a compaction is already queued or running;
@@ -306,7 +306,7 @@ Modes sit on layers, and one mode is active per layer; see [Layers](#layers). `/
 
 Modes replay from the active session branch after resume, fork, replacement, and tree navigation. A replayed mode is unavailable until its owner defines the same id, owner label, layer, rank and pin again; redefinition re-arms it without adding a transition. The owner label is not authenticated: a definition that copies a replayed mode's id and owner label re-arms it, and the real owner's definition then gets `DUPLICATE_ID`. A pinned layer protects against the model and the user, not against another loaded extension. An orphan does not block tools and can always be cleared with `/mode exit <layer>`, even on a pinned layer. A run-scoped mode is not restored. Replay also reads the older `context-aware/mode@1` entry: its current mode lands on the `default` layer. Its nested-away `outer` mode is dropped; it is not restored on any layer.
 
-Downgrade after the first `context-aware/mode@2` write is unsupported. An older runtime reads only `context-aware/mode@1`, so it replays the last such entry on the branch: a mode the user exited after the upgrade comes back, and if its owner defines it again at session start, its tool rules apply. No shadow `mode@1` entry is written.
+Downgrade after the first `context-aware/mode@2` write is unsupported. An older runtime reads only `context-aware/mode@1`, so it replays the last such entry on the branch: a mode the user exited after the upgrade comes back, and if its owner defines it again at session start, its tool rules apply. A mode entered only after the upgrade has no `mode@1` entry, so the older runtime replays no mode for it and that mode's tool rules stop applying. No shadow `mode@1` entry is written.
 
 Each enter gets a random `instanceId`, shown on the snapshot and its `outer`. Use it, not `enteredAt`, to tell one enter from another: `enteredAt` has millisecond precision, so an exit and re-enter can share it. Entering a mode on one layer keeps every other layer's `instanceId`, and replay keeps the persisted one. An entry written before `instanceId` existed gets a stable `legacy-` id, derived from the session entry id of the first state entry of that enter on the branch, so every replay gives the same value; such an entry with no session entry id is refused. Replay also refuses a state entry that reuses an `instanceId` that ended earlier on the branch, gives one `instanceId` to a different enter, or puts one `instanceId` on two layers, and falls back to the last accepted entry, as it does for a malformed field. Transition text is recovered only from the message whose `details.transitionId` matches the accepted state entry, so the message of a refused entry is never resent, and a message Pi delivers at the end of a turn, after later state entries, is still found. For an entry written before `transitionId` existed, replay reads messages without one between that entry and the next state entry. Check `supportsContextAwareModeInstanceIdsV1(service)` to learn, with no mode active, that the producer sets `instanceId`; older producers omit it. Compaction sends one message through the existing successful-compaction owner. It joins every active layer's transition, lowest rank first, without repeating a text two layers share.
 
@@ -332,7 +332,7 @@ if (supportsContextAwareModeLayersV1(service)) {
 }
 ```
 
-- `name` is 1 to 64 ASCII letters, digits, `_`, `.` or `-`, and starts with a letter or digit, so a user can type it after `/mode exit`. Another name is refused with `INVALID_REQUEST`, and replay refuses a state entry that holds one. `default` is reserved: a definition without `layer` sits on the `default` layer at rank 0, so two such modes replace each other instead of nesting.
+- `name` is 1 to 64 ASCII letters, digits, `_`, `.` or `-`, and starts with a letter or digit, so a user can type it after `/mode exit`. Another name is refused with `INVALID_REQUEST`, and replay drops a stored layer with such a name, keeping the entry's other layers. `default` is reserved: a definition without `layer` sits on the `default` layer at rank 0, so two such modes replace each other instead of nesting.
 - `rank` is an integer from -1000000 to 1000000. Layers are ordered by rank, then by name. The runtime knows no layer names.
 - Every definition on one layer must name the same rank and `pinned`; another is refused with `INVALID_REQUEST`. One exception: the restored mode of a replayed pinned layer, defined again with its own id, owner label, layer, rank and pin, re-arms the layer even when an earlier definition names it differently; that earlier mode then cannot enter the layer.
 - At most 16 layers are active at once. Entering a mode on a seventeenth layer is refused with `NESTING_LIMIT`; replacing the mode on a layer that is already active is not. Replay refuses a state entry with more than 16 layers, or a `default` layer with a rank other than 0 or a pin, because no definition could create either.
@@ -341,13 +341,13 @@ if (supportsContextAwareModeLayersV1(service)) {
 - `layers()` returns every active layer's snapshot, lowest rank first, each with `layer`, `rank`, `pinned` and `runScoped`. `current()` returns the highest-ranked one, with the next layer down as `outer`.
 - `setTrail(text)` shows a short step trail after the chips in the indicator; `setTrail(undefined)` clears it. It is at most 64 characters with no control or format characters, is never persisted, and any extension may replace it.
 
-**Run-scoped entry.** `handle.enter({ until: signal })` enters the mode for one run. When the signal aborts, the mode leaves its layer with one entry and one exit message, unless another mode has replaced it there. A run-scoped mode is not restored on resume. An already-aborted signal is refused with `RUN_ENDED`.
+**Run-scoped entry.** `handle.enter({ until: signal })` enters the mode for one run. When the signal aborts, the mode leaves its layer with one entry and one exit message, unless another mode has replaced it there. A run-scoped mode is not restored on resume. When the run ends during another transition, the exit runs after that transition. If its `sendMessage` or `onChange` throws, the outer `enter()` or `exit()` result is unchanged and does not throw; the error goes to `deps.onQueuedExitError` (default `console.error`) and the remaining queued exits still run. An already-aborted signal is refused with `RUN_ENDED`.
 
 **Pinned layer.** A definition with `layer.pinned: true` is entered only through its handle, in a new session (start reason `startup` or `new`, no user or assistant message on the branch) before its first agent run, and only when no pinned mode was replayed. Every later enter or exit on that layer is refused with `PINNED_LAYER`, as are run-scoped entry (`INVALID_REQUEST`) and model suggestions. Bare `/mode exit` skips it. Resume restores it. Once its definition is gone, only the user can clear it, with `/mode exit <layer>`.
 
 ### Mode indicator
 
-While a mode is active, the runtime draws a one-line widget below the editor under the key `caair.context-aware/mode-indicator`. It shows one solid chip per active layer in its mode's color, lowest rank first, with ` ⚑` on a pinned layer; then the owner labels, `[model-confirmed]` when a mode was entered on the model's suggestion, the step trail set with `setTrail`, and a rule in the top layer's color to the edge of the terminal. A replayed mode is drawn muted with `(unavailable)` until its owner defines it again. The widget clears when the last mode exits and at shutdown. The footer status stays as the short text form.
+While a mode is active, the runtime draws a one-line widget below the editor under the key `caair.context-aware/mode-indicator`. It shows one solid chip per active layer in its mode's color, lowest rank first, with ` ⚑` on a pinned layer; then the owner labels, `[model-confirmed]` when a mode was entered on the model's suggestion, the step trail set with `setTrail`, and a rule in the top layer's color to the edge of the terminal. A replayed mode is drawn muted with `(unavailable)` until its owner defines it again. When no mode is active but a trail is set, the widget still draws: the trail alone, after ` › `, with no chip and a muted rule, so a session that stays out of every mode can show progress. The widget clears when no mode is active and no trail is set, and at shutdown. The footer status stays as the short text form.
 
 Set the color and text with the optional `ui` field. Check `supportsContextAwareModeUiV1(service)` first; an older runtime ignores `ui`.
 
@@ -531,6 +531,63 @@ if (supportsContextAwareCondensedSkillsV1(service)) {
 - `endOwner(ownerKey)` returns `true` when it recorded the end. At the next fold, every skill registered under that key shows as a one-line stub.
 - While `folds.condensedSkills` is off (the default), `register` returns `{ ok: false, error: "folds.condensedSkills is off" }`. See [configuration.md](configuration.md#folds).
 - Context-aware never reads a file named only in message text. The condensed text comes from this call, from `load_skill`'s own read, or from a skill Pi loaded for the run. See [skills.md](skills.md#condensed-skills).
+
+## Fold hints
+
+An extension that sends its own custom messages, or registers a tool, can tell context-aware how a fold and a compaction treat them. Check the capability with `supportsContextAwareFoldHintsV1`; producers without it remain valid.
+
+```ts
+import {
+	discoverContextAwareServiceV1,
+	supportsContextAwareFoldHintsV1,
+} from "@centerforagenticai/pi-context-aware/context-service";
+
+const service = discoverContextAwareServiceV1(pi.events, "my-extension");
+if (supportsContextAwareFoldHintsV1(service)) {
+	service.folds.registerHint({
+		ownerKey: "my-extension",
+		match: { customType: "my-status" },
+		policy: "one-line",
+		line: "my-extension status",
+		summarize: (details) => "my-extension status: " + String((details as { state?: unknown })?.state),
+	});
+	// result: { ok: true, replaced } or { ok: false, error }
+	// When the extension stops sending these messages:
+	service.folds.endOwner("my-extension");
+}
+```
+
+A hint is keyed by `{ customType }` (a custom message an extension sends with `pi.sendMessage`) or `{ toolName }` (a tool's calls and results). It is never keyed by message text. The policies are:
+
+| Policy | Applies to | In a fold | In a compaction summary |
+|---|---|---|---|
+| `verbatim` | `toolName` | The call and its result stay out of the fold, word for word, at every tier, with their refs. A call or result over 16,000 characters folds normally, and so does a call whose result is over 16,000 characters: it folds with that result. | The summarizer is told to quote the tool's calls and results word for word. |
+| `one-line` | `customType` | The message is hidden. The fold summary lists one line for it under "Extension messages in this fold (one line each; not user intent)". | The message is replaced by `[<customType>: extension message kept as one line; not user intent] <line>`. |
+| `condensed` | `customType` | The message stays visible, showing the registered condensed text instead of its body. | The message is replaced by the condensed text. |
+| `drop-after-read` | `customType` | The message is hidden with no line. | The message is removed when an assistant message follows it. |
+| `default` | both | Removes the owner's hint; the message folds like any other. | Unchanged. |
+
+Rules:
+
+- **One owner per key per session.** The first `ownerKey` to register a key owns it for the session. Another owner's registration of that key is refused with `<key> is owned by another extension in this session`. The owner may register the key again to change its policy (`replaced: true`). `endOwner(ownerKey)` removes the owner's hints and returns how many it removed, but the owner keeps its keys, so no other extension can take them over.
+- **Typed user messages are never hinted.** A hint matches only a custom message's `customType` or a tool's name. A message the operator typed is user intent whatever it says, even when it starts with a command name.
+- `registerHint` copies only the named fields and bounds them: `ownerKey` 1-200 printable characters; a key 1-128 characters of letters, digits and `. _ : @ / -`; `line` one line of at most 200 characters (control characters and newlines become spaces); condensed text at most 32,000 characters; at most 256 keys per session. `condensed` needs a `customType`, `verbatim` a `toolName`, and `one-line` a `line` or a `summarize` function.
+- `summarize(details)` receives only a JSON copy of the message's `details`, never its content, and only when that copy is at most 16,000 characters. Its result is cut to one line of at most 200 characters. When it throws, returns something that is not a string, or the details are too large, the fold uses `line`, else `<customType> message`.
+- The ownerKey `context-aware` and customTypes starting with `context-aware.` are reserved.
+- Hints are held in memory for the session. Register them again after every `session_start`.
+- No custom message counts as "the most recent user message" when the fold engine computes its protected zone, hinted or not (pi-context-aware#284). Only a message a person typed moves the boundary, so a status note never pins the tail and can be folded. The parity preview keeps billion-context-pi's rule (see docs/fold-parity.md, "The protected zone").
+
+Hints apply to native folds and to the summaries context-aware writes. When context-aware leaves a compaction to Pi's built-in summarizer (it has nothing to add and holds no compaction claim), Pi summarizes the history unchanged. In billion-context-pi shadow mode, hints are not applied: not to a fold request, not to the compaction input, and not to the parity comparison. The same holds while the mode is not yet known, during extension load. A shadow-mode fold request is therefore never refused because a hint keeps its range word for word. Hint registration still works in shadow mode.
+
+### Built-in hints
+
+Context-aware registers these under its own ownerKey:
+
+| Key | Policy | Why |
+|---|---|---|
+| `customType: "ask-me"` | `one-line` | The `/ask-me` command sends its prompt as a custom message with `details: { flags: string[], focus: string }`. A fold keeps only `/ask-me ran: <flags> <focus>`; the prompt body is not kept. A message the operator types is not this marker. |
+| `toolName: "ask"` | `verbatim` | The questions asked and the operator's answers are decisions; they stay word for word. |
+| `customType: "context-aware.fold-notice"` | `drop-after-read` | The notice that an accepted fold was not written is read once. |
 
 ## What is not an integration API
 

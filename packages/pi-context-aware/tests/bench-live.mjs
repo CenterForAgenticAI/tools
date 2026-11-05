@@ -85,8 +85,8 @@ The user has not said which plan to continue. Both item #3 entries are plausible
 		rawSeed:
 			"Design a practical test and benchmark suite for context-aware seed expansion and compaction handoff. Include streaming UI, ambiguity modes, command/tool paths, transcript metadata, and sequencing tests.",
 		expectedAction: "proceed",
-		conversation: `The context-aware extension lives at agent/extensions/context-aware. It rewrites raw compaction seeds into self-contained prompts, uses the active conversation model for seed expansion, supports ambiguity modes ask/cautious-proceed/always-proceed, and exposes /compact-then and compact_session. The user now wants prompt R&D and benchmarks for the rewrite behavior.`,
-		mustInclude: ["streaming", "ambiguity", "compact_session", "/compact-then"],
+		conversation: `The context-aware extension lives at agent/extensions/context-aware. It rewrites raw compaction seeds into self-contained prompts, uses the active conversation model for seed expansion, supports ambiguity modes ask/cautious-proceed/always-proceed, and exposes /compact-then and context_compact. The user now wants prompt R&D and benchmarks for the rewrite behavior.`,
+		mustInclude: ["streaming", "ambiguity", "context_compact", "/compact-then"],
 		mustNotInclude: ["search_prior_sessions"],
 	},
 	{

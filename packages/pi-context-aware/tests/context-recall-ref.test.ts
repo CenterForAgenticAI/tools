@@ -12,6 +12,7 @@ import { createContextRecallSurface } from "../src/context-tools/context-recall.
 import { decideContextToolSurface } from "../src/context-tools/surface.js";
 import { applyFoldDrafts } from "../src/folds/fold-engine.js";
 import { foldDrafts, renderFoldSummary, type FoldRecord } from "../src/folds/fold-entries.js";
+import { hidePointerLine, planHides } from "../src/folds/hide-entries.js";
 import { guardErasureWrites } from "../src/erasure/write-boundary.js";
 import { createHostPi, createSession, type FakeHostPi } from "./compaction-owner-harness.js";
 
@@ -20,7 +21,7 @@ let exitCodeBefore: typeof process.exitCode;
 beforeEach(() => { exitCodeBefore = process.exitCode; });
 afterEach(() => { process.exitCode = exitCodeBefore; });
 
-// Seams: the registered context_recall and decompress tools after session_start,
+// Seams: the registered context_recall tool after session_start,
 // over a real Pi SessionManager holding a fold written with foldDrafts.
 
 interface RefTool {
@@ -108,7 +109,6 @@ test("REQ-193-4: ref mode writes nothing: the context_edit and fold entries stay
 	const before = { entries: manager.getEntries().length, edits: entriesOfType(manager, "context_edit"), folds: entriesOfType(manager, "fold"), context: contextText(manager) };
 	const { call, host } = await started(manager);
 	await call("context_recall", { ref: "b1" });
-	await call("decompress", { blockId: "b1" });
 	assert.equal(manager.getEntries().length, before.entries);
 	assert.equal(entriesOfType(manager, "context_edit"), before.edits);
 	assert.equal(entriesOfType(manager, "fold"), before.folds);
@@ -118,14 +118,10 @@ test("REQ-193-4: ref mode writes nothing: the context_edit and fold entries stay
 	assert.deepEqual(host.messages, [], "no message was sent");
 });
 
-test("REQ-193-4: decompress is an alias of context_recall({ ref }) and is deferred while billion-context-pi is absent", async () => {
+test("REQ-193-4: decompress does not register, with or without billion-context-pi", async () => {
 	const { manager } = foldedSession();
-	const { call, host } = await started(manager);
-	assert.equal((host.tools.get("decompress") as RefTool).exposure, "deferred");
-	const viaAlias = await call("decompress", { blockId: "b1", full: true, inline: true, toFile: "/tmp/ignored.txt" });
-	const direct = await call("context_recall", { ref: "b1" });
-	assert.deepEqual(viaAlias, direct);
-	assert.equal(fs.existsSync("/tmp/ignored.txt"), false, "toFile is ignored, not written");
+	const { host } = await started(manager);
+	assert.equal(host.tools.has("decompress"), false);
 });
 
 test("REQ-193-4: an unknown ref, or a query with a ref, is refused without reading anything", async () => {
@@ -134,20 +130,20 @@ test("REQ-193-4: an unknown ref, or a query with a ref, is refused without readi
 	const unknown = await call("context_recall", { ref: "b9" });
 	assert.equal(unknown?.isError, true);
 	assert.equal(unknown?.details.error, "unknown ref");
-	assert.match(body(unknown), /Folds on this branch: b1\./u);
+	assert.match(body(unknown), /No fold or hide "b9" on this branch\. Folds on this branch: b1\./u);
 	const both = await call("context_recall", { ref: "b1", query: "deploy" });
 	assert.equal(both?.isError, true);
 	assert.equal(both?.details.error, "query and ref");
 });
 
-test("REQ-193-5: with billion-context-pi loaded, ref mode refuses and names decompress", async () => {
+test("REQ-193-5: with billion-context-pi loaded, ref mode refuses and points to its own tool", async () => {
 	const { manager } = foldedSession();
 	const { call, host } = await started(manager, { billionContextPi: true });
 	assert.equal(host.tools.has("decompress"), false, "billion-context-pi keeps its own decompress");
 	const result = await call("context_recall", { ref: "b1" });
 	assert.equal(result?.isError, true);
 	assert.equal(result?.details.error, "folds owned by billion-context-pi");
-	assert.match(body(result), /decompress\(\{ blockId: "b1" \}\)/u);
+	assert.match(body(result), /Use its own tool to restore "b1"/u);
 	assert.doesNotMatch(body(result), /FOLDED-QUESTION/u);
 });
 
@@ -188,7 +184,6 @@ test("REQ-193-7: registered through the erasure-wrapped pi, ref mode refuses in 
 	assert.match(body(await call("context_recall", { ref: "b1" })), /FOLDED-QUESTION/u);
 	refused = true;
 	await assert.rejects(async () => call("context_recall", { ref: "b1" }), /Session activation refused; tool execution is blocked\./u);
-	await assert.rejects(async () => call("decompress", { blockId: "b1" }), /Session activation refused; tool execution is blocked\./u);
 });
 
 test("REQ-193-7: through the extension, recall tools are registered on the erasure-wrapped pi", async () => {
@@ -221,4 +216,50 @@ test("REQ-193-7: through the extension, recall tools are registered on the erasu
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 		fs.rmSync(root, { recursive: true, force: true });
 	}
+});
+
+// ---- pi-context-aware#268: recoverable hides resolve as h<N> ----
+
+const BIG_RESULT = "HIDE-HEAD\n" + "a".repeat(5_000) + "\nMIDDLE-ONLY-SENTINEL\n" + "b".repeat(5_000) + "\nHIDE-TAIL";
+
+function hiddenSession() {
+	const manager = SessionManager.inMemory("/tmp");
+	manager.appendMessage({ role: "user", content: "Inspect the log.", timestamp: 1 });
+	const result = manager.appendMessage({ role: "toolResult", toolCallId: "call_1", toolName: "shell", content: [{ type: "text", text: BIG_RESULT }], isError: false, timestamp: 2 });
+	manager.appendMessage(fauxAssistantMessage("Done."));
+	const plans = planHides(manager.getBranch(), [result]);
+	assert.equal(plans.length, 1);
+	applyFoldDrafts(manager, plans.flatMap((plan) => plan.drafts));
+	return { manager, result };
+}
+
+test("268: context_recall({ ref: \"h1\" }) returns the hidden entry's original text byte for byte, and the hide stays in effect", async () => {
+	const { manager, result } = hiddenSession();
+	assert.doesNotMatch(contextText(manager), /MIDDLE-ONLY-SENTINEL/u, "the context view holds the shortened text");
+	assert.ok(JSON.stringify(manager.buildSessionContext().messages).includes(JSON.stringify(hidePointerLine("h1")).slice(1, -1)));
+	const before = manager.getEntries().length;
+	const { call } = await started(manager);
+	const recalled = await call("context_recall", { ref: "h1" });
+	assert.ok(recalled);
+	assert.equal(recalled.isError, undefined, body(recalled));
+	assert.deepEqual(recalled.details.entry_ids, [result]);
+	assert.equal(recalled.details.ref, "h1");
+	assert.ok(body(recalled).includes(BIG_RESULT), "the original text, not the shortened one");
+	assert.match(body(recalled), /Hide h1: 1 original entry/u);
+	assert.equal(manager.getEntries().length, before, "recall writes nothing");
+	assert.doesNotMatch(contextText(manager), /MIDDLE-ONLY-SENTINEL/u, "the hide stays in place");
+});
+
+test("268: a fold ref b1 does not resolve a hide, and an unknown h-ref names the hides on the branch", async () => {
+	const { manager } = hiddenSession();
+	const { host, call } = await started(manager);
+	const fold = await call("context_recall", { ref: "b1" });
+	assert.equal(fold?.details.error, "unknown ref", "h1 is not b1");
+	assert.match(body(fold), /Hides on this branch: h1\./u);
+	const unknown = await call("context_recall", { ref: "h9" });
+	assert.equal(unknown?.isError, true);
+	assert.equal(unknown?.details.error, "unknown ref");
+	assert.match(body(unknown), /No fold or hide "h9" on this branch\. This branch has no folds\. Hides on this branch: h1\./u);
+	const schema = JSON.stringify((host.tools.get("context_recall") as unknown as { parameters: unknown }).parameters);
+	assert.match(schema, /recoverable hide id such as \\"h1\\"/u, "the ref schema names the hide id");
 });

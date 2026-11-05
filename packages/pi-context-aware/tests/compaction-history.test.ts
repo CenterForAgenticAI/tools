@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as os from "node:os";
 import * as path from "node:path";
-import { collectCompactionHistory, formatCompactionCountPrompt, formatCompactionHistory } from "../src/compaction/compaction-history.js";
+import { collectCompactionBoundaries, collectCompactionHistory, formatCompactionCountPrompt, formatCompactionHistory } from "../src/compaction/compaction-history.js";
 
 function compaction(id: string, priorTranscriptPath: unknown = "~/session.jsonl", details: unknown = undefined): Record<string, unknown> {
 	return {
@@ -105,6 +105,21 @@ test("counts malformed and detail-less compactions while nulling malformed field
 		{ ordinal: 7, priorTranscriptPath: null },
 	]);
 	assert.deepEqual(collectCompactionHistory([]), { compactions: [], priorTranscriptPaths: [] });
+});
+
+test("#283: each boundary is paired with the branch entry it was read from, in ordinal order", () => {
+	const first = compaction("c1");
+	const second = { type: "compaction", id: "c2", fromHook: true, details: { compactor: "rival" } };
+	const third = { type: "compaction", id: "c3", details: null };
+	const boundaries = collectCompactionBoundaries([
+		null, { type: "message", id: "m1" }, first, "compaction", second, { type: "custom" }, third,
+	] as unknown[]);
+	assert.deepEqual(boundaries.map(({ compaction: c }) => [c.ordinal, c.id]), [[1, "c1"], [2, "c2"], [3, "c3"]]);
+	assert.equal(boundaries[0]!.entry, first);
+	assert.equal(boundaries[1]!.entry, second);
+	assert.equal(boundaries[2]!.entry, third);
+	// collectCompactionHistory reports exactly these boundaries.
+	assert.deepEqual(collectCompactionHistory([first, second, third]).compactions, collectCompactionBoundaries([first, second, third]).map(({ compaction: c }) => c));
 });
 
 test("invalid branch input degrades to empty history", () => {

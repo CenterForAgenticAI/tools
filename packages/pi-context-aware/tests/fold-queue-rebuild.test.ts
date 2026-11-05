@@ -7,7 +7,7 @@ import * as path from "node:path";
 import { SessionManager, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 
-import { applyFoldDrafts, planQueuedFolds, registerFoldEngine, type FoldEngine, type FoldRequest } from "../src/folds/fold-engine.js";
+import { FOLD_NOTICE_TYPE, applyFoldDrafts, planQueuedFolds, registerFoldEngine, type FoldEngine, type FoldRequest } from "../src/folds/fold-engine.js";
 import { entryToCoreMessages } from "../src/folds/fold-adapter.js";
 import {
 	FOLD_ENTRY_TYPE,
@@ -145,12 +145,18 @@ function openFile(file: string, sessionDir: string): SessionManager {
 	return SessionManager.open(file, sessionDir);
 }
 
-/** Run a boundary the way Pi does and append what the handler returns. */
+/** Run a boundary the way Pi does and append what the handler returns. Returns the fold drafts: a drop notice is not a fold. */
 function boundary(harness: Harness, manager: SessionManager): SessionBoundaryDraft[] {
 	const result = harness.fire("turn_end", manager, { entries: [] });
 	const drafts = result?.entries ?? [];
 	applyFoldDrafts(manager, drafts);
-	return drafts;
+	return drafts.filter((draft) => !(draft.type === "custom_message" && draft.customType === FOLD_NOTICE_TYPE));
+}
+
+/** The drop notices on the branch (pi-context-aware#282). */
+function notices(manager: SessionManager): string[] {
+	return manager.getBranch().flatMap((entry) =>
+		entry.type === "custom_message" && entry.customType === FOLD_NOTICE_TYPE && typeof entry.content === "string" ? [entry.content] : []);
 }
 
 function foldEntryCount(manager: SessionManager): number {
@@ -480,6 +486,36 @@ test("a record that names an entry no longer on the branch is dropped as entry-m
 	assert.equal(boundary(restarted, manager).length, 0);
 	assert.equal(restarted.engine.dropped(restarted.ctx(manager))[0]?.code, "entry-missing");
 	assert.equal(foldRecords(manager).length, 0);
+	// A recovered request the caller was told was accepted: its drop is reported once in the next turn.
+	const [notice, ...more] = notices(manager);
+	assert.deepEqual(more, []);
+	assert.ok((notice ?? "").startsWith("Fold " + record.startEntryId + "..deadbeef was not written: "), notice);
+});
+
+test("#284: a drop found by a restart or tree change is reported once in the next turn, not on every restart", () => {
+	const manager = SessionManager.inMemory("/tmp");
+	exchanges(manager, 4);
+	const harness = boot();
+	const record = accept(harness, manager, "call_huge", 0, "m00001", "m00004");
+	const ids = Array.from({ length: MAX_RECOVERY_COVERED_IDS_PER_RECORD + 1 }, (_, index) => "forged" + index);
+	saveFoldCall(manager, "call_huge", [{ ...record, coveredEntryIds: ids, startEntryId: ids[0]!, endEntryId: ids[ids.length - 1]! }]);
+	const restarted = boot();
+	restarted.fire("session_start", manager, { reason: "resume" });
+	assert.equal(restarted.engine.dropped(restarted.ctx(manager))[0]?.code, "too-large");
+	assert.equal(restarted.engine.pending(restarted.ctx(manager)), 0, "nothing was queued");
+	boundary(restarted, manager);
+	const [notice, ...more] = notices(manager);
+	assert.deepEqual(more, []);
+	assert.match(notice ?? "", /^Fold .+ was not written: .*not recovered/u);
+	boundary(restarted, manager);
+	assert.equal(notices(manager).length, 1, "the notice is sent once");
+	// A later restart or tree change finds the same drop; the notice on the branch already named it.
+	const again = boot();
+	again.fire("session_start", manager, { reason: "resume" });
+	again.fire("session_tree", manager);
+	boundary(again, manager);
+	assert.equal(notices(manager).length, 1, "a restart does not repeat the notice");
+	assert.equal(again.engine.dropped(again.ctx(manager))[0]?.code, "too-large", "context_status still lists the drop");
 });
 
 test("only results after the newest compaction are recovered", () => {

@@ -71,7 +71,7 @@ function registerExtension(): RegisteredHandlers {
 		registerCommand() {},
 		registerTool() {},
 		getActiveTools() {
-			return ["compact_session", "context_recall"];
+			return ["context_compact", "context_recall"];
 		},
 		sendMessage() {},
 		sendUserMessage() {},
@@ -350,13 +350,20 @@ Envelope format: <context-telemetry source="pi-extension:context-aware" user-inp
 Bands: OK <45%, WARN >=45%, URGENT >=90%.
 UNKNOWN: the size is not measured yet, for example right after a compaction or an overflow. Do not assume it is low; keep the next action small until a measured band arrives.
 OK: compact only at natural phase boundaries.
-WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call compact_session at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.
-URGENT: before nontrivial tool use, call compact_session unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
+WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call context_compact at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.
+URGENT: before nontrivial tool use, call context_compact unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
 Use context_recall early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
 </context-awareness>`;
+		// The context-tools section (pi-context-aware#195) sits between the awareness and cache blocks.
+		const contextTools = `<context-tools>
+Context tools:
+- context_recall: get back text that left context. query searches earlier sessions and the cache; scope "session" or include_current: true also searches this session, folded text included. ref (a fold id such as b5) returns the original entries behind a fold.
+- context_compact: end a phase at a clean boundary and continue from a seed_prompt. Call it alone in its response.
+Under pressure: compact at a phase boundary, and recall instead of guessing or asking the user to paste again.
+</context-tools>`;
 		const cache = buildCacheSystemPromptBlock(cacheDir, foregroundCacheConfig());
 		assert.ok(cache);
-		const legacyPrompt = "base system prompt" + "\n\n" + [guidance, cache].join("\n\n");
+		const legacyPrompt = "base system prompt" + "\n\n" + [guidance, contextTools, cache].join("\n\n");
 		const first = await runBeforeAgentStart(handlers, ctx, "without focus");
 		assert.equal(first.systemPrompt, legacyPrompt);
 

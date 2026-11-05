@@ -1,4 +1,10 @@
-export const DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS = 16_384;
+/**
+ * The most output space the generation-reserve trigger holds back. The reserve is the model's real
+ * maximum output, capped here: a 128,000-token output limit on a 272,000-token window would otherwise
+ * compact at 47% for a reply that is almost never that long. 32,768 tokens is about 25,000 words in one
+ * reply; it leaves at least 87% of a 272,000-token window and 96% of a 1,000,000-token window usable.
+ */
+export const DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS = 32_768;
 export const GENERATION_PROTOCOL_OVERHEAD_TOKENS = 2_048;
 
 export interface GenerationBudgetAssessmentInput {

@@ -8,7 +8,7 @@ import { planFold } from "../src/folds/fold-adapter.js";
 import { applyFoldDrafts } from "../src/folds/fold-engine.js";
 import { stampRequestId } from "../src/folds/fold-entries.js";
 import * as foldTurnModule from "../src/folds/fold-turn.js";
-import { createFoldTurnMemory, prepareFoldTurn, type FoldTurnInput, type FoldTurnMemory, type FoldTurnResult } from "../src/folds/fold-turn.js";
+import { createFoldTurnMemory, prepareFoldTurn, renameFoldTool, type FoldTurnInput, type FoldTurnMemory, type FoldTurnResult } from "../src/folds/fold-turn.js";
 import type { Config } from "../src/folds/kernel/index.js";
 import { compareBatchRequestWithMemory, hashRequestMessages } from "../src/parity/compare.js";
 import { PARITY_RECORD_VERSION, type CompressRecord, type NextRequestRecord, type RequestHashes } from "../src/parity/records.js";
@@ -395,6 +395,26 @@ test("FP-201 (ranxianglei/billion-context-pi#628): ten tier-1 folds fire the tie
 	assert.deepEqual(grown.nudgeFix, { cause: "tier-trigger", sent: grown.nudge });
 });
 
+test("a nudge that depends on both the tier-2 trigger and the limit is left unexplained, not filed as a denominator fix", () => {
+	// Ten tier-1 folds plus archive text. The window is 120k with a 40k output cap, so billion-context-pi's limit is 90k.
+	// At 75k the native pass sends the tier-2 nudge. Its text differs from billion-context-pi's at 90k, and from billion-context-pi's at the
+	// whole window, so neither the tier-2 trigger nor the denominator alone explains the difference: no cause is named.
+	const manager = tenFolds();
+	for (let i = 1; i <= 4; i++) {
+		manager.appendMessage({ role: "user", content: "Archive " + i + ". " + "Invented archive review text. ".repeat(100), timestamp: 1 });
+		manager.appendMessage(fauxAssistantMessage("Reviewed " + i + ". " + "Invented archive answer text. ".repeat(100)));
+	}
+	manager.appendMessage({ role: "user", content: "Go.", timestamp: 1 });
+	const memory = createFoldTurnMemory();
+	const model = { contextWindow: 120_000, maxOutputTokens: 40_000, api: "openai-responses" } as FoldTurnInput["model"];
+	prepareFoldTurn({ ...turnInput(manager, memory, { hostTokens: 20_000, compatibility: true }), model });
+	const mixed = prepareFoldTurn({ ...turnInput(manager, memory, { hostTokens: 75_000, compatibility: true }), model });
+	assert.ok(mixed, "the request lines up with the projection");
+	assert.equal(mixed.denominator?.bcpLimit, 90_000);
+	assert.match(mixed.nudge ?? "", /\[TIER 2 DISTILLATION TRIGGER\]/u, "the native pass sends the tier-2 nudge");
+	assert.equal(mixed.nudgeFix, undefined, JSON.stringify(mixed.nudgeFix));
+});
+
 test("parity preview after a live FP-201 baseline emits the same next-turn tier-2 nudge", () => {
 	const previewFoldTurnState = (foldTurnModule as typeof foldTurnModule & { previewFoldTurnState?: (input: FoldTurnInput) => { result?: FoldTurnResult } }).previewFoldTurnState;
 	assert.equal(typeof previewFoldTurnState, "function", "the parity preview must snapshot retained turn memory");
@@ -460,7 +480,9 @@ test("FP-202 (ranxianglei/billion-context-pi#666): the emergency nudge waits for
 	manager.appendMessage(fauxAssistantMessage("Recovered."));
 	const sent = turn(manager, memory, { hostTokens: 116_000, contextWindow: 120_000, compatibility: true });
 	assert.match(sent.nudge ?? "", /^\u26A0\uFE0F Context limit reached/u);
-	assert.equal(sent.nudgeFix, undefined);
+	// Same nudge as billion-context-pi's, apart from the fold tool it names (pi-context-aware#257).
+	assert.equal(sent.nudgeFix?.cause, "tool-name");
+	assert.equal(sent.nudge, renameFoldTool(sent.nudgeFix?.compatible ?? "", "context_fold"));
 });
 
 // ---- Register entries FP-201 and FP-202 ----
@@ -500,6 +522,31 @@ test("FP-202 explains only billion-context-pi's emergency nudge that the native 
 	assert.equal(fp202.matches({ kind: "content" }, call, request(deferred, hashes([...BASE, { role: "user", hash: "gentle" }]))), false, "a different nudge text");
 	assert.equal(fp202.matches({ kind: "content" }, call, request(hashes(BASE, { nudgeFix: { cause: "tier-trigger", compatible: "emergency" } }), hashes([...BASE, { role: "user", hash: "emergency" }]))), false, "the other fix");
 	assert.equal(fp202.matches({ kind: "summaries" }, call, request(deferred, hashes([...BASE, { role: "user", hash: "emergency" }]))), false);
+});
+
+test("FP-257 explains only a nudge that differs from billion-context-pi's by the fold tool it names", () => {
+	const fp257 = entry("FP-257");
+	const fix = { cause: "tool-name" as const, sent: "native", compatible: "bcp" };
+	const ours = hashes([...BASE, { role: "user", hash: "native" }], { nudgeFix: fix });
+	assert.equal(fp257.matches({ kind: "content" }, call, request(ours, hashes([...BASE, { role: "user", hash: "bcp" }]))), true);
+	// A nudge that differs for another reason is that reason's entry, not this one.
+	for (const cause of ["tier-trigger", "emergency-defer"] as const) {
+		assert.equal(fp257.matches({ kind: "content" }, call, request(hashes([...BASE, { role: "user", hash: "native" }], { nudgeFix: { ...fix, cause } }), hashes([...BASE, { role: "user", hash: "bcp" }]))), false, cause);
+		assert.equal(entry(cause === "tier-trigger" ? "FP-201" : "FP-202").matches({ kind: "content" }, call, request(ours, hashes([...BASE, { role: "user", hash: "bcp" }]))), false, "the tool-name fix is not " + cause);
+	}
+	assert.equal(fp257.matches({ kind: "content" }, call, request(ours, hashes([...BASE, { role: "user", hash: "bcp" }, { role: "user", hash: "other" }]))), false, "another content difference");
+	assert.equal(fp257.matches({ kind: "content" }, call, request(hashes([...BASE, { role: "user", hash: "other" }], { nudgeFix: fix }), hashes([...BASE, { role: "user", hash: "bcp" }]))), false, "the sent nudge is not in the request");
+	assert.equal(fp257.matches({ kind: "content" }, call, request(hashes([...BASE, { role: "user", hash: "native" }]), hashes([...BASE, { role: "user", hash: "bcp" }]))), false, "no fix recorded");
+	assert.equal(fp257.matches({ kind: "summaries" }, call, request(ours, hashes([...BASE, { role: "user", hash: "bcp" }]))), false);
+	assert.equal(fp257.matches({ kind: "content" }, call, undefined), false);
+});
+
+test("a tool-name nudge-fix note is accepted evidence, and one that contradicts itself is a fault", () => {
+	const evidence = { activeFoldCount: 0, activeFoldIds: [], expectedSummaryHashes: [], expectedSummaryTopicHashes: [] };
+	const record = (nudgeFix: unknown) => ({ ...request(hashes(BASE, { ...evidence, nudgeFix } as Partial<RequestHashes>), hashes(BASE)), diffs: [{ kind: "content" }] });
+	assert.equal(parityEvidenceFault(record({ cause: "tool-name", sent: "a", compatible: "b" })), undefined);
+	assert.match(parityEvidenceFault(record({ cause: "tool-name", sent: "a", compatible: "a" })) ?? "", /nudgeFix/u, "equal hashes");
+	assert.match(parityEvidenceFault(record({ cause: "tool-name" })) ?? "", /nudgeFix/u, "no hash at all");
 });
 
 test("a nudge-fix note that contradicts itself is a recorder fault", () => {

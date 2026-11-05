@@ -7,7 +7,7 @@ Context-aware helps long Pi sessions keep their purpose through compaction. It t
 ## What it does
 
 - Shows context pressure and usable output headroom without changing the prompt on every tool call.
-- Rewrites `/compact-then` and `compact_session` seeds before Pi compacts the conversation.
+- Rewrites `/compact-then` and `context_compact` seeds before Pi compacts the conversation.
 - Can compact proactively when context usage or output headroom reaches a configured limit.
 - Preserves a prior-transcript reference and exposes bounded prior-session search.
 - Keeps optional durable focus, session tasks, and scoped context-cache documents across compaction.
@@ -23,7 +23,7 @@ The detailed behavior, recovery rules, and examples are in [commands and concept
 
 ![The handoff sequence](docs/diagrams/handoff-sequence.svg)
 
-The agent starts a handoff with `compact_session` or `/compact-then`. Context-aware resolves or generates a raw seed, asks the active model to rewrite it when rewriting is enabled, then gives the final seed to Pi as compaction guidance. After Pi drains queued input, context-aware delivers the seed once to start the next phase. In a worker session, it records a round-boundary request instead of starting a new turn.
+The agent starts a handoff with `context_compact` or `/compact-then`. Context-aware resolves or generates a raw seed, asks the active model to rewrite it when rewriting is enabled, then gives the final seed to Pi as compaction guidance. After Pi drains queued input, context-aware delivers the seed once to start the next phase. In a worker session, it records a round-boundary request instead of starting a new turn.
 
 The extension also listens to Pi lifecycle events. It records stable telemetry, task, focus, cache, and transcript metadata in the session without treating those records as user instructions.
 
@@ -35,9 +35,9 @@ Install the public package with Pi:
 pi install npm:@centerforagenticai/pi-context-aware
 ```
 
-Restart Pi or run `/reload`. The package declares Pi peer dependencies as `*`; its deterministic compatibility gate tests the supported minimum, Pi `1.4.0`, and the development pin. Pi `1.0.x` to `1.3.x` are no longer supported; release 0.5.14 is the last release that declares Pi `1.0.3` as its minimum. It needs Node `>=22.19.0`.
+Restart Pi or run `/reload`. The package declares Pi peer dependencies as `*`; its deterministic compatibility gate tests the supported minimum, Pi `1.5.0`, and the development pin. Pi `1.0.x` to `1.3.x` are no longer supported; release 0.5.14 is the last release that declares Pi `1.0.3` as its minimum. It needs Node `>=22.19.0`.
 
-For a local checkout, add its absolute path to the `packages` array in `~/.pi/agent/settings.json`, run `npm run build`, then restart Pi or run `/reload`. The manifest loads `./dist/extension.js`, which the build bundles into one file.
+For a local checkout, add its absolute path to the `packages` array in `~/.pi/agent/settings.json`, run `bun run build`, then restart Pi or run `/reload`. The manifest loads `./dist/extension.js`, which the build bundles into one file.
 
 For seeded automatic handoffs, let context-aware own automatic compaction and turn off Pi's native automatic threshold checks:
 
@@ -47,20 +47,22 @@ For seeded automatic handoffs, let context-aware own automatic compaction and tu
 }
 ```
 
-Manual `/compact`, `/compact-then`, and `compact_session` remain available. See [configuration](docs/configuration.md) for ownership warnings and the complete settings.
+Manual `/compact`, `/compact-then`, and `context_compact` remain available. See [configuration](docs/configuration.md) for ownership warnings and the complete settings.
 
-When `billion-context-pi` is loaded, it cancels every compaction. Context-aware detects it at session start, stops offering `compact_session`, and turns proactive compaction off. It tells the agent to use `compress` only when the current session can reach that tool; otherwise its model guidance falls back to keep-small/delegate and finish-atomic-work advice without naming `compress`. See [compaction blocked by another extension](docs/commands-and-concepts.md#compaction-blocked-by-another-extension). `/fold-parity` reports read-only shadow comparisons of its `compress` calls, including nested calls, and progress toward the 500-call cut-over gate; `/fold-parity all` lists every call that blocks it. See [fold parity](docs/fold-parity.md).
+When `billion-context-pi` is loaded, it cancels every compaction. Context-aware detects it at session start, stops offering `context_compact`, and turns proactive compaction off. It tells the agent to use billion-context-pi's own `compress` tool only when the current session can reach it; otherwise its model guidance falls back to keep-small/delegate and finish-atomic-work advice without naming that tool. See [compaction blocked by another extension](docs/commands-and-concepts.md#compaction-blocked-by-another-extension). `/fold-parity` reports read-only shadow comparisons of billion-context-pi's `compress` calls, including nested calls, and progress toward the 500-call cut-over gate; `/fold-parity all` lists every call that blocks it. See [fold parity](docs/fold-parity.md).
 
 ## Surface
 
+One prompt section guides the context tools, within 1,500 tokens.
+
 | Kind | Name | Purpose |
 | --- | --- | --- |
-| Tool | `compact_session` | Compact at a clean phase boundary and continue from a self-contained seed. Offered when `summarizer.enabled` is `true` and no loaded extension cancels every compaction. |
+| Tool | `context_compact` | Compact at a clean phase boundary and continue from a self-contained seed. Offered when `summarizer.enabled` is `true` and no loaded extension cancels every compaction. |
 | Tool | `session_focus` | Read or update one optional durable objective. |
 | Tool | `session_tasks` | Maintain a one-level checklist that survives compaction. |
-| Tool | `search_prior_sessions` | Search bounded transcript snippets from earlier sessions or compacted-away current history. |
-| Tool | `session_recall` | Search the context cache and session history together. |
-| Tool | `session_compaction_history` | Report current-branch compaction counts and boundary identifiers. |
+| Tool | `context_status` | Read context size and ladder stage, compaction boundaries and active folds. |
+| Tool | `context_recall` | Recall text that left context: earlier sessions, this session, the context cache, or the entries behind a fold. |
+| Tool | `context_fold` | Replace a consumed range of messages with a summary you write. Registered while billion-context-pi is not loaded. |
 | Tool | `load_skill` | Load a skill by name; a repeat load of an unchanged skill returns a pointer to the earlier copy. |
 | Command | `/compact-then [seed] [--model provider/id]` | Run the seeded handoff flow. Available when `summarizer.enabled` is `true`; refuses with the reason while another extension cancels every compaction. |
 | Commands | `/context-status`, `/context-aware-*` | Inspect pressure and configure seed, model, ambiguity, and proactive behavior. |
@@ -77,7 +79,7 @@ Settings come from built-in defaults, `~/.pi/agent/context-aware.json`, trusted 
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `seedMode` | `"auto-gen"` | Generate a seed when `/compact-then` has none. |
+| `seedMode` | `"auto-gen"` | Generate a seed when `/compact-then` has none. The file accepts `"auto-gen"` and `"user-approve"`. `autonomous` is a preset, not a file value: set it with `--context-aware-mode` or `/context-aware-seed-mode`. See [configuration](docs/configuration.md). |
 | `seedRewrite` | `true` | Rewrite raw seeds into self-contained prompts. |
 | `seedAuthorityGuard` | `"warn"` | Check generated handoffs against session authority. |
 | `ambiguityMode` | `"inherit"` | Ask, proceed cautiously, or proceed automatically when a seed is unclear. |
@@ -86,7 +88,8 @@ Settings come from built-in defaults, `~/.pi/agent/context-aware.json`, trusted 
 | `summarizer.enabled` | `true` | Own the compaction summary hook and register handoff surfaces. |
 | `compactionClaim.enabled` | `false` | Claim compaction from pi-fabric so this extension writes the summary. Off until `billion-context-pi` leaves the profile. |
 | `compactionClaim.fabricFallback` | `true` | While the claim is held, use pi-fabric's deterministic summary when the model summary fails. |
-| `proactiveCompaction.enabled` | `true` | Prepare a handoff before the context limit; threshold defaults to `0.78`. |
+| `proactiveCompaction.enabled` | `true` | Prepare a handoff before the context limit; threshold defaults to the pressure ladder's seeded-compaction step (`0.9`). |
+| `contextMetrics.enabled` | `true` | Append one numbers-only record per model request to `<agent dir>/context-aware/metrics/v1/<session-id>.jsonl`. See [`contextMetrics`](docs/configuration.md#contextmetrics). |
 | `imageStripping.enabled` | `false` | Send only the newest `imageStripping.keepRecent` (default `5`) image-bearing messages with their images; older images become text placeholders. |
 | `contextCache.enabled` | `true` | Surface scoped cache documents; the default scope is `"worktree"`. |
 | `restartNotice.enabled` | `true` | Remind the agent to re-check volatile state after time away. |

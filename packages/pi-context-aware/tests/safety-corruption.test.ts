@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { obj } from "@earendil-works/pi-schema";
 import { importAcpSideFile } from "../src/folds/acp-import.js";
 import { registerFoldEngine } from "../src/folds/fold-engine.js";
 import { registerFoldParityRecorder } from "../src/parity/recorder.js";
@@ -51,7 +51,7 @@ for (const scenario of ["malformed", "missing", "newer-schema"] as const) {
 			const agentDir = path.join(root, "agent");
 			const extension: ExtensionFactory = (pi) => {
 				// This pair selects shadow mode, but neither tool writes a side file.
-				for (const name of ["compress", "acp_status"]) pi.registerTool({ name, label: name, description: "Synthetic legacy owner.", parameters: Type.Object({}),
+				for (const name of ["compress", "acp_status"]) pi.registerTool({ name, label: name, description: "Synthetic legacy owner.", parameters: obj({}, { open: true }),
 					async execute() { return { content: [{ type: "text", text: "No ranges provided." }], details: {} }; } });
 				const engine = registerFoldEngine(pi);
 				flush = registerFoldParityRecorder(pi, { engine, agentDir, fingerprint: "safety-corruption", now: () => new Date("2026-01-01T00:00:00Z") }).flush;

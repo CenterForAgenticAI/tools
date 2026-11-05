@@ -542,7 +542,7 @@ export interface ContextAwarePressureLadderV1 {
 	readonly foldNudgeEndFraction: number;
 	/** Seeded compaction runs. The URGENT telemetry band starts here. */
 	readonly seededCompactionFraction: number;
-	/** Oldest entries are hidden recoverably, only when compaction cannot run. */
+	/** Oversized old messages are hidden recoverably (pi-context-aware#268): shortened with a context_recall pointer. Not gated on compaction. */
 	readonly recoverableHideFraction: number;
 }
 
@@ -666,6 +666,39 @@ export interface ContextAwareSkillsV1 {
 	endOwner?(ownerKey: string): boolean;
 }
 
+/** The fold policy a hint gives the content it selects (pi-context-aware#281). */
+export type ContextAwareFoldHintPolicyV1 = "verbatim" | "one-line" | "condensed" | "drop-after-read" | "default";
+
+/**
+ * A fold hint. `match` names exactly one typed key: the `customType` of the
+ * caller's `pi.sendMessage()` messages, or a `toolName`. No key selects a
+ * message the operator typed. Only these fields are read.
+ */
+export interface ContextAwareFoldHintRegistrationV1 {
+	/** The registering extension. The first owner of a key keeps it for the session. */
+	readonly ownerKey: string;
+	readonly match: { readonly customType: string } | { readonly toolName: string };
+	readonly policy: ContextAwareFoldHintPolicyV1;
+	/** `one-line`: the record shown in place of the message. At most 200 characters, one line. */
+	readonly line?: string;
+	/** `one-line`: builds the record from a copy of the message's `details` only. The result is bounded like `line`. */
+	readonly summarize?: (details: unknown) => string;
+	/** `condensed`: the text shown in place of a custom message. At most 32,000 characters. */
+	readonly condensed?: string;
+}
+
+export type ContextAwareFoldHintResultV1 =
+	| { readonly ok: true; readonly replaced: boolean }
+	| { readonly ok: false; readonly error: string };
+
+/** Fold hints for the caller's own messages and tools. Check with `supportsContextAwareFoldHintsV1`. */
+export interface ContextAwareFoldsV1 {
+	readonly hints: true;
+	registerHint(registration: ContextAwareFoldHintRegistrationV1): ContextAwareFoldHintResultV1;
+	/** Remove an owner's hints; its keys stay claimed. Returns how many hints were removed. */
+	endOwner(ownerKey: string): number;
+}
+
 export interface ContextAwareServiceV1 {
 	readonly protocolVersion: typeof CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION;
 	getSnapshot(): ContextAwareSnapshotV1;
@@ -675,6 +708,8 @@ export interface ContextAwareServiceV1 {
 	policy?: ContextAwarePolicyV1;
 	/** Added compatibly in protocol v1. Older producers may omit it. */
 	skills?: ContextAwareSkillsV1;
+	/** Added compatibly in protocol v1. Older producers may omit it. */
+	folds?: ContextAwareFoldsV1;
 	requestHandoff(
 		request: ContextAwareHandoffRequestV1,
 		options?: { signal?: AbortSignal },
@@ -739,6 +774,15 @@ export function supportsContextAwareCondensedSkillsV1(
 		&& service.skills.condensed === true
 		&& typeof service.skills.register === "function"
 		&& typeof service.skills.endOwner === "function";
+}
+
+/** Return true when the producer accepts fold hints (pi-context-aware#281). */
+export function supportsContextAwareFoldHintsV1(
+	service: ContextAwareServiceV1 | undefined,
+): service is ContextAwareServiceV1 & { folds: ContextAwareFoldsV1 } {
+	return service?.folds?.hints === true
+		&& typeof service.folds.registerHint === "function"
+		&& typeof service.folds.endOwner === "function";
 }
 
 /** Return true when a discovered producer implements the additive promotion capability. */

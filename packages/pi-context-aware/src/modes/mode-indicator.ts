@@ -6,7 +6,8 @@ import { modeDisplayText } from "./modes-state.js";
 export const MODES_WIDGET_KEY = "caair.context-aware/mode-indicator";
 
 const DEFAULT_MODE_COLOR: ThemeColor = "accent";
-const UNAVAILABLE_MODE_COLOR: ThemeColor = "muted";
+/** An unavailable mode's chip and the rule drawn with no layer. */
+const MUTED_COLOR: ThemeColor = "muted";
 
 type RgbColor = { readonly kind: "rgb"; readonly r: number; readonly g: number; readonly b: number };
 type IndicatorColor = ThemeColor | RgbColor;
@@ -27,7 +28,7 @@ function paint(theme: Theme, text: string, color: IndicatorColor, options: { inv
 }
 
 function modeColor(mode: ContextAwareModeSnapshotV1): IndicatorColor {
-	return mode.available ? indicatorColor(mode.ui?.color) : UNAVAILABLE_MODE_COLOR;
+	return mode.available ? indicatorColor(mode.ui?.color) : MUTED_COLOR;
 }
 
 function modeLabel(mode: ContextAwareModeSnapshotV1): string {
@@ -43,26 +44,29 @@ function chipText(mode: ContextAwareModeSnapshotV1): string {
 /**
  * One line: a solid chip per active layer in its mode's color, lowest rank
  * first, the owners, the step trail, and a rule in the top layer's color to the
- * edge. `modes` is in rank order, as `layers()` returns it.
+ * edge. `modes` is in rank order, as `layers()` returns it. With no layer, a
+ * trail is drawn alone, with no chip and a muted rule; with neither, nothing.
  */
 export function renderModeIndicatorLine(modes: readonly ContextAwareModeSnapshotV1[], theme: Theme, width: number, trail?: string): string {
 	const top = modes.at(-1);
-	if (width <= 0 || top === undefined) return "";
+	if (width <= 0 || (top === undefined && trail === undefined)) return "";
 	const parts: string[] = [];
 	modes.forEach((mode, index) => {
 		if (index > 0) parts.push(" ");
 		parts.push(paint(theme, chipText(mode), modeColor(mode), { inverse: true, bold: true }));
 	});
-	const owners = [...new Set(modes.map((mode) => modeDisplayText(mode.owner)))];
-	parts.push(theme.fg("muted", ` · ${owners.join(", ")}`));
+	if (top !== undefined) {
+		const owners = [...new Set(modes.map((mode) => modeDisplayText(mode.owner)))];
+		parts.push(theme.fg("muted", ` · ${owners.join(", ")}`));
+	}
 	if (modes.some((mode) => mode.suggestedBy === "model")) parts.push(theme.fg("warning", " [model-confirmed]"));
 	if (trail !== undefined) parts.push(theme.fg("muted", " › "), theme.fg("text", modeDisplayText(trail)));
-	parts.push(paint(theme, ` ${"─".repeat(width)}`, modeColor(top)));
+	parts.push(paint(theme, ` ${"─".repeat(width)}`, top === undefined ? MUTED_COLOR : modeColor(top)));
 	// Cut, never wrap: word wrapping would break at the hyphen in an owner such as `pi-stack`.
 	return truncateToWidth(parts.join(""), width, "", true);
 }
 
-/** A widget factory for the active layers; Pi calls it with the live theme. */
+/** A widget factory for the active layers and the trail; Pi calls it with the live theme. */
 export function createModeIndicatorWidget(modes: readonly ContextAwareModeSnapshotV1[], trail?: string): (tui: unknown, theme: Theme) => { render(width: number): string[]; invalidate(): void } {
 	return (_tui, theme) => {
 		let cached: { width: number; lines: string[] } | undefined;

@@ -67,7 +67,7 @@ test("extension load finds the top-level project config with one git command", {
 		// Without a project file, load registers the handoff tool.
 		const bare = await loadExtensionIn(root, nested, "bare");
 		assert.deepEqual(bare.gitCommands, [`-C ${nested} rev-parse --show-toplevel`]);
-		assert.equal(bare.tools.has("compact_session"), true);
+		assert.equal(bare.tools.has("context_compact"), true);
 
 		// A project file at the top level that sets summarizer.enabled defers the
 		// handoff tool to session start. Load runs from a nested directory, so the
@@ -76,7 +76,7 @@ test("extension load finds the top-level project config with one git command", {
 		fs.writeFileSync(path.join(repo, ".pi", "context-aware.json"), JSON.stringify({ summarizer: { enabled: true } }));
 		const configured = await loadExtensionIn(root, nested, "configured");
 		assert.deepEqual(configured.gitCommands, [`-C ${nested} rev-parse --show-toplevel`]);
-		assert.equal(configured.tools.has("compact_session"), false);
+		assert.equal(configured.tools.has("context_compact"), false);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}

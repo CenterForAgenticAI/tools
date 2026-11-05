@@ -8,12 +8,15 @@ import {
 	type ExtensionFactory, type SessionEntry, type ContextEvent,
 } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { arr, obj, opt, str, type Static } from "@earendil-works/pi-schema";
 import { entryToCoreMessages } from "../src/folds/fold-adapter.js";
 import { registerFoldEngine } from "../src/folds/fold-engine.js";
 import { renderFoldSummary } from "../src/folds/fold-entries.js";
 import { registerFoldParityRecorder } from "../src/parity/recorder.js";
 import { readParityRecords } from "../src/parity/records.js";
+
+const testToolParameters1 = obj({ content: arr(obj({ startId: str(), endId: str(), summary: str(), topic: opt(str()) }, { open: true })) }, { open: true });
+const testToolParameters2 = obj({}, { open: true });
 
 const SUMMARY = "The opening decisions are settled. Keep the agreed alpha and beta answers for the next phase.";
 interface Options { differentRange?: boolean; differentSummary?: boolean; nested?: boolean; absent?: boolean; recorder?: boolean; batch?: boolean; }
@@ -73,10 +76,10 @@ async function run(options: Options = {}) {
 			}) };
 		});
 		pi.on("tool_call", (event) => { if (event.toolName === "compress") callEventId = event.toolCallId; });
-		pi.registerTool({ name: "acp_status", label: "status", description: "bcp marker", parameters: Type.Object({}), async execute() { return { content: [{ type: "text", text: "status" }], details: {} }; } });
+		pi.registerTool({ name: "acp_status", label: "status", description: "bcp marker", parameters: obj({}, { open: true }), async execute() { return { content: [{ type: "text", text: "status" }], details: {} }; } });
 		pi.registerTool({
-			name: "compress", label: "compress", description: "bcp stub", parameters: Type.Object({ content: Type.Array(Type.Object({ startId: Type.String(), endId: Type.String(), summary: Type.String(), topic: Type.Optional(Type.String()) })) }),
-			async execute(id, params) {
+			name: "compress", label: "compress", description: "bcp stub", parameters: testToolParameters1,
+			async execute(id, params: Static<typeof testToolParameters1>) {
 				executeId = id;
 				const range = params.content[0]!;
 				const ids = options.differentRange ? branchSeed.slice(0, 2).map((entry) => entry.id) : range.startId === "m00005" ? branchSeed.slice(4, 8).map((entry) => entry.id) : [...expectedCoverage];
@@ -102,12 +105,12 @@ async function run(options: Options = {}) {
 			flush = registerFoldParityRecorder(recording, { engine, agentDir, fingerprint: "engine" }).flush;
 		}
 		pi.on("tool_result", (_event, ctx) => { afterRecorderEntries = structuredClone(ctx.sessionManager.getEntries()); afterRecorderSide = fs.existsSync(sideFile) ? fs.readFileSync(sideFile, "utf8") : ""; });
-		if (options.nested) pi.registerTool({ name: "nested_probe", label: "nested", description: "nested compress", parameters: Type.Object({}), async execute(_id, _params, _signal, _update, ctx) {
+		if (options.nested) pi.registerTool({ name: "nested_probe", label: "nested", description: "nested compress", parameters: testToolParameters2, async execute(_id, _params: Static<typeof testToolParameters2>, _signal, _update, ctx) {
 			const first = await ctx.executeTool("compress", request);
 			if (options.batch) await ctx.executeTool("compress", { content: [{ startId: "m00005", endId: "m00008", summary: "The middle conversation was also settled, after the opening. Keep this second summary in order.", topic: "opening" }] });
 			return first.result;
 		} });
-		if (options.absent) pi.registerTool({ name: "compress", label: "other compress", description: "not bcp", parameters: Type.Object({}), async execute() { return { content: [{ type: "text", text: "unrelated tool" }], details: {} }; } });
+		if (options.absent) pi.registerTool({ name: "compress", label: "other compress", description: "not bcp", parameters: obj({}, { open: true }), async execute() { return { content: [{ type: "text", text: "unrelated tool" }], details: {} }; } });
 	};
 	const faux = fauxProvider({ provider: "fold-parity", models: [{ id: "test", contextWindow: 1_000_000, maxTokens: 4096 }], tokensPerSecond: Infinity });
 	faux.setResponses([fauxAssistantMessage(fauxToolCall(options.nested ? "nested_probe" : "compress", options.nested || options.absent ? {} : request, { id: "parity-probe" }), { stopReason: "toolUse" }), fauxAssistantMessage("Done.")]);

@@ -4,17 +4,19 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { SessionManager, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { SessionManager, type ContextEvent, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { contentText, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { obj } from "@earendil-works/pi-schema";
 
 import extension from "../src/index.js";
 import { discoverContextAwareServiceV1, supportsContextAwareCondensedSkillsV1, supportsContextAwareLoadedSkillsV1 } from "../src/context-service.js";
-import { CONDENSED_RESEND_MESSAGE_TYPE, CONDENSED_SKILL_ENTRY_TYPE, SKILL_OWNER_ENDED_ENTRY_TYPE } from "../src/skills/condensed.js";
+import { CONDENSED_RESEND_MESSAGE_TYPE, CONDENSED_SKILL_ENTRY_TYPE, SKILL_OWNER_ENDED_ENTRY_TYPE, createCondensedSkills, createSkillCondenser, condensedSkillsOnBranch, renderCondensedBlock } from "../src/skills/condensed.js";
 import { planFold } from "../src/folds/fold-adapter.js";
 import { applyFoldDrafts } from "../src/folds/fold-engine.js";
 import { coveredEntryIds } from "../src/folds/fold-entries.js";
 import { createHostPi, createSession } from "./compaction-owner-harness.js";
-import { SAFETY_CONFIG } from "./fixtures/safety/session.js";
+import { SAFETY_CONFIG, safetySession } from "./fixtures/safety/session.js";
+import { CONFIG_POLICY_ENTRY_TYPE, configPolicyEntry } from "../src/platform/config-layers.js";
 
 // Seam: the tools the extension's default export registers on a host, and what the
 // registered load_skill returns for a skill Pi discovered (pi-context-aware#181).
@@ -27,6 +29,133 @@ interface LoadSkillTool {
 	name: string;
 	execute(id: string, params: { name: string }, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionContext): Promise<{ content: Array<{ type: string; text: string }>; details: Record<string, unknown> }>;
 }
+
+test("the host opt-out survives SDK session lifecycles without dropping pending tools", async (t) => {
+	const previous = process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL;
+	process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL = "1";
+	try {
+		for (const role of ["foreground", "worker"] as const) await t.test(role, async () => {
+			const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-host-skills-")));
+			let session: Awaited<ReturnType<typeof safetySession>>["session"] | undefined;
+			let lateApi: ExtensionAPI | undefined;
+			let toolSetWrites = 0;
+			const start = async (manager: SessionManager) => {
+				const created = await safetySession(root, manager, [
+					(pi) => extension(new Proxy(pi, {
+						get(target, key, receiver) {
+							if (key === "setActiveTools") return (names: string[]) => { toolSetWrites++; target.setActiveTools(names); };
+							return Reflect.get(target, key, receiver);
+						},
+					})),
+					(pi) => { lateApi = pi; },
+				]);
+				session = created.session;
+				assert.equal(session.getAllTools().some((tool) => tool.name === "load_skill"), false);
+				assert.equal(session.getActiveToolNames().includes("load_skill"), false);
+				assert.equal(session.getCallableToolNames().includes("load_skill"), false);
+				assert.doesNotMatch(session.systemPrompt, /load_skill/u);
+				assert.equal(toolSetWrites, 0, "opting out must never replace a session's tool set");
+			};
+			const registerLate = (name: string) => {
+				lateApi!.registerTool({
+					name, label: name, description: "Deferred host tool", exposure: "deferred", parameters: obj({}, { open: true }),
+					async execute() { return { content: [{ type: "text", text: "late" }], details: {} }; },
+				});
+				assert.ok(session!.getActiveToolNames().includes(name), "a recorded deferred tool must activate when it registers");
+			};
+			try {
+				const fresh = SessionManager.inMemory(root);
+				fresh.appendCustomEntry(CONFIG_POLICY_ENTRY_TYPE, configPolicyEntry("host", { sessionRole: role }));
+				await start(fresh);
+				session!.dispose();
+
+				const manager = SessionManager.create(root, path.join(root, "sessions"));
+				manager.appendCustomEntry(CONFIG_POLICY_ENTRY_TYPE, configPolicyEntry("host", { sessionRole: role }));
+				manager.appendMessage({ role: "system", content: "", timestamp: 0,
+					toolsAdded: ["read", "load_skill", "late_resume", "late_tree"].map((name) => ({ name, description: name, parameters: { type: "object", properties: {} } })),
+				});
+				const anchor = manager.appendMessage({ role: "user", content: "Root question", timestamp: 1 });
+				manager.appendMessage(fauxAssistantMessage("Root answer"));
+				const file = manager.getSessionFile()!;
+				assert.ok(fs.existsSync(file));
+				await start(SessionManager.open(file));
+				registerLate("late_resume");
+				await session!.navigateTree(anchor);
+				registerLate("late_tree");
+				assert.equal(session!.getCallableToolNames().includes("load_skill"), false);
+				assert.equal(toolSetWrites, 0);
+				session!.dispose();
+
+				await start(SessionManager.forkFrom(file, root));
+				registerLate("late_resume");
+			} finally {
+				session?.dispose();
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		});
+	} finally {
+		if (previous === undefined) delete process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL;
+		else process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL = previous;
+	}
+});
+
+test("the first request after opting out refreshes saved guidance without editing history or condensing full bodies", async () => {
+	const previous = process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL;
+	process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL = "1";
+	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-host-skill-replay-")));
+	let running: Awaited<ReturnType<typeof safetySession>> | undefined;
+	try {
+		const location = path.join(root, "SKILL.md");
+		const open = `<skill name="example" location="${location}"`;
+		const original = `${open}>\nORIGINAL-FULL-BODY\n</skill>`;
+		fs.writeFileSync(location, "ORIGINAL-FULL-BODY");
+		fs.writeFileSync(path.join(root, "condensed.md"), "CAPTURED-RULES");
+		const manager = SessionManager.create(root, path.join(root, "sessions"));
+		manager.appendMessage({ role: "user", content: original, timestamp: 1 });
+		manager.appendMessage(fauxAssistantMessage("First answer"));
+		manager.appendMessage({ role: "user", content: "Next question", timestamp: 2 });
+		manager.appendMessage(fauxAssistantMessage("Next answer"));
+		const skills = createCondensedSkills({ append: (type, data) => { manager.appendCustomEntry(type, data); } });
+		skills.capturePrompt(original, [{ name: "example", filePath: location }], manager);
+		const plan = planFold({ branch: manager.getBranch(), startRef: "m00001", endRef: "m00002", summary: "The first exchange completed.",
+			modelContextLimit: 64_000, config: { ...SAFETY_CONFIG, preserveRecentMessages: 0, preserveRecentTokens: 0 },
+			folds: { firstUserMessage: "fold", firstUserMessageMaxTokens: 8_000 }, condenser: createSkillCondenser(manager.getBranch())! });
+		assert.ok(plan.ok, JSON.stringify(plan));
+		applyFoldDrafts(manager, plan.drafts);
+		const oldBlock = skills.resendText(manager, () => false)!.content;
+		assert.match(oldBlock, /call load_skill/u);
+		manager.appendCustomMessageEntry(CONDENSED_RESEND_MESSAGE_TYPE, oldBlock, false);
+		const record = condensedSkillsOnBranch(manager.getBranch()).get(location)!.record;
+		manager.appendCustomMessageEntry(CONDENSED_RESEND_MESSAGE_TYPE, renderCondensedBlock(record, "stub"), false);
+		fs.writeFileSync(path.join(root, "condensed.md"), "NEWER-CAPTURED-RULES");
+		skills.capturePrompt(original, [{ name: "example", filePath: location }], manager);
+		const full = `${open}>\nSTILL-FULL-BODY\n</skill>`;
+		const foreign = `${open} form="condensed">\nUSER-AUTHORED-BODY\n</skill>`;
+		manager.appendMessage({ role: "user", content: `${full}\n${foreign}`, timestamp: 3 });
+		manager.appendMessage(fauxAssistantMessage("Continue"));
+		const saved = manager.getEntries().map((entry) => [entry.id, JSON.stringify(entry)] as const);
+		const reopened = SessionManager.open(manager.getSessionFile()!);
+		running = await safetySession(root, reopened, [extension]);
+		await running.prompt("Continue using the host reader.");
+		assert.equal(running.requests.length, 1);
+		const text = running.requests[0]!.map((message) => contentText(message.content)).join("\n");
+		assert.doesNotMatch(text, /call load_skill/u);
+		assert.ok(text.includes(`For the full text, read ${location}.`));
+		assert.ok(text.includes(`Read ${location} if you need it.`));
+		assert.match(text, /\nCAPTURED-RULES\n/u, "saved blocks must retain their originally captured rules");
+		assert.doesNotMatch(text, /NEWER-CAPTURED-RULES/u);
+		assert.ok(text.includes(full), "a full body must not condense before a fold");
+		assert.ok(text.includes(foreign), "user-authored lookalikes must not change");
+		for (const [id, entry] of saved) assert.equal(JSON.stringify(reopened.getEntry(id)), entry);
+		assert.equal(reopened.getEntries().filter((entry) => entry.type === "context_edit").length,
+			manager.getEntries().filter((entry) => entry.type === "context_edit").length);
+	} finally {
+		running?.session.dispose();
+		fs.rmSync(root, { recursive: true, force: true });
+		if (previous === undefined) delete process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL;
+		else process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL = previous;
+	}
+});
 
 test("the extension registers load_skill, which loads a discovered skill by name", async () => {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-load-skill-")));
@@ -131,9 +260,12 @@ async function condensedHarness(on: boolean) {
 	return { root, skillPath, host, manager, ctx, sync };
 }
 
-test("with folds.condensedSkills on, a pinned skill's condensed.md is captured from the run's prompt, and after a compaction it is resent once", async () => {
+for (const disabled of [false, true]) test(`condensed skills are resent once with the creation-time loader policy (disabled=${disabled})`, async () => {
+	const previous = process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL;
+	process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL = disabled ? "1" : "0";
 	const { root, skillPath, host, manager, ctx } = await condensedHarness(true);
 	try {
+		process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL = disabled ? "0" : "1";
 		const captured = manager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === CONDENSED_SKILL_ENTRY_TYPE);
 		assert.equal(captured.length, 1);
 		assert.match(JSON.stringify(captured[0]), /CONDENSED-RULES-MARKER/u);
@@ -144,8 +276,17 @@ test("with folds.condensedSkills on, a pinned skill's condensed.md is captured f
 		assert.equal(resent.length, 1);
 		assert.match(JSON.stringify(resent[0]!.message), /form=\\"condensed\\">\\nCONDENSED-RULES-MARKER/u);
 		assert.deepEqual(resent[0]!.options, { triggerTurn: false });
+		const text = (resent[0]!.message as { content: string }).content;
+		assert.ok(text.includes(`read ${skillPath}`));
+		assert.ok(text.includes("call load_skill"), "stored guidance is independent of the host's tool policy");
+		const messages: ContextEvent["messages"] = [{ role: "custom", customType: CONDENSED_RESEND_MESSAGE_TYPE, content: text, display: false, timestamp: 0 }];
+		const projected = await host.handler("context")({ type: "context", messages }, ctx) as { messages: ContextEvent["messages"] } | undefined;
+		const visible = (projected?.messages ?? messages).map((message) => "content" in message ? contentText(message.content) : "").join("\n");
+		assert.equal(visible.includes("call load_skill"), !disabled);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
+		if (previous === undefined) delete process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL;
+		else process.env.PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL = previous;
 	}
 });
 
@@ -206,7 +347,7 @@ async function foldedSkillRepeat(route: SkillRestoreRoute): Promise<{
 
 		const registeredTools = host.api.getAllTools();
 		if (route === "direct") {
-			host.api.setActiveTools(["read", "load_skill", "decompress"]);
+			host.api.setActiveTools(["read", "load_skill", "context_recall"]);
 		} else {
 			Object.assign(host.api, {
 				getAllTools: () => [...registeredTools, {
@@ -224,7 +365,7 @@ async function foldedSkillRepeat(route: SkillRestoreRoute): Promise<{
 			});
 			host.api.setActiveTools(["read", "fabric_exec"]);
 			const allowlist = ["read", "bash", "edit", "write", "grep", "find", "ls", "load_skill", "ask", "fabric_exec"];
-			if (route === "fabric-allowed") allowlist.push("decompress");
+			if (route === "fabric-allowed") allowlist.push("context_recall");
 			process.env.PI_FABRIC_TOOL_ALLOWLIST = JSON.stringify(allowlist);
 		}
 		await host.handler("before_agent_start")({
@@ -271,27 +412,27 @@ async function foldedSkillRepeat(route: SkillRestoreRoute): Promise<{
 test("folded load_skill pointers name only a reachable restore invocation", async (t) => {
 	const denied = await foldedSkillRepeat("fabric-denied");
 	await t.test("static guidance does not name a session-dependent restore tool", () => {
-		assert.doesNotMatch(denied.guidelines, /\bdecompress\b/u, "registered load_skill promptGuidelines must not name decompress");
+		assert.doesNotMatch(denied.guidelines, /\bcontext_recall\b/u, "registered load_skill promptGuidelines must not name context_recall");
 	});
-	await t.test("a Fabric child denied decompress gets the skill body", () => {
-		assert.match(denied.text, new RegExp(REACHABILITY_SKILL_BODY, "u"), "repeat load must return the skill body when decompress is denied");
-		assert.doesNotMatch(denied.text, /\bdecompress\b/u, "repeat load must not name decompress when the Fabric child cannot call it");
+	await t.test("a Fabric child denied context_recall gets the skill body", () => {
+		assert.match(denied.text, new RegExp(REACHABILITY_SKILL_BODY, "u"), "repeat load must return the skill body when context_recall is denied");
+		assert.doesNotMatch(denied.text, /\bcontext_recall\b/u, "repeat load must not name context_recall when the Fabric child cannot call it");
 	});
 
 	const fabric = await foldedSkillRepeat("fabric-allowed");
-	await t.test("a Fabric child allowed decompress gets the executor invocation", () => {
-		assert.match(fabric.text, new RegExp(`extensions\\.decompress\\(\\{ blockId: "${fabric.blockId}" \\}\\)`, "u"));
+	await t.test("a Fabric child allowed context_recall gets the executor invocation", () => {
+		assert.match(fabric.text, new RegExp(`extensions\\.context_recall\\(\\{ ref: "${fabric.blockId}" \\}\\)`, "u"));
 	});
 
 	const direct = await foldedSkillRepeat("direct");
-	await t.test("a directly active decompress tool keeps the direct invocation", () => {
-		assert.match(direct.text, new RegExp(`decompress\\(\\{ blockId: "${direct.blockId}" \\}\\)`, "u"));
-		assert.doesNotMatch(direct.text, /extensions\.decompress/u);
+	await t.test("a directly active context_recall tool keeps the direct invocation", () => {
+		assert.match(direct.text, new RegExp(`context_recall\\(\\{ ref: "${direct.blockId}" \\}\\)`, "u"));
+		assert.doesNotMatch(direct.text, /extensions\.context_recall/u);
 	});
 });
 
 // The pointer switch follows the fold engine's own mode (foldModeFor), so a reload that
-// puts our compress alias in front of billion-context-pi's still counts as
+// puts our context_fold in front of billion-context-pi's still counts as
 // billion-context-pi owning compression: Pi lists the first tool registered under a
 // name (pi-context-aware#189).
 async function repeatLoad(tools: ReadonlyArray<{ name: string; sourceInfo?: { path: string } }>): Promise<string> {
@@ -336,10 +477,10 @@ test("with the native fold engine live, a repeat load of an unchanged skill retu
 	assert.match(text, /already loaded/u);
 });
 
-test("after a reload puts our compress alias in front of billion-context-pi's, a repeat load returns the body", async () => {
+test("while billion-context-pi owns compression, a repeat load returns the body", async () => {
 	const text = await repeatLoad([
 		{ name: "context_fold", sourceInfo: { path: OWN_PATH } },
-		{ name: "compress", sourceInfo: { path: OWN_PATH } },
+		{ name: "compress", sourceInfo: { path: BCP_PATH } },
 		{ name: "acp_status", sourceInfo: { path: BCP_PATH } },
 	]);
 	assert.match(text, /MODE-BODY-MARKER/u);

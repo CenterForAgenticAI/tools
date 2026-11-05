@@ -83,11 +83,19 @@ export function outcomeEvidenceFault(value: unknown): string | undefined {
 
 /** A nudge-fix note: a known cause, at least one nudge hash, and the two hashes differ. */
 function isNudgeFix(value: unknown): boolean {
-	if (!isFields(value) || (value.cause !== "tier-trigger" && value.cause !== "emergency-defer")) return false;
+	if (!isFields(value) || (value.cause !== "tier-trigger" && value.cause !== "emergency-defer" && value.cause !== "denominator" && value.cause !== "tool-name")) return false;
 	const { sent, compatible } = value;
 	if (!isOptional(sent, isText) || !isOptional(compatible, isText) || sent === compatible) return false;
 	// Deferring the emergency nudge sends none where billion-context-pi sends one.
 	return value.cause === "emergency-defer" ? sent === undefined && compatible !== undefined : true;
+}
+
+/** A denominator note: both limits are positive, and the content keys appear only when the last step is crossed on one side. */
+function isDenominator(value: unknown): boolean {
+	if (!isFields(value) || !isCount(value.window) || !isCount(value.bcpLimit) || value.window <= 0 || value.bcpLimit <= 0 || value.bcpLimit === value.window || !isFlag(value.truncationStartDiffers)) return false;
+	const list = (keys: unknown) => Array.isArray(keys) && keys.length <= MAX_MESSAGE_HASHES && keys.every(isText);
+	if (!isOptional(value.limitKeys, list) || !isOptional(value.limitToolResultKeys, list)) return false;
+	return value.truncationStartDiffers === (value.limitKeys !== undefined && value.limitToolResultKeys !== undefined);
 }
 
 function isMediaElision(value: unknown): boolean {
@@ -112,7 +120,9 @@ export function requestHashesFault(value: unknown): string | undefined {
 	if (!isOptional(value.firstUserFolded, isMessageHash)) return "firstUserFolded";
 	if (!isOptional(value.firstUserReplacementHash, isText)) return "firstUserReplacementHash";
 	if (!isOptional(value.nudgeFix, isNudgeFix)) return "nudgeFix";
+	if (!isOptional(value.denominator, isDenominator)) return "denominator";
 	if (!isOptional(value.mediaElision, isMediaElision)) return "mediaElision";
+	if (!isOptional(value.hidePointer, isMediaElision)) return "hidePointer";
 	return undefined;
 }
 

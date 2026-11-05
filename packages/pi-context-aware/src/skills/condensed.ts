@@ -21,7 +21,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
-import type { ContextEditableContent, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ContextEditableContent, ContextEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import type { FoldCondenser } from "../folds/fold-adapter.js";
 
@@ -151,12 +151,16 @@ function attr(name: string, value: string | undefined): string {
 }
 
 /** The block a fold shows in place of a skill's full text. */
-export function renderCondensedBlock(record: CondensedSkillRecord, level: CondensedLevel): string {
+export function renderCondensedBlock(record: CondensedSkillRecord, level: CondensedLevel, reader: "load_skill" | "read" = "load_skill"): string {
 	const open = `<skill${attr("name", record.name)}${attr("location", record.location)}${attr("digest", record.digest)} form="${level}">`;
 	if (level === "stub") {
-		return `${open}\nSkill "${record.name}" is no longer in use; its text was removed. Load it again if you need it.\n</skill>`;
+		const restore = reader === "load_skill" ? "Load it again if you need it." : `Read ${record.location} if you need it.`;
+		return `${open}\nSkill "${record.name}" is no longer in use; its text was removed. ${restore}\n</skill>`;
 	}
-	return `${open}\n${record.condensed.trim()}\n\nThis is the condensed form of the skill. For the full text, call load_skill with name "${record.name}" and force: true, or read ${record.location}.\n</skill>`;
+	const restore = reader === "load_skill"
+		? `call load_skill with name "${record.name}" and force: true, or read ${record.location}`
+		: `read ${record.location}`;
+	return `${open}\n${record.condensed.trim()}\n\nThis is the condensed form of the skill. For the full text, ${restore}.\n</skill>`;
 }
 
 /** One `<skill ...>` block in message text. */
@@ -197,19 +201,29 @@ export function findSkillBlocks(text: string): SkillBlock[] {
  * no block of a captured skill.
  */
 export function condenseText(text: string, skills: CondensedSkillForms): string | undefined {
+	return rewriteSkillBlocks(text, (block) => {
+		const state = block.attributes.location === undefined ? undefined : skills.get(block.attributes.location)?.get(block.attributes.digest);
+		if (!state) return undefined;
+		const { record } = state;
+		if (record.name !== block.attributes.name || record.digest !== block.attributes.digest) return undefined;
+		return renderCondensedBlock(record, state.level);
+	});
+}
+
+/** Rewrite selected skill blocks; other text stays byte for byte. */
+function rewriteSkillBlocks(
+	text: string,
+	replace: (block: SkillBlock, text: string) => string | undefined,
+): string | undefined {
 	let out = "";
 	let cursor = 0;
 	let matched = false;
 	for (const block of findSkillBlocks(text)) {
-		const state = block.attributes.location === undefined ? undefined : skills.get(block.attributes.location)?.get(block.attributes.digest);
-		if (!state) continue;
-		const { record } = state;
-		// A digest on either side must agree; a registration always carries one.
-		if (record.digest !== undefined && block.attributes.digest !== record.digest) continue;
-		if (record.digest === undefined && block.attributes.digest !== undefined) continue;
-		if (block.attributes.name !== record.name) continue;
+		const original = text.slice(block.start, block.end);
+		const replacement = replace(block, original);
+		if (replacement === undefined) continue;
 		matched = true;
-		out += text.slice(cursor, block.start) + renderCondensedBlock(record, state.level);
+		out += text.slice(cursor, block.start) + replacement;
 		cursor = block.end;
 	}
 	return matched ? out + text.slice(cursor) : undefined;
@@ -218,13 +232,13 @@ export function condenseText(text: string, skills: CondensedSkillForms): string 
 type Part = { type?: unknown; text?: unknown };
 
 /** Condense a user or custom message's content, keeping its shape. */
-function condenseContent(content: unknown, skills: CondensedSkillForms): ContextEditableContent | undefined {
-	if (typeof content === "string") return condenseText(content, skills);
+function mapTextContent(content: unknown, transform: (text: string) => string | undefined): ContextEditableContent | undefined {
+	if (typeof content === "string") return transform(content);
 	if (!Array.isArray(content)) return undefined;
 	let matched = false;
 	const parts = content.map((part: Part) => {
 		if (part?.type !== "text" || typeof part.text !== "string") return part;
-		const text = condenseText(part.text, skills);
+		const text = transform(part.text);
 		if (text === undefined) return part;
 		matched = true;
 		return { ...part, text };
@@ -240,15 +254,41 @@ function condenseContent(content: unknown, skills: CondensedSkillForms): Context
 export function createSkillCondenser(branch: readonly SessionEntry[]): FoldCondenser | undefined {
 	const skills = condensedSkillFormsOnBranch(branch);
 	if (skills.size === 0) return undefined;
+	const condense = (content: unknown) => mapTextContent(content, (text) => condenseText(text, skills));
 	return {
 		condense(entry) {
-			if (entry.type === "custom_message") return condenseContent(entry.content, skills);
+			if (entry.type === "custom_message") return condense(entry.content);
 			if (entry.type !== "message") return undefined;
 			const message = entry.message as { role?: unknown; content?: unknown };
 			if (message.role !== "user") return undefined;
-			return condenseContent(message.content, skills);
+			return condense(message.content);
 		},
 	};
+}
+
+/** Refresh our saved condensed/stub guidance for a host-owned reader, without editing history or full bodies. */
+export function projectHostSkillGuidance(messages: ContextEvent["messages"], branch: readonly SessionEntry[]): ContextEvent["messages"] {
+	// Saved blocks may use an older capture than the current form. Match every
+	// validated capture, preserving its own rules rather than the newest body's.
+	const replacements = new Map<string, string>();
+	for (const entry of branch) {
+		if (entry.type !== "custom" || entry.customType !== CONDENSED_SKILL_ENTRY_TYPE) continue;
+		const record = readCondensedRecord(entry.data);
+		if (!record) continue;
+		for (const level of ["condensed", "stub"] as const) {
+			replacements.set(renderCondensedBlock(record, level), renderCondensedBlock(record, level, "read"));
+		}
+	}
+	if (replacements.size === 0) return messages;
+	let changed = false;
+	const projected = messages.map((message) => {
+		if (message.role !== "user" && message.role !== "custom") return message;
+		const content = mapTextContent(message.content, (text) => rewriteSkillBlocks(text, (_block, original) => replacements.get(original)));
+		if (content === undefined) return message;
+		changed = true;
+		return { ...message, content };
+	});
+	return changed ? projected as ContextEvent["messages"] : messages;
 }
 
 /** Locations of skill blocks in `text` that show a skill's full text (no `form` attribute). */

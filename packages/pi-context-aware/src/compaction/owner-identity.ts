@@ -34,7 +34,7 @@ function isPrintable(value: string): boolean {
 
 /**
  * The root of the package this file belongs to, from where the build puts it:
- * `<root>/dist/extension.js` (the bundled entry Pi loads), `<root>/dist/compaction/`
+ * `<root>/dist/extension.js` (the bundle that is the Pi entry), `<root>/dist/compaction/`
  * (the release build), `<root>/src/compaction/` (the source) or
  * `<root>/.test-dist/src/compaction/` (the test build). Anything else has no known root.
  */

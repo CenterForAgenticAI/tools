@@ -20,6 +20,8 @@ export const PROMPT_SECTION = {
 	contextAwareness: "context-awareness",
 	/** Durable-focus tool guidance. Changes only with session role and tool reachability. */
 	focusGuidance: "durable-focus-guidance",
+	/** One section for the context tools. Changes only with which of them are reachable. */
+	contextTools: "context-tools",
 	/** Count of cached reference documents. Changes when the document count changes. */
 	contextCache: "context-cache",
 	/** Current durable focus. Changes when the focus changes. */
@@ -31,7 +33,37 @@ export const PROMPT_SECTION = {
 export type PromptSectionName = typeof PROMPT_SECTION[keyof typeof PROMPT_SECTION];
 
 /** Desired content per owned section; `null` means the section is absent this turn. */
-export type PromptSectionValues = { readonly [Name in PromptSectionName]: string | null };
+export type PromptSectionValues = { readonly [Name in Exclude<PromptSectionName, "context-tools">]: string | null }
+	& { readonly "context-tools"?: string | null };
+
+/** Which context tools the session can reach; the section names only these. */
+export interface ContextToolsAvailability {
+	readonly status: boolean;
+	readonly recall: boolean;
+	readonly fold: boolean;
+	readonly compact: boolean;
+}
+
+/**
+ * The one guidance section for the context tools (pi-context-aware#195).
+ *
+ * Each tool's own prompt snippet and guidelines stay short; the shared advice
+ * lives here once. The section, snippets and guidelines together stay under
+ * 1,500 tokens (tests/context-tool-guidance.test.ts). Returns `null` when no context tool is reachable.
+ */
+export function buildContextToolsSection(available: ContextToolsAvailability): string | null {
+	const lines: string[] = [];
+	if (available.status) lines.push("- context_status: read context size, stage, compactions and active folds. Cache numbers: the user runs /context-status cache.");
+	if (available.recall) lines.push("- context_recall: get back text that left context. query searches earlier sessions and the cache; scope \"session\" or include_current: true also searches this session, folded text included. ref (a fold id such as b5) returns the original entries behind a fold.");
+	if (available.fold) lines.push("- context_fold: replace a consumed range of messages (by acp refs) with a summary you write. Keep paths, errors and decisions verbatim. Never fold what the current step still uses.");
+	if (available.compact) lines.push("- context_compact: end a phase at a clean boundary and continue from a seed_prompt. Call it alone in its response.");
+	if (lines.length === 0) return null;
+	return [
+		"Context tools:",
+		...lines,
+		`Under pressure: ${available.fold ? "fold what you have finished with, " : ""}${available.compact ? "compact at a phase boundary, " : ""}and recall instead of guessing or asking the user to paste again.`,
+	].join("\n");
+}
 
 /** The parts of Pi's `before_agent_start` event this module reads and mutates. */
 export interface PromptSectionEvent {

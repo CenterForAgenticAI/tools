@@ -1,4 +1,5 @@
 import test from "node:test";
+import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import assert from "node:assert/strict";
 import {
 	DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS,
@@ -21,10 +22,10 @@ test("marks the issue #5 reproduction unsafe before a 272k model turn", () => {
 		contextWindow: 272_000,
 		usedTokens: 268_000,
 		headroomTokens: 4_000,
-		outputReserveTokens: 16_384,
+		outputReserveTokens: 32_768,
 		protocolOverheadTokens: 2_048,
-		requiredHeadroomTokens: 18_432,
-		shortfallTokens: 14_432,
+		requiredHeadroomTokens: 34_816,
+		shortfallTokens: 30_816,
 		safe: false,
 	});
 });
@@ -81,4 +82,43 @@ test("checks output budget after every provider-completed turn, including tool l
 	for (const stopReason of ["aborted", undefined, "unknown"]) {
 		assert.equal(isProactiveCompactionCheckpoint(stopReason), false, String(stopReason));
 	}
+});
+
+// pi-context-aware#244 (CR-LARGE-OUTPUT-HEADROOM): the reserve is the model's real maximum output, capped.
+// The models are read from the pinned @earendil-works/pi-ai catalog, so a change to a model's limits
+// changes these cases instead of leaving an invented figure behind.
+const CURRENT_MODELS = [
+	["openai", "gpt-5.2"],
+	["openai", "gpt-5.5"],
+	["anthropic", "claude-opus-4-5"],
+	["anthropic", "claude-opus-4-8"],
+	["anthropic", "claude-sonnet-4-6"],
+	["google", "gemini-2.5-pro"],
+] as const;
+
+test("on current large-output models the reply reserve is the capped output limit, not the fixed 16,384", () => {
+	for (const [provider, id] of CURRENT_MODELS) {
+		const model = getBuiltinModel(provider, id as never) as { contextWindow: number; maxTokens: number };
+		assert.ok(model.maxTokens > DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS, id + " has an output limit above the cap, so the cap decides");
+		const unsafe = assessGenerationBudget({ contextWindow: model.contextWindow, usedTokens: model.contextWindow - 20_000, configuredOutputReserveTokens: DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS, modelMaxOutputTokens: model.maxTokens });
+		assert.equal(unsafe.outputReserveTokens, DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS, id);
+		assert.equal(unsafe.requiredHeadroomTokens, DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS + GENERATION_PROTOCOL_OVERHEAD_TOKENS, id);
+		assert.equal(unsafe.safe, false, id + ": 20,000 tokens of room is less than a 32,768-token reply plus overhead");
+		const roomy = assessGenerationBudget({ contextWindow: model.contextWindow, usedTokens: model.contextWindow - 40_000, configuredOutputReserveTokens: DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS, modelMaxOutputTokens: model.maxTokens });
+		assert.equal(roomy.safe, true, id + ": 40,000 tokens of room covers the capped reserve");
+		assert.ok(model.contextWindow - roomy.requiredHeadroomTokens >= 0.82 * model.contextWindow, id + " keeps at least 82% of the window usable");
+	}
+});
+
+test("a model whose output limit is below the cap holds back its own limit", () => {
+	const model = getBuiltinModel("openai", "gpt-5.3-codex-spark" as never) as { contextWindow: number; maxTokens: number };
+	assert.ok(model.maxTokens < DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS);
+	const budget = assessGenerationBudget({ contextWindow: model.contextWindow, usedTokens: 0, configuredOutputReserveTokens: DEFAULT_GENERATION_OUTPUT_RESERVE_TOKENS, modelMaxOutputTokens: model.maxTokens });
+	assert.equal(budget.outputReserveTokens, model.maxTokens);
+});
+
+test("a user-set cap above the default is honoured up to the model's output limit", () => {
+	const model = getBuiltinModel("anthropic", "claude-opus-4-8" as never) as { contextWindow: number; maxTokens: number };
+	const budget = assessGenerationBudget({ contextWindow: model.contextWindow, usedTokens: 0, configuredOutputReserveTokens: 1_000_000, modelMaxOutputTokens: model.maxTokens });
+	assert.equal(budget.outputReserveTokens, model.maxTokens);
 });

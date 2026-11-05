@@ -40,8 +40,25 @@ export interface AcpSkippedBlock {
 	readonly reason: string;
 }
 
-const BLOCK_ID = /^b[1-9]\d*$/u;
-const RUN_ID = /^r[1-9]\d*$/u;
+/** Most distinct blocks one import will take. Over it the whole import is refused. */
+export const MAX_IMPORT_BLOCKS = 1000;
+/**
+ * Draft budget, relative to the session. A fixed count refused the longest real sessions, which need
+ * folds most. After the blockId dedupe, one block writes at most (covered entries + 2) drafts and covers
+ * only entries on this branch, so the total is bounded by the session itself. Folds nest (tier 1 to 3),
+ * so a nested block can cover an entry that its child also covers; ENTRY_COVER_FACTOR allows that
+ * overlap (one cover per tier plus one spare). Over the budget, which no honest sidecar reaches, the
+ * whole import is refused. The budget is 4 x branch entries + 2 x kept blocks.
+ */
+export const ENTRY_COVER_FACTOR = 4;
+export function importDraftBudget(branchEntries: number, keptBlocks: number): number {
+	return ENTRY_COVER_FACTOR * branchEntries + 2 * keptBlocks;
+}
+const MAX_REASON_CHARS = 200;
+
+// At most nine digits: the number stays a safe integer, so a hand-edited side file cannot make the next id `bInfinity`. Such a block is skipped.
+const BLOCK_ID = /^b[1-9]\d{0,8}$/u;
+const RUN_ID = /^r[1-9]\d{0,8}$/u;
 
 interface LegacyBlock {
 	blockId: string;
@@ -88,17 +105,23 @@ export function importAcpSideFile(input: AcpImportInput): AcpImportResult {
 	const document = parsed as Record<string, unknown>;
 	const schemaVersion = document.schemaVersion;
 	if (typeof schemaVersion !== "number" || !SUPPORTED_ACP_SCHEMA_VERSIONS.includes(schemaVersion)) {
-		return { status: "unsupported", reason: `unknown schemaVersion ${JSON.stringify(schemaVersion ?? null)}` };
+		return { status: "unsupported", reason: `unknown schemaVersion ${(JSON.stringify(schemaVersion ?? null) ?? "undefined").slice(0, MAX_REASON_CHARS)}` };
 	}
 	if (!Array.isArray(document.blocks)) return { status: "unsupported", reason: "blocks is not an array" };
 
 	const blocks: LegacyBlock[] = [];
 	const skippedBlocks: AcpSkippedBlock[] = [];
+	const seenIds = new Set<string>();
 	document.blocks.forEach((raw, index) => {
 		const block = readLegacyBlock(raw);
 		if (typeof block === "string") skippedBlocks.push({ blockId: blockIdOf(raw) ?? `#${index}`, reason: block });
-		else blocks.push(block);
+		else if (seenIds.has(block.blockId)) skippedBlocks.push({ blockId: block.blockId, reason: "duplicate blockId" });
+		else {
+			seenIds.add(block.blockId);
+			blocks.push(block);
+		}
 	});
+	if (blocks.length > MAX_IMPORT_BLOCKS) return { status: "unsupported", reason: `too many blocks (${blocks.length}, limit ${MAX_IMPORT_BLOCKS})` };
 
 	// Import folds still in effect and the folds they absorbed. A block that is
 	// inactive for any other reason was expanded or discarded upstream.
@@ -122,6 +145,7 @@ export function importAcpSideFile(input: AcpImportInput): AcpImportResult {
 	const messages = input.branch.flatMap(entryToCoreMessages);
 	const records: FoldRecord[] = [];
 	const drafts: SessionBoundaryDraft[] = [];
+	const draftBudget = importDraftBudget(input.branch.length, keep.size);
 	const imported = new Set<string>();
 	for (const block of blocks) {
 		if (!keep.has(block.blockId)) continue;
@@ -160,6 +184,7 @@ export function importAcpSideFile(input: AcpImportInput): AcpImportResult {
 		imported.add(block.blockId);
 		records.push(record);
 		drafts.push(...foldDrafts(record, renderFoldSummary(block.summary, block.topic)));
+		if (drafts.length > draftBudget) return { status: "unsupported", reason: `too many entries (limit ${draftBudget})` };
 	}
 	if (records.length === 0 && skippedBlocks.length === 0) return { status: "skipped", reason: "no-blocks" };
 	return { status: "imported", records, drafts, skippedBlocks };

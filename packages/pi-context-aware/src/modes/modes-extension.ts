@@ -4,8 +4,10 @@ import type {
 	ExtensionToolContext,
 	ToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { obj, opt, str } from "@earendil-works/pi-schema";
 import type { ContextAwareModesV1 } from "../context-service.js";
+import { schemaTool } from "../schema-tool.js";
+import { stringEnum } from "../tool-arguments.js";
 import { createContextAwareModesV1, type ContextAwareModesRuntime } from "./modes-runtime.js";
 import { createModeIndicatorWidget, MODES_WIDGET_KEY } from "./mode-indicator.js";
 import { MAX_MODE_ID_LENGTH, MAX_MODE_LAYER_LENGTH, MAX_MODE_REASON_LENGTH, MODE_DEFAULT_LAYER, modeDisplayText } from "./modes-state.js";
@@ -13,11 +15,11 @@ import { MAX_MODE_ID_LENGTH, MAX_MODE_LAYER_LENGTH, MAX_MODE_REASON_LENGTH, MODE
 export const MODES_STATUS_KEY = "caair.context-aware/mode";
 export const SUGGEST_MODE_TOOL_NAME = "suggest_mode";
 
-const suggestModeSchema = Type.Object({
-	mode: Type.String({ minLength: 1, maxLength: MAX_MODE_ID_LENGTH }),
-	action: Type.Union([Type.Literal("enter"), Type.Literal("exit")]),
-	reason: Type.Optional(Type.String({ maxLength: MAX_MODE_REASON_LENGTH })),
-});
+const suggestModeSchema = obj({
+	mode: str({ minLength: 1, maxLength: MAX_MODE_ID_LENGTH }),
+	action: stringEnum(["enter", "exit"]),
+	reason: opt(str({ maxLength: MAX_MODE_REASON_LENGTH })),
+}, { open: true });
 
 interface ModeControllerOptions {
 	readonly suggestToolEnabled: (ctx?: ExtensionContext) => boolean;
@@ -82,13 +84,15 @@ export function createModesExtensionController(pi: ExtensionAPI, options: ModeCo
 		const layers = activeRuntime?.layers() ?? [];
 		const trail = activeRuntime?.trail();
 		// Definitions of other modes also call onChange; only a visible change re-renders.
-		const signature = layers.length === 0 ? undefined : JSON.stringify({ layers, trail }, (key, value) => key === "updatedAt" ? undefined : value);
+		// With no layer, a trail alone still draws the line, so a session in no mode can show progress.
+		const visible = layers.length > 0 || trail !== undefined;
+		const signature = !visible ? undefined : JSON.stringify({ layers, trail }, (key, value) => key === "updatedAt" ? undefined : value);
 		if (context === shownContext && signature === shownWidget) return;
 		shownContext = context;
 		shownWidget = signature;
 		context.ui.setWidget(
 			MODES_WIDGET_KEY,
-			layers.length === 0 ? undefined : createModeIndicatorWidget(layers, trail),
+			visible ? createModeIndicatorWidget(layers, trail) : undefined,
 			{ placement: "belowEditor" },
 		);
 	};
@@ -102,13 +106,14 @@ export function createModesExtensionController(pi: ExtensionAPI, options: ModeCo
 			// A replacement context can be torn down while a callback is completing.
 		}
 	};
+	// The mode id and the model's reason are caller text; the dialog shows them only as display text.
 	const confirm = async (request: { mode: string; action: "enter" | "exit"; reason?: string }): Promise<boolean | undefined> => {
 		const context = activeContext;
 		if (!context?.hasUI) return undefined;
 		try {
 			return await context.ui.confirm(
 				`Confirm mode ${request.action}`,
-				`Allow the model to ${request.action} mode ${request.mode}?${request.reason ? `\nReason: ${request.reason}` : ""}`,
+				`Allow the model to ${request.action} mode ${modeDisplayText(request.mode)}?${request.reason ? `\nReason: ${modeDisplayText(request.reason)}` : ""}`,
 			);
 		} catch {
 			return false;
@@ -161,7 +166,7 @@ export function createModesExtensionController(pi: ExtensionAPI, options: ModeCo
 					ctx.ui.notify(statusText(runtime) ?? "No active mode.", "info");
 				},
 			});
-			pi.registerTool({
+			pi.registerTool(schemaTool({
 				name: SUGGEST_MODE_TOOL_NAME,
 				label: "Suggest Mode",
 				description: "Ask the user to confirm entering or exiting a session mode.",
@@ -184,7 +189,7 @@ export function createModesExtensionController(pi: ExtensionAPI, options: ModeCo
 						details: result,
 					};
 				},
-			});
+			}));
 		},
 		start: (ctx, reason) => {
 			activeRuntime?.close();

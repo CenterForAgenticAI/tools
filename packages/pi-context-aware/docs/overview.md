@@ -18,7 +18,7 @@ This keeps post-compaction sessions from starting with under-specified instructi
 ## What it provides
 
 - **Context budget status**: a pressure-only footer item gives the glanceable band and percentage while `/context-status` reports full token usage, headroom, and configuration; agents receive cache-friendly `<context-telemetry>` envelopes for context pressure.
-- **Self-contained compaction handoffs**: `/compact-then` and `compact_session` rewrite raw seeds into fresh-session-ready prompts.
+- **Self-contained compaction handoffs**: `/compact-then` and `context_compact` rewrite raw seeds into fresh-session-ready prompts.
 - **Live rewrite preview**: while the model rewrites the seed, the UI streams the emerging prompt/question in a compact widget above the editor.
 - **Distinct compaction state**: when compaction starts, the rewrite preview clears and the UI switches to a separate “Compressing conversation into handoff summary…” loading state.
 - **Generation-safe proactive compaction**: after every completed provider turn—including tool loops—the extension checks both the configured context threshold and usable output headroom, schedules the trigger without awaiting a model from `turn_end`, and starts bounded seed preparation only from Pi's public `agent_settled` idle boundary. A context-constrained output-limit stop is discarded and recovered through one compact-and-retry handoff, keeping the truncated tool call so Pi can answer it with a result of its own instead of leaving that result parentless.
@@ -27,7 +27,7 @@ This keeps post-compaction sessions from starting with under-specified instructi
 - **Tool-result integrity guard**: every outgoing history is checked against the provider's own pairing rule before the request leaves, on the merged shape the provider actually receives. A tool result that has lost its tool call is repaired—by restoring the call where possible, otherwise by dropping that one result—and reported once, so a malformed history costs a retry instead of the session.
 - **Transcript recovery**: compaction summaries include a `Prior transcript: ~/.pi/agent/sessions/...` line so later agents can recover full pre-compaction context if needed.
 - **Seed metadata**: compaction details preserve raw seed, expanded seed, ambiguity mode, confidence/fallback metadata, and transcript path.
-- **Prior-session search and compaction boundaries**: `search_prior_sessions` can search earlier session transcripts, including the current session when `include_current: true`; `session_compaction_history` reports current-branch compaction counts and boundary identifiers without scanning the transcript.
+- **Prior-session search and compaction boundaries**: `context_recall` can search earlier session transcripts, including the current session when `include_current: true`; `context_status` with the `compactions` view reports current-branch compaction counts, boundary identifiers and the last committed compaction writer without scanning the transcript.
 - **Optional durable workstreams**: agents can start a concise, unpinned focus when its purpose must survive context loss; transcript-authoritative state, a persistent width-aware active-focus widget above the editor, bounded context/compaction projections, private session registry records, exact overlap warnings, and optional terminal/launcher metadata are wired through the Pi lifecycle.
 - **Session task list**: an enumerable checklist that survives compaction. `session_tasks` and `/tasks` keep tasks in the transcript, the list is re-rendered into the prompt every turn, a settle-time nudge names what is still open, and the remaining tasks ride the compaction seed into the next phase.
 - **User-facing session health**: `/focus health` and `/sessions health` expose scrubbed adapter/capability state; `/sessions` lists bounded session projections and `/sessions jump <id>` delegates only through an available launcher.
@@ -44,12 +44,12 @@ pi install npm:@centerforagenticai/pi-context-aware
 
 For local development, add the checkout path to `~/.pi/agent/settings.json`
 under `packages`. The package's `dist/` directory is gitignored, so run
-`npm run build` after every pull or branch switch, before `/reload` or
+`bun run build` after every pull or branch switch, before `/reload` or
 restarting Pi. The manifest loads `./dist/extension.js`, which the build bundles
 into one file; the `prepare` script builds
 `dist/` automatically during install and `npm pack`.
 
-The supported minimum host version is Pi 1.4.0
+The supported minimum host version is Pi 1.5.0
 (`@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai`) on Node 22.19
 or newer. The compatibility gate tests that minimum and the development pin.
 Pi 1.0.x to 1.3.x are no longer supported; release 0.5.14 is the last release

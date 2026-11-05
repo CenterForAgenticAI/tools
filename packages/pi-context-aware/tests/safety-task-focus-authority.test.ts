@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall, getCurrentSystemMessage, type JsonObject } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { obj } from "@earendil-works/pi-schema";
 import contextAware from "../src/index.js";
 import { registerFoldEngine } from "../src/folds/fold-engine.js";
 import { resolveAuthoritativeTasks, TASKS_ENTRY_TYPE, type TasksSnapshot } from "../src/session-tasks/session-tasks.js";
@@ -58,7 +58,7 @@ test("REQ-C1: folding task and focus calls cannot replace authority or its promp
 	let requested = false;
 	const trigger: ExtensionFactory = (pi) => {
 		const engine = registerFoldEngine(pi, { config: SAFETY_CONFIG });
-		pi.registerTool({ name: "safety_fold", label: "fold", description: "Synthetic fold trigger.", parameters: Type.Object({}),
+		pi.registerTool({ name: "safety_fold", label: "fold", description: "Synthetic fold trigger.", parameters: obj({}, { open: true }),
 			async execute(_id, _params, _signal, _update, ctx) {
 				const result = engine.request(ctx, { startRef: "m00001", endRef: "m00006", summary: hostileSummary });
 				assert.ok(result.ok && result.queued, JSON.stringify(result));

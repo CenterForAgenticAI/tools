@@ -21,8 +21,8 @@ Envelope format: <context-telemetry source="pi-extension:context-aware" user-inp
 Bands: OK <45%, WARN >=45%, URGENT >=90%.
 UNKNOWN: the size is not measured yet, for example right after a compaction or an overflow. Do not assume it is low; keep the next action small until a measured band arrives.
 OK: compact only at natural phase boundaries.
-WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call compact_session at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.
-URGENT: before nontrivial tool use, call compact_session unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
+WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call context_compact at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.
+URGENT: before nontrivial tool use, call context_compact unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
 Use context_recall early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
 </context-awareness>`;
 
@@ -32,8 +32,8 @@ Envelope format: <context-telemetry source="pi-extension:context-aware" user-inp
 Bands: OK <45%, WARN >=45%, URGENT >=90%.
 UNKNOWN: the size is not measured yet, for example right after a compaction or an overflow. Do not assume it is low; keep the next action small until a measured band arrives.
 OK: compact only at natural phase boundaries.
-WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call compact_session at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.
-URGENT: before nontrivial tool use, call compact_session unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
+WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call context_compact at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.
+URGENT: before nontrivial tool use, call context_compact unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
 Use context_recall early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
 </context-awareness>`;
 
@@ -257,7 +257,7 @@ async function runWiringCase(config: Record<string, unknown>, entryMinutesAgo = 
 
 test("pressure telemetry modes install the exact model-visible context-awareness section", async () => {
 	for (const [mode, expected] of [["full", FULL_CONTEXT_AWARENESS], ["band", BAND_CONTEXT_AWARENESS], ["off", OFF_CONTEXT_AWARENESS]] as const) {
-		const result = await runWiringCase({ pressureTelemetry: { mode } }, 2, NOW, true, ["compact_session", "context_recall"]);
+		const result = await runWiringCase({ pressureTelemetry: { mode } }, 2, NOW, true, ["context_compact", "context_recall"]);
 		try {
 			assert.equal(contextAwarenessSection(result.firstSystemPrompt), expected, mode);
 			if (mode === "off") assert.equal(result.second, undefined, "off mode emits no empty usage marker");

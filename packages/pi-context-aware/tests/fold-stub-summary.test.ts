@@ -14,7 +14,7 @@ import {
 	type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type AssistantMessage, type ToolCall } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { arr, obj, opt, str, type Static } from "@earendil-works/pi-schema";
 
 import { planFold } from "../src/folds/fold-adapter.js";
 import { foldPointer, renderEarlierFoldCalls } from "../src/folds/fold-call-render.js";
@@ -27,6 +27,8 @@ import { PARITY_RECORD_VERSION, type CompressRecord, type NextRequestRecord, typ
 import { PARITY_REGISTER } from "../src/parity/register.js";
 import { buildFoldParityReport } from "../src/parity/report.js";
 import { parseSideSnapshot } from "../src/parity/side-file.js";
+
+const testToolParameters1 = obj({ content: arr(obj({ startId: str(), endId: str(), topic: opt(str()), summary: str() }, { open: true })) }, { open: true });
 
 // pi-context-aware#173: models copy the 200-character summary stubs that
 // billion-context-pi shows for earlier compress calls. The engine's own minimum
@@ -213,8 +215,8 @@ test("live mode: the next request shows the earlier fold call as a pointer and a
 		const engine = registerFoldEngine(pi, { config: { compress: { minCompressRange: 0, maxSummaryLength: 20_000, minSummaryLength: 10 }, preserveRecentMessages: 2, preserveRecentTokens: 0 } });
 		pi.registerTool({
 			name: "fold_probe", label: "fold_probe", description: "Test-only fold tool.",
-			parameters: Type.Object({ content: Type.Array(Type.Object({ startId: Type.String(), endId: Type.String(), topic: Type.Optional(Type.String()), summary: Type.String() })) }),
-			async execute(id, params, _signal, _update, ctx) {
+			parameters: testToolParameters1,
+			async execute(id, params: Static<typeof testToolParameters1>, _signal, _update, ctx) {
 				params.content.forEach(({ startId, endId, topic, summary }, index) => results.push(engine.request(ctx, { startRef: startId, endRef: endId, summary, ...(topic ? { topic } : {}), requestId: `${id}#${index}` })));
 				return { content: [{ type: "text", text: "requested" }], details: {} };
 			},

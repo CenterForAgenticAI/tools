@@ -42,12 +42,12 @@ test("check-in prompt carries focus, task ids and context pressure", () => {
 	assert.match(prompt, /Done/iu);
 	assert.match(prompt, /Left/iu);
 	assert.match(prompt, /Record corrections.*session_focus \/ session_tasks/isu);
-	assert.match(prompt, /Continue or compact.*compact_session/isu);
+	assert.match(prompt, /Continue or compact.*context_compact/isu);
 });
 
 test("check-in prompt drops compaction wording when compaction is unavailable", () => {
 	const prompt = buildCheckinPrompt({ focus: null, tasks: null, pressure: null }, { compactionAvailable: false });
-	assert.doesNotMatch(prompt, /compact_session|compact from this request/u);
+	assert.doesNotMatch(prompt, /context_compact|compact from this request/u);
 	assert.match(prompt, /Continue — say whether this is a clean phase boundary/u);
 	assert.match(prompt, /Compaction is not available in this session/u);
 });

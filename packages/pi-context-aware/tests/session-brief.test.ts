@@ -139,6 +139,33 @@ test("recovery rides every provider request of its run, then ends with the run",
 	});
 });
 
+test("a brief written during a recovery run replaces the recovered brief", async () => {
+	await withFixture(async (fixture) => {
+		await fixture.call("session_focus", { action: "brief", brief: "brief alpha" });
+		await fixture.turn();
+		fixture.entries.push({ type: "compaction" });
+		const first = briefBlocks(await fixture.continueRequest());
+		assert.equal(first.length, 1);
+		assert.match(first[0] ?? "", /brief alpha/);
+		await fixture.call("session_focus", { action: "brief", brief: "brief beta" });
+		const second = briefBlocks(await fixture.continueRequest());
+		assert.equal(second.length, 1, "one recovery message per request");
+		assert.match(second[0] ?? "", /brief beta/);
+		assert.doesNotMatch(second[0] ?? "", /brief alpha/);
+		await fixture.endRun();
+		assert.deepEqual(briefBlocks(await fixture.continueRequest()), []);
+	});
+});
+
+test("an empty recovery is not revived by a brief written later in the run", async () => {
+	await withFixture(async (fixture) => {
+		fixture.entries.push({ type: "compaction" });
+		assert.deepEqual(briefBlocks(await fixture.continueRequest()), []);
+		await fixture.call("session_focus", { action: "brief", brief: "late brief" });
+		assert.deepEqual(briefBlocks(await fixture.continueRequest()), []);
+	});
+});
+
 test("an automatic retry after a failed attempt keeps the recovery", async () => {
 	await withFixture(async (fixture) => {
 		await fixture.call("session_focus", { action: "brief", brief: "retry attempt state" });

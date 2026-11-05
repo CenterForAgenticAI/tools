@@ -221,7 +221,7 @@ export function decideRepeat(input: RepeatInput): RepeatDecision {
 	if (input.restoreInvocation === undefined) return { kind: "body", changed: false, reason: "restore-unavailable" };
 	return {
 		kind: "pointer",
-		text: `Skill "${input.name}" was loaded earlier and is now folded into block ${state.blockId} (unchanged). Restore it with ${input.restoreInvocation}({ blockId: "${state.blockId}" }); do not load it again. Pass force: true only if the block cannot be restored.`,
+		text: `Skill "${input.name}" was loaded earlier and is now folded into block ${state.blockId} (unchanged). Restore it with ${input.restoreInvocation}({ ref: "${state.blockId}" }); do not load it again. Pass force: true only if the block cannot be restored.`,
 		details: { name: input.name, path: input.path, pointer: "compressed", blockId: state.blockId, toolCallId: previous.toolCallId },
 	};
 }
@@ -290,11 +290,11 @@ export interface SkillRegistryOptions {
 
 /**
  * Fabric and Jev give nested calls their own id formats when the host has no
- * native nested calls: `fabric_<uuid>`, `jev:<id>:<n>`. Pi's own nested ids are
+ * native nested calls: `fabric_<uuid>`, `jev:<id>:<n>`, `component:<...>`. Pi's own nested ids are
  * `<calling id>/<n>`.
  */
 export function isNestedToolCallId(toolCallId: string): boolean {
-	return toolCallId.includes("/") || toolCallId.startsWith("fabric_") || toolCallId.startsWith("jev:");
+	return toolCallId.includes("/") || toolCallId.startsWith("fabric_") || toolCallId.startsWith("jev:") || toolCallId.startsWith("component:");
 }
 
 export function createSkillRegistry(options: SkillRegistryOptions): SkillRegistry {

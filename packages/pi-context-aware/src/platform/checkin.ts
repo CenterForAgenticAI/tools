@@ -52,7 +52,7 @@ export function buildCheckinPrompt(
 	options: { compactionAvailable?: boolean; compactionInvocation?: string } = {},
 ): string {
 	const compact = options.compactionAvailable !== false;
-	const compactionInvocation = options.compactionInvocation ?? "compact_session";
+	const compactionInvocation = options.compactionInvocation ?? "context_compact";
 	const hasDurableRecord = snapshot.focus !== null || (snapshot.tasks?.tasks.length ?? 0) > 0;
 	return [
 		`Perform a read-only session check-in using the invocation-time snapshot below. ${compact ? `Do not call ${compactionInvocation} and do not mutate` : "Do not mutate"} session_focus or session_tasks unless proposing the exact corrective calls in the Record corrections section.`,

@@ -22,7 +22,7 @@ When the result says a skill is already loaded, follow the pointer. Do not load 
 | Earlier load | Result |
 | --- | --- |
 | Same file, full copy still in context | `Skill "glab" is already loaded at m00010 (unchanged). Re-read that result; do not load it again.` |
-| Same file, copy folded by a native fold | The block id and the reachable restore call, such as `decompress({ blockId: "b3" })` or `extensions.decompress({ blockId: "b3" })`; the full body when no restore call is reachable |
+| Same file, copy folded by a native fold | The block id and the reachable restore call, such as `context_recall({ ref: "b3" })` or `extensions.context_recall({ ref: "b3" })`; the full body when no restore call is reachable |
 | The file changed since the load | The full new body, with a note that it replaces the earlier copy |
 | Made by another tool, or edited after delivery (partial) | The full body |
 | No longer in context, for example after a compaction | The full body |
@@ -30,9 +30,13 @@ When the result says a skill is already loaded, follow the pointer. Do not load 
 
 While billion-context-pi does the live compression, every load returns the full body. A billion-context-pi block cannot be matched to a registry record, so a pointer could name text the agent no longer has. Pointers start when the native fold engine owns compression (pi-context-aware#137).
 
+## The tool card
+
+In Pi's transcript, a delivered skill body collapses to one line: the skill name, its path, its line count, and whether it changed or shadows other copies. Press ctrl+o to expand the card to the full text. The already-loaded pointer and error results (an unknown name, an unreadable file) are short, so they always show in full. Only the card changes: the model receives the whole body either way. A `load_skill` call made inside `fabric_exec` is drawn by Fabric's card, not this one.
+
 ## Partial loads
 
-A load made inside another tool, such as a `fabric_exec` program, returns its body to that program, not to the transcript. The program may print only part of it. The registry records such a load as `partial`, with the calling tool call's id when Pi reports it, and does not protect the calling tool's result. The next direct `load_skill` call returns the full body. A load counts as nested when its tool call carries a `parentToolCallId`, or when its call id has Pi's or Fabric's nested form (`outer/inner`, `fabric_…`, `jev:…`).
+A load made inside another tool, such as a `fabric_exec` program, returns its body to that program, not to the transcript. The program may print only part of it. The registry records such a load as `partial`, with the calling tool call's id when Pi reports it, and does not protect the calling tool's result. A skill loaded through `fabric_exec` is therefore recorded as partial, never as full. The next direct `load_skill` call returns the full body, not a pointer. A load counts as nested when its tool call carries a `parentToolCallId`, or when its call id has Pi's or Fabric's nested form (`outer/inner`, `fabric_…`, `jev:…`).
 
 ## The registry
 
@@ -43,7 +47,7 @@ Each load appends one `context-aware.skill-registry.v1` custom entry: name, reso
 - `partial`: nested, or the text in context differs from what was delivered.
 - `gone`: the result is no longer in context.
 
-`/context-status` lists loaded skills with their state and size, and the context service reports them through `skills.loaded()` (see [context-service.md](context-service.md#loaded-skills)).
+`/context-status` and the `context_status` tool (alone as `context_status({ view: "skills" })`) list loaded skills with their name, state, size and ref, never the skill text. The context service reports them through `skills.loaded()` (see [context-service.md](context-service.md#loaded-skills)).
 
 ## Fold protection
 

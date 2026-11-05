@@ -1,7 +1,7 @@
 /**
  * Whether anything will deliver a compaction seed once the current run ends.
  *
- * `compact_session` ends the agent run and relies on the host to keep the
+ * `context_compact` ends the agent run and relies on the host to keep the
  * session alive: after the run settles, context-aware compacts it and sends the
  * next-phase seed, which starts a new run. A Fabric child does not stay alive
  * for that: its runner reports the child complete when the run ends, so the
@@ -57,8 +57,8 @@ export function seedContinuation(env: Env = process.env): SeedContinuation {
 	return isFabricChild(env) ? { available: false, reason: "fabric-child" } : { available: true };
 }
 
-/** The error compact_session throws when nothing would continue the session. */
-export function seedContinuationRefusalMessage(foldInvocation?: string): string {
+/** The error the compaction tool throws when nothing would continue the session. */
+export function seedContinuationRefusalMessage(foldInvocation?: string, toolName = "context_compact"): string {
 	const fold = foldInvocation ? ` If context is tight, use ${foldInvocation} to fold finished, older ranges.` : "";
-	return `Refused: compact_session is unavailable in a Fabric child session. The child ends as soon as its run ends, so nothing would deliver the next-phase seed and ending the run now would lose the rest of the work. Nothing was compacted. Keep working and finish your result in this run.${fold}`;
+	return `Refused: ${toolName} is unavailable in a Fabric child session. The child ends as soon as its run ends, so nothing would deliver the next-phase seed and ending the run now would lose the rest of the work. Nothing was compacted. Keep working and finish your result in this run.${fold}`;
 }

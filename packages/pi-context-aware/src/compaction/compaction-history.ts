@@ -75,15 +75,22 @@ function normalizePriorTranscriptPath(value: unknown): string | null {
 	}
 }
 
+/** One boundary's public metadata together with the branch entry it was read from. */
+export interface CompactionBoundary {
+	readonly compaction: ContextAwareSessionCompactionV1;
+	/** The committed entry itself, for callers that classify it further (for example its writer). Never expose it. */
+	readonly entry: unknown;
+}
+
 /**
- * Extract boundary metadata from an already-selected current leaf branch.
+ * Extract each compaction boundary of an already-selected current leaf branch with its entry.
+ * The one place that decides which entries count as compactions, so every caller pairs the same ones.
  * This function never reads the filesystem or transcript files.
  */
-export function collectCompactionHistory(branch: readonly unknown[]): CompactionHistoryV1 {
-	if (!Array.isArray(branch)) return { compactions: [], priorTranscriptPaths: [] };
+export function collectCompactionBoundaries(branch: readonly unknown[]): CompactionBoundary[] {
+	if (!Array.isArray(branch)) return [];
 
-	const compactions: ContextAwareSessionCompactionV1[] = [];
-	const priorTranscriptPaths: string[] = [];
+	const boundaries: CompactionBoundary[] = [];
 	for (const entry of branch) {
 		if (!entry || typeof entry !== "object" || (entry as { type?: unknown }).type !== "compaction") continue;
 		const record = entry as {
@@ -103,17 +110,34 @@ export function collectCompactionHistory(branch: readonly unknown[]): Compaction
 				// Malformed details are represented as nullable boundary metadata.
 			}
 		}
-		if (priorTranscriptPath !== null) priorTranscriptPaths.push(priorTranscriptPath);
-		compactions.push({
-			ordinal: compactions.length + 1,
-			id: nullableString(record.id),
-			parentId: nullableString(record.parentId),
-			timestamp: nullableTimestamp(record.timestamp),
-			firstKeptEntryId: nullableString(record.firstKeptEntryId),
-			tokensBefore: nullableTokenCount(record.tokensBefore),
-			fromHook: typeof record.fromHook === "boolean" ? record.fromHook : null,
-			priorTranscriptPath,
+		boundaries.push({
+			compaction: {
+				ordinal: boundaries.length + 1,
+				id: nullableString(record.id),
+				parentId: nullableString(record.parentId),
+				timestamp: nullableTimestamp(record.timestamp),
+				firstKeptEntryId: nullableString(record.firstKeptEntryId),
+				tokensBefore: nullableTokenCount(record.tokensBefore),
+				fromHook: typeof record.fromHook === "boolean" ? record.fromHook : null,
+				priorTranscriptPath,
+			},
+			entry,
 		});
 	}
+	return boundaries;
+}
+
+/** Boundary metadata only, built from the boundaries `collectCompactionBoundaries` selects. */
+export function historyOfBoundaries(boundaries: readonly CompactionBoundary[]): CompactionHistoryV1 {
+	const compactions = boundaries.map(({ compaction }) => compaction);
+	const priorTranscriptPaths = compactions.flatMap(({ priorTranscriptPath }) => (priorTranscriptPath === null ? [] : [priorTranscriptPath]));
 	return { compactions, priorTranscriptPaths };
+}
+
+/**
+ * Extract boundary metadata from an already-selected current leaf branch.
+ * This function never reads the filesystem or transcript files.
+ */
+export function collectCompactionHistory(branch: readonly unknown[]): CompactionHistoryV1 {
+	return historyOfBoundaries(collectCompactionBoundaries(branch));
 }
