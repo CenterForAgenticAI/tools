@@ -12,6 +12,10 @@ export const DEFAULT_DELEGATE_ONLY_ALLOWLIST: readonly string[] = [
 	"ext:@centerforagenticai/pi-context-aware:session_focus",
 	"ext:@centerforagenticai/pi-context-aware:compact_session",
 	"ask",
+	// pi-context-aware owns load_skill. pi-caair-dev-tools registers a fallback
+	// copy only when no other extension provides one.
+	"ext:@caair/pi-context-aware:load_skill",
+	"ext:@centerforagenticai/pi-context-aware:load_skill",
 	"ext:@caair/pi-caair-dev-tools:load_skill",
 	"delegate_control",
 	"delegate_escalation",

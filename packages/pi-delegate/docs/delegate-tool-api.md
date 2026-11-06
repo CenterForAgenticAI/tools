@@ -63,7 +63,7 @@ there, `collapse_mode` does not, and the driver path then ignores it. That is
 current behaviour, recorded here rather than implied away.
 
 The advertised schema is deliberately compact. A runtime tail
-(`confineWrites`, `writableRoots`, `readOnly`, `fallbackModels`, `thinkingMin`,
+(`confineWrites`, `writableRoots`, `readOnly`, `fabric`, `fallbackModels`, `thinkingMin`,
 `thinkingMax`, `collapse_mode`, `summary_model`, `supervisor_instructions`,
 `snippet_last_n`, `heartbeat_interval_ms`, `max_consecutive_heartbeats`,
 `max_duration_ms`, `wind_down_grace_ms`) is accepted and strictly validated but

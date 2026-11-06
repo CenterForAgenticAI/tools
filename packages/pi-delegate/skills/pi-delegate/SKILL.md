@@ -223,6 +223,8 @@ delegate({ runs: [{
   // Omit for no provider call; pin provider/model, or use "auto" for built-in Haiku 4.5.
   summary_model?: "anthropic/claude-haiku-4-5" | "auto",
   supervisor_instructions?: "be strict about error handling",
+  heartbeat_interval_ms?: 180_000,  // supervisor wait: heartbeat after this much worker silence
+  max_consecutive_heartbeats?: 5,   // silent heartbeats before a wind-down steer, then abort
 
   // solo and supervised
   thinking?: "high" | false,        // worker-only initial level override
@@ -233,8 +235,10 @@ delegate({ runs: [{
   interactive?: false,              // route worker UI prompts to overlay
   worktree?: false,                 // one fresh git worktree for this run
   escalation?: "off" | "local" | object, // per-entry structured escalation policy
+  fabric?: false,                   // keep native tools, no fabric_exec; only narrows
 
   model?: "openai/gpt-5",           // worker model override
+  fallbackModels?: ["openai/gpt-5-mini"], // ordered worker fallback models
   depth?: 1,                        // nested-delegation cap
   env?: { GRAFT_MAIN_REF?: string | null }, // per-worker env patch
   handoff?: { tasks: [...] },       // seed the durable task list
@@ -260,6 +264,17 @@ values take precedence. Workers use the already-loaded extension code from the
 parent session; rebuilding an extension while a session is running does not
 update existing runs.
 Durable agent/chain/config definitions store `env` values in plaintext.
+
+When the worker loads pi-fabric, it gets `fabric_exec` unless it is
+`readOnly`, has an explicit `tools` list, or sets `fabric: false` (agent, run
+entry, or top level). A `readOnly` worker stays on native `read`, `bash`,
+`write` and `edit` until pi-fabric supports a worker write policy, so it can
+still write its scratch files and artifact; its result reports
+`surfaceReason: readonly-worker`. A run entry's `fabric: true` never undoes an
+agent's `fabric: false`. Each result reports `surface` (`fabric` or `native`) and
+`surfaceReason`, its text has a line such as `surface: native (fabric-opt-out)`,
+and status details count them in `workerSurfaces`. See
+[`docs/fabric-mode.md`](../../docs/fabric-mode.md#fabric-inside-a-worker).
 Name-only operational displays are redaction, not encryption of those files.
 Never save API keys, tokens, passwords, or other secrets in these definitions;
 use the process environment or a secret manager instead.
@@ -407,6 +422,7 @@ Driver runs cannot use `retryOf`; recover them through the control route.
   await?: false,                    // true only when the next action requires the result
   sync?: false,                     // deprecated compatibility alias for await
   notifyOnFailure?: true,            // default true; set false to opt out of early failure wakes
+  fabric?: false,                   // native tools for every run; a run's true cannot undo it
 }
 ```
 
@@ -529,11 +545,15 @@ default and receive a unique per-worker scratch directory. `write`/`edit` paths
 are checked lexically, case-aware per filesystem root, and through existing
 symlinks. Use `readOnly: true` on the run entry to restrict primary-root
 `write`/`edit` paths; scratch and separate artifact roots remain writable, while
-the primary root and its ancestors are excluded. It also rejects common mutating
-bash commands while allowing non-writing shell forms such as literal `/dev/null`
-redirection, file-descriptor duplication, and safe read-only Git inspection.
-Git output, executable-helper, and global config-injection options remain
-refused; prose and a tool list do not enforce read-only behavior.
+the primary root and its ancestors are excluded. It also refuses mutating git
+unless git runs (tool cwd or `-C`) and targets only inside scratch or the
+artifact workspace, so a read-only reviewer cannot commit or switch branches in
+the shared checkout; read-only git forms such as `git status`, `git log`, and
+`git diff` run anywhere. `readOnly` guards against accidental writes through
+`write`, `edit`, and git. It is not isolation: other `bash` commands are not
+classified and run on the host with the worker's own permissions, so they can
+write anywhere the OS allows. Prose and a tool list do not enforce read-only
+behavior. To isolate a worker from your checkout, use `worktree: true`.
 The repository-pollution guard rejects reserved or declared artifact names and
 the protected `.pi/pi-delegate.json` config for `write`/`edit` and common shell
 writes in Git worktrees. It detects the effective (last) static `dd of=` operand
@@ -543,7 +563,7 @@ repository paths. The bash name
 guard is best effort against deliberate command-form evasion, not a sandbox.
 Dynamic or computed target construction, unmodelled interpreter file-open APIs
 such as `os.open`, `fs.openSync`, `sysopen`, and `File.binwrite`, nested shells,
-unlisted mutators, and arbitrary custom tools remain accepted residuals. The
+unparsed mutators, and arbitrary custom tools remain accepted residuals. The
 authoritative guarantee that reserved files never reach Git is the delivery/CI
 gate, whose git-level staged/tracked check catches files however they were
 created. Direct
@@ -551,20 +571,33 @@ workers and supervised forks report git-only mutation attribution. Configure
 `writableRoots` or `confineWrites: false` per slot; see
 [`docs/write-confinement.md`](../../docs/write-confinement.md).
 
-A worker may write only inside its assigned cwd, its own scratch directory, and
-any roots you grant with `writableRoots` (a `readOnly` worker cannot write its
-cwd — only scratch and separate artifact roots). Arbitrary absolute paths are
-refused, and the rest of `/tmp` (the OS temp directory) is **not** writable —
-only the worker's own scratch and artifact-workspace subdirectories are.
-So a task that says "write the report to `/tmp/foo.md`" is refused every time, no
-matter how the caller phrases it. For a private file returned through delegate, set
-`artifact: "foo.md"`; the value is one canonical basename with an extension. The
-runtime injects a separate absolute artifact-workspace path, then validates and
-returns that file. `artifact: "notes/foo.md"` is rejected: it is not a destination
-inside the worker cwd. For a durable workspace file, omit `artifact` and instruct
-the worker to use its `write` tool at an authorized workspace-relative path. To
-write outside the worker cwd, grant `writableRoots` on a worker that is NOT
-`readOnly`.
+A worker may write only inside its cwd, its own scratch directory, its artifact
+path, and roots granted with `writableRoots`; a `readOnly` worker loses its cwd.
+Other absolute paths, including the rest of `/tmp`, are refused, so "write the
+report to `/tmp/foo.md`" fails however it is phrased. Scratch is removed when
+the run ends.
+
+### Pick the worker by what the task returns
+
+- **Findings, a review or an answer:** `readOnly: true`. The worker returns its
+  findings in its final message, and you read them from the result. It can
+  still orient itself: `git status`, `git log`, `git branch --show-current` and
+  `git remote -v` run without a refusal, so a rule to name the repository and
+  branch is satisfiable.
+- **A file you want back:** `artifact: "<name>.<ext>"` (one basename; works with
+  `readOnly`). The runtime gives the worker one absolute path inside that
+  worker's own attempt directory, then validates the file and returns it with
+  the result. That path is never the worker cwd or a shared `output/`
+  directory under pi-delegate's data root. Its root defaults to the OS
+  temporary directory, so it can be under `/tmp`; use the exact path given.
+- **A file in the workspace:** a writable worker (no `readOnly`) that writes at
+  a workspace-relative path. Grant `writableRoots` for a path outside its cwd.
+
+```ts
+delegate({ runs: [{ agent: "reviewer", readOnly: true, task: "Review src/auth.ts for token leaks. Report findings in your final message." }] })
+delegate({ runs: [{ agent: "worker", readOnly: true, artifact: "audit.md", task: "Write the audit as Markdown to your artifact path." }] })
+delegate({ runs: [{ agent: "worker", task: "Write docs/auth.md describing the token flow." }] })
+```
 
 `readOnly: true` does not combine with `writableRoots`. A read-only worker may
 write only its scratch directory and its artifact workspace, so a granted root
@@ -573,9 +606,6 @@ inside, or containing the primary root is now rejected at dispatch rather than
 silently ignored; before that, the worker did its whole task and the write
 failed at the end, after which the scratch directory was removed and the work
 was unrecoverable.
-
-**For a read-only worker that must produce a file, use `artifact:`.** It is the
-only supported route, not merely the preferred one.
 
 The worker is told its own write scope automatically, so the task text does not need
 to name a scratch path — and must not hard-code an out-of-scope one.

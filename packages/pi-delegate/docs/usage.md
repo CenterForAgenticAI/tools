@@ -933,9 +933,15 @@ control metadata are not writable roots. Chain directories hold `progress` recor
 and are not artifact roots. Use per-slot `writableRoots` to widen authority or
 `confineWrites: false` to opt out. A slot with `readOnly: true` removes `write` and
 `edit` for primary-root paths but may write its private scratch and candidate output
-leaves; the primary root and any ancestor roots are excluded. It also rejects
-obvious mutating bash commands and reports structured refusals; prose and
-`tools: [read, bash]` do not enforce it.
+leaves; the primary root and any ancestor roots are excluded. It also refuses
+mutating git unless git runs and targets only inside those leaves, so the worker
+cannot commit or switch branches in the shared checkout, and it reports
+structured refusals; prose and `tools: [read, bash]` do not enforce it.
+`readOnly` guards against accidental writes through `write`, `edit`, and git; it
+is not isolation. Other `bash` commands are not classified and can write
+anywhere the OS allows. Use `worktree: true` to isolate a worker from your
+checkout. A read-only worker may dispatch writable children, still clamped to
+its own roots.
 Because that exclusion makes the grant void, combining `readOnly: true` with a
 `writableRoots` entry at, inside, or containing the primary root is rejected at
 dispatch instead of being silently ignored. A root outside the primary root is

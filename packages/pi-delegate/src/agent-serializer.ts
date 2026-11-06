@@ -65,6 +65,7 @@ const FIELD_ORDER: AgentSerializableField[] = [
 	"interactive",
 	"maxSubagentDepth",
 	"allowNestedDelegate",
+	"fabric",
 	"nestedDelegateAgents",
 	"maxDurationMs",
 	"windDownGraceMs",
@@ -74,6 +75,8 @@ const FIELD_ORDER: AgentSerializableField[] = [
  * Optional override of the agent's frontmatter. Used by
  * `action: "update"` to merge user-supplied fields on top of the
  * existing config. `false` clears the field. `undefined` keeps it.
+ * `fabric` is the exception, matching agent management: `false` writes the
+ * native-tools opt-out and `true` removes it (automatic selection).
  */
 export interface AgentConfigPatch {
 	name?: string | false;
@@ -105,6 +108,8 @@ export interface AgentConfigPatch {
 	interactive?: boolean | false;
 	maxSubagentDepth?: number | false;
 	allowNestedDelegate?: boolean | false;
+	/** `false` writes the opt-out; `true` removes it. */
+	fabric?: boolean;
 	nestedDelegateAgents?: string[] | false;
 	maxDurationMs?: number | false;
 	windDownGraceMs?: number | false;
@@ -124,6 +129,13 @@ export function applyAgentPatch(base: AgentConfig, patch: AgentConfigPatch): Age
 		if (value === undefined) continue;
 		if (key === "output" || key === "outputFrom") {
 			throw new TypeError(`agent field ${key} is removed; declare artifact: instead`);
+		}
+		if (key === "fabric") {
+			// `fabric: false` is the opt-out itself (#587). Clearing it here would
+			// widen the worker's tool surface, so it follows agent management:
+			// `false` writes the opt-out and `true` restores automatic selection.
+			out.fabric = value === false ? false : undefined;
+			continue;
 		}
 		if (value === false) {
 			// Clear the field. Required fields can't be cleared.
@@ -237,7 +249,7 @@ function mergeMcpIntoToolsLine(agent: AgentConfig): string | null {
 	const tools = canonicalizeAgentToolEntries(agent.tools) ?? [];
 	const mcp = (agent.mcpDirectTools ?? []).map((n) => `mcp:${n}`);
 	const all = [...tools, ...mcp];
-	if (all.length === 0) return null;
+	if (agent.tools === undefined && all.length === 0) return null;
 	return `tools: ${JSON.stringify(all)}`;
 }
 
@@ -309,6 +321,7 @@ function renderField(name: string, value: unknown): string | null {
 		case "defaultProgress":
 		case "interactive":
 		case "allowNestedDelegate":
+		case "fabric":
 			// Skip false booleans for inherit*/default* (false is the parser's default)
 			// but emit them when explicitly true.
 			if (typeof value !== "boolean") return null;
@@ -333,7 +346,7 @@ function renderField(name: string, value: unknown): string | null {
 			return `${name}: ${Math.min(validated, HARD_MAX_DEPTH)}`;
 		}
 		default:
-			// Unknown fields are skipped. extraFields are not round-tripped:
+			// Unknown fields are skipped. metadata is not round-tripped:
 			// we deliberately don't preserve them so a `update` doesn't
 			// resurrect arbitrary keys the user may have removed.
 			return null;

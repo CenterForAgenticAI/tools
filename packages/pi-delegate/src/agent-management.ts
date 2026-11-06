@@ -196,6 +196,7 @@ export const ManagementConfigSchema = Type.Object({
 	interactive: Type.Optional(Type.Boolean()),
 	maxSubagentDepth: Type.Optional(Type.Union([Type.Integer({ minimum: 0, maximum: HARD_MAX_DEPTH }), Type.Literal(false)])),
 	allowNestedDelegate: Type.Optional(Type.Union([Type.Boolean(), Type.Literal(false)])),
+	fabric: Type.Optional(Type.Boolean()),
 	nestedDelegateAgents: Type.Optional(ManagementStringListSchema),
 	maxDurationMs: Type.Optional(Type.Union([Type.Integer({ minimum: 0, maximum: MAX_TIMEOUT_MS }), Type.Literal(false)])),
 	windDownGraceMs: Type.Optional(Type.Union([Type.Integer({ minimum: 0, maximum: MAX_TIMEOUT_MS }), Type.Literal(false)])),
@@ -233,14 +234,14 @@ export interface ManagementDefinition {
 }
 function agentDefinition(agent: AgentConfig): ManagementDefinition {
  const config: ManagementConfig = { name: agent.name, description: agent.description, systemPrompt: agent.systemPrompt,
-  model: agent.model, tools: [...(agent.tools ?? []), ...(agent.mcpDirectTools ?? []).map(tool => `mcp:${tool}`)], systemPromptMode: agent.systemPromptMode,
+  model: agent.model, tools: agent.tools === undefined && !agent.mcpDirectTools ? undefined : [...(agent.tools ?? []), ...(agent.mcpDirectTools ?? []).map(tool => `mcp:${tool}`)], systemPromptMode: agent.systemPromptMode,
   inheritProjectContext: agent.inheritProjectContext, inheritSkills: agent.inheritSkills, skills: agent.skills,
   fallbackModels: agent.fallbackModels, extensions: agent.extensions, extensionInclude: agent.extensionInclude,
   extensionExclude: agent.extensionExclude, thinking: agent.thinking, thinkingMin: agent.thinkingMin, thinkingMax: agent.thinkingMax,
   defaultMaxRounds: agent.defaultMaxRounds, stopConditionHint: agent.stopConditionHint, collapseMode: agent.collapseMode,
   summaryModel: agent.summaryModel, reads: agent.defaultReads, progress: agent.defaultProgress, artifact: agent.artifact,
   interactive: agent.interactive, maxSubagentDepth: agent.maxSubagentDepth, allowNestedDelegate: agent.allowNestedDelegate,
-  nestedDelegateAgents: agent.nestedDelegateAgents, maxDurationMs: agent.maxDurationMs, windDownGraceMs: agent.windDownGraceMs,
+  fabric: agent.fabric, nestedDelegateAgents: agent.nestedDelegateAgents, maxDurationMs: agent.maxDurationMs, windDownGraceMs: agent.windDownGraceMs,
   ...(agent.escalation ? { escalation: {
    mode: agent.escalation.mode, intermediate: agent.escalation.intermediate,
    hopTimeoutMs: agent.escalation.hopTimeoutMs, ...(agent.escalation.holdStrategy === "hold-open" ? { holdStrategy: agent.escalation.holdStrategy } : {}),
@@ -649,7 +650,7 @@ function parseTools(raw: unknown): { tools?: string[]; mcpDirectTools?: string[]
 		} else tools.push(item);
 	}
 	return {
-		tools: canonicalizeAgentToolEntries(tools.length ? tools : undefined),
+		tools: canonicalizeAgentToolEntries(tools),
 		mcpDirectTools: mcp.length ? mcp : undefined,
 	};
 }
@@ -836,6 +837,11 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 			return "config.allowNestedDelegate must be a boolean or false.";
 		}
 	}
+	if (hasKey(cfg, "fabric")) {
+		if (typeof cfg.fabric !== "boolean") return "config.fabric must be a boolean.";
+		// `false` keeps native tools (#582); `true` is the automatic default.
+		target.fabric = cfg.fabric === false ? false : undefined;
+	}
 	if (hasKey(cfg, "nestedDelegateAgents")) {
 		const parsed = parseManagedList(cfg.nestedDelegateAgents, "nestedDelegateAgents");
 		if (parsed.error) return parsed.error;
@@ -980,6 +986,7 @@ export function formatAgentDetail(agent: AgentConfig): string {
 	if (agent.defaultProgress) lines.push("Progress: true");
 	if (agent.maxSubagentDepth !== undefined) lines.push(`Max subagent depth: ${agent.maxSubagentDepth}`);
 	if (agent.allowNestedDelegate !== undefined) lines.push(`Allow nested delegate: ${agent.allowNestedDelegate ? "true" : "false"}`);
+	if (agent.fabric === false) lines.push("Fabric: false (native tools)");
 	if (agent.nestedDelegateAgents?.length) lines.push(`Nested delegate agents: ${agent.nestedDelegateAgents.join(", ")}`);
 	if (agent.maxDurationMs !== undefined) lines.push(`Max duration: ${agent.maxDurationMs} ms`);
 	if (agent.windDownGraceMs !== undefined) lines.push(`Wind-down grace: ${agent.windDownGraceMs} ms`);
@@ -1076,6 +1083,7 @@ function agentFingerprint(agent: AgentConfig): string {
 		interactive: agent.interactive,
 		maxSubagentDepth: agent.maxSubagentDepth,
 		allowNestedDelegate: agent.allowNestedDelegate,
+		fabric: agent.fabric,
 		nestedDelegateAgents: agent.nestedDelegateAgents,
 		maxDurationMs: agent.maxDurationMs,
 		windDownGraceMs: agent.windDownGraceMs,
@@ -1264,9 +1272,9 @@ export function handleCanonicalize(
 	const discoveryWarnings: string[] = [];
 	const parsed = discoverAgentFile(target.filePath, target.source, discoveryWarnings);
 	if (!parsed) return err(`Could not canonicalize '${target.filePath}': the agent cannot be represented safely.`);
-	if (parsed.extraFields && Object.keys(parsed.extraFields).length > 0) {
+	if (parsed.metadata) {
 		return err(
-			`Could not canonicalize '${target.filePath}': unknown frontmatter fields cannot be represented by the canonical serializer (${Object.keys(parsed.extraFields).sort().join(", ")}).`,
+			`Could not canonicalize '${target.filePath}': unknown frontmatter fields cannot be represented by the canonical serializer (${Object.keys(parsed.metadata).sort().join(", ")}).`,
 		);
 	}
 	const unsafeWarnings = canonicalizeWarnings(discoveryWarnings);

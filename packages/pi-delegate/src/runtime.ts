@@ -16,7 +16,7 @@
  * out.
  */
 
-import { DELEGATE_EVENTS, emitDelegateEvent } from "./events.js";
+import { DELEGATE_EVENTS, emitDelegateEvent, type DelegateWorkerSessionEvent } from "./events.js";
 import { lstatSync } from "node:fs";
 import * as path from "node:path";
 import type { AgentSource } from "./agents.js";
@@ -105,6 +105,7 @@ import {
 } from "./usage-rollup.js";
 import type { RunRecoveryDescriptor } from "./fork-recovery.js";
 import { unavailableMutationReport } from "./mutation-tracking.js";
+import { isWorkerSurface, isWorkerSurfaceReason, projectWorkerSurfaceReport, type WorkerSurface, type WorkerSurfaceReason } from "./worker-surface.js";
 
 export type RunLiveStatus =
 	| "pending"
@@ -394,6 +395,10 @@ export interface RunLiveState {
 	failureCause?: WorkerFailureCause;
 	/** Worker model refs that refused before this entry failed or fell back. */
 	refusalModels?: string[];
+	/** Tool path the worker received, once its session started (#582). */
+	surface?: WorkerSurface;
+	/** Why the worker received that surface. */
+	surfaceReason?: WorkerSurfaceReason;
 	startedAt?: number;
 	endedAt?: number;
 	/** Effective interval used for this supervised fork; 0 disables heartbeat. */
@@ -1652,6 +1657,7 @@ function synthesizeFinalResult(run: DelegateDispatchState): RunResult[] {
 			error: entry.error,
 			errorKind: entry.errorKind,
 			refusalModels: entry.refusalModels,
+			...projectWorkerSurfaceReport(entry),
 			cancelReason: entry.status === "aborted" ? entry.cancelReason : undefined,
 			timeout: timeoutResultMetadata(entry),
 			usage: entry.usage
@@ -2512,6 +2518,7 @@ function cloneRunLiveState(state: RunLiveState): RunLiveState {
 		errorKind: isWorkerErrorKind(state.errorKind) ? state.errorKind : undefined,
 		failureCause: isWorkerFailureCause(state.failureCause) ? state.failureCause : undefined,
 		refusalModels: optionalStrings(state.refusalModels),
+		...projectWorkerSurfaceReport(state),
 		startedAt: finiteValue(state.startedAt),
 		endedAt: finiteValue(state.endedAt),
 		heartbeatIntervalMs: finiteValue(state.heartbeatIntervalMs),
@@ -3189,6 +3196,8 @@ function isStrictResultOptionalFields(value: Record<string, unknown>, projected:
 	if (!optionalKnownValue(value, "error", (candidate) => typeof candidate === "string")) return false;
 	if (!optionalKnownValue(value, "errorKind", (candidate) => isWorkerErrorKind(candidate))) return false;
 	if (!optionalKnownValue(value, "refusalModels", isStringArray)) return false;
+	if (!optionalKnownValue(value, "surface", isWorkerSurface)) return false;
+	if (!optionalKnownValue(value, "surfaceReason", isWorkerSurfaceReason)) return false;
 	if (!optionalKnownValue(value, "policyRefusals", isPolicyRefusalArray)) return false;
 	if (!optionalKnownValue(value, "mutationReport", isMutationReportRecord)) return false;
 	if (!optionalKnownValue(value, "workerModel", (candidate) => typeof candidate === "string")) return false;
@@ -3244,6 +3253,7 @@ function isTranscriptEntry(value: unknown): value is TranscriptEntry {
 		(value.toolName === undefined || typeof value.toolName === "string") &&
 		(value.toolCallId === undefined || typeof value.toolCallId === "string") &&
 		(value.toolMeta === undefined || typeof value.toolMeta === "string") &&
+		(value.durationMs === undefined || (isFiniteNumber(value.durationMs) && value.durationMs >= 0)) &&
 		(value.isError === undefined || typeof value.isError === "boolean")
 	);
 }
@@ -3419,6 +3429,8 @@ function isPersistedRunLiveStateRecord(value: unknown): value is RunLiveState {
 		(value.errorKind === undefined || isWorkerErrorKind(value.errorKind)) &&
 		(value.failureCause === undefined || isWorkerFailureCause(value.failureCause)) &&
 		(value.refusalModels === undefined || isStringArray(value.refusalModels)) &&
+		(value.surface === undefined || isWorkerSurface(value.surface)) &&
+		(value.surfaceReason === undefined || isWorkerSurfaceReason(value.surfaceReason)) &&
 		(value.cancelReason === undefined || isCancelReasonValue(value.cancelReason)) &&
 		(value.completedResult === undefined || isPersistedRunResultRecord(value.completedResult)) &&
 		(value.usage === undefined || isPersistedUsage(value.usage)) &&
@@ -4123,6 +4135,28 @@ export function isRuntimePersistenceHydrated(): boolean {
 /** Wire the pi event bus into the runtime. Called from the extension factory. */
 export function setEventEmitter(fn: EventEmitter | undefined): void {
 	emitter = fn;
+}
+
+/** Observe one native worker attempt without changing its transcript identity. */
+export function observeWorkerSession(
+	session: Pick<import("@earendil-works/pi-coding-agent").AgentSession, "sessionId" | "subscribe">,
+	ownerSessionId: string | undefined,
+	listener: (event: import("@earendil-works/pi-coding-agent").AgentSessionEvent) => void,
+): () => void {
+	const identity = { sessionId: session.sessionId, ownerSessionId };
+	const publish = (frame: DelegateWorkerSessionEvent) => emit(DELEGATE_EVENTS.workerSession, frame);
+	publish({ ...identity, phase: "opened" });
+	const unsubscribe = session.subscribe((event) => {
+		publish({ ...identity, phase: "event", event });
+		listener(event);
+	});
+	let closed = false;
+	return () => {
+		if (closed) return;
+		closed = true;
+		try { unsubscribe(); }
+		finally { publish({ ...identity, phase: "closed" }); }
+	};
 }
 
 function emit(channel: string, data: unknown): void {
@@ -5242,7 +5276,7 @@ const RUN_LIVE_STATE_KEYS = [
 	"name", "displayLabel", "agent", "agentSource", "task", "collapseMode", "workerCwd", "workerBranch",
 	"requestedModel", "resolvedModel", "skills", "confineWrites", "readOnly", "cloneMode", "status",
 	"currentRound", "maxRounds", "lastWorkerText", "lastSupervisorText", "workerSessionFile", "error",
-	"errorKind", "failureCause", "refusalModels", "startedAt", "endedAt", "heartbeatIntervalMs", "maxConsecutiveHeartbeats",
+	"errorKind", "failureCause", "refusalModels", "surface", "surfaceReason", "startedAt", "endedAt", "heartbeatIntervalMs", "maxConsecutiveHeartbeats",
 	"windDown", "lastActivityAt", "taskProgress", "transcript", "activityHistory", "pendingGuidance",
 	"cancelReason", "startedAtMs", "timeoutDeadlineAtMs", "timeoutPolicy", "cost", "usage", "completedResult",
 	"interactive",
@@ -5268,6 +5302,12 @@ export function projectRunLivePatch(patch: Partial<RunLiveState>, workerCwd?: st
 				break;
 			case "errorKind":
 				next = isWorkerErrorKind(value) ? value : undefined;
+				break;
+			case "surface":
+				next = isWorkerSurface(value) ? value : undefined;
+				break;
+			case "surfaceReason":
+				next = isWorkerSurfaceReason(value) ? value : undefined;
 				break;
 			case "failureCause":
 				next = isWorkerFailureCause(value) ? value : undefined;
@@ -5601,6 +5641,10 @@ export function recordRunCompletedResult(
 	if (!existing) return;
 	const now = Date.now();
 	const projectedResult = cloneRunResult(result);
+	// The surface and its reason fall back as one pair: a result without a valid
+	// pair keeps the previous pair whole rather than mixing old and new halves.
+	const resultSurface = projectWorkerSurfaceReport(projectedResult);
+	const surfacePair = resultSurface.surface !== undefined ? resultSurface : projectWorkerSurfaceReport(existing);
 	const next: RunLiveState = {
 		...existing,
 		attempt: existing.attempt ?? projectedResult.attempt ?? 1,
@@ -5610,6 +5654,8 @@ export function recordRunCompletedResult(
 		collapseMode: projectedResult.collapseMode,
 		workerSessionFile: projectedResult.workerSessionFile ?? existing.workerSessionFile,
 		workerCwd: projectedResult.workerCwd ?? existing.workerCwd,
+		surface: surfacePair.surface,
+		surfaceReason: surfacePair.surfaceReason,
 		error: projectedResult.error,
 		cancelReason: projectedResult.status === "aborted" ? projectedResult.cancelReason : existing.cancelReason,
 		usage: projectedResult.usage ? { ...projectedResult.usage } : existing.usage,
@@ -6025,9 +6071,8 @@ function shutdownRunDiagnostic(run: DelegateDispatchState, reason: SessionShutdo
  * carry the right `cancelReason`), then fall through to `run.abort()` as a
  * belt-and-suspenders dispatchAbort kick. Called on session_shutdown.
  *
- * Fire-and-forget: the returned promises are detached so session shutdown
- * doesn't block on pi's teardown ordering. The ps-tree sweep inside
- * `cancelOneFork` still runs in the background and reaps stray descendants.
+ * Returns cancellation completion after persisting the terminal snapshot
+ * synchronously. Lifecycle callers must bound their wait for SDK teardown.
  *
  * Session shutdown terminalizes this process' active in-process delegate runs.
  * The `reason` is the pi SDK `SessionShutdownEvent['reason']`, but every reason
@@ -6040,7 +6085,8 @@ function shutdownRunDiagnostic(run: DelegateDispatchState, reason: SessionShutdo
  * Matching foreign and unproven owner records are skipped. Their live closures
  * may still exist, or the evidence may be too weak to reclaim safely.
  */
-export function abortAllRuns(reason?: SessionShutdownReason): void {
+export function abortAllRuns(reason?: SessionShutdownReason): Promise<void> {
+	const cancellations: Promise<void>[] = [];
 	// Flush any pending debounced persist BEFORE iterating runs. Belt-and-
 	// suspenders: most active runs hit persistRuntimeStateNow() inside the
 	// loop below, but if all runs are already terminal and a debounced
@@ -6079,12 +6125,12 @@ export function abortAllRuns(reason?: SessionShutdownReason): void {
 			// call it during shutdown. The orphan snapshot below is sufficient for
 			// state truthfulness, and production live runs wire a real cancel closure.
 			if (callbackAuthority && run.cancel && run.cancel !== defaultCancelStub) {
-				void run.cancel(undefined, "shutdown").catch((err) => {
+				cancellations.push(run.cancel(undefined, "shutdown").catch((err) => {
 					logDelegateDiagnostic(
 						`cancel("shutdown") for runId=${run.runId} threw: ${(err as Error).message}`,
 						{ agentDir: runtimeAgentDir },
 					);
-				});
+				}));
 			}
 		} catch (err) {
 			logDelegateDiagnostic(
@@ -6108,6 +6154,7 @@ export function abortAllRuns(reason?: SessionShutdownReason): void {
 		needsPersist = true;
 	}
 	if (needsPersist) persistRuntimeStateNow();
+	return Promise.all(cancellations).then(() => undefined);
 }
 
 /**

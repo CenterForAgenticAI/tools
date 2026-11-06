@@ -77,7 +77,7 @@ import {
 	resolveBusFrame,
 	type BusEventKind,
 } from "./event-bus.js";
-import { assertArtifactWriterCapability, resolveWorkerToolSurface } from "./tool-surface.js";
+import { assertArtifactWriterCapability, resolveWorkerToolOverrides, resolveWorkerToolSurface } from "./tool-surface.js";
 import { resolveDelegateOnlyDepth } from "./delegate-only/fork-policy.js";
 import { shouldRequestShorterResult } from "./delegate-only/result-caps.js";
 import { getActiveDelegateOnlyMode } from "./delegate-only/runtime-state.js";
@@ -164,7 +164,7 @@ import {
 	type PromptLifecycleHarvestResult,
 } from "./harvest-outcome.js";
 import type { RunFailureRecovery } from "./pending-wakes.js";
-import type { CancelReason, RunLiveState } from "./runtime.js";
+import { observeWorkerSession, type CancelReason, type RunLiveState } from "./runtime.js";
 import type { EffectiveEscalationPolicy } from "./escalation-policy.js";
 import type { ResolvedEscalationConfig } from "./config.js";
 import {
@@ -214,6 +214,7 @@ import {
 	providerAuthReader,
 	type ModelRuntimeLike,
 } from "./sdk-model-runtime.js";
+import { clearWorkerSurfaceReport, describeWorkerSurface } from "./worker-surface.js";
 
 // `AgentMessage` isn't re-exported from the top-level pi-coding-agent.
 type AgentMessage = any;
@@ -1554,16 +1555,12 @@ async function runDirectWorkerInner(
 		// installed, so it is pushed after writeConfinement is resolved below.
 		// Plain-worker tool surface shared with the inner worker beneath a
 		// supervised run.
-		const workerSurface = resolveWorkerToolSurface(req.agent, {
-			escalationPolicy: req.escalationPolicy,
-			readOnly: req.readOnly,
-			...(req.parentTranscriptSearch ? { customToolNames: [PARENT_TRANSCRIPT_SEARCH_TOOL_NAME] } : {}),
-		});
+		const workerSurface = resolveWorkerToolSurface(req.agent, resolveWorkerToolOverrides(req));
 		const artifactWriterRequirement = req.artifact === undefined
 			? undefined
 			: { artifactName: req.artifact, readOnly: req.readOnly === true };
 		if (artifactWriterRequirement) assertArtifactWriterCapability(workerSurface, artifactWriterRequirement);
-		const releaseWorkerToolRegistration = dctx.ensureWorkerToolRegistration?.(workerSurface.tools ?? []);
+		const releaseWorkerToolRegistration = dctx.ensureWorkerToolRegistration?.(workerSurface.tools ?? workerSurface.runToolNames);
 		for (const d of workerSurface.diagnostics)
 			logDelegateDiagnostic(d, { agentDir: dctx.agentDir, throttleKey: "tool-surface" });
 		const writeConfinement = resolveWorkerWriteAuthority({
@@ -1706,7 +1703,7 @@ async function runDirectWorkerInner(
 			(selector) => selector.tool === undefined || selector.tool === ASK_TOOL_NAME,
 		);
 		const workerCustomTools = [
-			...(dctx.getWorkerToolDefinitions?.(effectiveSurface.tools ?? []) ?? []),
+			...(dctx.getWorkerToolDefinitions?.(effectiveSurface.tools ?? effectiveSurface.runToolNames) ?? []),
 			...(escalationEnabled
 				? makeEscalationRaiseTools({
 					sessionFile: () => sessionMgr.getSessionFile(),
@@ -1825,6 +1822,11 @@ async function runDirectWorkerInner(
 		// for the whole AgentSession lifetime.
 		workerToolScope.install(workerSession);
 		result.activeToolNames = [...workerSession.getActiveToolNames()];
+		{
+			const surfaceReport = describeWorkerSurface(workerToolScope.fabricAdmission, result.activeToolNames);
+			Object.assign(result, surfaceReport);
+			dctx.onRuntimeUpdate?.(surfaceReport);
+		}
 		if (typeof releaseWorkerToolRegistration === "function") releaseWorkerToolRegistration();
 
 		// Subscribe for both the short-lived widget phase and transcript projection.
@@ -1847,7 +1849,7 @@ async function runDirectWorkerInner(
 				}
 			},
 		);
-		const unsubscribe = workerSession.subscribe((ev) => {
+		const unsubscribe = observeWorkerSession(workerSession, dctx.ownerSessionId, (ev) => {
 			try {
 				if (!promptRepairPhaseActive || !shouldPreservePromptRepairActivity(ev.type)) {
 					promptRepairPhaseActive = false;
@@ -2238,7 +2240,7 @@ async function runDirectWorkerInner(
 						);
 						const nextChoice = nextWorkerModel();
 						if (nextChoice) {
-							result.activeToolNames = undefined;
+							result.activeToolNames = undefined; clearWorkerSurfaceReport(result);
 							pendingWorkerModel = nextChoice;
 							replacingWorkerAttempt = true;
 							result.status = "running";
@@ -2266,7 +2268,7 @@ async function runDirectWorkerInner(
 								? nextWorkerModel()
 								: undefined;
 							if (nextChoice) {
-								result.activeToolNames = undefined;
+								result.activeToolNames = undefined; clearWorkerSurfaceReport(result);
 								pendingWorkerModel = nextChoice;
 								replacingWorkerAttempt = true;
 								result.status = "running";
@@ -2557,7 +2559,7 @@ async function runDirectWorkerInner(
 			if (lifecycle.workerSession === workerSession) lifecycle.workerSession = undefined;
 			workerSession = undefined;
 			if (dctx.sessionRefs) dctx.sessionRefs.worker = undefined;
-			result.activeToolNames = undefined;
+			result.activeToolNames = undefined; clearWorkerSurfaceReport(result);
 			continue;
 		}
 		break;

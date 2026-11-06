@@ -7,13 +7,13 @@ import type {
 	DaemonAttachment,
 	DaemonClient,
 	DaemonLease,
-} from "@caair/pi-daemon/client";
+} from "@centerforagenticai/pi-daemon/client";
 import type {
 	Cursor,
 	OperationResult,
 	PromptStatusResult,
 	StreamFrame,
-} from "@caair/pi-daemon/protocol";
+} from "@centerforagenticai/pi-daemon/protocol";
 
 import {
 	readOrchestrateCfg,
@@ -31,12 +31,12 @@ import { readJsonFile, replaceJsonFile, withStateFileLock } from "./state-io.js"
  * imports standalone, and only a `mode: "driver"` dispatch needs the daemon
  * runtime. Load it lazily so importing pi-delegate never eagerly requires it.
  */
-let daemonClientModulePromise: Promise<typeof import("@caair/pi-daemon/client")> | undefined;
-function loadDaemonClient(): Promise<typeof import("@caair/pi-daemon/client")> {
-	return (daemonClientModulePromise ??= import("@caair/pi-daemon/client"));
+let daemonClientModulePromise: Promise<typeof import("@centerforagenticai/pi-daemon/client")> | undefined;
+function loadDaemonClient(): Promise<typeof import("@centerforagenticai/pi-daemon/client")> {
+	return (daemonClientModulePromise ??= import("@centerforagenticai/pi-daemon/client"));
 }
 async function connectDaemonLazy(
-	options: Parameters<typeof import("@caair/pi-daemon/client")["connectDaemon"]>[0],
+	options: Parameters<typeof import("@centerforagenticai/pi-daemon/client")["connectDaemon"]>[0],
 ): Promise<DaemonClient> {
 	const { connectDaemon } = await loadDaemonClient();
 	return await connectDaemon(options);

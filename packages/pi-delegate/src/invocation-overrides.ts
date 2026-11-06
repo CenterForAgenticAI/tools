@@ -31,6 +31,11 @@ export interface InvocationAgentOverrides {
 	windDownGraceMs?: number;
 	/** Per-slot recursive delegation cap; bounded by the hard depth ceiling. */
 	maxSubagentDepth?: number;
+	/**
+	 * `false` keeps native tools (#582). The opt-out only narrows: `true` cannot
+	 * undo an agent's `fabric: false`, so it leaves the agent's setting as is.
+	 */
+	fabric?: boolean;
 }
 
 /** Clone an AgentConfig deeply enough that invocation patches cannot leak to siblings. */
@@ -46,7 +51,7 @@ function cloneAgentConfig(agent: AgentConfig): AgentConfig {
 		...(agent.extensionExclude ? { extensionExclude: [...agent.extensionExclude] } : {}),
 		...(agent.defaultReads ? { defaultReads: [...agent.defaultReads] } : {}),
 		...(agent.env ? { env: { ...agent.env } } : {}),
-		...(agent.extraFields ? { extraFields: { ...agent.extraFields } } : {}),
+		...(agent.metadata ? { metadata: structuredClone(agent.metadata) } : {}),
 	});
 }
 
@@ -132,6 +137,10 @@ export function applyInvocationOverrides(
 			HARD_MAX_DEPTH,
 		);
 	}
+
+	// The agent author's opt-out wins: a run may add `fabric: false` but a run's
+	// `fabric: true` never widens an agent that set `fabric: false`.
+	if (overrides.fabric === false) next.fabric = false;
 
 	const skillOverride = overrides.skill !== undefined ? overrides.skill : overrides.skills;
 	if (skillOverride === false) {

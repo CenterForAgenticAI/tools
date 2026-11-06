@@ -32,7 +32,19 @@ import {
 	resolveByScopePrecedence,
 	type PackageAgentDiscoveryOptions,
 } from "./agents.js";
-import { configuredPackageRoots } from "./configured-package-roots.js";
+import {
+	agentDiscoveryOptions,
+	resolveEffectiveAgents,
+	type EffectiveAgentDiscovery,
+} from "./effective-agents.js";
+export {
+	resolveEffectiveAgents,
+	resolveEffectiveWorkerTools,
+	type EffectiveAgentDiscovery,
+	type EffectiveAgentDiscoveryOptions,
+	type EffectiveWorkerRun,
+	type EffectiveWorkerTools,
+} from "./effective-agents.js";
 import {
 	CONTROL_ROUTE,
 	forwardedParams,
@@ -86,7 +98,7 @@ import {
 	type NotifyCompletionSink,
 } from "./pending-wakes.js";
 import { controlHints, modelInterfaceFor, setModelInterfaceProbe, type DelegateModelInterface } from "./model-interface.js";
-import { registerChildCompletionGate } from "./worker-session-lifecycle.js";
+import { registerChildCompletionGate, waitForSessionShutdown } from "./worker-session-lifecycle.js";
 import { handleManagementAction, ManagementConfigSchema } from "./agent-management.js";
 import {
 	deliverEscalationToHolder,
@@ -106,7 +118,6 @@ import {
 	purgeLegacyDecisionState,
 } from "./escalation-runtime.js";
 import type { EscalationKind, EscalationRequest } from "./escalation-store.js";
-import { applyAgentOverrides } from "./agent-overrides.js";
 import { mergeEnvOverrides, type EnvOverrides } from "./env-overrides.js";
 import {
 	modelScopeFromExtensionContext,
@@ -141,8 +152,6 @@ import {
 import {
 	DEFAULT_HEARTBEAT_INTERVAL_MS,
 	DEFAULT_MAX_CONSECUTIVE_HEARTBEATS,
-	type DelegateConfig,
-	type EscalationConfig,
 	type ResolvedEscalationConfig,
 	loadConfig,
 	loadConfigReadOnly,
@@ -161,8 +170,7 @@ import {
 import { projectAgentTrustError } from "./project-trust.js";
 import {
 	assertAwaitEscalationCompatibility,
-	parseEscalationInvocationValue,
-	resolveEscalationPolicy,
+	resolveSlotEscalationPolicy,
 	type EffectiveEscalationPolicy,
 } from "./escalation-policy.js";
 import {
@@ -178,6 +186,7 @@ import {
 	pumpDirectWorkers,
 	resolveParentTranscriptSearch,
 	resolveWritableRoots,
+	singleDirectRawTask,
 	type DirectTaskInput,
 } from "./direct-shape.js";
 import { appendFocusToPrompt } from "./focus-seam.js";
@@ -208,6 +217,7 @@ import {
 } from "./fork-runner.js";
 import type { WorkerChannelClock } from "./worker-channel.js";
 import { formatForkWarningLines } from "./fork-warnings.js";
+import { formatWorkerSurfaceLine } from "./worker-surface.js";
 import { renderPromptRepairReport } from "./prompt-repair-seam.js";
 import { prepareChainDir, sweepOldChainDirs } from "./output-file.js";
 import { assertReadOnlyValue } from "./write-confinement.js";
@@ -1533,6 +1543,34 @@ export function reasonToErrorText(reason: CancelReason): string {
 	}
 }
 
+/** Repeated cancellation joins admitted work even after its entry becomes terminal. */
+function createRunCanceller(
+	run: DelegateDispatchState,
+	cancelEntry: (name: string, reason: CancelReason) => Promise<void>,
+): NonNullable<DelegateDispatchState["cancel"]> {
+	const pending = new Map<string, Promise<void>>();
+	const cancel = async (name: string, reason: CancelReason): Promise<void> => {
+		const admitted = pending.get(name);
+		if (admitted) return admitted;
+		const entry = run.forks[name];
+		if (!entry || !isLiveStatus(entry.status)) return;
+		let resolve!: () => void, reject!: (error: unknown) => void;
+		const completion = new Promise<void>((done, fail) => { resolve = done; reject = fail; });
+		pending.set(name, completion);
+		void cancelEntry(name, reason).then(resolve, reject);
+		try {
+			await completion;
+		} finally {
+			pending.delete(name);
+		}
+	};
+	return async (name, reason = "user") => {
+		if (name !== undefined) return cancel(name, reason);
+		await Promise.all(Object.keys(run.forks).map((entry) => cancel(entry, reason)));
+		run.abort();
+	};
+}
+
 function abortControllersWhenParentAborts(
 	parent: AbortSignal,
 	controllers: Record<string, AbortController>,
@@ -1631,6 +1669,7 @@ export function applyWindDownSteered(
  *   - `worker session:` absolute path to the worker session JSONL (file-backed)
  *   - `rounds:` rounds used / maxRounds (useful for "did the run entry hit the cap?")
  *   - `cwd:` working directory the worker ran in (worktree-aware)
+ *   - `surface:` the worker's tool surface and why (#582), when reported
  *   - `summary model:` only when the summary collapse path was used, including
  *     a hint if we had to fall back to the supervisor's raw `summary` field
  *   - `warning [kind]:` for every structured non-fatal fork warning
@@ -1645,6 +1684,7 @@ export function renderForkSessionBlock(r: RunResult): string {
 	if (r.workerSessionFile) lines.push(`worker session: ${r.workerSessionFile}`);
 	lines.push(`rounds: ${r.roundsUsed}/${r.maxRounds}`);
 	if (r.workerCwd) lines.push(`cwd: ${r.workerCwd}`);
+	if (r.surface && r.surfaceReason) lines.push(formatWorkerSurfaceLine({ surface: r.surface, surfaceReason: r.surfaceReason }));
 	if (r.summaryModelUsed) {
 		const note = r.summaryFallbackReason ? ` (fell back: ${r.summaryFallbackReason})` : "";
 		lines.push(`summary model: ${r.summaryModelUsed}${note}`);
@@ -2605,6 +2645,8 @@ export interface OrchestrateInput {
 	model?: string;
 	env?: EnvOverrides;
 	maxSubagentDepth?: number;
+	/** `false` adds a Fabric opt-out; `true` never undoes the agent's (#587). */
+	fabric?: boolean;
 }
 
 export interface ExecuteOrchestrateShapeArgs {
@@ -2893,6 +2935,7 @@ export async function executeOrchestrateShape(args: ExecuteOrchestrateShapeArgs)
 		...(agent.extensionInclude ? { extensionInclude: agent.extensionInclude } : {}),
 		...(agent.extensionExclude ? { extensionExclude: agent.extensionExclude } : {}),
 		...(surface.tools ? { tools: surface.tools } : {}),
+		...(agent.fabric === false || input.fabric === false ? { fabric: false as const } : {}),
 		hasExplicitAllowlist: surface.hasExplicitAllowlist,
 		...(surface.extSelectors.length ? { extensionToolSelectors: surface.extSelectors } : {}),
 		...(optionalGlobalExtensionSelectorKeys.length
@@ -3587,8 +3630,6 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 	// any pending prompts, and call workerSession.abort().
 	const cancelOneTask = async (taskName: string, reason: CancelReason) => {
 		const refs = sessionRefsByTask[taskName];
-		const current = runState.forks[taskName]?.status;
-		if (current === "completed" || current === "failed" || current === "aborted") return;
 		const errorText = reasonToErrorText(reason);
 		taskAbortControllers[taskName]?.abort();
 		updateRunState(runId, taskName, {
@@ -3603,20 +3644,7 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 			/* swallow */
 		}
 	};
-	runState.cancel = async (taskName, reason) => {
-		const why: CancelReason = reason ?? "user";
-		if (taskName !== undefined) {
-			const target = runState.forks[taskName];
-			if (!target || !isLiveStatus(target.status)) return;
-			await cancelOneTask(taskName, why);
-			return;
-		}
-		const liveNames = Object.values(runState.forks)
-			.filter((f) => isLiveStatus(f.status))
-			.map((f) => f.name);
-		await Promise.all(liveNames.map((n) => cancelOneTask(n, why)));
-		dispatchAbort.abort();
-	};
+	runState.cancel = createRunCanceller(runState, cancelOneTask);
 	if (args.recoveryDescriptors && args.recoveryDescriptors.size > 0) {
 		runState.recoveryDescriptors = args.recoveryDescriptors;
 	}
@@ -3842,11 +3870,13 @@ function invocationOverridesFromSlot(slot: any): InvocationAgentOverrides | unde
 		slot?.maxSubagentDepth !== undefined ||
 		slot?.skill !== undefined ||
 		slot?.skills !== undefined ||
+		slot?.fabric !== undefined ||
 		slot?.env !== undefined ||
 		slot?.max_duration_ms !== undefined ||
 		slot?.wind_down_grace_ms !== undefined;
 	if (!hasOverride) return undefined;
 	return {
+		...(slot.fabric !== undefined ? { fabric: slot.fabric } : {}),
 		model: slot.model,
 		thinking: slot.thinking,
 		thinkingMin: slot.thinkingMin,
@@ -3859,26 +3889,6 @@ function invocationOverridesFromSlot(slot: any): InvocationAgentOverrides | unde
 		maxDurationMs: slot.max_duration_ms,
 		windDownGraceMs: slot.wind_down_grace_ms,
 	};
-}
-
-/** Resolve and freeze one slot's §5 policy before any dispatch side effect. */
-function resolveSlotEscalationPolicy(args: {
-	shape: "supervised" | "direct" | "parallel-direct" | "chain";
-	config: DelegateConfig;
-	agent: AgentConfig | undefined;
-	invocationValue: unknown;
-	fieldPath: string;
-}): EffectiveEscalationPolicy {
-	let invocationLayer: EscalationConfig | undefined;
-	if (args.invocationValue !== undefined) {
-		invocationLayer = parseEscalationInvocationValue(args.invocationValue, args.fieldPath);
-	}
-	return resolveEscalationPolicy({
-		shape: args.shape,
-		globalLayer: args.config.escalationGlobalLayer,
-		agentLayer: args.agent?.escalation,
-		invocationLayer,
-	});
 }
 
 function escalationPreflightError(error: unknown, errorCode = "invalid-request"): {
@@ -3903,8 +3913,8 @@ function projectTrustPreflight(
 
 /**
  * Nested-caller refusal with its structured failure class. Agent-policy denials
- * remain uncoded core errors; every writable-root confinement refusal (including
- * a read-only caller's child-authority refusal) is `invalid-confinement`.
+ * remain uncoded core errors; every writable-root confinement refusal is
+ * `invalid-confinement`.
  */
 function nestedDelegateRefusal(
 	policy: ReturnType<typeof nestedDelegatePolicyForApi>,
@@ -3978,29 +3988,15 @@ function configuredAgentDiscoveryOptions(
 	cwd: string,
 	warnings?: string[],
 ): PackageAgentDiscoveryOptions {
-	return {
-		additionalResolvedPackageRoots: configuredPackageRoots({
-			cwd,
-			agentDir: getAgentDir(),
-			projectTrusted: ctx.isProjectTrusted?.() === true,
-			...(warnings ? { warn: (message: string) => warnings.push(message) } : {}),
-		}),
-	};
+	return agentDiscoveryOptions(cwd, ctx.isProjectTrusted?.() === true, warnings);
 }
 
-/** Apply the effective delegate config to an already-discovered agent list. */
-function applyConfiguredAgentOverrides(
-	discovery: ReturnType<typeof discoverAgents>,
-	config: DelegateConfig = loadConfigReadOnly(getAgentDir()),
-): ReturnType<typeof discoverAgents> {
-	const overridden = applyAgentOverrides(discovery.agents, config);
-	if (overridden.unmatched.length > 0) {
-		logDelegateDiagnostic(
-			`agentOverrides keys had no matching agent: ${overridden.unmatched.join(", ")}`,
-			{ agentDir: getAgentDir() },
-		);
-	}
-	return { ...discovery, agents: overridden.agents };
+/** The effective agents native dispatch selects from for this context. */
+function effectiveAgentsFor(
+	ctx: Pick<ExtensionContext, "isProjectTrusted" | "cwd">,
+	scope: AgentScope = "both",
+): EffectiveAgentDiscovery {
+	return resolveEffectiveAgents(ctx.cwd, { scope, projectTrusted: ctx.isProjectTrusted?.() === true });
 }
 
 /**
@@ -4150,13 +4146,15 @@ export default function (pi: ExtensionAPI) {
 		registerDeferredTools(deferredNames, true);
 		if (!Array.isArray(active)) return () => {};
 		// Registration refreshes the foreground active set, so restore it before
-		// the delegate call returns or starts any background worker. The worker gets
-		// the same definition through getWorkerToolDefinitions below.
+		// the delegate call returns or starts any background worker. The worker
+		// registers its own control definitions in its loaded extension.
 		toolRegistry.setActiveTools?.(active);
 		return () => {};
 	};
 	const getWorkerToolDefinitions = (names: readonly string[]): readonly ToolDefinition[] =>
 		names.flatMap((name) => {
+			// Control closures belong to the worker's loaded runtime and live registry.
+			if (name === "delegate_control" || name === "delegate_escalation") return [];
 			const definition = deferredToolDefinitions.get(name);
 			return definition ? [definition as unknown as ToolDefinition] : [];
 		});
@@ -4501,12 +4499,11 @@ export default function (pi: ExtensionAPI) {
 
 		const scope: AgentScope = (params.agent_scope as AgentScope) ?? "both";
 		const discoveryOptions = configuredAgentDiscoveryOptions(ctx, ctx.cwd);
-		const discovery = discoverAgents(ctx.cwd, scope, discoveryOptions);
-		let config = loadConfigReadOnly(getAgentDir());
 		// Phase D: filter builtins + apply per-agent overrides from
 		// `<agentDir>/config/pi-delegate/config.json` + config.local.json.
-		const overridden = applyConfiguredAgentOverrides(discovery, config);
-		const agents = overridden.agents;
+		const discovery = effectiveAgentsFor(ctx, scope);
+		let config = discovery.config;
+		const agents = discovery.agents;
 
 		// ── Phase A: shape detection ──────────────────────────────────────
 		// Three accepted top-level shapes: {agents}, {tasks}, {agent,task}.
@@ -4735,6 +4732,7 @@ export default function (pi: ExtensionAPI) {
 				model?: unknown;
 				env?: EnvOverrides;
 				maxSubagentDepth?: unknown;
+				fabric?: unknown;
 			};
 			if (typeof orch?.agent !== "string" || orch.agent.trim() === "") {
 				return {
@@ -4812,6 +4810,7 @@ export default function (pi: ExtensionAPI) {
 						: orch.task,
 					...(typeof orch.model === "string" ? { model: orch.model } : {}),
 					...(orch.env !== undefined ? { env: orch.env } : {}),
+					...(orch.fabric === false ? { fabric: false } : {}),
 					...(requestedMaxSubagentDepth !== undefined
 						? { maxSubagentDepth: requestedMaxSubagentDepth }
 						: {}),
@@ -4841,50 +4840,7 @@ export default function (pi: ExtensionAPI) {
 		if (shape === "single-direct" || shape === "parallel-direct") {
 			const rawTasks =
 				shape === "single-direct"
-					? [
-							{
-								// A canonical single solo run may request a name, and the
-								// forkName is the key for receipts, steering and cancel.
-								// Hardcoding undefined here dropped it and the run entry fell
-								// back to the agent name.
-								name: params.name,
-								agent: params.agent,
-								task: params.task,
-								checklist: params.checklist,
-								...(params.focus !== undefined ? { focus: params.focus } : {}),
-								cwd: params.cwd,
-								artifact: params.artifact,
-								check: params.check,
-								reads: params.reads,
-								parentTranscriptSearch: params.parentTranscriptSearch,
-								progress: params.progress,
-								model: params.model,
-								thinking: params.thinking,
-								thinkingMin: params.thinkingMin,
-								thinkingMax: params.thinkingMax,
-								fallbackModels: params.fallbackModels,
-								maxSubagentDepth: params.maxSubagentDepth,
-								skill: params.skill,
-								skills: params.skills,
-								interactive: params.interactive,
-								writableRoots: params.writableRoots,
-								confineWrites: params.confineWrites,
-								readOnly: params.readOnly,
-								env: params.env,
-								retryOf: params.retryOf,
-								escalation: params.escalation,
-								// #287: the wall-clock budget travels with the slot. This
-								// list is an explicit allowlist, so a field omitted here is
-								// silently dropped before it can ever be armed.
-								max_duration_ms: params.max_duration_ms,
-								wind_down_grace_ms: params.wind_down_grace_ms,
-								// A canonical single run may request solo fan-out. Hardcoding
-								// 1 silently gave the caller one worker instead of the copies
-								// they asked for. Legacy single-direct callers supply no
-								// count and still get exactly one.
-								count: typeof params.count === "number" && params.count > 0 ? params.count : 1,
-							},
-						]
+					? [singleDirectRawTask(params)]
 					: params.tasks;
 			const repeatedRetry = rawTasks.find((task: (typeof rawTasks)[number]) => task.retryOf !== undefined && typeof task.count === "number" && task.count > 1);
 			if (repeatedRetry) {
@@ -5719,17 +5675,6 @@ export default function (pi: ExtensionAPI) {
 		// that escaped the pgid, worker session that hadn't booted yet, etc.
 		const cancelOneFork = async (forkName: string, reason: CancelReason) => {
 			const refs = sessionRefsByFork[forkName];
-			const current = runState.forks[forkName]?.status;
-			// Spec 0019 / REQ-PAUSE-1 — "paused" is a terminal status (forced finish),
-			// so a cancel that races a just-paused fork is a no-op like the other
-			// terminal statuses: there is nothing left to abort.
-			if (
-				current === "completed" ||
-				current === "failed" ||
-				current === "aborted" ||
-				current === "paused"
-			)
-				return;
 			const errorText = reasonToErrorText(reason);
 			forkAbortControllers[forkName]?.abort();
 			// Mark aborted up-front so the overlay / run-history reflect the
@@ -5773,20 +5718,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		};
 
-		runState.cancel = async (forkName, reason) => {
-			const why: CancelReason = reason ?? "user";
-			if (forkName !== undefined) {
-				const target = runState.forks[forkName];
-				if (!target || !isLiveStatus(target.status)) return;
-				await cancelOneFork(forkName, why);
-				return;
-			}
-			const liveNames = Object.values(runState.forks)
-				.filter((f) => isLiveStatus(f.status))
-				.map((f) => f.name);
-			await Promise.all(liveNames.map((n) => cancelOneFork(n, why)));
-				dispatchAbort.abort();
-		};
+		runState.cancel = createRunCanceller(runState, cancelOneFork);
 
 		// Create per-entry recovery descriptors for the supervised batch — ALWAYS,
 		// regardless of notifyOnFailure. notifyOnFailure only controls whether early-wake
@@ -6001,7 +5933,7 @@ export default function (pi: ExtensionAPI) {
 							delete windDownGraceTimers[forkName];
 							const currentStatus = runState.forks[forkName]?.status;
 							if (currentStatus === undefined || !isLiveStatus(currentStatus) || !isHardCancelEnabled(timeoutPolicy)) return;
-							cancelOneFork(forkName, "timeout").catch(() => {});
+							runState.cancel!(forkName, "timeout").catch(() => {});
 						}, windDownGraceMs);
 						(windDownGraceTimers[forkName] as unknown as { unref?: () => void }).unref?.();
 					}, Math.max(0, deadlineAtMs - Date.now()));
@@ -8239,7 +8171,9 @@ export default function (pi: ExtensionAPI) {
 	});
 	// Wakes and results that name a control route follow the same selection as
 	// the Fabric-mode instructions and native suppression.
-	setModelInterfaceProbe(pi, () => (fabric.adapter?.selected() === true ? "fabric" : "native"));
+	// Before Fabric's first activation (#574), a hidden native surface leaves
+	// fabric_exec as the only usable route, and `delegate.*` refs work from it.
+	setModelInterfaceProbe(pi, () => (fabric.adapter?.selected() === true || fabric.adapter?.routePending() === true ? "fabric" : "native"));
 	// The core is installed from the foreground `session_start` below, never at
 	// load. Pi loads a separate module instance for every in-process worker
 	// session, and those instances skip foreground lifecycle. Installing at load
@@ -8760,7 +8694,7 @@ export default function (pi: ExtensionAPI) {
 			.filter((run) => run.completedAt === undefined && hasLocalRunAuthority(run))
 			.filter((run) => (run.rootRunId ?? run.runId) === run.runId)
 			.map((run) => run.runId);
-		abortAllRuns(event.reason);
+		await waitForSessionShutdown(abortAllRuns(event.reason));
 		// Keep the query authoritative throughout shutdown terminalization. Only
 		// after abortAllRuns has durably removed local active registrations may the
 		// foreground listener disappear.
@@ -8913,14 +8847,8 @@ export default function (pi: ExtensionAPI) {
 		invokeDelegate,
 		invokeCancel,
 		listCancelTargets,
-		discoverAgents: (ctx) =>
-			applyConfiguredAgentOverrides(
-				discoverAgents(ctx.cwd, "both", configuredAgentDiscoveryOptions(ctx, ctx.cwd)),
-			).agents,
-		discoverAgentsWithWarnings: (ctx) =>
-			applyConfiguredAgentOverrides(
-				discoverAgents(ctx.cwd, "both", configuredAgentDiscoveryOptions(ctx, ctx.cwd)),
-			),
+		discoverAgents: (ctx) => effectiveAgentsFor(ctx).agents,
+		discoverAgentsWithWarnings: (ctx) => effectiveAgentsFor(ctx),
 		discoverChainsWithWarnings: (ctx) => {
 			const configuredWarnings: string[] = [];
 			const discovery = discoverAgentsAll(

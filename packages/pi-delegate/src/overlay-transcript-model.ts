@@ -255,9 +255,7 @@ export function buildTranscriptModel(
 				continue;
 			}
 
-			const durationMs = paired?.entry.timestamp !== undefined && entry.timestamp !== undefined
-				? paired.entry.timestamp - entry.timestamp
-				: undefined;
+			const durationMs = paired?.entry.durationMs;
 			const output = paired === undefined ? undefined : outputOf(paired.entry);
 			const args = argsOf(entry);
 			blocks.push({

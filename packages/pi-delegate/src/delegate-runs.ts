@@ -403,7 +403,7 @@ function compileLayers(runs: CanonicalRun[], task: string | undefined, groupOpti
  * spelling is rejected at dispatch time — later than the ingress, and for a
  * safety-relevant field.
  */
-function toRuntimeEscalation(value: unknown): unknown {
+export function toRuntimeEscalation(value: unknown): unknown {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return value;
 	const policy = value as JsonObject;
 	if (policy.escalation_mode === undefined) return policy;
@@ -448,6 +448,9 @@ function mergeDefaults(params: JsonObject, run: JsonObject): CanonicalRun {
 	// task, rather than relying on a per-runner fallback that supervised slots
 	// do not have. After-gated entries keep their "{previous}" default.
 	if (out.task === undefined && out.after === undefined && typeof params.task === "string") out.task = params.task;
+	// A top-level opt-out reaches every run, like readOnly. It only narrows: a
+	// run entry's `fabric: true` cannot undo it.
+	if (params.fabric === false) out.fabric = false;
 	if (params.handoff !== undefined) out.handoff = { ...(params.handoff as Record<string, unknown>), ...(out.handoff as Record<string, unknown> ?? {}) };
 	return out as CanonicalRun;
 }

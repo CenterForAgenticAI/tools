@@ -201,10 +201,11 @@ exact extension tools".
 
 ### A read-only slot must use the dispatch policy
 
-Set `readOnly: true` on the run entry. This removes `write` and `edit`, returns
-structured refusals, and blocks a best-effort list of obvious mutating bash
-commands. Agent frontmatter, prose, and `tools: [read, bash]` alone do not
-enforce the boundary:
+Set `readOnly: true` on the run entry. This confines `write` and `edit` to the
+worker's scratch and artifact paths, refuses mutating git outside them (so the
+worker cannot commit or switch branches in the shared checkout), and returns
+structured refusals. Agent frontmatter, prose, and `tools: [read, bash]` alone
+do not enforce the boundary:
 
 ```ts
 // invocation shape, not agent frontmatter
@@ -213,9 +214,11 @@ delegate({
 })
 ```
 
-The bash list is not a sandbox. Interpreters (`python -c`, `node -e`), nested
-shells, wrappers, aliases, unlisted mutators, and arbitrary custom tools can
-still write. Keep the prose rule as defense in depth:
+`readOnly` guards against accidental writes through `write`, `edit`, and git;
+it is not isolation. Other `bash` commands are not classified, so redirection,
+interpreters (`python -c`, `node -e`), and arbitrary custom tools can still
+write anywhere the OS allows. To isolate a worker from your checkout, dispatch
+it with `worktree: true`. Keep the prose rule as defense in depth:
 
 ```markdown
 Use `bash` only for read-only inspection — `git diff`, `git log`, `rg`, test
@@ -234,6 +237,7 @@ is silently inert. Group them mentally:
 | Wall-clock budget | `maxDurationMs`, `windDownGraceMs` | `mode: "solo"` and `mode: "supervised"` entries (#287); a driver rejects both |
 | Solo only | `defaultReads`, `defaultProgress`, `artifact` | `mode: "solo"` entries and saved chain steps |
 | Delegation limits | `maxSubagentDepth`, `allowNestedDelegate`, `nestedDelegateAgents` | any worker that itself delegates |
+| Tool surface | `fabric` (`false` keeps native tools when pi-fabric is loaded) | workers whose profile loads pi-fabric |
 
 Setting `collapseMode: summary` on an agent you only ever dispatch as a solo
 run does nothing. Setting `artifact: plan.md` on a supervised entry is rejected

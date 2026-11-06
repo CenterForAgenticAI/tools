@@ -1,9 +1,7 @@
-// VENDORED build-time type fallback for the OPTIONAL @caair/pi-daemon peer (#35 / #470).
-// Copied verbatim from @caair/pi-daemon dist .d.ts. Used ONLY when the package is
-// absent (tsconfig `paths` resolves the real node_modules types first, these second),
-// so pi-delegate builds/type-checks without the package. Regenerate by re-copying
-// @caair/pi-daemon/dist/{client,protocol}/*.d.ts when the daemon protocol changes.
-// Do not hand-edit.
+// VENDORED build-time type fallback for optional @centerforagenticai/pi-daemon@0.4.0.
+// Copied verbatim from its published dist declarations. Used only when the
+// package is absent; tsconfig paths prefer the installed declarations.
+// Regenerate from dist/{client,protocol}/*.d.ts. Do not hand-edit.
 export type JsonPrimitive = boolean | number | string | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | {
     [key: string]: JsonValue;

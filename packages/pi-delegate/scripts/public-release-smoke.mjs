@@ -9,9 +9,10 @@ const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf
 
 assert.equal(manifest.name, "@centerforagenticai/pi-delegate");
 assert.equal(manifest.license, "MIT");
-assert.equal(manifest.optionalDependencies, undefined);
-assert.equal(manifest.peerDependenciesMeta, undefined);
+assert.deepEqual(Object.keys(manifest.optionalDependencies ?? {}), ["@centerforagenticai/pi-daemon"]);
+assert.deepEqual(manifest.peerDependenciesMeta, { "@centerforagenticai/pi-daemon": { optional: true } });
 assert.deepEqual(Object.keys(manifest.peerDependencies ?? {}).sort(), [
+  "@centerforagenticai/pi-daemon",
   "@earendil-works/pi-ai",
   "@earendil-works/pi-coding-agent",
   "@earendil-works/pi-tui",

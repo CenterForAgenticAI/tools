@@ -395,13 +395,25 @@ accept that the package can register extensions, skills, prompts,
 themes — code paths with full system access. Package-shipped agents
 fit the same model.
 
+**Today, installing a package is the one trust event for its agent
+files.** Pi-delegate does not record a digest of an agent file, so a later
+version of the package is accepted as it is.
+
+**Planned change (not built yet):** installing a package will no longer
+approve later versions of its agent files. Their digests will be pinned in
+`caair-stack/stack.lock.json`, and the lock will be signed in OpenSSF Model
+Signing (OMS) format. Pi will warn at load on an unsigned or changed entry,
+then refuse once the warnings stop. This is decision 1.2 of the agent
+protocol review (18 October 2026); the work belongs to pi-stack. Nothing in
+this repository checks the lock yet.
+
 This means:
 
 - **No `confirmProjectAgents` prompt for package agents.** That
   per-repo gate exists to protect users against running unfamiliar
   agents from an untrusted clone of a repo. Package agents are
-  installed deliberately and globally; the install itself is the
-  trust event.
+  installed deliberately and globally; today the install itself is the
+  trust event (see the planned change above).
 - **A package's `skills:` references resolve through the existing
   pi skill discovery.** A package shipping an agent that depends on
   a skill it doesn't also ship will fail at dispatch time with the

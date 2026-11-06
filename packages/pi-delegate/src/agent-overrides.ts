@@ -127,8 +127,8 @@ function applyGlobalBaseline(
 
 	const next = copyOptionalGlobalToolEntries(agent, { ...agent });
 	if (globalTools.length > 0) {
-		const explicitTools = agent.tools && agent.tools.length > 0 ? agent.tools : undefined;
-		next.tools = explicitTools
+		const explicitTools = agent.tools;
+		next.tools = explicitTools !== undefined
 			? dedupe([...globalTools, ...explicitTools])
 			: dedupe([...DEFAULT_WORKER_TOOLS, ...globalTools]);
 		setOptionalGlobalToolEntries(
@@ -196,7 +196,11 @@ function mergeOverride(
 	}
 
 	if (ov.tools !== undefined) {
-		if (baseline === undefined || ov.tools.length === 0) {
+		if (ov.tools.length === 0) {
+			// An empty durable list clears the agent back to unspecified (Pi defaults), as documented;
+			// `[]` itself would now be an explicit, unusable allowlist.
+			delete next.tools;
+		} else if (baseline === undefined) {
 			next.tools = [...ov.tools];
 		} else {
 			next.tools = dedupe([...(next.tools ?? []), ...ov.tools]);
@@ -218,6 +222,10 @@ function mergeOverride(
 			next.skills = dedupe([...(next.skills ?? baseline.skills ?? []), ...ov.skills]);
 		}
 	}
+
+	// The fabric opt-out only narrows (#582): an override can add
+	// `fabric: false`, but its `fabric: true` never undoes the agent's.
+	if (ov.fabric === false) next.fabric = false;
 
 	const thinkingKeys = ["thinking", "thinkingMin", "thinkingMax"] as const;
 	if (thinkingKeys.some((key) => ov[key] !== undefined)) {

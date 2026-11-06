@@ -471,6 +471,7 @@ Import `DELEGATE_EVENTS` instead of copying these strings. The object contains e
 | `delegate:guidance-drained` | A worker took queued guidance. |
 | `delegate:guidance-delivered` | Queued guidance reached the worker's transcript. |
 | `delegate:worker-notify` | A worker called `ctx.ui.notify`. |
+| `delegate:worker-session` | A direct or fork worker's `AgentSession` opened, emitted a native event, or closed (`phase`: `opened`, `event`, `closed`; payload `DelegateWorkerSessionEvent`). Native events are forwarded unchanged and entry IDs stay owned by `AgentSession`. The `event` payload is the SDK's live object and partial `message_update` messages keep mutating, so consumers must serialise or copy it synchronously. |
 | `delegate:complete` | A run reached a terminal state. |
 | `delegate:sync-orphan-recovery-surfaced` | An interrupted synchronous run surfaced recovery information. |
 | `delegate:reveal-control-tools` | Another extension asked pi-delegate to reveal lazy control tools. |

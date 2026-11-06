@@ -39,6 +39,7 @@ import { renderPromptRepairReport } from "./prompt-repair-seam.js";
 import { runFailureReasonFor } from "./pending-wakes.js";
 import type { RunFailureReason, RunFailureRecovery } from "./pending-wakes.js";
 import { controlHints, type DelegateModelInterface } from "./model-interface.js";
+import { formatWorkerSurfaceLine } from "./worker-surface.js";
 import type { ModelRuntimeLike } from "./sdk-model-runtime.js";
 import type { EffectiveEscalationPolicy } from "./escalation-policy.js";
 import type { ResolvedRunTimeoutPolicy } from "./fork-timeout.js";
@@ -241,6 +242,7 @@ interface RawDirectTaskInput {
 	maxSubagentDepth?: number;
 	skill?: InvocationSkillOverride;
 	skills?: InvocationSkillOverride;
+	fabric?: boolean;
 	[k: string]: any;
 }
 
@@ -254,9 +256,11 @@ function invocationOverridesFromRawTask(raw: RawDirectTaskInput): InvocationAgen
 		raw.maxSubagentDepth !== undefined ||
 		raw.skill !== undefined ||
 		raw.skills !== undefined ||
+		raw.fabric !== undefined ||
 		raw.env !== undefined;
 	if (!hasOverride) return undefined;
 	return {
+		...(raw.fabric !== undefined ? { fabric: raw.fabric } : {}),
 		model: raw.model,
 		thinking: raw.thinking,
 		thinkingMin: raw.thinkingMin,
@@ -266,6 +270,60 @@ function invocationOverridesFromRawTask(raw: RawDirectTaskInput): InvocationAgen
 		skill: raw.skill,
 		skills: raw.skills,
 		...(raw.env !== undefined ? { env: raw.env } : {}),
+	};
+}
+
+/**
+ * The worker slot for a single solo run (`detectShape` → "single-direct").
+ *
+ * `compileDelegateRuns` lifts a lone solo run entry to top-level fields, so
+ * this is the one place those fields become a slot again. It is an explicit
+ * list: a field left out here is dropped before the worker sees it, as the
+ * wall-clock budget (#287) and `fabric: false` (#587) once were.
+ * tests/unit/single-direct-raw-task.test.ts checks it against every run-entry
+ * field in the dispatch schema.
+ */
+export function singleDirectRawTask(params: Record<string, unknown>) {
+	return {
+		// A canonical single solo run may request a name, and the forkName is
+		// the key for receipts, steering and cancel. Hardcoding undefined here
+		// dropped it and the run entry fell back to the agent name.
+		name: params.name,
+		agent: params.agent,
+		task: params.task,
+		checklist: params.checklist,
+		...(params.focus !== undefined ? { focus: params.focus } : {}),
+		cwd: params.cwd,
+		artifact: params.artifact,
+		check: params.check,
+		reads: params.reads,
+		parentTranscriptSearch: params.parentTranscriptSearch,
+		progress: params.progress,
+		model: params.model,
+		thinking: params.thinking,
+		thinkingMin: params.thinkingMin,
+		thinkingMax: params.thinkingMax,
+		fallbackModels: params.fallbackModels,
+		maxSubagentDepth: params.maxSubagentDepth,
+		skill: params.skill,
+		skills: params.skills,
+		interactive: params.interactive,
+		writableRoots: params.writableRoots,
+		confineWrites: params.confineWrites,
+		readOnly: params.readOnly,
+		// #587: the run or top-level `fabric: false` opt-out. Without it the
+		// invocation overrides never see the opt-out and the worker gets fabric_exec.
+		fabric: params.fabric,
+		env: params.env,
+		retryOf: params.retryOf,
+		escalation: params.escalation,
+		// #287: the wall-clock budget travels with the slot.
+		max_duration_ms: params.max_duration_ms,
+		wind_down_grace_ms: params.wind_down_grace_ms,
+		// A canonical single run may request solo fan-out. Hardcoding 1 silently
+		// gave the caller one worker instead of the copies they asked for.
+		// Legacy single-direct callers supply no count and still get exactly one.
+		count: typeof params.count === "number" && params.count > 0 ? params.count : 1,
 	};
 }
 
@@ -362,6 +420,7 @@ export function buildDirectCombinedContent(
 		const lines: string[] = [];
 		if (r.workerSessionFile) lines.push(`worker session: ${r.workerSessionFile}`);
 		if (Array.isArray(r.activeToolNames)) lines.push(`tools: ${r.activeToolNames.join(", ") || "(none)"}`);
+		if (r.surface && r.surfaceReason) lines.push(formatWorkerSurfaceLine({ surface: r.surface, surfaceReason: r.surfaceReason }));
 		if (r.outputFile) lines.push(`output: ${r.outputFile.absolutePath}`);
 		if (r.error) lines.push(`error: ${r.error}`);
 		const recovery = r.status === "failed" ? recoveryByWorker?.get(r.name) : undefined;

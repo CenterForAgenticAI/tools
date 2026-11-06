@@ -48,6 +48,7 @@ import {
 
 import { PROMPT_REPAIR_ENTRY_TYPE, mergePromptRepairRecords, parsePromptRepairRecord, type PromptRepairRecord } from "./prompt-repair-seam.js";
 import type { WorktreeDiff } from "./worktree.js";
+import { projectWorkerSurfaceReport } from "./worker-surface.js";
 /** Optional direct-only fields carried on caller-visible tool details. */
 export interface RunResultDetailExtensions {
 	harvest?: HarvestOutcome;
@@ -163,6 +164,7 @@ export function projectTranscriptEntry(entry: unknown): RunResult["transcript"][
 	if (entry.source !== "supervisor" && entry.source !== "worker") return undefined;
 	if (!isTranscriptRole(entry.role)) return undefined;
 	const timestamp = optionalFiniteNumber(entry.timestamp);
+	const durationMs = optionalFiniteNumber(entry.durationMs);
 	const toolName = optionalString(entry.toolName);
 	const toolCallId = optionalString(entry.toolCallId);
 	const toolMeta = optionalString(entry.toolMeta);
@@ -173,6 +175,7 @@ export function projectTranscriptEntry(entry: unknown): RunResult["transcript"][
 		role: entry.role,
 		text: entry.text,
 		...(timestamp !== undefined ? { timestamp } : {}),
+		...(durationMs !== undefined && durationMs >= 0 ? { durationMs } : {}),
 		...(toolName !== undefined ? { toolName } : {}),
 		...(toolCallId !== undefined ? { toolCallId } : {}),
 		...(toolMeta !== undefined ? { toolMeta } : {}),
@@ -547,6 +550,8 @@ function projectAgentMessage(message: unknown, timeoutSalvage = false): AgentMes
 	projected.toolCallId = projectTimeoutString(message.toolCallId, timeoutSalvage)!;
 	projected.toolName = projectTimeoutString(message.toolName, timeoutSalvage)!;
 	projected.isError = message.isError;
+	const durationMs = optionalFiniteNumber(message.durationMs);
+	if (durationMs !== undefined && durationMs >= 0) projected.durationMs = durationMs;
 	const usage = projectAgentSdkUsage(message.usage);
 	if (usage !== undefined) projected.usage = usage;
 	if (Array.isArray(message.addedToolNames)) {
@@ -694,6 +699,7 @@ export function projectRunResult(
 			: cappedResult.text,
 		...(typeof result.workerSessionFile === "string" ? { workerSessionFile: projectTimeoutString(result.workerSessionFile, timeoutSalvage) } : {}),
 		...(activeToolNames !== undefined ? { activeToolNames } : {}),
+		...projectWorkerSurfaceReport(result),
 		...(inputDigests !== undefined ? { inputDigests } : {}),
 		...(result.taskLedger !== undefined ? { taskLedger: timeoutSalvage ? projectTimeoutTaskLedger(result.taskLedger) : projectTaskLedger(result.taskLedger) } : {}),
 		...(typeof result.recoveredOutput === "boolean" ? { recoveredOutput: result.recoveredOutput } : {}),

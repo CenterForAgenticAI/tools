@@ -35,7 +35,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import type { Cursor } from "@caair/pi-daemon/protocol";
+import type { Cursor } from "@centerforagenticai/pi-daemon/protocol";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -834,6 +834,8 @@ export interface OrchestrateCfg {
 	extensionExclude?: string[];
 	/** Builtin/exact custom-tool allowlist for the child session; undefined → defaults. */
 	tools?: string[];
+	/** `false` when the agent or the run opted out of Fabric: the child never receives fabric_exec (#582). */
+	fabric?: false;
 	/**
 	 * Whether the caller explicitly declared its tool allowlist before the
 	 * foreground materialized hosted defaults into `tools`. New writers always

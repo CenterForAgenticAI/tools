@@ -404,6 +404,11 @@ export interface AgentOverride {
 	interactive?: boolean;
 	maxSubagentDepth?: number;
 	allowNestedDelegate?: boolean;
+	/**
+	 * `false` keeps native tools (#582). Only narrows: `true` never undoes an
+	 * agent's `fabric: false`.
+	 */
+	fabric?: boolean;
 	nestedDelegateAgents?: string[];
 	/** Supervised-run absolute budget override; 0 explicitly disables. */
 	maxDurationMs?: number;
@@ -1311,6 +1316,12 @@ export function loadConfig(agentDir: string = defaultAgentDir(), options: LoadCo
 				}
 				delete override.max_duration_ms;
 				delete override.wind_down_grace_ms;
+				if ("fabric" in rawOverride && typeof rawOverride.fabric !== "boolean") {
+					// Fail closed (#587): a value that is not a boolean must not leave the
+					// worker on Fabric. Keep the agent name out of the diagnostic.
+					override.fabric = false;
+					warnConfig("[delegate] invalid agentOverrides.fabric; treating it as fabric: false (expected a boolean)");
+				}
 				if ("env" in rawOverride) {
 					try {
 						override.env = parseEnvOverrides(rawOverride.env, "agentOverrides.env");

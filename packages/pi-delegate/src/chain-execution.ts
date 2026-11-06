@@ -69,6 +69,7 @@ import {
 } from "./intercom-bridge.js";
 import type { RunResult } from "./fork-runner.js";
 import { formatForkWarningLines } from "./fork-warnings.js";
+import { formatWorkerSurfaceLine } from "./worker-surface.js";
 import { runFailureReasonFor } from "./pending-wakes.js";
 import type { RunFailureReason } from "./pending-wakes.js";
 import { prepareChainDir } from "./output-file.js";
@@ -128,6 +129,8 @@ export interface ChainSequentialStep {
 	writableRoots?: string[];
 	confineWrites?: boolean;
 	readOnly?: boolean;
+	/** `false` keeps native tools (#582); it only narrows the agent's setting. */
+	fabric?: boolean;
 	/**
 	 * Per-step wall-clock budget (#287). Carried on the step because an
 	 * after-gated solo dispatch compiles to a chain, and the budget the caller
@@ -425,9 +428,11 @@ export function invocationOverridesFromStep(step: ChainSequentialStep): Invocati
 		step.maxSubagentDepth !== undefined ||
 		step.skill !== undefined ||
 		step.skills !== undefined ||
+		step.fabric !== undefined ||
 		step.env !== undefined;
 	if (!hasOverride) return undefined;
 	return {
+		...(step.fabric !== undefined ? { fabric: step.fabric } : {}),
 		model: step.model,
 		thinking: step.thinking,
 		thinkingMin: step.thinkingMin,
@@ -982,6 +987,46 @@ async function runSequentialStep(
 
 // ── Parallel step ──────────────────────────────────────────────────────────
 
+/**
+ * Map one parallel chain slot to the raw task `expandParallelTasks` reads.
+ * Every slot field a worker honours must be listed here; an omitted field is
+ * silently dropped for parallel chain workers.
+ */
+export function chainParallelSlotRawTask(
+	slot: ChainSequentialStep & { count?: number; name?: string },
+	agent: AgentConfig,
+	task: string,
+): Parameters<typeof expandParallelTasks>[0]["rawTasks"][number] {
+	return {
+		name: slot.name,
+		agent,
+		task,
+		cwd: slot.cwd,
+		// expandParallelTasks currently predates artifact and drops unknown fields;
+		// runParallelStep preserves the declaration through that seam.
+		reads: slot.reads,
+		parentTranscriptSearch: slot.parentTranscriptSearch,
+		progress: slot.progress,
+		interactive: slot.interactive,
+		writableRoots: slot.writableRoots,
+		confineWrites: slot.confineWrites,
+		readOnly: slot.readOnly,
+		...(slot.fabric !== undefined ? { fabric: slot.fabric } : {}),
+		env: slot.env,
+		escalationPolicy: slot.escalationPolicy,
+		model: slot.model,
+		thinking: slot.thinking,
+		thinkingMin: slot.thinkingMin,
+		thinkingMax: slot.thinkingMax,
+		fallbackModels: slot.fallbackModels,
+		skill: slot.skill,
+		skills: slot.skills,
+		max_duration_ms: slot.max_duration_ms,
+		wind_down_grace_ms: slot.wind_down_grace_ms,
+		count: slot.count,
+	};
+}
+
 async function runParallelStep(
 	step: ChainParallelStep,
 	stepIndex: number,
@@ -1009,40 +1054,13 @@ async function runParallelStep(
 			expandedResolutionErrors.push(resolutionError);
 			expandedArtifacts.push((slot as typeof slot & { artifact?: string | false }).artifact);
 		}
-		tasksRaw.push({
-			name: slot.name,
-			agent: agentObj,
-			task: resolveStepTaskBody({
-				stepIndex,
-				rawTask: slot.task,
-				chainTask: ctx.chainTask,
-				previous: ctx.previous,
-				chainDir: ctx.chainDir,
-			}),
-			cwd: slot.cwd,
-			// expandParallelTasks currently predates artifact and drops unknown fields;
-			// expandedArtifacts above preserves the declaration through that seam.
-
-			reads: slot.reads,
-			parentTranscriptSearch: slot.parentTranscriptSearch,
-			progress: slot.progress,
-			interactive: slot.interactive,
-			writableRoots: slot.writableRoots,
-			confineWrites: slot.confineWrites,
-			readOnly: slot.readOnly,
-			env: slot.env,
-			escalationPolicy: slot.escalationPolicy,
-			model: slot.model,
-			thinking: slot.thinking,
-			thinkingMin: slot.thinkingMin,
-			thinkingMax: slot.thinkingMax,
-			fallbackModels: slot.fallbackModels,
-			skill: slot.skill,
-			skills: slot.skills,
-			max_duration_ms: slot.max_duration_ms,
-			wind_down_grace_ms: slot.wind_down_grace_ms,
-			count: slot.count,
-		});
+		tasksRaw.push(chainParallelSlotRawTask(slot, agentObj, resolveStepTaskBody({
+			stepIndex,
+			rawTask: slot.task,
+			chainTask: ctx.chainTask,
+			previous: ctx.previous,
+			chainDir: ctx.chainDir,
+		})));
 	}
 
 	// 2. Expand `count` and dedupe names. Then prefix each name with
@@ -1296,7 +1314,13 @@ export function buildChainCombinedContent(steps: ChainStepResult[]): string {
 	for (const s of steps) {
 		const status = s.ok ? "completed" : "failed";
 		const warningLines = s.results.flatMap((result) => formatForkWarningLines(result.warnings));
-		const warningPrefix = warningLines.length > 0 ? `${warningLines.join("\n")}\n\n` : "";
+		// The tool surface each worker received (#582). A parallel step names
+		// the entry, because its results share one block.
+		const surfaceLines = s.results.flatMap((result) => result.surface && result.surfaceReason
+			? [`${s.stepKind === "parallel" ? `${result.name} — ` : ""}${formatWorkerSurfaceLine({ surface: result.surface, surfaceReason: result.surfaceReason })}`]
+			: []);
+		const prefixLines = [...warningLines, ...surfaceLines];
+		const warningPrefix = prefixLines.length > 0 ? `${prefixLines.join("\n")}\n\n` : "";
 		if (s.stepKind === "sequential") {
 			const r = s.results[0]!;
 			const header = `## Step ${s.stepIndex + 1} — ${r.agent} (sequential, ${status})`;

@@ -15,6 +15,22 @@ import { getRun, hasLocalRunAuthority, listRuns } from "./runtime.js";
 /** Maximum time to wait for worker extensions before invalidating their session. */
 export const DEFAULT_WORKER_SESSION_SHUTDOWN_TIMEOUT_MS = 1_000;
 
+/** Bound lifecycle drains so SDK teardown cannot wait on itself indefinitely. */
+export async function waitForSessionShutdown(
+	completion: Promise<unknown>,
+	timeoutMs = DEFAULT_WORKER_SESSION_SHUTDOWN_TIMEOUT_MS,
+): Promise<void> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			completion,
+			new Promise<void>((resolve) => { timeout = setTimeout(resolve, timeoutMs); }),
+		]);
+	} finally {
+		if (timeout !== undefined) clearTimeout(timeout);
+	}
+}
+
 /**
  * Notify extensions and then dispose a delegate-owned session.
  *
@@ -31,28 +47,8 @@ export async function disposeWorkerSession(
 		const extensionRunner = session.extensionRunner;
 		if (extensionRunner.hasHandlers("session_shutdown")) {
 			await withDelegateOwnedExtensionBind(async () => {
-				let timeout: ReturnType<typeof setTimeout> | undefined;
-				try {
-					const event: SessionShutdownEvent = { type: "session_shutdown", reason: "quit" };
-					// A handler that never settles must not strand this promise: swallow a
-					// late rejection so it cannot surface as an unhandled rejection after
-					// the race has already been decided by the timeout.
-					const emit = Promise.resolve()
-						.then(() => extensionRunner.emit(event))
-						.then(() => undefined, () => undefined);
-					// The timer is deliberately NOT unref'd. An unref'd timer lets the event
-					// loop drain while a hanging handler leaves this race pending, which Node
-					// reports as "Promise resolution is still pending but the event loop has
-					// already resolved". `clearTimeout` in the finally bounds it either way.
-					const timeoutPromise = new Promise<void>((resolve) => {
-						timeout = setTimeout(resolve, timeoutMs);
-					});
-					await Promise.race([emit, timeoutPromise]);
-				} catch {
-					// Extension shutdown is best effort; disposal must still happen.
-				} finally {
-					if (timeout !== undefined) clearTimeout(timeout);
-				}
+				const event: SessionShutdownEvent = { type: "session_shutdown", reason: "quit" };
+				await waitForSessionShutdown(extensionRunner.emit(event), timeoutMs);
 			}, nestedDelegatePolicy);
 		}
 	} catch {
@@ -157,12 +153,12 @@ export function registerChildCompletionGate(
 		staleWait?.settle();
 	});
 
-	pi.on("session_shutdown", (_event, ctx) => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		if (!isDelegateOwnedExtensionApi(pi)) return;
 		const wait = activeWait;
 		activeWait = undefined;
 		wait?.settle();
-		for (const child of unfinishedOwnedChildren(ctx)) child.abort();
+		await Promise.all(unfinishedOwnedChildren(ctx).map((child) => child.cancel!(undefined, "shutdown")));
 	});
 
 	pi.on("agent_end", async (event, ctx) => {

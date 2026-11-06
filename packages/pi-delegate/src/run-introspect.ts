@@ -91,6 +91,7 @@ import { readRouteRecord } from "./control-route.js";
 import { actorActivitySilenceMs } from "./actor-activity.js";
 import { isSafeRunId } from "./run-id.js";
 import { buildRetryProjection, type RetryProjectionFork } from "./retry-projection.js";
+import { projectWorkerSurfaceReport, type WorkerSurfaceReason } from "./worker-surface.js";
 
 // ── Uniform shapes ───────────────────────────────────────────────────────────
 
@@ -669,8 +670,29 @@ function inMemoryStatus(run: NonNullable<ReturnType<typeof getRunSnapshot>>): Un
 			usage: aggregateRunStateUsage(run),
 			...(safeRecovery ? { recovery: safeRecovery } : {}),
 			...(typeof run.detached === "boolean" ? { detached: run.detached } : {}),
+			...summarizeWorkerSurfaces(entries),
 		},
 	};
+}
+
+/**
+ * Categorical worker-surface counts (#582): how many entries reached tools
+ * through fabric_exec or native tools, and why. Only closed-set values pass.
+ */
+function summarizeWorkerSurfaces(
+	entries: ReadonlyArray<{ surface?: unknown; surfaceReason?: unknown }>,
+): { workerSurfaces?: { fabric: number; native: number; reasons: Partial<Record<WorkerSurfaceReason, number>> } } {
+	let fabric = 0;
+	let native = 0;
+	const reasons: Partial<Record<WorkerSurfaceReason, number>> = {};
+	for (const entry of entries) {
+		const report = projectWorkerSurfaceReport(entry);
+		if (!report.surface || !report.surfaceReason) continue;
+		if (report.surface === "fabric") fabric += 1;
+		else native += 1;
+		reasons[report.surfaceReason] = (reasons[report.surfaceReason] ?? 0) + 1;
+	}
+	return fabric + native === 0 ? {} : { workerSurfaces: { fabric, native, reasons } };
 }
 
 /** Map an in-memory run snapshot to the uniform result. */
@@ -1353,6 +1375,10 @@ function resolveDetachedStatus(
 	eventCache?: EventTailCache,
 	childLogOptions: ChildLogSurfaceOptions = {},
 ): UniformRunStatus | undefined {
+	// No `workerSurfaces` here (#582): a detached child admits or withholds
+	// fabric_exec inside its own process and reports no surface back, so the
+	// parent has no evidence to count. In-process runs, including completed
+	// runs hydrated after a restart, report it through inMemoryStatus.
 	const cfg = loadDetachedCfg(agentDir, runId);
 	const rootRunId = cfg?.rootRunId ?? runId;
 	const eventTail = readBusEventTail(agentDir, rootRunId, eventCache);

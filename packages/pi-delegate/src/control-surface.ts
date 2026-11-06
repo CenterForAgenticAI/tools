@@ -361,7 +361,7 @@ export function parseToolGrant(entry: string): ToolGrant | undefined {
 		return { tool: legacy.tool, actions: [legacy.action] };
 	}
 
-	const known = ACTIONS_BY_TOOL[name];
+	const known = Object.hasOwn(ACTIONS_BY_TOOL, name) ? ACTIONS_BY_TOOL[name] : undefined;
 	if (!known) return undefined;
 	if (action === undefined) return { tool: name };
 	if (action.length === 0 || !known.includes(action)) {

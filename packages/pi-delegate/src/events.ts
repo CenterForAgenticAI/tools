@@ -16,6 +16,8 @@
  * message and this bus event are separate mechanisms that share a name.
  */
 export const DELEGATE_EVENTS = Object.freeze({
+	/** Native worker AgentSession events, bracketed by opened/closed ownership frames. */
+	workerSession: "delegate:worker-session",
 	/** A run was registered or its registration changed. Payload: `{ runId }`. */
 	register: "delegate:register",
 	/** A run's registration was withdrawn. Payload: `{ runId }`. */
@@ -71,3 +73,16 @@ export function emitDelegateEvent(
 ): void {
 	emit(name, data);
 }
+
+/**
+ * Native identity is owned by AgentSession; hosts must not infer entry IDs.
+ * `event` is the SDK's live object and partial `message_update` messages keep
+ * mutating, so consumers must serialise or copy it synchronously.
+ */
+export type DelegateWorkerSessionEvent = {
+	sessionId: string;
+	ownerSessionId: string | undefined;
+} & (
+	| { phase: "opened" | "closed" }
+	| { phase: "event"; event: import("@earendil-works/pi-coding-agent").AgentSessionEvent }
+);

@@ -19,6 +19,9 @@
  *   2. custom tool NAMES must be in the allow-list or they're filtered out —
  *      so when a shape supplies customTools, their names are always included.
  *
+ * Implicit workers inherit the workspace surface. Run-supplied tools travel as
+ * `runToolNames` so adding them does not materialize a narrowing allowlist.
+ *
  * `ext:` selector syntax:
  *   - `ext:foo`          → include all of extension `foo`'s tools (compatibility)
  *   - `ext:foo:bar`      → narrow extension `foo` to tool `bar`
@@ -37,6 +40,7 @@ import type { EffectiveEscalationPolicy } from "./escalation-policy.js";
 import { assertReadOnlyValue } from "./write-confinement.js";
 import { TASKS_TOOL_NAME } from "./task-seam.js";
 import { FOCUS_TOOL_NAME } from "./focus-seam.js";
+import { PARENT_TRANSCRIPT_SEARCH_TOOL_NAME } from "./parent-transcript-search.js";
 import {
 	isPiDelegatePackageIdentifier,
 	normalizeNpmIdentity,
@@ -230,6 +234,20 @@ export interface ResolvedToolSurface {
 	 * `AgentConfig` the amending caller no longer has.
 	 */
 	hasExplicitAllowlist: boolean;
+	/**
+	 * The agent or the task set `fabric: false` (#582). The worker keeps the
+	 * native tool surface and never receives fabric_exec. Absent means automatic.
+	 */
+	fabricOptOut?: boolean;
+	/**
+	 * The run is readOnly (#587). A readOnly worker keeps the native tool
+	 * surface and never receives fabric_exec, whatever its Fabric reports:
+	 * pi-fabric has no worker write policy yet that keeps scratch and the
+	 * declared artifact writable while refusing every other write.
+	 */
+	readOnly?: boolean;
+	/** Run-supplied definitions; also included in `tools` when the surface is explicit. */
+	runToolNames: readonly string[];
 }
 
 const optionalGlobalExtensionSelectorKeys = new WeakMap<ResolvedToolSurface, ReadonlySet<string>>();
@@ -461,11 +479,8 @@ export function resolveRunToolSurface(
 	assertReadOnlyValue(overrides.readOnly);
 	const isolated = overrides.isolated ?? false;
 	const customToolNames = overrides.customToolNames ?? [];
-	// Historical AgentConfig call sites often materialize `tools: []` to mean
-	// "unspecified". Preserve that compatibility while still treating an
-	// invocation override (including `tools: []`) and any non-empty agent list
-	// as an explicit least-privilege allowlist that must fail closed.
-	const hasExplicitAllowlist = overrides.tools !== undefined || (agent.tools?.length ?? 0) > 0;
+	// Any declared list, including `tools: []`, is a least-privilege allowlist that fails closed.
+	const hasExplicitAllowlist = overrides.tools !== undefined || agent.tools !== undefined;
 	const rawEntries = overrides.tools ?? agent.tools ?? [];
 	const { builtins, extSelectors, diagnostics, actionGrants } = parseToolEntries(rawEntries);
 
@@ -504,6 +519,10 @@ export function resolveRunToolSurface(
 		);
 	}
 
+	// A plain worker with no allowlist and no readOnly confinement keeps Pi's
+	// implicit workspace surface; run additions must not narrow it.
+	const inheritsWorkspace = shape === "direct" && !hasExplicitAllowlist && overrides.readOnly !== true;
+
 	// Compose the allow-list per shape.
 	let allow: string[];
 	if (shape === "supervised" && !hasExplicitAllowlist && rawEntries.length === 0 && customToolNames.length === 0) {
@@ -521,17 +540,6 @@ export function resolveRunToolSurface(
 		// built-ins, plus any explicitly-named custom tools.
 		allow = [...filteredBuiltins];
 	}
-	if (shape === "direct" && overrides.escalationPolicy?.enabled === true && rawEntries.length === 0) {
-		// Adding custom tools turns Pi's implicit defaults into an explicit
-		// allow-list. Preserve the ordinary direct-worker default surface.
-		allow = ["read", "bash", "edit", "write"];
-	}
-
-	// Always force-include the shape's custom tool names so pi's allow-list
-	// Set filter does not strip them.
-	for (const name of customToolNames) {
-		if (!allow.includes(name)) allow.push(name);
-	}
 
 	const escalationToolNames = overrides.escalationPolicy?.enabled === true
 		? shape === "direct"
@@ -540,7 +548,11 @@ export function resolveRunToolSurface(
 				? [RESOLVE_ESCALATION_TOOL, ESCALATE_TOOL]
 				: []
 		: [];
-	for (const name of escalationToolNames) {
+	// Always force-include the run's own tools so pi's allow-list Set filter
+	// does not strip them. Delegate-family and recovery names stay denied.
+	const runToolNames = dedupe([...customToolNames, ...escalationToolNames]).filter((name) =>
+		name !== DELEGATE_RECOVER_TOOL_NAME && (delegateOptIn || !EXCLUDED_SET.has(name)));
+	for (const name of runToolNames) {
 		if (!allow.includes(name)) allow.push(name);
 	}
 
@@ -567,7 +579,7 @@ export function resolveRunToolSurface(
 
 	// Foot-gun guard: never return an empty allow-list (would strip
 	// everything incl. customTools). Empty → undefined (pi default).
-	const tools = allow.length > 0 ? dedupe(allow) : undefined;
+	const tools = !inheritsWorkspace && allow.length > 0 ? dedupe(allow) : undefined;
 
 	const surface: ResolvedToolSurface = {
 		tools,
@@ -578,6 +590,9 @@ export function resolveRunToolSurface(
 		diagnostics,
 		deniedToolNames,
 		hasExplicitAllowlist,
+		...(agent.fabric === false ? { fabricOptOut: true } : {}),
+		...(overrides.readOnly === true ? { readOnly: true } : {}),
+		runToolNames,
 		// Only report grants for tools that actually survived into the allow-list;
 		// a grant on a stripped tool would be a restriction on nothing.
 		//
@@ -804,6 +819,27 @@ export function assertArtifactWriterCapability(
 	);
 }
 
+/** Unset tools alone do not imply inheritance: extension-only allowlists also leave them unset. */
+export function inheritsWorkspaceTools(surface: Pick<ResolvedToolSurface, "tools" | "hasExplicitAllowlist">): boolean {
+	return surface.tools === undefined && !surface.hasExplicitAllowlist;
+}
+
+/** The launch-request fields that change a plain worker's tool surface. */
+export interface WorkerToolRequest {
+	readOnly?: unknown;
+	escalationPolicy?: EffectiveEscalationPolicy;
+	parentTranscriptSearch?: boolean;
+}
+
+/** Map one worker launch request to its surface overrides; shared by every runner and admission. */
+export function resolveWorkerToolOverrides(request: WorkerToolRequest): ToolSurfaceOverrides {
+	return {
+		escalationPolicy: request.escalationPolicy,
+		readOnly: request.readOnly,
+		...(request.parentTranscriptSearch ? { customToolNames: [PARENT_TRANSCRIPT_SEARCH_TOOL_NAME] } : {}),
+	};
+}
+
 /**
  * Resolve the tool surface for a plain worker session.
  *
@@ -852,7 +888,7 @@ export function amendClaimedSessionTools(
 	// dispatch seed a checklist the worker still could not move: the very bug
 	// this function exists to fix, one door over.
 	if (surface.tools === undefined) {
-		if (!surface.hasExplicitAllowlist) return surface;
+		if (inheritsWorkspaceTools(surface)) return surface;
 		return copyOptionalGlobalExtensionSelectors(surface, { ...surface, tools: dedupe(additions) });
 	}
 	return copyOptionalGlobalExtensionSelectors(surface, { ...surface, tools: [...surface.tools, ...additions] });

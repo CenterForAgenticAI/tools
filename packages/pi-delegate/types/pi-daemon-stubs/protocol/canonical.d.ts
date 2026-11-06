@@ -1,9 +1,7 @@
-// VENDORED build-time type fallback for the OPTIONAL @caair/pi-daemon peer (#35 / #470).
-// Copied verbatim from @caair/pi-daemon dist .d.ts. Used ONLY when the package is
-// absent (tsconfig `paths` resolves the real node_modules types first, these second),
-// so pi-delegate builds/type-checks without the package. Regenerate by re-copying
-// @caair/pi-daemon/dist/{client,protocol}/*.d.ts when the daemon protocol changes.
-// Do not hand-edit.
+// VENDORED build-time type fallback for optional @centerforagenticai/pi-daemon@0.4.0.
+// Copied verbatim from its published dist declarations. Used only when the
+// package is absent; tsconfig paths prefer the installed declarations.
+// Regenerate from dist/{client,protocol}/*.d.ts. Do not hand-edit.
 import { type Infer, type JsonObject, type JsonValue, type Schema } from "./schema.js";
 declare const cursorSchema: Schema<{
     entryId: string | null;
@@ -67,6 +65,9 @@ declare const sessionSummarySchema: Schema<{
         epoch: number;
     };
     name?: string;
+    agentDir?: string;
+    additionalExtensionPaths?: string[];
+    environment?: JsonValue;
 }, {
     readonly type: "object";
     readonly properties: {
@@ -81,6 +82,16 @@ declare const sessionSummarySchema: Schema<{
         };
         readonly name: {
             readonly type: "string";
+        };
+        readonly agentDir: {
+            readonly type: "string";
+        };
+        readonly additionalExtensionPaths: {
+            readonly type: "array";
+            readonly items: Readonly<Record<string, unknown>>;
+        };
+        readonly environment: {
+            readonly $ref: "#/$defs/JsonValue";
         };
         readonly runtime: {
             readonly type: "string";
@@ -210,9 +221,9 @@ export type PromptOutcomeName = (typeof PROMPT_OUTCOMES)[number];
 export type PromptOutcomeErrorCode = Infer<typeof promptOutcomeErrorCodeSchema>;
 declare const promptStatusResultSchema: Schema<{
     state: "pending";
+    reason?: "external_writer";
     promptId?: string;
     acceptedAt?: string;
-    reason?: "external_writer";
 } | {
     state: "unknown";
 } | {
@@ -400,10 +411,10 @@ declare const promptStatusResultSchema: Schema<{
     })[];
 }>;
 export type PromptStatusResult = Infer<typeof promptStatusResultSchema>;
-export declare const ERROR_CODES: readonly ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_awake", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
-declare const errorCodeSchema: Schema<"asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_awake" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal", {
+export declare const ERROR_CODES: readonly ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
+declare const errorCodeSchema: Schema<"asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal", {
     readonly type: "string";
-    readonly enum: ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_awake", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
+    readonly enum: ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
 }>;
 export type ErrorCode = Infer<typeof errorCodeSchema>;
 export declare const ERROR_GROUPS: {
@@ -540,6 +551,9 @@ declare const operationSource: {
                     epoch: number;
                 };
                 name?: string;
+                agentDir?: string;
+                additionalExtensionPaths?: string[];
+                environment?: JsonValue;
             }[];
         }, {
             readonly type: "object";
@@ -593,6 +607,9 @@ declare const operationSource: {
                     epoch: number;
                 };
                 name?: string;
+                agentDir?: string;
+                additionalExtensionPaths?: string[];
+                environment?: JsonValue;
             };
             created: false;
         }, {
@@ -612,6 +629,16 @@ declare const operationSource: {
                         };
                         readonly name: {
                             readonly type: "string";
+                        };
+                        readonly agentDir: {
+                            readonly type: "string";
+                        };
+                        readonly additionalExtensionPaths: {
+                            readonly type: "array";
+                            readonly items: Readonly<Record<string, unknown>>;
+                        };
+                        readonly environment: {
+                            readonly $ref: "#/$defs/JsonValue";
                         };
                         readonly runtime: {
                             readonly type: "string";
@@ -693,6 +720,9 @@ declare const operationSource: {
         readonly params: Schema<{
             cwd: string;
             name?: string;
+            agentDir?: string;
+            additionalExtensionPaths?: string[];
+            environment?: JsonValue;
             sessionId?: string;
             sleepAfterMs?: number;
         }, {
@@ -711,6 +741,16 @@ declare const operationSource: {
                     readonly type: "integer";
                     readonly minimum: 0;
                     readonly maximum: number;
+                };
+                readonly agentDir: {
+                    readonly type: "string";
+                };
+                readonly additionalExtensionPaths: {
+                    readonly type: "array";
+                    readonly items: Readonly<Record<string, unknown>>;
+                };
+                readonly environment: {
+                    readonly $ref: "#/$defs/JsonValue";
                 };
             };
             readonly required: readonly "cwd"[];
@@ -741,6 +781,9 @@ declare const operationSource: {
                     epoch: number;
                 };
                 name?: string;
+                agentDir?: string;
+                additionalExtensionPaths?: string[];
+                environment?: JsonValue;
             };
             created: true;
         }, {
@@ -760,6 +803,16 @@ declare const operationSource: {
                         };
                         readonly name: {
                             readonly type: "string";
+                        };
+                        readonly agentDir: {
+                            readonly type: "string";
+                        };
+                        readonly additionalExtensionPaths: {
+                            readonly type: "array";
+                            readonly items: Readonly<Record<string, unknown>>;
+                        };
+                        readonly environment: {
+                            readonly $ref: "#/$defs/JsonValue";
                         };
                         readonly runtime: {
                             readonly type: "string";
@@ -834,7 +887,7 @@ declare const operationSource: {
             readonly additionalProperties: false;
         }>;
         readonly errorGroups: readonly ["request", "registrationLock"];
-        readonly extraErrors: readonly ["duplicate_session", "sdk_incompatible"];
+        readonly extraErrors: readonly ["duplicate_session", "invalid_request", "sdk_incompatible"];
     };
     readonly attach: {
         readonly session: "required";
@@ -882,6 +935,9 @@ declare const operationSource: {
                     epoch: number;
                 };
                 name?: string;
+                agentDir?: string;
+                additionalExtensionPaths?: string[];
+                environment?: JsonValue;
             };
             attachmentId: string;
             replay: {
@@ -920,6 +976,16 @@ declare const operationSource: {
                         };
                         readonly name: {
                             readonly type: "string";
+                        };
+                        readonly agentDir: {
+                            readonly type: "string";
+                        };
+                        readonly additionalExtensionPaths: {
+                            readonly type: "array";
+                            readonly items: Readonly<Record<string, unknown>>;
+                        };
+                        readonly environment: {
+                            readonly $ref: "#/$defs/JsonValue";
                         };
                         readonly runtime: {
                             readonly type: "string";
@@ -1243,9 +1309,9 @@ declare const operationSource: {
             outcome: "known";
             status: {
                 state: "pending";
+                reason?: "external_writer";
                 promptId?: string;
                 acceptedAt?: string;
-                reason?: "external_writer";
             } | {
                 state: "unknown";
             } | {
@@ -1298,9 +1364,9 @@ declare const operationSource: {
         }>;
         readonly result: Schema<{
             state: "pending";
+            reason?: "external_writer";
             promptId?: string;
             acceptedAt?: string;
-            reason?: "external_writer";
         } | {
             state: "unknown";
         } | {
@@ -1604,6 +1670,72 @@ declare const operationSource: {
         readonly errorGroups: readonly ["request", "session", "attachment", "generation", "awakeHostMutation"];
         readonly extraErrors: readonly ["invalid_state", "rejected"];
     };
+    readonly set_model: {
+        readonly session: "required";
+        readonly params: Schema<{
+            generation: number;
+            model: {
+                provider: string;
+                id: string;
+            };
+            attachmentId: string;
+            leaseId: string;
+            thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh";
+        }, {
+            readonly type: "object";
+            readonly properties: {
+                readonly attachmentId: {
+                    readonly type: "string";
+                };
+                readonly leaseId: {
+                    readonly type: "string";
+                };
+                readonly generation: {
+                    readonly type: "integer";
+                    readonly minimum: 0;
+                    readonly maximum: number;
+                };
+                readonly model: {
+                    readonly type: "object";
+                    readonly properties: {
+                        readonly provider: {
+                            readonly type: "string";
+                        };
+                        readonly id: {
+                            readonly type: "string";
+                        };
+                    };
+                    readonly required: readonly ("provider" | "id")[];
+                    readonly additionalProperties: false;
+                };
+                readonly thinkingLevel: {
+                    readonly type: "string";
+                    readonly enum: readonly ["minimal", "low", "medium", "high", "xhigh"];
+                };
+            };
+            readonly required: readonly ("generation" | "model" | "attachmentId" | "leaseId")[];
+            readonly additionalProperties: false;
+        }>;
+        readonly result: Schema<{
+            state: "applied";
+            model: {
+                provider: string;
+                id: string;
+            };
+            thinkingLevel?: string;
+        } | {
+            state: "queued";
+            model: {
+                provider: string;
+                id: string;
+            };
+            thinkingLevel?: string;
+        }, {
+            readonly oneOf: Readonly<Record<string, unknown>>[];
+        }>;
+        readonly errorGroups: readonly ["request", "session", "attachment", "generation", "awakeHostMutation", "driver"];
+        readonly extraErrors: readonly ["rejected", "invalid_state"];
+    };
     readonly abort: {
         readonly session: "required";
         readonly params: Schema<{
@@ -1829,6 +1961,9 @@ declare const operationSource: {
                     epoch: number;
                 };
                 name?: string;
+                agentDir?: string;
+                additionalExtensionPaths?: string[];
+                environment?: JsonValue;
             };
             slept: true;
         }, {
@@ -1851,6 +1986,16 @@ declare const operationSource: {
                         };
                         readonly name: {
                             readonly type: "string";
+                        };
+                        readonly agentDir: {
+                            readonly type: "string";
+                        };
+                        readonly additionalExtensionPaths: {
+                            readonly type: "array";
+                            readonly items: Readonly<Record<string, unknown>>;
+                        };
+                        readonly environment: {
+                            readonly $ref: "#/$defs/JsonValue";
                         };
                         readonly runtime: {
                             readonly type: "string";
@@ -1973,6 +2118,9 @@ declare const operationSource: {
                     epoch: number;
                 };
                 name?: string;
+                agentDir?: string;
+                additionalExtensionPaths?: string[];
+                environment?: JsonValue;
             };
             woke: boolean;
         }, {
@@ -1995,6 +2143,16 @@ declare const operationSource: {
                         };
                         readonly name: {
                             readonly type: "string";
+                        };
+                        readonly agentDir: {
+                            readonly type: "string";
+                        };
+                        readonly additionalExtensionPaths: {
+                            readonly type: "array";
+                            readonly items: Readonly<Record<string, unknown>>;
+                        };
+                        readonly environment: {
+                            readonly $ref: "#/$defs/JsonValue";
                         };
                         readonly runtime: {
                             readonly type: "string";
@@ -2066,7 +2224,7 @@ declare const operationSource: {
             readonly additionalProperties: false;
         }>;
         readonly errorGroups: readonly ["request", "session", "attachment", "generation"];
-        readonly extraErrors: readonly ["already_awake", "gone", "path_mismatch", "sdk_incompatible", "external_writer"];
+        readonly extraErrors: readonly ["gone", "path_mismatch", "sdk_incompatible", "external_writer"];
     };
     readonly recover: {
         readonly session: "required";
@@ -2117,6 +2275,9 @@ declare const operationSource: {
                     epoch: number;
                 };
                 name?: string;
+                agentDir?: string;
+                additionalExtensionPaths?: string[];
+                environment?: JsonValue;
             };
             recovered: true;
             closedPromptIds: string[];
@@ -2144,6 +2305,16 @@ declare const operationSource: {
                         };
                         readonly name: {
                             readonly type: "string";
+                        };
+                        readonly agentDir: {
+                            readonly type: "string";
+                        };
+                        readonly additionalExtensionPaths: {
+                            readonly type: "array";
+                            readonly items: Readonly<Record<string, unknown>>;
+                        };
+                        readonly environment: {
+                            readonly $ref: "#/$defs/JsonValue";
                         };
                         readonly runtime: {
                             readonly type: "string";
@@ -2239,6 +2410,7 @@ declare const operationSource: {
                 pid: number;
                 startedAt: string;
                 socket: string;
+                launchPath?: string;
             };
             counts: JsonObject;
             sessions?: {
@@ -2265,6 +2437,9 @@ declare const operationSource: {
                     epoch: number;
                 };
                 name?: string;
+                agentDir?: string;
+                additionalExtensionPaths?: string[];
+                environment?: JsonValue;
             }[];
         } | {
             session: {
@@ -2291,6 +2466,9 @@ declare const operationSource: {
                     epoch: number;
                 };
                 name?: string;
+                agentDir?: string;
+                additionalExtensionPaths?: string[];
+                environment?: JsonValue;
             };
             readers: number;
             lease?: {
@@ -2307,6 +2485,7 @@ declare const operationSource: {
         readonly session: "forbidden";
         readonly params: Schema<{
             graceMs?: number;
+            ifIdle?: boolean;
         }, {
             readonly type: "object";
             readonly properties: {
@@ -2314,6 +2493,9 @@ declare const operationSource: {
                     readonly type: "integer";
                     readonly minimum: 0;
                     readonly maximum: number;
+                };
+                readonly ifIdle: {
+                    readonly type: "boolean";
                 };
             };
             readonly required: readonly never[];
@@ -2340,7 +2522,7 @@ declare const operationSource: {
         readonly extraErrors: readonly ["shutdown_in_progress", "busy"];
     };
 };
-export declare const OPERATIONS: readonly ("replay" | "status" | "lease" | "hello" | "list" | "open" | "create" | "attach" | "detach" | "prompt" | "prompt_status" | "steer" | "follow_up" | "abort" | "ui_answer" | "sleep" | "wake" | "recover" | "shutdown")[];
+export declare const OPERATIONS: readonly ("replay" | "status" | "lease" | "hello" | "list" | "open" | "create" | "attach" | "detach" | "prompt" | "prompt_status" | "steer" | "follow_up" | "set_model" | "abort" | "ui_answer" | "sleep" | "wake" | "recover" | "shutdown")[];
 export type Operation = (typeof OPERATIONS)[number];
 export type OperationParams<O extends Operation> = Infer<(typeof operationSource)[O]["params"]>;
 export type OperationResult<O extends Operation> = Infer<(typeof operationSource)[O]["result"]>;
@@ -2358,13 +2540,13 @@ type RequestFor<O extends Operation> = {
     params: OperationParams<O>;
 } & SessionField<(typeof operationSource)[O]["session"]>;
 export type RequestFrame<O extends Operation = Operation> = O extends Operation ? RequestFor<O> : never;
-export declare const OPERATION_ERROR_CODES: Readonly<Record<"replay" | "status" | "lease" | "hello" | "list" | "open" | "create" | "attach" | "detach" | "prompt" | "prompt_status" | "steer" | "follow_up" | "abort" | "ui_answer" | "sleep" | "wake" | "recover" | "shutdown", readonly ("asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_awake" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal")[]>>;
+export declare const OPERATION_ERROR_CODES: Readonly<Record<"replay" | "status" | "lease" | "hello" | "list" | "open" | "create" | "attach" | "detach" | "prompt" | "prompt_status" | "steer" | "follow_up" | "set_model" | "abort" | "ui_answer" | "sleep" | "wake" | "recover" | "shutdown", readonly ("asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal")[]>>;
 declare const failureFrameSchema: Schema<{
+    id: string;
     ok: false;
     t: "res";
-    id: string;
     error: {
-        code: "asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_awake" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal";
+        code: "asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal";
         message: string;
         details?: JsonValue;
     };
@@ -2385,7 +2567,7 @@ declare const failureFrameSchema: Schema<{
             readonly properties: {
                 readonly code: {
                     readonly type: "string";
-                    readonly enum: ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_awake", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
+                    readonly enum: ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
                 };
                 readonly message: {
                     readonly type: "string";
@@ -2398,7 +2580,7 @@ declare const failureFrameSchema: Schema<{
             readonly additionalProperties: false;
         };
     };
-    readonly required: readonly ("ok" | "t" | "id" | "error")[];
+    readonly required: readonly ("id" | "ok" | "t" | "error")[];
     readonly additionalProperties: false;
 }>;
 export type SuccessFrame<O extends Operation = Operation> = {
@@ -2411,7 +2593,7 @@ export type FailureFrame = Infer<typeof failureFrameSchema>;
 export type ResponseFrame<O extends Operation = Operation> = SuccessFrame<O> | FailureFrame;
 export declare const EVENT_TYPES: readonly ("agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_execution_end" | "agent_settled" | "queue_update" | "compaction_start" | "entry_appended" | "session_info_changed" | "thinking_level_changed" | "compaction_end" | "auto_retry_start" | "auto_retry_end" | "summarization_retry_scheduled" | "summarization_retry_attempt_start" | "summarization_retry_finished" | "bash_execution_update")[];
 export type EventType = (typeof EVENT_TYPES)[number];
-export declare const DAEMON_FRAME_NAMES: readonly ("phase" | "attention" | "external_writer" | "lease" | "prompt" | "sleep" | "wake" | "replay_start" | "replay_end" | "keepalive" | "restored" | "ui_notice")[];
+export declare const DAEMON_FRAME_NAMES: readonly ("phase" | "attention" | "external_writer" | "model" | "lease" | "prompt" | "sleep" | "wake" | "replay_start" | "replay_end" | "keepalive" | "restored" | "ui_notice")[];
 export declare const STREAM_KINDS: readonly ("daemon" | "error" | "entry" | "event" | "ui_request" | "gap")[];
 export type StreamKind = (typeof STREAM_KINDS)[number];
 declare const streamFrameSchema: Schema<{
@@ -2655,7 +2837,7 @@ declare const streamFrameSchema: Schema<{
     eventType: "thinking_level_changed";
     durable: false;
     data: {
-        level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+        level: "minimal" | "low" | "medium" | "high" | "xhigh" | "off" | "max";
     };
 } | {
     epoch: number;
@@ -2772,6 +2954,26 @@ declare const streamFrameSchema: Schema<{
     t: "ev";
     kind: "daemon";
     data: JsonObject;
+    sourceEntryId: string;
+} | {
+    epoch: number;
+    name: "model";
+    seq: number;
+    generation: number;
+    session: string;
+    attachmentId: string;
+    t: "ev";
+    kind: "daemon";
+    data: {
+        v: 1;
+        state: "pending" | "applied" | "dropped";
+        model: {
+            provider: string;
+            id: string;
+        };
+        thinkingLevel?: string;
+        reason?: string;
+    };
     sourceEntryId: string;
 } | {
     epoch: number;
@@ -2980,7 +3182,7 @@ declare const streamFrameSchema: Schema<{
     attachmentId: string;
     t: "ev";
     error: {
-        code: "asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_awake" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal";
+        code: "asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal";
         message: string;
         details?: JsonValue;
     };
@@ -3101,7 +3303,7 @@ declare const streamFrameSchema: Schema<{
                 readonly properties: {
                     readonly code: {
                         readonly type: "string";
-                        readonly enum: ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_awake", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
+                        readonly enum: ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
                     };
                     readonly message: {
                         readonly type: "string";
@@ -3192,9 +3394,9 @@ declare const customEntryDataSource: {
         at: string;
         epoch: number;
         generation: number;
+        v: 1;
         reason: string;
         action: "failed" | "gone" | "created" | "slept" | "woke" | "sleeping";
-        v: 1;
         sleepAfterMs?: number;
     }, {
         readonly type: "object";
@@ -3230,7 +3432,7 @@ declare const customEntryDataSource: {
                 readonly format: "date-time";
             };
         };
-        readonly required: readonly ("at" | "epoch" | "generation" | "reason" | "action" | "v")[];
+        readonly required: readonly ("at" | "epoch" | "generation" | "v" | "reason" | "action")[];
         readonly additionalProperties: false;
     }>;
     readonly "pi-daemon/phase": Schema<{
@@ -3238,10 +3440,10 @@ declare const customEntryDataSource: {
         epoch: number;
         attention: "failed" | "none" | "question" | "interrupted";
         generation: number;
+        v: 1;
         reason: string;
         from: "idle" | "working" | "blocked" | "failed" | "gone";
         pendingQuestionIds: string[];
-        v: 1;
         to: "idle" | "working" | "blocked" | "failed" | "gone";
     }, {
         readonly type: "object";
@@ -3283,16 +3485,58 @@ declare const customEntryDataSource: {
                 readonly format: "date-time";
             };
         };
-        readonly required: readonly ("at" | "epoch" | "attention" | "generation" | "reason" | "from" | "pendingQuestionIds" | "v" | "to")[];
+        readonly required: readonly ("at" | "epoch" | "attention" | "generation" | "v" | "reason" | "from" | "pendingQuestionIds" | "to")[];
+        readonly additionalProperties: false;
+    }>;
+    readonly "pi-daemon/model": Schema<{
+        v: 1;
+        state: "pending" | "applied" | "dropped";
+        model: {
+            provider: string;
+            id: string;
+        };
+        thinkingLevel?: string;
+        reason?: string;
+    }, {
+        readonly type: "object";
+        readonly properties: {
+            readonly v: {
+                readonly const: 1;
+            };
+            readonly state: {
+                readonly type: "string";
+                readonly enum: readonly ["pending", "applied", "dropped"];
+            };
+            readonly model: {
+                readonly type: "object";
+                readonly properties: {
+                    readonly provider: {
+                        readonly type: "string";
+                    };
+                    readonly id: {
+                        readonly type: "string";
+                    };
+                };
+                readonly required: readonly ("provider" | "id")[];
+                readonly additionalProperties: false;
+            };
+            readonly thinkingLevel: {
+                readonly type: "string";
+            };
+            readonly reason: {
+                readonly type: "string";
+            };
+        };
+        readonly required: readonly ("v" | "state" | "model")[];
         readonly additionalProperties: false;
     }>;
     readonly "pi-daemon/lease": Schema<{
         at: string;
         epoch: number;
         generation: number;
+        v: 1;
         leaseId: string;
         action: "released" | "acquired" | "expired" | "taken_over" | "disconnected";
-        v: 1;
         actorId: string;
         expiresAt?: string;
         previousLeaseId?: string;
@@ -3334,17 +3578,17 @@ declare const customEntryDataSource: {
                 readonly format: "date-time";
             };
         };
-        readonly required: readonly ("at" | "epoch" | "generation" | "leaseId" | "action" | "v" | "actorId")[];
+        readonly required: readonly ("at" | "epoch" | "generation" | "v" | "leaseId" | "action" | "actorId")[];
         readonly additionalProperties: false;
     }>;
     readonly "pi-daemon/prompt-claim": Schema<{
+        v: 1;
         promptId: string;
         acceptedAt: string;
         attribution: {
             actorId: string;
         };
         idempotencyKey: string;
-        v: 1;
         payloadSha256: string;
         clientId: string;
     }, {
@@ -3380,30 +3624,30 @@ declare const customEntryDataSource: {
                 readonly format: "date-time";
             };
         };
-        readonly required: readonly ("promptId" | "acceptedAt" | "attribution" | "idempotencyKey" | "v" | "payloadSha256" | "clientId")[];
+        readonly required: readonly ("v" | "promptId" | "acceptedAt" | "attribution" | "idempotencyKey" | "payloadSha256" | "clientId")[];
         readonly additionalProperties: false;
     }>;
     readonly "pi-daemon/prompt-outcome": Schema<{
         outcome: "settled";
+        v: 1;
         promptId: string;
         settledAt: string;
-        v: 1;
         finalEntryId?: string | null;
         stopReason?: string;
     } | {
         outcome: "aborted";
         errorCode: "aborted";
+        v: 1;
         promptId: string;
         settledAt: string;
-        v: 1;
         finalEntryId?: string | null;
         stopReason?: string;
     } | {
         outcome: "failed";
         errorCode: "interrupted" | "external_writer" | "provider_error" | "sdk_error" | "rejected";
+        v: 1;
         promptId: string;
         settledAt: string;
-        v: 1;
         finalEntryId?: string | null;
         stopReason?: string;
     }, {
@@ -3430,7 +3674,7 @@ declare const customEntryDataSource: {
                     readonly const: "settled";
                 };
             };
-            readonly required: readonly ("outcome" | "promptId" | "settledAt" | "v")[];
+            readonly required: readonly ("outcome" | "v" | "promptId" | "settledAt")[];
             readonly additionalProperties: false;
         } | {
             readonly type: "object";
@@ -3458,7 +3702,7 @@ declare const customEntryDataSource: {
                     readonly const: "aborted";
                 };
             };
-            readonly required: readonly ("outcome" | "errorCode" | "promptId" | "settledAt" | "v")[];
+            readonly required: readonly ("outcome" | "errorCode" | "v" | "promptId" | "settledAt")[];
             readonly additionalProperties: false;
         } | {
             readonly type: "object";
@@ -3487,7 +3731,7 @@ declare const customEntryDataSource: {
                     readonly enum: ["interrupted", "external_writer", "provider_error", "sdk_error", "rejected"];
                 };
             };
-            readonly required: readonly ("outcome" | "errorCode" | "promptId" | "settledAt" | "v")[];
+            readonly required: readonly ("outcome" | "errorCode" | "v" | "promptId" | "settledAt")[];
             readonly additionalProperties: false;
         })[];
     }>;
@@ -3495,8 +3739,8 @@ declare const customEntryDataSource: {
         at: string;
         epoch: number;
         generation: number;
-        inputId: string;
         v: 1;
+        inputId: string;
         actorId: string;
         operation: "steer" | "follow_up";
         contentSha256: string;
@@ -3534,7 +3778,7 @@ declare const customEntryDataSource: {
                 readonly format: "date-time";
             };
         };
-        readonly required: readonly ("at" | "epoch" | "generation" | "inputId" | "v" | "actorId" | "operation" | "contentSha256")[];
+        readonly required: readonly ("at" | "epoch" | "generation" | "v" | "inputId" | "actorId" | "operation" | "contentSha256")[];
         readonly additionalProperties: false;
     }>;
     readonly "pi-daemon/ui": Schema<{
@@ -3543,8 +3787,8 @@ declare const customEntryDataSource: {
         questionId: string;
         method: "select" | "confirm" | "input" | "editor";
         generation: number;
-        action: "cancelled" | "answered" | "opened" | "timed_out";
         v: 1;
+        action: "cancelled" | "answered" | "opened" | "timed_out";
         actorId?: string;
     }, {
         readonly type: "object";
@@ -3581,14 +3825,39 @@ declare const customEntryDataSource: {
                 readonly format: "date-time";
             };
         };
-        readonly required: readonly ("at" | "epoch" | "questionId" | "method" | "generation" | "action" | "v")[];
+        readonly required: readonly ("at" | "epoch" | "questionId" | "method" | "generation" | "v" | "action")[];
+        readonly additionalProperties: false;
+    }>;
+    readonly "pi-daemon/environment": Schema<{
+        agentDir: string;
+        additionalExtensionPaths: string[];
+        v: 1;
+        environment?: JsonValue;
+    }, {
+        readonly type: "object";
+        readonly properties: {
+            readonly v: {
+                readonly const: 1;
+            };
+            readonly agentDir: {
+                readonly type: "string";
+            };
+            readonly additionalExtensionPaths: {
+                readonly type: "array";
+                readonly items: Readonly<Record<string, unknown>>;
+            };
+            readonly environment: {
+                readonly $ref: "#/$defs/JsonValue";
+            };
+        };
+        readonly required: readonly ("agentDir" | "additionalExtensionPaths" | "v")[];
         readonly additionalProperties: false;
     }>;
     readonly "pi-daemon/epoch": Schema<{
         at: string;
+        v: 1;
         reason: "fork" | "switch" | "restore" | "rewind" | "navigate";
         forkPoint: string | null;
-        v: 1;
         previousLeaf: string | null;
         currentLeaf: string | null;
         fromEpoch: number;
@@ -3627,11 +3896,11 @@ declare const customEntryDataSource: {
                 readonly format: "date-time";
             };
         };
-        readonly required: readonly ("at" | "reason" | "forkPoint" | "v" | "previousLeaf" | "currentLeaf" | "fromEpoch" | "toEpoch")[];
+        readonly required: readonly ("at" | "v" | "reason" | "forkPoint" | "previousLeaf" | "currentLeaf" | "fromEpoch" | "toEpoch")[];
         readonly additionalProperties: false;
     }>;
 };
-export declare const CUSTOM_ENTRY_TYPES: readonly ("pi-daemon/restored" | "pi-daemon/lifecycle" | "pi-daemon/phase" | "pi-daemon/lease" | "pi-daemon/prompt-claim" | "pi-daemon/prompt-outcome" | "pi-daemon/input" | "pi-daemon/ui" | "pi-daemon/epoch")[];
+export declare const CUSTOM_ENTRY_TYPES: readonly ("pi-daemon/restored" | "pi-daemon/lifecycle" | "pi-daemon/phase" | "pi-daemon/model" | "pi-daemon/lease" | "pi-daemon/prompt-claim" | "pi-daemon/prompt-outcome" | "pi-daemon/input" | "pi-daemon/ui" | "pi-daemon/environment" | "pi-daemon/epoch")[];
 export type CustomEntryType = (typeof CUSTOM_ENTRY_TYPES)[number];
 export type CustomEntryData<T extends CustomEntryType> = Infer<(typeof customEntryDataSource)[T]>;
 export type DaemonCustomEntry<T extends CustomEntryType = CustomEntryType> = T extends CustomEntryType ? {
@@ -3706,6 +3975,16 @@ export declare const PROTOCOL_JSON_SCHEMA: {
                 readonly name: {
                     readonly type: "string";
                 };
+                readonly agentDir: {
+                    readonly type: "string";
+                };
+                readonly additionalExtensionPaths: {
+                    readonly type: "array";
+                    readonly items: Readonly<Record<string, unknown>>;
+                };
+                readonly environment: {
+                    readonly $ref: "#/$defs/JsonValue";
+                };
                 readonly runtime: {
                     readonly type: "string";
                     readonly enum: readonly ["awake", "asleep"];
@@ -3773,11 +4052,11 @@ export declare const PROTOCOL_JSON_SCHEMA: {
         };
         readonly Operation: {
             readonly type: "string";
-            readonly enum: ["replay" | "status" | "lease" | "hello" | "list" | "open" | "create" | "attach" | "detach" | "prompt" | "prompt_status" | "steer" | "follow_up" | "abort" | "ui_answer" | "sleep" | "wake" | "recover" | "shutdown", ...("replay" | "status" | "lease" | "hello" | "list" | "open" | "create" | "attach" | "detach" | "prompt" | "prompt_status" | "steer" | "follow_up" | "abort" | "ui_answer" | "sleep" | "wake" | "recover" | "shutdown")[]];
+            readonly enum: ["replay" | "status" | "lease" | "hello" | "list" | "open" | "create" | "attach" | "detach" | "prompt" | "prompt_status" | "steer" | "follow_up" | "set_model" | "abort" | "ui_answer" | "sleep" | "wake" | "recover" | "shutdown", ...("replay" | "status" | "lease" | "hello" | "list" | "open" | "create" | "attach" | "detach" | "prompt" | "prompt_status" | "steer" | "follow_up" | "set_model" | "abort" | "ui_answer" | "sleep" | "wake" | "recover" | "shutdown")[]];
         };
         readonly ErrorCode: {
             readonly type: "string";
-            readonly enum: ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_awake", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
+            readonly enum: ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
         };
         readonly PromptOutcomeName: {
             readonly type: "string";
@@ -3998,7 +4277,7 @@ export declare const PROTOCOL_JSON_SCHEMA: {
                     readonly $ref: "#/$defs/JsonValue";
                 };
             };
-            readonly required: readonly ("ok" | "result" | "t" | "id")[];
+            readonly required: readonly ("id" | "ok" | "result" | "t")[];
             readonly additionalProperties: false;
         };
         readonly FailureFrame: {
@@ -4018,7 +4297,7 @@ export declare const PROTOCOL_JSON_SCHEMA: {
                     readonly properties: {
                         readonly code: {
                             readonly type: "string";
-                            readonly enum: ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_awake", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
+                            readonly enum: ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
                         };
                         readonly message: {
                             readonly type: "string";
@@ -4031,7 +4310,7 @@ export declare const PROTOCOL_JSON_SCHEMA: {
                     readonly additionalProperties: false;
                 };
             };
-            readonly required: readonly ("ok" | "t" | "id" | "error")[];
+            readonly required: readonly ("id" | "ok" | "t" | "error")[];
             readonly additionalProperties: false;
         };
         readonly StreamKind: {
@@ -4153,7 +4432,7 @@ export declare const PROTOCOL_JSON_SCHEMA: {
                         readonly properties: {
                             readonly code: {
                                 readonly type: "string";
-                                readonly enum: ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_awake", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
+                                readonly enum: ["bad_frame", "frame_too_large", "handshake_required", "protocol_mismatch", "unsupported_op", "invalid_request", "unknown_session", "duplicate_session", "path_mismatch", "session_locked", "external_writer", "gone", "not_attached", "busy", "rejected", "no_lease", "lease_held", "lease_expired", "stale_generation", "stale_epoch", "asleep", "already_asleep", "invalid_state", "cursor_unknown", "cursor_off_branch", "unknown_question", "invalid_ui_answer", "idempotency_conflict", "queue_full", "sdk_incompatible", "shutdown_in_progress", "unavailable", "internal"];
                             };
                             readonly message: {
                                 readonly type: "string";
@@ -4194,26 +4473,26 @@ export declare const PROTOCOL_JSON_SCHEMA: {
         };
         readonly CustomEntryType: {
             readonly type: "string";
-            readonly enum: ["pi-daemon/restored" | "pi-daemon/lifecycle" | "pi-daemon/phase" | "pi-daemon/lease" | "pi-daemon/prompt-claim" | "pi-daemon/prompt-outcome" | "pi-daemon/input" | "pi-daemon/ui" | "pi-daemon/epoch", ...("pi-daemon/restored" | "pi-daemon/lifecycle" | "pi-daemon/phase" | "pi-daemon/lease" | "pi-daemon/prompt-claim" | "pi-daemon/prompt-outcome" | "pi-daemon/input" | "pi-daemon/ui" | "pi-daemon/epoch")[]];
+            readonly enum: ["pi-daemon/restored" | "pi-daemon/lifecycle" | "pi-daemon/phase" | "pi-daemon/model" | "pi-daemon/lease" | "pi-daemon/prompt-claim" | "pi-daemon/prompt-outcome" | "pi-daemon/input" | "pi-daemon/ui" | "pi-daemon/environment" | "pi-daemon/epoch", ...("pi-daemon/restored" | "pi-daemon/lifecycle" | "pi-daemon/phase" | "pi-daemon/model" | "pi-daemon/lease" | "pi-daemon/prompt-claim" | "pi-daemon/prompt-outcome" | "pi-daemon/input" | "pi-daemon/ui" | "pi-daemon/environment" | "pi-daemon/epoch")[]];
         };
         readonly DaemonCustomEntry: {
             readonly oneOf: readonly Readonly<Record<string, unknown>>[];
         };
     };
 };
-export declare const isRequestFrame: (value: unknown) => value is RequestFor<"replay"> | RequestFor<"status"> | RequestFor<"lease"> | RequestFor<"hello"> | RequestFor<"list"> | RequestFor<"open"> | RequestFor<"create"> | RequestFor<"attach"> | RequestFor<"detach"> | RequestFor<"prompt"> | RequestFor<"prompt_status"> | RequestFor<"steer"> | RequestFor<"follow_up"> | RequestFor<"abort"> | RequestFor<"ui_answer"> | RequestFor<"sleep"> | RequestFor<"wake"> | RequestFor<"recover"> | RequestFor<"shutdown">;
+export declare const isRequestFrame: (value: unknown) => value is RequestFor<"replay"> | RequestFor<"status"> | RequestFor<"lease"> | RequestFor<"hello"> | RequestFor<"list"> | RequestFor<"open"> | RequestFor<"create"> | RequestFor<"attach"> | RequestFor<"detach"> | RequestFor<"prompt"> | RequestFor<"prompt_status"> | RequestFor<"steer"> | RequestFor<"follow_up"> | RequestFor<"set_model"> | RequestFor<"abort"> | RequestFor<"ui_answer"> | RequestFor<"sleep"> | RequestFor<"wake"> | RequestFor<"recover"> | RequestFor<"shutdown">;
 export declare const isSuccessFrame: (value: unknown) => value is {
+    id: string;
     ok: true;
     result: JsonValue;
     t: "res";
-    id: string;
 };
 export declare const isFailureFrame: (value: unknown) => value is {
+    id: string;
     ok: false;
     t: "res";
-    id: string;
     error: {
-        code: "asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_awake" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal";
+        code: "asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal";
         message: string;
         details?: JsonValue;
     };
@@ -4459,7 +4738,7 @@ export declare const isStreamFrame: (value: unknown) => value is {
     eventType: "thinking_level_changed";
     durable: false;
     data: {
-        level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+        level: "minimal" | "low" | "medium" | "high" | "xhigh" | "off" | "max";
     };
 } | {
     epoch: number;
@@ -4576,6 +4855,26 @@ export declare const isStreamFrame: (value: unknown) => value is {
     t: "ev";
     kind: "daemon";
     data: JsonObject;
+    sourceEntryId: string;
+} | {
+    epoch: number;
+    name: "model";
+    seq: number;
+    generation: number;
+    session: string;
+    attachmentId: string;
+    t: "ev";
+    kind: "daemon";
+    data: {
+        v: 1;
+        state: "pending" | "applied" | "dropped";
+        model: {
+            provider: string;
+            id: string;
+        };
+        thinkingLevel?: string;
+        reason?: string;
+    };
     sourceEntryId: string;
 } | {
     epoch: number;
@@ -4784,7 +5083,7 @@ export declare const isStreamFrame: (value: unknown) => value is {
     attachmentId: string;
     t: "ev";
     error: {
-        code: "asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_awake" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal";
+        code: "asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal";
         message: string;
         details?: JsonValue;
     };
@@ -4811,9 +5110,9 @@ export declare const isDaemonCustomEntry: (value: unknown) => value is {
         at: string;
         epoch: number;
         generation: number;
+        v: 1;
         reason: string;
         action: "failed" | "gone" | "created" | "slept" | "woke" | "sleeping";
-        v: 1;
         sleepAfterMs?: number;
     };
 } | {
@@ -4824,11 +5123,24 @@ export declare const isDaemonCustomEntry: (value: unknown) => value is {
         epoch: number;
         attention: "failed" | "none" | "question" | "interrupted";
         generation: number;
+        v: 1;
         reason: string;
         from: "idle" | "working" | "blocked" | "failed" | "gone";
         pendingQuestionIds: string[];
-        v: 1;
         to: "idle" | "working" | "blocked" | "failed" | "gone";
+    };
+} | {
+    type: "custom";
+    customType: "pi-daemon/model";
+    data: {
+        v: 1;
+        state: "pending" | "applied" | "dropped";
+        model: {
+            provider: string;
+            id: string;
+        };
+        thinkingLevel?: string;
+        reason?: string;
     };
 } | {
     type: "custom";
@@ -4837,9 +5149,9 @@ export declare const isDaemonCustomEntry: (value: unknown) => value is {
         at: string;
         epoch: number;
         generation: number;
+        v: 1;
         leaseId: string;
         action: "released" | "acquired" | "expired" | "taken_over" | "disconnected";
-        v: 1;
         actorId: string;
         expiresAt?: string;
         previousLeaseId?: string;
@@ -4848,13 +5160,13 @@ export declare const isDaemonCustomEntry: (value: unknown) => value is {
     type: "custom";
     customType: "pi-daemon/prompt-claim";
     data: {
+        v: 1;
         promptId: string;
         acceptedAt: string;
         attribution: {
             actorId: string;
         };
         idempotencyKey: string;
-        v: 1;
         payloadSha256: string;
         clientId: string;
     };
@@ -4863,25 +5175,25 @@ export declare const isDaemonCustomEntry: (value: unknown) => value is {
     customType: "pi-daemon/prompt-outcome";
     data: {
         outcome: "settled";
+        v: 1;
         promptId: string;
         settledAt: string;
-        v: 1;
         finalEntryId?: string | null;
         stopReason?: string;
     } | {
         outcome: "aborted";
         errorCode: "aborted";
+        v: 1;
         promptId: string;
         settledAt: string;
-        v: 1;
         finalEntryId?: string | null;
         stopReason?: string;
     } | {
         outcome: "failed";
         errorCode: "interrupted" | "external_writer" | "provider_error" | "sdk_error" | "rejected";
+        v: 1;
         promptId: string;
         settledAt: string;
-        v: 1;
         finalEntryId?: string | null;
         stopReason?: string;
     };
@@ -4892,8 +5204,8 @@ export declare const isDaemonCustomEntry: (value: unknown) => value is {
         at: string;
         epoch: number;
         generation: number;
-        inputId: string;
         v: 1;
+        inputId: string;
         actorId: string;
         operation: "steer" | "follow_up";
         contentSha256: string;
@@ -4907,35 +5219,44 @@ export declare const isDaemonCustomEntry: (value: unknown) => value is {
         questionId: string;
         method: "select" | "confirm" | "input" | "editor";
         generation: number;
-        action: "cancelled" | "answered" | "opened" | "timed_out";
         v: 1;
+        action: "cancelled" | "answered" | "opened" | "timed_out";
         actorId?: string;
+    };
+} | {
+    type: "custom";
+    customType: "pi-daemon/environment";
+    data: {
+        agentDir: string;
+        additionalExtensionPaths: string[];
+        v: 1;
+        environment?: JsonValue;
     };
 } | {
     type: "custom";
     customType: "pi-daemon/epoch";
     data: {
         at: string;
+        v: 1;
         reason: "fork" | "switch" | "restore" | "rewind" | "navigate";
         forkPoint: string | null;
-        v: 1;
         previousLeaf: string | null;
         currentLeaf: string | null;
         fromEpoch: number;
         toEpoch: number;
     };
 };
-export declare const isProtocolFrame: (value: unknown) => value is RequestFor<"replay"> | RequestFor<"status"> | RequestFor<"lease"> | RequestFor<"hello"> | RequestFor<"list"> | RequestFor<"open"> | RequestFor<"create"> | RequestFor<"attach"> | RequestFor<"detach"> | RequestFor<"prompt"> | RequestFor<"prompt_status"> | RequestFor<"steer"> | RequestFor<"follow_up"> | RequestFor<"abort"> | RequestFor<"ui_answer"> | RequestFor<"sleep"> | RequestFor<"wake"> | RequestFor<"recover"> | RequestFor<"shutdown"> | {
+export declare const isProtocolFrame: (value: unknown) => value is RequestFor<"replay"> | RequestFor<"status"> | RequestFor<"lease"> | RequestFor<"hello"> | RequestFor<"list"> | RequestFor<"open"> | RequestFor<"create"> | RequestFor<"attach"> | RequestFor<"detach"> | RequestFor<"prompt"> | RequestFor<"prompt_status"> | RequestFor<"steer"> | RequestFor<"follow_up"> | RequestFor<"set_model"> | RequestFor<"abort"> | RequestFor<"ui_answer"> | RequestFor<"sleep"> | RequestFor<"wake"> | RequestFor<"recover"> | RequestFor<"shutdown"> | {
+    id: string;
     ok: true;
     result: JsonValue;
     t: "res";
-    id: string;
 } | {
+    id: string;
     ok: false;
     t: "res";
-    id: string;
     error: {
-        code: "asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_awake" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal";
+        code: "asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal";
         message: string;
         details?: JsonValue;
     };
@@ -5180,7 +5501,7 @@ export declare const isProtocolFrame: (value: unknown) => value is RequestFor<"r
     eventType: "thinking_level_changed";
     durable: false;
     data: {
-        level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+        level: "minimal" | "low" | "medium" | "high" | "xhigh" | "off" | "max";
     };
 } | {
     epoch: number;
@@ -5297,6 +5618,26 @@ export declare const isProtocolFrame: (value: unknown) => value is RequestFor<"r
     t: "ev";
     kind: "daemon";
     data: JsonObject;
+    sourceEntryId: string;
+} | {
+    epoch: number;
+    name: "model";
+    seq: number;
+    generation: number;
+    session: string;
+    attachmentId: string;
+    t: "ev";
+    kind: "daemon";
+    data: {
+        v: 1;
+        state: "pending" | "applied" | "dropped";
+        model: {
+            provider: string;
+            id: string;
+        };
+        thinkingLevel?: string;
+        reason?: string;
+    };
     sourceEntryId: string;
 } | {
     epoch: number;
@@ -5505,7 +5846,7 @@ export declare const isProtocolFrame: (value: unknown) => value is RequestFor<"r
     attachmentId: string;
     t: "ev";
     error: {
-        code: "asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_awake" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal";
+        code: "asleep" | "gone" | "external_writer" | "rejected" | "bad_frame" | "frame_too_large" | "handshake_required" | "protocol_mismatch" | "unsupported_op" | "invalid_request" | "unknown_session" | "duplicate_session" | "path_mismatch" | "session_locked" | "not_attached" | "busy" | "no_lease" | "lease_held" | "lease_expired" | "stale_generation" | "stale_epoch" | "already_asleep" | "invalid_state" | "cursor_unknown" | "cursor_off_branch" | "unknown_question" | "invalid_ui_answer" | "idempotency_conflict" | "queue_full" | "sdk_incompatible" | "shutdown_in_progress" | "unavailable" | "internal";
         message: string;
         details?: JsonValue;
     };
@@ -5523,9 +5864,9 @@ export declare const isPromptOutcome: (value: unknown) => value is {
 };
 export declare const isPromptStatusResult: (value: unknown) => value is {
     state: "pending";
+    reason?: "external_writer";
     promptId?: string;
     acceptedAt?: string;
-    reason?: "external_writer";
 } | {
     state: "unknown";
 } | {

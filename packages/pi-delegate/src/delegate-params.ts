@@ -66,7 +66,7 @@ const handoff = Type.Optional(Type.Object({
  * authoring-delegate-agents skill documents their grammar.
  */
 const RUN_TAIL_INDEX =
-	"Run entry. Also accepted, validated at runtime, documented in the skill: confineWrites, writableRoots, readOnly, fallbackModels, thinkingMin, thinkingMax, collapse_mode, summary_model, supervisor_instructions, snippet_last_n, heartbeat_interval_ms, max_consecutive_heartbeats, max_duration_ms, wind_down_grace_ms.";
+	"Run entry. Also accepted, validated at runtime, documented in the skill: confineWrites, writableRoots, readOnly, fabric, fallbackModels, thinkingMin, thinkingMax, collapse_mode, summary_model, supervisor_instructions, snippet_last_n, heartbeat_interval_ms, max_consecutive_heartbeats, max_duration_ms, wind_down_grace_ms.";
 
 const retryOf = Type.Optional(Type.Object({
 	runId: Type.String(),
@@ -167,6 +167,7 @@ const tailProperties = {
 	writableRoots: Type.Optional(Type.Array(Type.String())),
 	confineWrites: Type.Optional(Type.Boolean()),
 	readOnly: Type.Optional(Type.Boolean()),
+	fabric: Type.Optional(Type.Boolean()),
 	heartbeat_interval_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_TIMEOUT_MS })),
 	max_consecutive_heartbeats: Type.Optional(Type.Integer({ minimum: 0 })),
 	collapse_mode: Type.Optional(Type.Union([Type.Literal("final_output"), Type.Literal("summary")])),
@@ -215,6 +216,7 @@ export const DelegateParamsInternal = Type.Object({
 	writableRoots: Type.Optional(Type.Array(Type.String())),
 	confineWrites: Type.Optional(Type.Boolean()),
 	readOnly: Type.Optional(Type.Boolean()),
+	fabric: Type.Optional(Type.Boolean()),
 	interactive: Type.Optional(Type.Boolean()),
 	artifact: Type.Optional(Type.Union([Type.String(), Type.Literal(false)])),
 	check: Type.Optional(Type.String()),

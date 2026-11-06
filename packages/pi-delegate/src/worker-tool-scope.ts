@@ -10,6 +10,7 @@ import { clearSessionControlGrants, registerSessionControlGrants } from "./contr
 import {
 	ASK_TOOL_NAME,
 	BUILTIN_TOOL_NAMES,
+	amendClaimedSessionTools,
 	DELEGATE_TOOL_NAME,
 	EXCLUDED_TOOL_NAMES,
 	artifactWriterToolNames,
@@ -32,9 +33,11 @@ import {
 	resolveLoadedExtensionForToolSelector,
 } from "./extension-policy.js";
 import { ToolSelectorDiagnosticCode, toolSelectorDiagnostic } from "./tool-selector.js";
+import { claimedSessionToolNames } from "./worker-session-seeds.js";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { PARENT_TRANSCRIPT_SEARCH_TOOL_NAME } from "./parent-transcript-search.js";
 import type { FabricHostPolicyV1 } from "./fabric-protocol.js";
+import type { WorkerSurfaceReason } from "./worker-surface.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -110,6 +113,10 @@ export interface PreparedWorkerToolScope {
 	readonly deniedToolNames: readonly string[];
 	/** Host policy required before this restricted full-code Fabric shape is admitted. */
 	readonly fabricHostPolicy?: FabricHostPolicyV1;
+	/** The agent or task set `fabric: false`: this worker never receives fabric_exec. */
+	readonly fabricOptOut?: boolean;
+	/** Why fabric_exec was or was not admitted, before the live session starts (#582). */
+	readonly fabricAdmission: WorkerSurfaceReason;
 	readonly controlActionGrants?: Record<string, string[] | undefined>;
 	/** Diagnostics retained for worker binding (missing selectors fail construction). */
 	readonly diagnostics: string[];
@@ -232,14 +239,6 @@ function hasSystemText(message: TranscriptSystemMessage): boolean {
 }
 
 /**
- * Remove tool declarations outside `allowed` from a Pi >= 0.86 transcript.
- * Pi computes the transcript's tool delta before `turn_start`, so a tool an
- * extension registers in `before_agent_start` can be declared even though the
- * floor has already removed it from the executable set. Dropping the stale
- * names narrows what the model is told to match what the worker can run.
- * Returns the context unchanged when nothing outside `allowed` is declared.
- */
-/**
  * True when pi-fabric full-code mode has collapsed the transcript's tool
  * declarations to `fabric_exec` (plus any foreground tools) while the final
  * worker set excludes it.
@@ -277,6 +276,14 @@ export function redeclareTranscriptTools<T>(context: T, definitions: readonly Fi
 	return { ...(context as object), messages: next } as T;
 }
 
+/**
+ * Remove tool declarations outside `allowed` from a Pi >= 0.86 transcript.
+ * Pi computes the transcript's tool delta before `turn_start`, so a tool an
+ * extension registers in `before_agent_start` can be declared even though the
+ * floor has already removed it from the executable set. Dropping the stale
+ * names narrows what the model is told to match what the worker can run.
+ * Returns the context unchanged when nothing outside `allowed` is declared.
+ */
 export function narrowTranscriptToolDeclarations<T>(context: T, allowed: readonly string[]): T {
 	const messages = (context as { messages?: unknown } | null | undefined)?.messages;
 	if (!Array.isArray(messages)) return context;
@@ -503,6 +510,11 @@ function resolveExtensionMatches(
 	const wanted = trimmed.toLowerCase();
 	const isPiDelegateAlias = isPiDelegateSelectorAlias(trimmed);
 	return extensions.filter((extension) => {
+		// Pi names an inline factory `<inline:name>`. It has no package: an identity
+		// derived from that path resolves against the cwd and borrows the project's
+		// package, which would make that package's selectors ambiguous (#587).
+		// Match an inline factory only by its own path.
+		if (extension.path.startsWith("<inline:")) return extensionSelectorAliases(extension).has(wanted);
 		try {
 			const identity = getPortableExtensionIdentity(extension) ?? identifyLoadedExtension(extension);
 			// The convenience alias is trusted only after the loaded portable
@@ -670,12 +682,19 @@ function selectedExtensionAllowsTool(
 	return extensionOwnsSelectedTool(selectedExtension, toolName, extensions);
 }
 
+/** Loaded extensions from the `pi-fabric` package that register fabric_exec. */
+export function loadedFabricExtensions(extensions: readonly Extension[]): Extension[] {
+	return extensions.filter((extension) =>
+		extension.tools.has(FABRIC_EXEC_TOOL_NAME) &&
+		(getPortableExtensionIdentity(extension) ?? identifyLoadedExtension(extension)).packageName === "pi-fabric");
+}
+
 /**
  * Prepare one live tool scope. This is the only resolver used by in-process
  * worker sessions after extension selectors have been parsed.
  */
 export function prepareWorkerToolScope(
-	surface: Pick<ResolvedToolSurface, "tools" | "extSelectors"> & Partial<Pick<ResolvedToolSurface, "deniedToolNames" | "actionGrants" | "delegateOptIn" | "hasExplicitAllowlist">>,
+	surface: Pick<ResolvedToolSurface, "tools" | "extSelectors"> & Partial<Pick<ResolvedToolSurface, "deniedToolNames" | "actionGrants" | "delegateOptIn" | "hasExplicitAllowlist" | "fabricOptOut" | "readOnly">>,
 	extensions: readonly Extension[],
 	options: {
 		workerGrantedToolNames?: readonly string[];
@@ -718,9 +737,7 @@ export function prepareWorkerToolScope(
 		? [...surface.tools].filter(isWorkerGrantedToolName)
 		: undefined;
 	const controlActionGrants = surface.actionGrants;
-	const fabricOwners = extensions.filter((extension) =>
-		extension.tools.has(FABRIC_EXEC_TOOL_NAME) &&
-		(getPortableExtensionIdentity(extension) ?? identifyLoadedExtension(extension)).packageName === "pi-fabric");
+	const fabricOwners = loadedFabricExtensions(extensions);
 	const workerFabricRuntimePath = fabricOwners.length === 1 ? fabricOwners[0]!.resolvedPath : undefined;
 	const resolution = resolveWorkerToolScopeSelectorBindings(
 		requestedSelectors,
@@ -732,9 +749,16 @@ export function prepareWorkerToolScope(
 	// native veto and the write-confinement tool_call hook. A restricted worker
 	// therefore gets full Fabric only when its Fabric acknowledges a host policy
 	// that refuses the denied names and every unhooked non-read action.
+	const fabricOptOut = surface.fabricOptOut === true;
+	// A readOnly worker stays native (#587), even when its Fabric would
+	// acknowledge a host policy. pi-fabric has no worker write policy yet: it
+	// can only refuse pi.write / pi.edit outright, which also refuses the
+	// scratch and artifact writes the readOnly prompt asks for. Native write and
+	// edit under write confinement remain the enforced path.
+	const readOnlyWorker = surface.readOnly === true;
 	const fabricUnrestrictedShape = !hasExplicitAllowlist && requestedToolNames === undefined && !dynamic;
 	const fabricRestricted = deniedToolNames.size > 0 || options.writeConfined === true;
-	const fabricHostPolicy: FabricHostPolicyV1 | undefined = fabricUnrestrictedShape && fabricRestricted
+	const fabricHostPolicy: FabricHostPolicyV1 | undefined = !fabricOptOut && !readOnlyWorker && fabricUnrestrictedShape && fabricRestricted
 		? {
 				owner: "pi-delegate",
 				reason: options.writeConfined === true ? "write-confined delegate worker" : "restricted delegate worker",
@@ -742,13 +766,20 @@ export function prepareWorkerToolScope(
 				allowedUnhookedRisks: ["read"],
 			}
 		: undefined;
-	const fabricAllowed = fabricUnrestrictedShape && (
-		!fabricHostPolicy ||
-		(workerFabricRuntimePath !== undefined && options.requestFabricHostPolicy?.(
-			fabricHostPolicy,
-			workerFabricRuntimePath,
-		) === true)
-	);
+	const fabricHostPolicyAcknowledged = fabricHostPolicy !== undefined && workerFabricRuntimePath !== undefined &&
+		options.requestFabricHostPolicy?.(fabricHostPolicy, workerFabricRuntimePath) === true;
+	const fabricAllowed = !fabricOptOut && !readOnlyWorker && fabricUnrestrictedShape && (!fabricHostPolicy || fabricHostPolicyAcknowledged);
+	const fabricAdmission: WorkerSurfaceReason = workerFabricRuntimePath === undefined
+		? "fabric-not-loaded"
+		: fabricOptOut
+			? "fabric-opt-out"
+			: readOnlyWorker
+				? "readonly-worker"
+				: !fabricUnrestrictedShape
+				? "explicit-tool-scope"
+				: fabricHostPolicy
+					? (fabricHostPolicyAcknowledged ? "fabric-host-policy" : "host-policy-unacknowledged")
+					: "fabric-unrestricted";
 	const selectedExtensions = resolution.selectedExtensions;
 	const selectorExtensions = resolution.bindings.map(({ extension }) => extension);
 	const diagnostics = resolution.diagnostics;
@@ -805,6 +836,8 @@ export function prepareWorkerToolScope(
 			workerFabricRuntimePath,
 			deniedToolNames: [...deniedToolNames],
 			...(fabricHostPolicy ? { fabricHostPolicy } : {}),
+			...(fabricOptOut ? { fabricOptOut } : {}),
+			fabricAdmission,
 			controlActionGrants: surface.actionGrants,
 			diagnostics,
 			extensionToolSelectors: selectors,
@@ -816,12 +849,27 @@ export function prepareWorkerToolScope(
 			hasExplicitAllowlist,
 			...(artifactWriterRequirement !== undefined ? { artifactWriterRequirement } : {}),
 			dynamic: false,
-			sessionOptions: requestedToolNames ? { tools: requestedToolNames.filter((name) => name !== FABRIC_EXEC_TOOL_NAME) } : {},
+			sessionOptions: requestedToolNames
+				? {
+						tools: [
+							...requestedToolNames.filter((name) => name !== FABRIC_EXEC_TOOL_NAME),
+							// Pi's static allowlist must admit fabric_exec; the live
+							// scope still checks its owner before activating it.
+							...(fabricAllowed && workerFabricRuntimePath !== undefined ? [FABRIC_EXEC_TOOL_NAME] : []),
+						],
+					}
+				: {},
 			currentActiveToolNames(session) {
 				return requestedToolNames
-					? allowedRequestedNames(session)
+					? [
+							...allowedRequestedNames(session),
+							...(session && fabricAllowed &&
+								fabricExecAdmitted(undefined, session.getAllTools(), workerFabricRuntimePath)
+								? [FABRIC_EXEC_TOOL_NAME]
+								: []),
+						]
 					: session?.getAllTools().map((tool) => tool.name).filter((name) =>
-						!deniedToolNames.has(name) && (name !== FABRIC_EXEC_TOOL_NAME ||
+						!deniedToolNames.has(name) && isWorkerGrantedToolName(name) && (name !== FABRIC_EXEC_TOOL_NAME ||
 							(fabricAllowed && fabricExecAdmitted(undefined, session.getAllTools(), workerFabricRuntimePath)))) ?? [];
 			},
 			isAllowedToolName(name, session) {
@@ -985,6 +1033,8 @@ export function prepareWorkerToolScope(
 		workerFabricRuntimePath,
 		deniedToolNames: [...deniedToolNames],
 		...(fabricHostPolicy ? { fabricHostPolicy } : {}),
+		...(fabricOptOut ? { fabricOptOut } : {}),
+		fabricAdmission,
 		controlActionGrants: surface.actionGrants,
 		diagnostics,
 		extensionToolSelectors: selectors,
@@ -1083,6 +1133,23 @@ function bindSessionControlGrants(
 }
 
 /**
+ * Bind a resolved worker surface to the worker's loaded extensions: the single
+ * owner shared by worker construction and host admission projection. Re-applies
+ * the session-declaration rule, prepares the live scope and enforces its
+ * construction floor.
+ */
+export function bindWorkerToolScope(
+	surface: ResolvedToolSurface,
+	extensions: readonly Extension[],
+	options: Parameters<typeof prepareWorkerToolScope>[2] = {},
+): { surface: ResolvedToolSurface; toolScope: PreparedWorkerToolScope } {
+	const bound = amendClaimedSessionTools(surface, claimedSessionToolNames(extensions));
+	const toolScope = prepareWorkerToolScope(bound, extensions, options);
+	assertWorkerToolSurfaceUsable(bound, toolScope);
+	return { surface: bound, toolScope };
+}
+
+/**
  * Enforce the construction-time usable-surface floor after extension policy
  * and owner binding have resolved. Exact selectors may still register lazily,
  * so a qualified non-delegate selector counts as a deferred capability.
@@ -1128,8 +1195,11 @@ export function assertWorkerArtifactWriterRetained(
 		return builtin && retained;
 	});
 	if (retainedBuiltinWriter) return;
-	// Fabric full-code mode serves the builtin writer through fabric_exec.
-	const fabricServesWriter = fabric.fullCodeMode === true && fabric.hasRunner === true &&
+	// Fabric full-code mode serves the builtin writer through fabric_exec. A
+	// readOnly worker never has fabric_exec (#587), so only its native write
+	// can serve scratch and the artifact.
+	const fabricServesWriter = requirement.readOnly !== true &&
+		fabric.fullCodeMode === true && fabric.hasRunner === true &&
 		definitions.some((tool) => tool.name === FABRIC_EXEC_TOOL_NAME) &&
 		fabricExecAdmitted(fabric.requestedToolNames, tools, fabric.workerFabricRuntimePath) &&
 		artifactWriterToolNames(requirement).some((name) => {
@@ -1163,7 +1233,7 @@ export function assertWorkerToolSurfaceHasUsableToolNames(names: readonly string
  */
 export function createDetachedWorkerToolScopeEnvelope(
 	scope: Pick<PreparedWorkerToolScope, "requestedToolNames" | "workerFabricRuntimePath" | "deniedToolNames" | "extensionToolSelectors" | "selectorExtensionPaths" | "dynamic" | "controlActionGrants" | "hasExplicitAllowlist"> &
-		Partial<Pick<PreparedWorkerToolScope, "fabricHostPolicy" | "delegateOptIn" | "delegateToolSelectorIndexes">>,
+		Partial<Pick<PreparedWorkerToolScope, "fabricHostPolicy" | "fabricOptOut" | "delegateOptIn" | "delegateToolSelectorIndexes">>,
 	selectedExtensionPaths: readonly string[],
 	extensionRuntimePaths?: Readonly<Record<string, string>>,
 	workerAskRuntimePath?: string,
@@ -1179,7 +1249,9 @@ export function createDetachedWorkerToolScopeEnvelope(
 	// action would be permitted. A caller may also force one so lifecycle-time
 	// registrations can be re-applied to a static allowlist. Dynamic scopes need
 	// one regardless, for their selector narrowing.
-	if (!scope.dynamic && !scope.controlActionGrants && !scope.fabricHostPolicy && scope.deniedToolNames.length === 0 && options.force !== true) return undefined;
+	// A Fabric opt-out also needs one: without an envelope the child keeps Pi's
+	// default surface, which includes fabric_exec.
+	if (!scope.dynamic && !scope.controlActionGrants && !scope.fabricHostPolicy && !scope.fabricOptOut && scope.deniedToolNames.length === 0 && options.force !== true) return undefined;
 	const validatedOwnerPaths = dedupe([
 		...selectedExtensionPaths,
 		...(options.workerFabricResolvedPath !== undefined && options.workerFabricResolvedPath === scope.workerFabricRuntimePath
@@ -1219,7 +1291,7 @@ export function createDetachedWorkerToolScopeEnvelope(
 	) {
 		throw new Error("Detached worker tool scope selector owners do not match the parent-validated extension paths");
 	}
-	const fabricUnrestrictedShape = !scope.hasExplicitAllowlist && scope.requestedToolNames === undefined && !scope.dynamic;
+	const fabricUnrestrictedShape = scope.fabricOptOut !== true && !scope.hasExplicitAllowlist && scope.requestedToolNames === undefined && !scope.dynamic;
 	const fabricHostPolicy = fabricUnrestrictedShape && options.workerFabricRuntimePath
 		? scope.fabricHostPolicy
 		: undefined;

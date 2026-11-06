@@ -73,6 +73,24 @@ export function resolveEscalationPolicy(args: {
 	});
 }
 
+/** Resolve and freeze one slot's §5 policy before any dispatch side effect. */
+export function resolveSlotEscalationPolicy(args: {
+	shape: EscalationPolicyShape;
+	config: { escalationGlobalLayer?: EscalationConfig };
+	agent: { escalation?: EscalationConfig } | undefined;
+	invocationValue: unknown;
+	fieldPath: string;
+}): EffectiveEscalationPolicy {
+	return resolveEscalationPolicy({
+		shape: args.shape,
+		globalLayer: args.config.escalationGlobalLayer,
+		agentLayer: args.agent?.escalation,
+		invocationLayer: args.invocationValue === undefined
+			? undefined
+			: parseEscalationInvocationValue(args.invocationValue, args.fieldPath),
+	});
+}
+
 /**
  * Parse the strict tool-argument form of the §5 escalation binding.
  * String mode shorthand is accepted; reserved `park` fails before dispatch.

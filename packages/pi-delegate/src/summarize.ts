@@ -65,6 +65,8 @@ export interface TranscriptEntry {
 	 * duration ("✓ 1.2s") rather than two disconnected lines.
 	 */
 	toolCallId?: string;
+	/** Native monotonic execution time on tool results; absent when unrecorded. */
+	durationMs?: number;
 	/**
 	 * For `toolCall` entries: a short single-line metadata preview (file path,
 	 * command, query, …) shown on the collapsed chip. Never the full args.
@@ -284,6 +286,8 @@ export function messagesToTranscript(
 				}
 			}
 		} else if (m.role === "toolResult") {
+			const durationMs = typeof m.durationMs === "number" && Number.isFinite(m.durationMs) && m.durationMs >= 0
+				? m.durationMs : undefined;
 			const text = (m.content as any[])
 				.map((c) => (c.type === "text" ? c.text : ""))
 				.filter(Boolean)
@@ -297,6 +301,7 @@ export function messagesToTranscript(
 					toolName: (m as any).toolName,
 					toolCallId: (m as any).toolCallId,
 					isError: (m as any).isError === true,
+					...(durationMs === undefined ? {} : { durationMs }),
 				});
 			}
 		}

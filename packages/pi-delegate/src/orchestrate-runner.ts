@@ -181,6 +181,8 @@ function cfgToAgentConfig(cfg: OrchestrateCfg): AgentConfig {
 		...(cfg.extensionInclude ? { extensionInclude: cfg.extensionInclude } : {}),
 		...(cfg.extensionExclude ? { extensionExclude: cfg.extensionExclude } : {}),
 		...(cfg.tools ? { tools: cfg.tools } : {}),
+		// Carry the opt-out so the child's surface resolves to fabricOptOut (#582).
+		...(cfg.fabric === false ? { fabric: false } : {}),
 		...(cfg.model ? { model: cfg.model } : {}),
 		...(cfg.env ? { env: cfg.env } : {}),
 		...(cfg.thinking ? { thinking: cfg.thinking } : {}),
@@ -2163,6 +2165,9 @@ export async function runOrchestrateChild(
 			liveToolScope?.currentActiveToolNames().includes("set_thinking_effort") === true;
 		const detachedFabricPolicyRequired = preparedResources?.toolScope.workerFabricRuntimePath !== undefined &&
 			preparedResources.toolScope.fabricHostPolicy !== undefined;
+		// A Fabric opt-out needs the live scope bridge: without its envelope the
+		// child has no veto against an extension that activates fabric_exec.
+		const fabricOptOut = effectiveHostedSurface.fabricOptOut === true;
 		const hostedCfg: OrchestrateCfg = {
 			...cfg,
 			...(selectedExtensionPaths ? { extensions: selectedExtensionPaths } : {}),
@@ -2176,7 +2181,7 @@ export async function runOrchestrateChild(
 		const sessionDir = buildWorkerSessionDir(cfg.agentDir);
 		const built = buildOrchestratePiArgs(hostedCfg, {
 			sessionDir,
-			forceWorkerToolScopeBridge: detachedFabricPolicyRequired,
+			forceWorkerToolScopeBridge: detachedFabricPolicyRequired || fabricOptOut,
 		});
 		let workerToolScopeEnvelope: DetachedWorkerToolScopeEnvelope | undefined;
 		let thinkingPolicyRequirements: DetachedThinkingPolicyRequirements | undefined;
@@ -2190,8 +2195,14 @@ export async function runOrchestrateChild(
 				effectiveHostedSurface.hasExplicitAllowlist
 				? prepareWorkerToolScope({ ...effectiveHostedSurface, tools: selectedToolNames }, [])
 				: undefined;
+			const fabricOptOutToolScope = !liveToolScope && !staticTaskToolScope && !staticExplicitToolScope &&
+				!detachedFabricPolicyRequired && fabricOptOut
+				// The preflight scope already records the opt-out and the validated
+				// Fabric owner; without a preflight, a static scope suffices.
+				? preparedResources?.toolScope ?? prepareWorkerToolScope({ ...effectiveHostedSurface, tools: selectedToolNames }, [])
+				: undefined;
 			const childToolScopeBase = liveToolScope ?? staticTaskToolScope ?? staticExplicitToolScope ??
-				(detachedFabricPolicyRequired ? preparedResources?.toolScope : undefined);
+				(detachedFabricPolicyRequired ? preparedResources?.toolScope : undefined) ?? fabricOptOutToolScope;
 			const childToolScope = childToolScopeBase
 				? {
 						...childToolScopeBase,

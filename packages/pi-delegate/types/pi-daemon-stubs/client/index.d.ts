@@ -1,9 +1,7 @@
-// VENDORED build-time type fallback for the OPTIONAL @caair/pi-daemon peer (#35 / #470).
-// Copied verbatim from @caair/pi-daemon dist .d.ts. Used ONLY when the package is
-// absent (tsconfig `paths` resolves the real node_modules types first, these second),
-// so pi-delegate builds/type-checks without the package. Regenerate by re-copying
-// @caair/pi-daemon/dist/{client,protocol}/*.d.ts when the daemon protocol changes.
-// Do not hand-edit.
+// VENDORED build-time type fallback for optional @centerforagenticai/pi-daemon@0.4.0.
+// Copied verbatim from its published dist declarations. Used only when the
+// package is absent; tsconfig paths prefer the installed declarations.
+// Regenerate from dist/{client,protocol}/*.d.ts. Do not hand-edit.
 import { type ChildProcess } from "node:child_process";
 import { type Socket } from "node:net";
 import { type Cursor, type ErrorCode, type Operation, type OperationParams, type OperationResult, type StreamFrame } from "../protocol/index.js";
@@ -130,6 +128,10 @@ export declare class DaemonLease {
     heartbeat(): Promise<LeaseHeartbeatResult>;
     release(): Promise<LeaseReleaseResult>;
     prompt(params: LeasePromptOptions): Promise<OperationResult<"prompt">>;
+    setModel(params: {
+        readonly model: OperationParams<"set_model">["model"];
+        readonly thinkingLevel?: OperationParams<"set_model">["thinkingLevel"];
+    }): Promise<OperationResult<"set_model">>;
     abort(params?: LeaseAbortOptions): Promise<OperationResult<"abort">>;
     answerUi(params: LeaseUiAnswerOptions): Promise<OperationResult<"ui_answer">>;
     sleep(options?: AttachmentSleepOptions): Promise<OperationResult<"sleep">>;
@@ -147,9 +149,22 @@ export declare class DaemonClient {
     request<O extends ClientOperation>(operation: O, params: OperationParams<O>, session?: string): Promise<OperationResult<O>>;
     requestWithId<O extends ClientOperation>(id: string, operation: O, params: OperationParams<O>, session?: string): Promise<OperationResult<O>>;
     attach(sessionId: string, params?: OperationParams<"attach">, options?: DaemonAttachmentOptions): Promise<DaemonAttachment>;
+    /**
+     * Read status without waking or resubmitting. Keep the original submission key.
+     * `unknown` means no indexed claim, not proof that provider work never started;
+     * reconcile explicitly or accept duplicate risk before resending. A new file's
+     * first claim may not be saved before dispatch (O10); an ordinary crash can
+     * retain `pending` in SQLite. Neither uncertain state authorizes automatic retry.
+     * A known, received pre-claim `busy` refusal remains safe to re-evaluate.
+     */
     promptStatus(sessionId: string, params: OperationParams<"prompt_status">): Promise<OperationResult<"prompt_status">>;
     recover(sessionId: string, params: OperationParams<"recover">): Promise<OperationResult<"recover">>;
     close(): void;
+    /**
+     * Open a fresh connection; no prompts, attachments, or leases are replayed.
+     * Caller hooks own recovery policy and must not turn an `unknown` prompt
+     * status into automatic resend. Query with the original submission key.
+     */
     reconnect(): Promise<DaemonClient>;
     private receive;
     private routeStreamFrame;

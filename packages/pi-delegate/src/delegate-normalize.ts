@@ -222,7 +222,7 @@ const RUN_SCOPED_KEYS = [
 	"interactive", "worktree", "escalation", "handoff", "retryOf",
 	// runtime tail (accepted per entry, validated by DelegateParamsInternal)
 	"maxSubagentDepth", "max_rounds", "skill", "thinkingMin", "thinkingMax", "fallbackModels",
-	"writableRoots", "confineWrites", "readOnly", "heartbeat_interval_ms",
+	"writableRoots", "confineWrites", "readOnly", "fabric", "heartbeat_interval_ms",
 	"max_consecutive_heartbeats", "collapse_mode", "summary_model",
 	"supervisor_instructions", "snippet_last_n", "max_duration_ms", "wind_down_grace_ms",
 ];

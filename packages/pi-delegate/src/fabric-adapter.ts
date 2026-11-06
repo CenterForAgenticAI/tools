@@ -38,6 +38,7 @@ import {
 	type FabricProviderRegistration,
 	type FabricRisk,
 } from "./fabric-protocol.js";
+import { EXCLUDED_TOOL_NAMES as NATIVE_DELEGATE_TOOL_NAMES } from "./tool-surface.js";
 import { DELEGATE_RUNTIME_CAPABILITIES, type DelegateRuntimeCapability } from "./runtime-contract.js";
 import type { DelegateRuntimeApiHandle, DelegateRuntimeClient, DelegateRuntimeInvocationOptions, DelegateRuntimeUpdate } from "./runtime-api.js";
 
@@ -298,6 +299,14 @@ export const FABRIC_MODE_INSTRUCTIONS = [
 	"- Results are bounded: logs follow native tail limits, and a result larger than Fabric's nested result limit arrives as a truncated preview. The complete envelope stays at the receipt's `resultPath`.",
 ].join("\n");
 
+/**
+ * One-line advertisement for the turns before Fabric activates (#574). In
+ * full-code mode Fabric hides the native delegate tools, and discovery runs
+ * only on the first `fabric_exec` call, so without this line the first turn
+ * would carry no delegate guidance at all.
+ */
+export const FABRIC_ROUTE_HINT = "pi-delegate: delegation is available inside `fabric_exec` through the `delegate` provider, for example `await tools.call({ ref: \"delegate.dispatch\", args: { runs: [{ agent: \"worker\", task: \"...\" }] } })`; list its actions with `tools.list`. Full pi-delegate instructions follow once Fabric has activated.";
+
 /** Remove exact whole lines, leaving every other byte of the prompt unchanged. */
 export function withoutLines(text: string, lines: readonly string[]): string {
 	if (lines.length === 0) return text;
@@ -329,6 +338,15 @@ export interface DelegateFabricAdapter {
 	 * text should wait until every `session_start` handler has run.
 	 */
 	selectionPending(): boolean;
+	/**
+	 * True in full-code mode (`fabric_exec` active, every native delegate tool
+	 * hidden) when `fabric_exec` can reach the `delegate` provider,
+	 * but Fabric has not run discovery yet, so the Fabric interface is not
+	 * selected. Fabric discovers providers on its first activation, so a
+	 * `delegate.*` ref called from `fabric_exec` already works in this state.
+	 * The first-turn advertisement and wake wording follow it (#574).
+	 */
+	routePending(): boolean;
 	/** Call from the foreground `session_start`, after the runtime core is installed. */
 	sessionStart(context: ExtensionContext): void;
 	/** Call from the foreground `session_shutdown`. */
@@ -404,7 +422,9 @@ export function setupFabricAdapter(pi: ExtensionAPI, host: DelegateFabricAdapter
 			try { ctx.ui.notify(pendingNotice, "warning"); } catch { /* best-effort */ }
 		}
 		pendingNotice = undefined;
-		if (!adapter.selected()) return undefined;
+		if (!adapter.selected()) {
+			return adapter.routePending() ? { systemPrompt: `${event.systemPrompt}\n\n${FABRIC_ROUTE_HINT}` } : undefined;
+		}
 		// The base prompt for this turn can predate native suppression, so drop the
 		// native delegate lines here as well; later turns omit them already.
 		return { systemPrompt: `${withoutLines(event.systemPrompt, host.nativePromptLines())}\n\n${FABRIC_MODE_INSTRUCTIONS}` };
@@ -437,6 +457,22 @@ export function setupFabricAdapter(pi: ExtensionAPI, host: DelegateFabricAdapter
 			} catch {
 				return false;
 			}
+		},
+		routePending() {
+			if (!host.isForeground() || host.nativeSurfaceRequired() || adapter.selected()) return false;
+			// Only before the first negotiation: a refused, failed or withdrawn
+			// provider cannot answer `delegate.*`, so those states stay native.
+			if (state !== "absent") return false;
+			let capabilities: readonly string[];
+			try { capabilities = host.coreCapabilities(); } catch { return false; }
+			if (!DELEGATE_RUNTIME_CAPABILITIES.every((capability) => capabilities.includes(capability) && ACTION_BY_NAME.has(capability))) return false;
+			let active: unknown;
+			try { active = typeof pi.getActiveTools === "function" ? pi.getActiveTools() : undefined; } catch { return false; }
+			// Full-code mode only (#574): Fabric hides the native delegate tools.
+			// While any of them is active the session is in native mode, which
+			// keeps its native prompt and wake wording unchanged.
+			return Array.isArray(active) && active.includes("fabric_exec") &&
+				!active.some((name) => NATIVE_DELEGATE_TOOL_NAMES.includes(name as string));
 		},
 		sessionStart() {
 			if (!host.isForeground()) return;

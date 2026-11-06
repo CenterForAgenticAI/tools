@@ -73,6 +73,34 @@ exactly the native names it removed before the next model turn. There is no
 interval in which both interfaces are withheld: native advertisement is removed
 only after the discovery handshake succeeded.
 
+### Before Fabric activates
+
+Fabric discovers providers when its runtime activates, which can be the first
+`fabric_exec` call. In full-code mode the native delegate tools are already
+hidden then, so without help the first turn would carry no delegate guidance.
+While all of these hold:
+
+- `fabric_exec` is in the model's active tool set;
+- no native delegate tool (`delegate`, `delegate_control`,
+  `delegate_escalation` or a legacy alias) is active, as in full-code mode;
+- Fabric has not negotiated with pi-delegate in this session yet;
+- the installed core supports every runtime capability;
+- no mode needs the native surface;
+
+pi-delegate appends one line, exported as `FABRIC_ROUTE_HINT`, to the system
+prompt:
+
+```text
+pi-delegate: delegation is available inside `fabric_exec` through the `delegate` provider, for example `await tools.call({ ref: "delegate.dispatch", args: { runs: [{ agent: "worker", task: "..." }] } })`; list its actions with `tools.list`. Full pi-delegate instructions follow once Fabric has activated.
+```
+
+Wakes and tool results in this state name the Fabric refs called from
+`fabric_exec` (for example `delegate.harvest`), never `delegate_control`. The
+first `fabric_exec` call activates Fabric, so those refs work. pi-delegate
+leaves the native tools as they are, because it cannot see whether Fabric hides
+them. After discovery the full Fabric-mode instructions replace the line. An
+unsupported, failed or withdrawn negotiation keeps the native wording.
+
 ### Unsupported versions and registration failure
 
 A discovery payload that is not version 1, has no `register` function, or whose
@@ -93,17 +121,16 @@ pi-delegate: Fabric adapter not registered (<reason>). Native delegate tools sta
 | `/fabric reload` (Fabric reinitializes its runtime) | Fabric closes its registry but excludes external providers, so it does not call `close()`. It mounts the stored provider again and repeats discovery; pi-delegate answers with `overwrite: true`. The surface stays ready and Fabric mode stays selected across the reload. |
 | pi-delegate `session_shutdown` | The discovery listener is released and the surface resets. The runtime core is withdrawn after that, so a late Fabric call fails with `[core-unavailable]`. |
 | Session switch, `/new`, `/resume`, `/fork`, reload | Pi runs `session_shutdown` and `session_start`. The provider binds a fresh runtime client to the invoking `fabric_exec` context on every call, so it never reuses a previous session's context. |
-| pi-delegate loads before Fabric, with pending results at startup | Startup wakes (recovered sync output, orphaned or failed driver results, dropped dispatch and escalation wakes) name a control route. While a loaded Fabric host has not selected its interface yet, pi-delegate delivers them after every `session_start` handler has run (at `resources_discover`, or the first `turn_start`), so the hint follows the settled selection. Without Fabric they are delivered during `session_start`, as before. In both cases the startup retention sweep runs after them, so an old recovered run is shown before it is removed. |
+| pi-delegate loads before Fabric, with pending results at startup | Startup wakes (recovered sync output, orphaned or failed driver results, dropped dispatch and escalation wakes) name a control route. While a loaded Fabric host has not selected its interface yet, pi-delegate delivers them after every `session_start` handler has run (at `resources_discover`, or the first `turn_start`), so the hint follows the settled selection. When `fabric_exec` is active, the native delegate tools are hidden and Fabric has not activated, the hint names the Fabric refs (see [Before Fabric activates](#before-fabric-activates)). Without Fabric they are delivered during `session_start`, as before. In both cases the startup retention sweep runs after them, so an old recovered run is shown before it is removed. |
 | Delegate-owned worker sessions | The worker's pi-delegate instance never registers a provider and never changes instructions. |
 | Pi reload without restart | Pi's extension runtime unsubscribes event-bus listeners on invalidation. A stale module instance cannot answer discovery. |
 
 Host limits, stated plainly:
 
-- Fabric decides when it activates. Before activation a loaded Fabric is
-  "installed but inactive", and pi-delegate stays in native mode. In Fabric's
-  full-code mode the native tools are already hidden, so until the first
-  `fabric_exec` call triggers discovery the model sees no delegate guidance
-  (tracked in #574).
+- Fabric decides when it activates. Before activation pi-delegate keeps its
+  native tools and adds only the one-line route described in
+  [Before Fabric activates](#before-fabric-activates). The full Fabric-mode
+  instructions arrive with the first turn after discovery.
 - Fabric's extension-tool roster lists captured tools by name. Once
   `delegate_control` has been revealed it appears there too, next to the
   Fabric-mode instructions that route control through the `delegate`
@@ -124,10 +151,19 @@ Host limits, stated plainly:
 ## Fabric inside a worker
 
 A worker whose profile loads Fabric gets `fabric_exec` when its tool surface
-leaves Fabric room: no explicit `tools` list and no extension selectors.
+leaves Fabric room: not `readOnly`, no explicit `tools` list and no extension
+selectors. A `tools` list from the agent or the run entry withholds Fabric.
 
-Most workers are also restricted. An ordinary worker has the delegate family
-denied, and a `readOnly` or write-confined worker has write confinement.
+A `readOnly` worker stays on the native tools (`read`, `bash`, `write`,
+`edit`) and never receives `fabric_exec`, whatever its Fabric supports.
+pi-fabric has no worker write policy yet: it can refuse `pi.write` and
+`pi.edit` only outright, which would also refuse the scratch and artifact
+writes a `readOnly` worker is allowed. pi-delegate does not ask its Fabric
+for a host policy, and the result reports `surfaceReason: readonly-worker`.
+This holds until pi-fabric supports a worker write policy.
+
+Most other workers are also restricted. An ordinary worker has the delegate
+family denied, and a write-confined worker has write confinement.
 Several Fabric providers (`agents`, `mcp`, `sessions`, `jev` and others)
 do not replay Pi `tool_call` hooks, so neither restriction would see them.
 Before such a worker gets `fabric_exec`, pi-delegate sends the worker's Fabric
@@ -147,6 +183,49 @@ native tools without `fabric_exec`, as before. For a detached worker,
 pi-delegate performs this handshake inside the child process after that child's
 Fabric has loaded; the parent's detached-scope envelope carries only the policy
 to request and cannot grant `fabric_exec` by itself.
+
+An agent or a single run can keep the native surface with `fabric: false`
+(agent frontmatter, or a run entry field). A top-level `fabric: false` on a
+dispatch applies to every run, including chained and parallel ones. Such a worker never receives
+`fabric_exec`, and pi-delegate does not ask its Fabric for a host policy. The
+opt-out only narrows: a run entry can add `fabric: false`, but a run entry's
+`fabric: true` cannot undo an agent's `fabric: false`; the agent author's
+choice wins. To keep Fabric from loading at all, use
+`extensionExclude: [pi-fabric]`.
+
+A worker with no active `fabric_exec` does not see pi-fabric's skills (such
+as `fabric-exec`) in its skill list, whether it is write-confined (the
+default) or dispatched with `confineWrites: false`. A detached (driver) child
+builds its prompt in its own Pi process and still lists them.
+pi-fabric adds its own prompt sections only when `fabric_exec` is active.
+
+The worker's result and `delegate.status` report the surface it received:
+
+- the harvested result carries `surface` (`fabric` or `native`) and
+  `surfaceReason`, and its text has a line such as
+  `surface: native (fabric-opt-out)` for solo, parallel, supervised and chain
+  workers (a parallel chain step prefixes the entry name);
+- `delegate.status` details carry `workerSurfaces`, with counts of `fabric`
+  and `native` entries and of each reason. A completed run restored after a
+  restart keeps them.
+
+| `surfaceReason` | Surface | Meaning |
+| --- | --- | --- |
+| `fabric-unrestricted` | fabric | The worker shape needs no host policy. |
+| `fabric-host-policy` | fabric | A write-confined or tool-denying worker whose Fabric acknowledged the host policy. |
+| `fabric-not-loaded` | native | The worker loads no single pi-fabric extension. |
+| `fabric-opt-out` | native | The agent or the run set `fabric: false`. |
+| `readonly-worker` | native | A `readOnly` worker, until pi-fabric supports a worker write policy. |
+| `explicit-tool-scope` | native | An explicit `tools:` list from the agent or the run, `ext:` selectors, or dynamic tools such as escalation verbs. |
+| `host-policy-unacknowledged` | native | A restricted worker whose Fabric did not acknowledge the policy (an older pi-fabric). |
+| `fabric-exec-inactive` | native | Fabric was admitted, but `fabric_exec` was not active when the worker started. |
+
+A detached (driver) worker carries `fabric: false` from its agent or its run
+entry into the child process. The child runs under pi-delegate's live tool
+scope, which withholds `fabric_exec` even when an extension tries to activate
+it. Detached workers do not report a surface yet: the child admits or
+withholds `fabric_exec` in its own process and sends no report back, so
+`delegate.status` for a detached run has no `workerSurfaces`.
 
 pi-delegate delivers this request directly to the single listener registered
 from the loaded `pi-fabric` package instead of broadcasting it on the worker's
@@ -268,6 +347,11 @@ itself.
 | Absent, inactive, unsupported, failure, teardown, session switch, suppression, wake hints | `tests/integration/fabric-adapter-lifecycle.test.ts` |
 | Shared-core contract: solo/supervised/driver dispatch, evidence, controls, auth, cancellation | `tests/integration/fabric-adapter-contract.test.ts` (the driver case needs the pi-daemon fixture: Node 24 and the optional pi-daemon package; CI runs it in `daemon_node24`) |
 | Wake and result hints name Fabric refs, never a removed native tool | `tests/unit/model-interface.test.ts` |
+| First turn before activation: one-line route, Fabric wake wording (#574) | `tests/integration/fabric-adapter-lifecycle.test.ts` |
+| Worker surface admission, `fabric: false`, receipt and status fields (#582) | `tests/unit/worker-tool-scope.test.ts`, `tests/unit/worker-surface.test.ts`, `tests/unit/run-introspect.test.ts` |
+| `readOnly` workers stay native, with native write for scratch and the artifact in full-code mode (#587) | `tests/unit/fabric-default-admission.test.ts` |
+| `fabric: false` on a single solo run reaches the worker (#587) | `tests/unit/single-direct-raw-task.test.ts`, `tests/unit/fabric-run-opt-out.test.ts` |
+| pi-fabric skills hidden from native workers | `tests/unit/worker-fabric-guidance.test.ts` |
 | Installed package: exports, shipped files, registration, matrix | `tests/integration/fabric-packed-artifact.test.ts` via `npm run smoke:pack` |
 
 `node scripts/fetch-fabric-contract-builds.mjs --with-peers --fork <fork-root>`

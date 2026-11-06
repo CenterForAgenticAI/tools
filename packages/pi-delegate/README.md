@@ -10,9 +10,10 @@ pi-delegate runs specialist agents from a Pi session and returns one result for 
 - Add a private supervisor that can review and redirect a worker before returning one answer.
 - Keep the foreground responsive with background completion wakes, inspection, cancellation, recovery, and escalation.
 - Isolate worker changes in Git worktrees and confine writes to approved roots.
-- Keep read-only workers useful for inspection: literal `/dev/null` redirection,
-  file-descriptor duplication, and safe read-only Git forms remain available;
-  Git output, executable-helper, and global config-injection options are refused.
+- Guard read-only workers against accidental writes through `write`, `edit`,
+  and git: they keep shell inspection and read-only Git forms, but cannot commit
+  or switch branches in the shared checkout. This is not isolation; use
+  `worktree: true` to isolate a worker.
 - Use the same production handlers from a Node client, Fabric, or another Pi extension.
 
 Read [Using pi-delegate](docs/usage.md) for the complete behavior and examples.
@@ -81,7 +82,7 @@ The extension hooks `resources_discover`, `before_agent_start`, `session_start`,
 The source is maintained in a private repository and published here as release snapshots; contributions are welcome as pull requests on [GitHub](https://github.com/CenterForAgenticAI/tools), which maintainers carry into the source repository.
 
 ```sh
-npm install
+bun install
 node scripts/public-release-smoke.mjs
 ```
 

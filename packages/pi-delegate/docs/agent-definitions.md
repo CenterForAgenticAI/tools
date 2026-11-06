@@ -78,7 +78,8 @@ an origin is an alias, not a trust proof.
 
 Extension loading and tool exposure are separate. Loading an extension makes
 its registrations available; an explicit `tools:` list still exposes only the
-named builtins and `ext:` selections. Built-in tools are bare names. The
+named builtins and `ext:` selections. A present but empty `tools:` fails closed;
+omit the key to inherit. Built-in tools are bare names. The
 canonical extension grammar is:
 
 ```text
@@ -240,6 +241,19 @@ Delegate extensions (all optional; canonical camelCase names):
   delegate tools listed in `tools:` are still stripped unless this is `true`.
 - `nestedDelegateAgents` — optional YAML array child-agent allow-list enforced
   when this worker calls `delegate`.
+- `fabric` — `false` keeps the worker on native tools even when pi-fabric is
+  loaded and `fabric_exec` could be admitted. Omit it for automatic selection.
+  Any other value, such as `no`, `off`, `0` or a list, counts as `false`
+  and logs a warning, so a mistyped opt-out still keeps native tools. A
+  `readOnly` worker stays on native tools whatever this field says, until
+  pi-fabric supports a worker write policy.
+  A run entry or `agentOverrides.<agent>.fabric` can add `fabric: false`,
+  but their `fabric: true` cannot undo the agent's `fabric: false`. An
+  `agentOverrides.<agent>.fabric` value that is not a boolean also counts
+  as `false`, with a warning. Agent
+  management `create` and `update` accept `config.fabric`: `false` writes
+  the opt-out, and `true` removes it from the definition. See
+  [Fabric inside a worker](fabric-mode.md#fabric-inside-a-worker).
 
 Nested delegation remains **strip-by-default**. To let a direct worker call
 delegate, set `allowNestedDelegate: true` and list exact trusted `pi-delegate`
@@ -275,8 +289,8 @@ delegate resolves it using the normal discovery order. The allow-list does not
 pin a source or file path, so avoid same-name overrides for allow-listed agents
 unless that override is the intended target.
 
-Unknown frontmatter fields are preserved in `extraFields` rather than
-silently dropped.
+Unknown frontmatter fields are preserved with their raw YAML values in
+`metadata` rather than silently dropped.
 
 Discovery searches (in order, later wins on name collisions):
 

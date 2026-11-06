@@ -51,7 +51,6 @@ import {
 	formatWorkerSeedAudit,
 	formatStrippedClaimantWarning,
 	isWorkerSeedPromptFallback,
-	claimedSessionToolNames,
 	usableToolNamesFromScope,
 } from "./worker-session-seeds.js";
 import { logDelegateDiagnostic } from "./diagnostics.js";
@@ -83,7 +82,7 @@ import {
 	AUTO_TEXT_COMPLETION_MODEL_REF,
 	resolveTextCompletionModel,
 } from "./model-completion.js";
-import { type CancelReason, type RunLiveState, updateRunState } from "./runtime.js";
+import { type CancelReason, type RunLiveState, updateRunState, observeWorkerSession } from "./runtime.js";
 import { dropTrailingLiveAssistant, isPiSystemMessage, seedLiveContext } from "./live-context.js";
 import { buildSeedMessages, type CloneMode, type DirectFirstTurnExchange } from "./seed.js";
 import { DEFAULT_TASK_DELIVERY_MODE, type TaskDeliveryMode } from "./delegate-runs.js";
@@ -107,8 +106,8 @@ import {
 	type ArtifactWriterRequirement,
 	type ResolvedToolSurface,
 	resolveRunToolSurface,
+	resolveWorkerToolOverrides,
 	resolveWorkerToolSurface,
-	amendClaimedSessionTools,
 } from "./tool-surface.js";
 import {
 	invalidateFailedWorkerRuntime,
@@ -116,8 +115,7 @@ import {
 } from "./extension-policy.js";
 import type { ResolvedBridge } from "./intercom-bridge.js";
 import {
-	assertWorkerToolSurfaceUsable,
-	prepareWorkerToolScope,
+	bindWorkerToolScope,
 	type PreparedWorkerToolScope,
 } from "./worker-tool-scope.js";
 import {
@@ -216,6 +214,12 @@ import {
 } from "./escalation-tools.js";
 import { listMailbox } from "./escalation-store.js";
 import { createFabricHostPolicyEventBus, requestFabricHostPolicy } from "./fabric-protocol.js";
+import { describeWorkerSurface, type WorkerSurface, type WorkerSurfaceReason } from "./worker-surface.js";
+import {
+	createWorkerFabricGuidanceExtension,
+	fabricSkillSourceDirs,
+	WORKER_FABRIC_GUIDANCE_EXTENSION_NAME,
+} from "./worker-fabric-guidance.js";
 import {
 	ASK_TOOL_NAME,
 	makeWorkerAskRoutingTool,
@@ -638,6 +642,10 @@ export interface RunResult {
 	failureCause?: WorkerFailureCause;
 	/** Worker model refs that refused before this run entry failed or fell back. */
 	refusalModels?: string[];
+	/** Tool path the worker received: `fabric` (fabric_exec) or `native` (#582). */
+	surface?: WorkerSurface;
+	/** Why the worker received that surface. */
+	surfaceReason?: WorkerSurfaceReason;
 	/** Structured policy refusals observed during the worker session. */
 	policyRefusals?: Array<{ boundary: "readOnly" | "writableRoot"; toolName: "write" | "edit" | "bash"; reason: string }>;
 	/** Git-only attribution of changes observed during this run entry's time window. */
@@ -939,6 +947,8 @@ export async function prepareWorkerSessionResources(
 		settingsManager?: SettingsManager;
 		extraInstructions?: string[];
 		confinement?: WriteConfinementPolicy;
+		/** Bind as write-confined without installing `confinement`; defaults to its presence. */
+		writeConfined?: boolean;
 		intercomBridge?: ResolvedBridge;
 		workerGrantedToolNames?: readonly string[];
 		/** Mode-aware artifact writer capability that must survive final live binding. */
@@ -971,10 +981,30 @@ export async function prepareWorkerSessionResources(
 			thinkingPolicyContext.extensionFactory,
 		];
 	}
+	// Filled once the worker's own extensions are known; read at each turn.
+	let fabricSkillDirs: ReadonlySet<string> = new Set();
+	// Every worker without an active fabric_exec loses pi-fabric's skills (#582).
+	const fabricGuidance = createWorkerFabricGuidanceExtension(() => fabricSkillDirs);
 	if (base.confinement) {
+		// A confined worker's gate rides on the confinement extension, so its
+		// loaded extension set gains no extra inline entry.
+		const confinement = createWriteConfinementExtension(base.confinement);
 		loaderOptions.extensionFactories = [
 			...(loaderOptions.extensionFactories ?? []),
-			createWriteConfinementExtension(base.confinement),
+			{
+				name: confinement.name,
+				factory: async (pi) => {
+					await confinement.factory(pi);
+					await fabricGuidance(pi);
+				},
+			},
+		];
+	} else {
+		// A confineWrites: false worker has no other inline pi-delegate extension
+		// to carry the gate, so it gets one of its own.
+		loaderOptions.extensionFactories = [
+			...(loaderOptions.extensionFactories ?? []),
+			{ name: WORKER_FABRIC_GUIDANCE_EXTENSION_NAME, factory: fabricGuidance },
 		];
 	}
 	let loader: DefaultResourceLoader | undefined;
@@ -992,11 +1022,11 @@ export async function prepareWorkerSessionResources(
 		// what the dispatching session loads. Re-apply the session-declaration rule
 		// here so a least-privilege agent still gets the tools its dispatch needs.
 		const loadedExtensions = loader.getExtensions().extensions;
-		const effectiveSurface = amendClaimedSessionTools(surface, claimedSessionToolNames(loadedExtensions));
-		const toolScope = prepareWorkerToolScope(effectiveSurface, loadedExtensions, {
+		fabricSkillDirs = fabricSkillSourceDirs(loadedExtensions);
+		const { surface: effectiveSurface, toolScope } = bindWorkerToolScope(surface, loadedExtensions, {
 			workerGrantedToolNames: base.workerGrantedToolNames,
 			artifactWriterRequirement: base.artifactWriterRequirement,
-			writeConfined: base.confinement !== undefined,
+			writeConfined: base.writeConfined ?? base.confinement !== undefined,
 			requestFabricHostPolicy: (policy, fabricResolvedPath) =>
 				requestFabricHostPolicy(eventBus, policy, fabricResolvedPath),
 		});
@@ -1005,14 +1035,19 @@ export async function prepareWorkerSessionResources(
 			["delegate_control", "delegate_escalation"].includes(toolScope.extensionToolSelectors[index].tool))) {
 			eventBus.emit(DELEGATE_EVENTS.revealControlTools, undefined);
 		}
-		assertWorkerToolSurfaceUsable(effectiveSurface, toolScope);
 		if (toolScope.diagnostics.length > 0) {
 			logDelegateDiagnostic(toolScope.diagnostics.join(" "), {
 				agentDir: base.agentDir,
 				throttleKey: "tool-surface-missing-extension",
 			});
 		}
-		return { loader, toolScope, surface: effectiveSurface, eventBus, thinkingPolicyContext };
+		return {
+			loader,
+			toolScope,
+			surface: effectiveSurface,
+			eventBus,
+			thinkingPolicyContext,
+		};
 	} catch (error) {
 		// A loader can have already executed extension factories before policy or
 		// thinking validation fails. There is no AgentSession to own that runtime
@@ -2115,12 +2150,8 @@ async function runForkInner(
 		// supervisor clone, it has the same capability contract as a top-level
 		// direct worker. Delegate-only mode replaces nested delegation with
 		// steering-only control actions for supervised workers.
-		const workerSurface = resolveDelegateOnlySteeringSurface(resolveWorkerToolSurface(req.agent, {
-			escalationPolicy: req.escalationPolicy,
-			readOnly: req.readOnly,
-			...(req.parentTranscriptSearch ? { customToolNames: [PARENT_TRANSCRIPT_SEARCH_TOOL_NAME] } : {}),
-		}));
-		const releaseWorkerToolRegistration = fctx.ensureWorkerToolRegistration?.(workerSurface.tools ?? []);
+		const workerSurface = resolveDelegateOnlySteeringSurface(resolveWorkerToolSurface(req.agent, resolveWorkerToolOverrides(req)));
+		const releaseWorkerToolRegistration = fctx.ensureWorkerToolRegistration?.(workerSurface.tools ?? workerSurface.runToolNames);
 		for (const d of workerSurface.diagnostics)
 			logDelegateDiagnostic(d, { agentDir: fctx.agentDir, throttleKey: "tool-surface" });
 		if (fctx.signal?.aborted) throw new Error("aborted before fork construction");
@@ -2294,7 +2325,7 @@ async function runForkInner(
 				(selector) => selector.tool === undefined || selector.tool === ASK_TOOL_NAME,
 			);
 			const workerSessionCustomTools = [
-				...(fctx.getWorkerToolDefinitions?.(effectiveSurface.tools ?? []) ?? []),
+				...(fctx.getWorkerToolDefinitions?.(effectiveSurface.tools ?? effectiveSurface.runToolNames) ?? []),
 				...(workerCustomTools ?? []),
 				...(selectedExtensionMayProvideAsk ? [workerAskTool] : []),
 			];
@@ -2428,6 +2459,11 @@ async function runForkInner(
 			// chance to register tools. The hook and turn subscription remain
 			// installed until this attempt's AgentSession is disposed.
 			unsubscribeToolScope = workerToolScope.install(session);
+			{
+				const surfaceReport = describeWorkerSurface(workerToolScope.fabricAdmission, session.getActiveToolNames());
+				Object.assign(result, surfaceReport);
+				fctx.onRuntimeUpdate?.(surfaceReport);
+			}
 			if (typeof releaseWorkerToolRegistration === "function") releaseWorkerToolRegistration();
 			// Wrap the worker session in a WorkerChannel so the clone-side
 			// `message_subagent` tool goes through a single lifecycle object
@@ -2534,7 +2570,7 @@ async function runForkInner(
 					}
 				},
 			);
-			unsubscribe = session.subscribe((ev) => {
+			unsubscribe = observeWorkerSession(session, fctx.ownerSessionId, (ev) => {
 				if (workerAttempt?.generation !== activityGeneration) return;
 				try {
 					if (ev.type === "agent_start") {

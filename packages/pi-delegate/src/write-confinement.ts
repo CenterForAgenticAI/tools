@@ -769,10 +769,6 @@ interface ShellExecutionWrapperSpec {
 	longOptionsWithValues?: ReadonlySet<string>;
 	requiredPositionalsBeforeCommand?: number;
 	optionalNumericPositionalBeforeCommand?: boolean;
-	mutatingOutputShortOptions?: string;
-	mutatingOutputLongOptions?: ReadonlySet<string>;
-	refusedShortOptions?: string;
-	refusedLongOptions?: ReadonlySet<string>;
 	nonExecutingShortOptions?: string;
 	nonExecutingLongOptions?: ReadonlySet<string>;
 }
@@ -800,21 +796,16 @@ const SHELL_EXECUTION_WRAPPERS: ReadonlyMap<string, ShellExecutionWrapperSpec> =
 			"--close-from", "--chdir", "--login-class", "--group", "--host", "--prompt", "--chroot",
 			"--role", "--command-timeout", "--type", "--other-user", "--user",
 		]),
-		refusedShortOptions: "eis",
-		refusedLongOptions: new Set(["--edit", "--login", "--shell"]),
 		nonExecutingShortOptions: "lVv",
 		nonExecutingLongOptions: new Set(["--list", "--validate", "--version"]),
 	}],
 	["doas", {
 		shortOptionsWithValues: "Cua",
-		refusedShortOptions: "s",
 		nonExecutingShortOptions: "C",
 	}],
 	["time", {
 		shortOptionsWithValues: "fo",
 		longOptionsWithValues: new Set(["--format", "--output"]),
-		mutatingOutputShortOptions: "o",
-		mutatingOutputLongOptions: new Set(["--output"]),
 	}],
 ]);
 
@@ -825,8 +816,6 @@ const ENV_EXECUTION_WRAPPER_SPEC: ShellExecutionWrapperSpec = {
 
 interface ShellWrapperOptionAnalysis {
 	consumesNextValue: boolean;
-	mutatesOutput: boolean;
-	refused: boolean;
 	nonExecuting: boolean;
 }
 
@@ -840,54 +829,37 @@ function analyzeShellWrapperOption(word: string, spec: ShellExecutionWrapperSpec
 	if (word.startsWith("--")) {
 		return {
 			consumesNextValue: !word.includes("=") && longShellOptionMatches(word, spec.longOptionsWithValues),
-			mutatesOutput: longShellOptionMatches(word, spec.mutatingOutputLongOptions),
-			refused: longShellOptionMatches(word, spec.refusedLongOptions),
 			nonExecuting: longShellOptionMatches(word, spec.nonExecutingLongOptions),
 		};
 	}
 	const shortOptionsWithValues = spec.shortOptionsWithValues ?? "";
-	const mutatingOutputShortOptions = spec.mutatingOutputShortOptions ?? "";
-	const refusedShortOptions = spec.refusedShortOptions ?? "";
 	const nonExecutingShortOptions = spec.nonExecutingShortOptions ?? "";
-	let mutatesOutput = false;
-	let refused = false;
 	let nonExecuting = false;
 	for (let index = 1; index < word.length; index++) {
 		const option = word[index]!;
-		mutatesOutput ||= mutatingOutputShortOptions.includes(option);
-		refused ||= refusedShortOptions.includes(option);
 		nonExecuting ||= nonExecutingShortOptions.includes(option);
 		if (!shortOptionsWithValues.includes(option)) continue;
-		return { consumesNextValue: index === word.length - 1, mutatesOutput, refused, nonExecuting };
+		return { consumesNextValue: index === word.length - 1, nonExecuting };
 	}
-	return { consumesNextValue: false, mutatesOutput, refused, nonExecuting };
+	return { consumesNextValue: false, nonExecuting };
 }
 
-interface ConsumedShellExecutionWrapper {
-	commandIndex: number;
-	mutatingOutputOption?: string;
-	refusedOption?: string;
-}
-
+/** Return the index of the command a wrapper executes, past the wrapper's own arguments. */
 function consumeShellExecutionWrapper(
 	words: readonly string[],
 	wrapperIndex: number,
 	spec: ShellExecutionWrapperSpec,
-): ConsumedShellExecutionWrapper {
+): number {
 	let index = wrapperIndex + 1;
 	let requiredPositionals = spec.requiredPositionalsBeforeCommand ?? 0;
 	let optionalNumericPositional = spec.optionalNumericPositionalBeforeCommand === true;
 	let options = true;
-	let mutatingOutputOption: string | undefined;
-	let refusedOption: string | undefined;
 	let nonExecuting = false;
 	while (index < words.length) {
 		const word = words[index]!;
 		if (options && word === "--") { index++; options = false; continue; }
 		if (options && word.startsWith("-") && word !== "-") {
 			const option = analyzeShellWrapperOption(word, spec);
-			if (option.mutatesOutput) mutatingOutputOption = word;
-			if (option.refused) refusedOption = word;
 			nonExecuting ||= option.nonExecuting;
 			index++;
 			if (option.consumesNextValue && index < words.length) index++;
@@ -901,21 +873,11 @@ function consumeShellExecutionWrapper(
 		}
 		break;
 	}
-	return {
-		commandIndex: nonExecuting ? words.length : index,
-		...(mutatingOutputOption ? { mutatingOutputOption } : {}),
-		...(refusedOption ? { refusedOption } : {}),
-	};
+	return nonExecuting ? words.length : index;
 }
 
-type ShellWrapperOptionReporter = (wrapper: string, option: string) => void;
-
 /** Remove assignments, control-flow words, and wrappers to reveal a simple command's executable. */
-function shellCommandWords(
-	inputWords: readonly string[],
-	reportOutput?: ShellWrapperOptionReporter,
-	reportRefused?: ShellWrapperOptionReporter,
-): string[] {
+function shellCommandWords(inputWords: readonly string[]): string[] {
 	const words = [...inputWords];
 	let index = 0;
 	while (index < words.length) {
@@ -972,10 +934,7 @@ function shellCommandWords(
 		}
 		const wrapper = SHELL_EXECUTION_WRAPPERS.get(executable);
 		if (!wrapper) break;
-		const consumed = consumeShellExecutionWrapper(words, index, wrapper);
-		if (consumed.mutatingOutputOption) reportOutput?.(executable, consumed.mutatingOutputOption);
-		if (consumed.refusedOption) reportRefused?.(executable, consumed.refusedOption);
-		index = consumed.commandIndex;
+		index = consumeShellExecutionWrapper(words, index, wrapper);
 	}
 	return words.slice(index);
 }
@@ -991,6 +950,8 @@ function resolveGitTarget(value: string, cwd: string): string | undefined {
 
 interface ParsedGitSimpleCommand {
 	targets: string[];
+	/** Directory git runs in: the tool cwd, or the last `-C` directory. */
+	cwd: string;
 	subcommand?: string;
 	arguments: string[];
 	unsafeOption?: string;
@@ -1147,12 +1108,13 @@ function parseGitSimpleCommand(tokens: string[], cwd: string): ParsedGitSimpleCo
 		const arguments_ = gitSubcommandArguments(tokens, index + 1);
 		return {
 			targets,
+			cwd: commandCwd,
 			subcommand: token,
 			arguments: arguments_,
 			...(unsafeOption === undefined ? {} : { unsafeOption }),
 		};
 	}
-	return { targets, arguments: [], ...(unsafeOption === undefined ? {} : { unsafeOption }) };
+	return { targets, cwd: commandCwd, arguments: [], ...(unsafeOption === undefined ? {} : { unsafeOption }) };
 }
 function readOnlyGitBranch(arguments_: readonly string[]): boolean {
 	if (arguments_.length === 0) return true;
@@ -1277,16 +1239,36 @@ interface GitTargetViolation {
 	dynamic: boolean;
 }
 
-/** Return explicit, out-of-root git targets from mutating bash commands. */
+/**
+ * Return the git targets a mutating bash command may not touch.
+ *
+ * A confined worker's explicit targets (`-C`, `--git-dir`, `--work-tree`,
+ * `GIT_DIR`, `GIT_WORK_TREE`) must sit inside its writable roots. A readOnly
+ * worker's cwd is still one of `policy.roots`, so for it the same check would
+ * let `git commit` or `git checkout` run in the shared checkout. A readOnly
+ * worker therefore also checks the directory git runs in -- the tool cwd, or
+ * the last `-C` directory -- and checks everything against the readOnly roots
+ * (scratch and artifact roots only). A literal leading `cd <dir> &&` is not
+ * followed: the tool cwd stays the effective directory, which can only refuse
+ * more, never less.
+ */
 function outOfRootGitTargetViolations(command: string, policy: WriteConfinementPolicy, cwd: string): GitTargetViolation[] {
 	if (typeof command !== "string") return [];
+	const readOnly = policy.readOnly === true;
+	const allowed = (target: string): boolean => readOnly
+		? readOnlyWritablePath(target, policy, cwd)
+		: isWritablePath(target, policy, cwd);
 	const offending: GitTargetViolation[] = [];
 	for (const simpleCommand of splitSimpleCommands(command)) {
 		const parsed = parseGitSimpleCommand(shellWords(simpleCommand), cwd);
 		if (!parsed || isReadOnlyGitInvocation(parsed)) continue;
-		for (const target of parsed.targets) {
+		// `git --version` and a bare `git` name no subcommand and change nothing.
+		const checked = readOnly && parsed.subcommand !== undefined
+			? unique([...parsed.targets, parsed.cwd])
+			: parsed.targets;
+		for (const target of checked) {
 			const dynamic = hasUnevaluatedExpansion(target);
-			if ((dynamic || !isWritablePath(target, policy, cwd)) && !offending.some((entry) => entry.target === target)) {
+			if ((dynamic || !allowed(target)) && !offending.some((entry) => entry.target === target)) {
 				offending.push({ target, dynamic });
 			}
 		}
@@ -1298,19 +1280,13 @@ export function outOfRootGitTargets(command: string, policy: WriteConfinementPol
 	return outOfRootGitTargetViolations(command, policy, cwd).map((entry) => entry.target);
 }
 
-const READ_ONLY_MUTATING_EXECUTABLES = new Set([
-	"rm", "mv", "cp", "tee", "truncate", "dd", "mkdir", "touch", "chmod", "chown", "ln", "install", "sudoedit",
-]);
-const READ_ONLY_PACKAGE_COMMANDS = new Set([
-	"npm install", "npm i", "yarn add", "pnpm add", "pip install", "pip3 install",
-]);
-const READ_ONLY_INTERPRETERS = new Set([
+const CODE_INTERPRETERS = new Set([
 	"python", "python3", "node", "nodejs", "deno", "bun", "perl", "ruby", "php",
 	"Rscript", "osascript", "sh", "bash", "dash", "zsh", "ksh",
 ]);
 const INTERPRETER_INLINE_CODE_FLAGS = ["-c", "-e", "-E", "-r", "-p", "--eval", "--exec", "--print"] as const;
 
-/** Return true for an unquoted shell output redirection. */
+/** Unquoted shell output redirections and their static targets. */
 interface ShellOutputRedirections {
 	found: boolean;
 	targets: string[];
@@ -1372,36 +1348,6 @@ function shellOutputRedirections(command: string): ShellOutputRedirections {
 		index = Math.max(index, target.end - 1);
 	}
 	return { found, targets };
-}
-
-/** Return true when an unquoted shell output redirection can write bytes. */
-function hasOutputRedirection(command: string): boolean {
-	let quote: "'" | '"' | undefined;
-	for (let index = 0; index < command.length; index++) {
-		const character = command[index]!;
-		if (character === "\\" && quote !== "'") { index++; continue; }
-		if (character === "'" || character === '"') {
-			if (quote === undefined) quote = character;
-			else if (quote === character) quote = undefined;
-			continue;
-		}
-		if (quote !== undefined || character !== ">") continue;
-		if (command[index - 1] === "<" || command[index + 1] === "|") return true;
-		const append = command[index + 1] === ">";
-		if (append && command[index - 1] === "&") return true;
-		let targetStart = index + (append ? 2 : 1);
-		while (/\s/u.test(command[targetStart] ?? "")) targetStart++;
-		if (command[targetStart] === "&") {
-			const duplicate = /^&(?:\d+|-)(?=$|[\s;|&()<>])/u.exec(command.slice(targetStart));
-			if (!duplicate) return true;
-			index = targetStart + duplicate[0].length - 1;
-			continue;
-		}
-		const target = readShellWordAt(command, targetStart);
-		if (target.end === targetStart || command.slice(targetStart, target.end) !== "/dev/null") return true;
-		index = target.end - 1;
-	}
-	return false;
 }
 
 function nonOptionShellArguments(words: readonly string[]): string[] {
@@ -1626,12 +1572,10 @@ function bashWriteTargets(command: string): string[] {
 			// source that only becomes the protected file AFTER the shell runs -- a
 			// glob (`ln .pi/*.json alias`), a command substitution
 			// (`ln "$(printf .pi/pi-delegate.json)" alias`), or an interpreter link API
-			// (`python3 -c 'os.link(...)'`, `node -e 'fs.linkSync(...)'`) on a WRITABLE
-			// worker, which does not receive the readOnly interpreter denylist. This is
-			// the same unbounded command-form-denylist evasion class #460 records for
-			// the readOnly guard: it blocks the realistic accidental/primed-pollution
-			// threat, and the durable fix (an OS read-only mount / sandbox / command
-			// allowlist) closes the whole class for writable workers too.
+			// (`python3 -c 'os.link(...)'`, `node -e 'fs.linkSync(...)'`). This is the
+			// unbounded command-form-denylist evasion class #460 records: it blocks
+			// the realistic accidental/primed-pollution threat, and the durable fix
+			// (an OS read-only mount / sandbox / command allowlist) closes the class.
 			if (createsHardlink) {
 				for (const source of argumentsAfterOptions.slice(0, -1)) addTarget(targets, source);
 			}
@@ -1642,37 +1586,9 @@ function bashWriteTargets(command: string): string[] {
 
 function interpreterName(executable: string): string | undefined {
 	const basename = shellExecutableBasename(executable);
-	if (READ_ONLY_INTERPRETERS.has(basename)) return basename;
+	if (CODE_INTERPRETERS.has(basename)) return basename;
 	const withoutVersion = basename.replace(/-?\d+(?:\.\d+)*$/u, "");
-	return READ_ONLY_INTERPRETERS.has(withoutVersion) ? basename : undefined;
-}
-
-function hasUnquotedShellSubstitution(command: string): boolean {
-	let quote: "'" | '"' | undefined;
-	for (let index = 0; index < command.length; index++) {
-		const character = command[index]!;
-		if (character === "\\" && quote !== "'") { index++; continue; }
-		if (character === "'" || character === '"') {
-			if (quote === undefined) quote = character;
-			else if (quote === character) quote = undefined;
-			continue;
-		}
-		if (quote !== "'" && (
-			character === "`" ||
-			((character === "$" || character === "<" || character === ">") && command[index + 1] === "(")
-		)) return true;
-	}
-	return false;
-}
-
-function hasEnvSplitString(words: readonly string[]): boolean {
-	for (let index = 0; index < words.length; index++) {
-		if (shellExecutableBasename(words[index]!) !== "env") continue;
-		return words.slice(index + 1).some((word) =>
-			word === "-S" || word.startsWith("-S") || word === "--split-string" || word.startsWith("--split-string="),
-		);
-	}
-	return false;
+	return CODE_INTERPRETERS.has(withoutVersion) ? basename : undefined;
 }
 
 function interpreterCarriesCode(args: readonly string[], command: string, pipedInput: boolean): boolean {
@@ -1886,60 +1802,6 @@ function interpreterArtifactWriteTargets(command: string): string[] {
 	return unique(targets);
 }
 
-/** Best-effort denylist for obvious mutating commands in a read-only slot. */
-export function readOnlyBashRefusal(command: string, cwd = process.cwd()): string | undefined {
-	if (typeof command !== "string") return "readOnly bash policy could not classify the command";
-	if (hasUnquotedShellSubstitution(command)) return "readOnly bash policy refuses shell command or process substitution";
-	for (const simpleCommand of splitSimpleCommandSegments(command)) {
-		const simple = simpleCommand.command;
-		if (hasOutputRedirection(simple)) return "readOnly bash policy refuses shell output redirection";
-		const rawWords = shellWords(simple);
-		if (hasEnvSplitString(rawWords)) return "readOnly bash policy refuses env split-string command";
-		let wrapperOutput: { wrapper: string; option: string } | undefined;
-		let refusedWrapperOption: { wrapper: string; option: string } | undefined;
-		const words = shellCommandWords(
-			rawWords,
-			(wrapper, option) => { wrapperOutput ??= { wrapper, option }; },
-			(wrapper, option) => { refusedWrapperOption ??= { wrapper, option }; },
-		);
-		if (wrapperOutput) {
-			return `readOnly bash policy refuses mutating ${wrapperOutput.wrapper} output option ${wrapperOutput.option}`;
-		}
-		if (refusedWrapperOption) {
-			return `readOnly bash policy refuses unsafe ${refusedWrapperOption.wrapper} option ${refusedWrapperOption.option}`;
-		}
-		if (words.length === 0) continue;
-		const executable = path.basename(words[0]!);
-		const interpreter = interpreterName(executable);
-		if (interpreter && interpreterCarriesCode(words.slice(1), simple, simpleCommand.pipedInput)) {
-			return `readOnly bash policy refuses interpreter ${interpreter} with executable code`;
-		}
-		if (READ_ONLY_MUTATING_EXECUTABLES.has(executable)) {
-			return `readOnly bash policy refuses mutating command ${executable}`;
-		}
-		if (executable === "sed" && words.slice(1).some((word) =>
-			word === "-i" || word.startsWith("-i") || word === "--in-place" || word.startsWith("--in-place="),
-		)) return "readOnly bash policy refuses in-place sed";
-		if (READ_ONLY_PACKAGE_COMMANDS.has([executable, ...words.slice(1, 2)].join(" "))) {
-			return `readOnly bash policy refuses package installation ${words.slice(0, 2).join(" ")}`;
-		}
-		const parsedGit = parseGitSimpleCommand(rawWords, cwd);
-		if (parsedGit?.unsafeOption !== undefined) {
-			return `readOnly bash policy refuses unsafe git global option ${parsedGit.unsafeOption}`;
-		}
-		if (parsedGit?.subcommand !== undefined) {
-			const unsafeOption = unsafeReadOnlyGitOption(parsedGit.subcommand, parsedGit.arguments);
-			if (unsafeOption !== undefined) {
-				return `readOnly bash policy refuses unsafe git option ${unsafeOption}`;
-			}
-			if (!isReadOnlyGitInvocation(parsedGit)) {
-				return `readOnly bash policy refuses mutating git subcommand ${parsedGit.subcommand}`;
-			}
-		}
-	}
-	return undefined;
-}
-
 /** Join roots into a readable "a, b and c" clause for a worker prompt. */
 function joinRootsForPrompt(roots: readonly string[]): string {
 	if (roots.length <= 1) return roots[0] ?? "";
@@ -1948,7 +1810,29 @@ function joinRootsForPrompt(roots: readonly string[]): string {
 
 /** Effective writable roots of a non-read-only policy, primary root first. */
 function displayWritableRoots(policy: WriteConfinementPolicy): string[] {
-	return unique([policy.primaryRoot, ...policy.roots]);
+	return uniqueByRealPath([policy.primaryRoot, ...policy.roots]);
+}
+
+/**
+ * De-duplicate roots by realpath identity, keeping the first spelling. Policy
+ * roots hold both lexical and realpath forms, and listing both made one
+ * directory read as several grants (#463).
+ */
+function uniqueByRealPath(roots: readonly string[]): string[] {
+	const seen = new Set<string>();
+	const kept: string[] = [];
+	for (const root of roots) {
+		const identity = realRoot(root);
+		if (seen.has(identity) || seen.has(root)) continue;
+		seen.add(identity);
+		seen.add(root);
+		kept.push(root);
+	}
+	return kept;
+}
+
+function sameRootIdentity(left: string, right: string): boolean {
+	return left === right || realRoot(left) === realRoot(right);
 }
 
 /**
@@ -1982,7 +1866,7 @@ export function workerWriteScopeInstruction(params: {
 	artifact?: string;
 }): string {
 	const deliverable = params.artifact
-		? `\nYour artifact: ${params.artifact}\nWrite that exact path. It is your deliverable.\nYour final message is your handoff, not the artifact.`
+		? `\nYour artifact: ${params.artifact}\nWrite that exact path. It is your deliverable.\nYour final message is your handoff, not the artifact.\nThe path is unique to this attempt: write the artifact there and nowhere else, even if you see other output directories.`
 		: "";
 	if (!params.policy) {
 		// Writes are not confined for this worker, so a refusal claim would be a
@@ -1992,21 +1876,39 @@ export function workerWriteScopeInstruction(params: {
 	const policy = params.policy;
 	const scratch = policy.scratchRoot ?? params.scratchRoot;
 	const readOnly = policy.readOnly === true;
-	const allowed = readOnly ? readOnlyAllowedRoots(policy) : displayWritableRoots(policy);
+	const allowed = readOnly ? uniqueByRealPath(readOnlyAllowedRoots(policy)) : displayWritableRoots(policy);
 	// Roots the caller widened with beyond the cwd + scratch the worker always has.
-	const extra = unique(allowed.filter((root) => root !== policy.primaryRoot && root !== scratch));
+	const extra = allowed.filter((root) => !sameRootIdentity(root, policy.primaryRoot) && !sameRootIdentity(root, scratch));
 	const extraClause = extra.length > 0 ? `, plus ${joinRootsForPrompt(extra)}` : "";
 	const refusal = " Writes anywhere else are refused, including elsewhere under /tmp or the system temp directory.";
 	const durableTail = params.artifact
 		? deliverable
-		: ` If you need to produce a file, such as a report or review you might otherwise drop in /tmp, write it inside your scratch directory ${scratch}, or return it in your final message.`;
+		: readOnly
+			? " Return your findings in your final message: that text is your result. Scratch files are temporary and are removed when the run ends."
+			: ` If you need to produce a file, such as a report or review you might otherwise drop in /tmp, write it inside your scratch directory ${scratch}, or return it in your final message.`;
 	if (readOnly) {
+		const readOnlyIntro = `Write scope. This worker is read-only, so its working directory ${policy.primaryRoot} is not writable.`;
+		const ownArtifact = ownDeclaredArtifactPath(policy);
+		if (allowed.length === 0) {
+			// The guard refuses every write, so the prompt must not promise scratch (#463).
+			const only = ownArtifact ? ` except your declared artifact ${ownArtifact}` : "";
+			return (
+				`${readOnlyIntro} No other filesystem path is writable for this worker${only}: ` +
+				`write and edit are refused everywhere else, and mutating git commands are refused everywhere. ` +
+				`readOnly does not sandbox bash: do not use it to change files.` +
+				(params.artifact ? deliverable : " Return any report in your final message.")
+			);
+		}
+		const scratchListed = allowed.some((root) => sameRootIdentity(root, scratch));
+		const where = scratchListed
+			? `your scratch directory ${scratch}${extraClause}`
+			: joinRootsForPrompt(allowed);
 		return (
-			`Write scope. This worker is read-only, so its working directory ${policy.primaryRoot} is not writable. ` +
-			`You may create or modify files only inside your scratch directory ${scratch}${extraClause}.` +
-			` Use the built-in write/edit tools for these files. Mutating bash commands and interpreter scripts are refused even inside scratch.` +
+			`${readOnlyIntro} You may create or modify files only inside ${where}.` +
+			` Use the built-in write/edit tools for these files. Mutating git commands are refused outside these directories.` +
+			` readOnly does not sandbox bash: do not use it to change files anywhere else.` +
 			` If your tool list lacks the needed write/edit tool, ask the dispatcher to grant it; scratch allocation does not add tools.` +
-			`${refusal}${durableTail}`
+			`${refusal}${scratchListed ? durableTail : (params.artifact ? deliverable : " Otherwise return the file in your final message.")}`
 		);
 	}
 	return (
@@ -2058,6 +1960,47 @@ function gitTreeRootForTarget(target: string): string | undefined {
 	}
 }
 
+
+/**
+ * The run's own declared artifact path (#472): an absolute `artifact` inside
+ * one of the policy's runner-allocated artifact roots and outside the primary
+ * root. A run may always write this one file with the write and edit tools,
+ * even when readOnly or when its attempt directory lies inside a Git tree.
+ * Other runs' files keep every guard.
+ */
+function ownDeclaredArtifactPath(policy: WriteConfinementPolicy): string | undefined {
+	const artifact = policy.artifact?.trim();
+	if (!artifact || !path.isAbsolute(artifact)) return undefined;
+	const resolved = path.resolve(artifact);
+	let real: string;
+	try { real = realPathWithRemainder(resolved); } catch { return undefined; }
+	const roots = policy.artifactRoots ?? [];
+	const contained = (candidate: string): boolean => roots.some((root) =>
+		isContained(candidate, root, policy.caseInsensitiveRoots?.get(root) ?? caseInsensitiveForRoot(root)));
+	if (!contained(resolved) || !contained(real)) return undefined;
+	const primary = policy.primaryRoot;
+	const primaryReal = realRoot(primary);
+	if (isContained(resolved, primary, caseInsensitiveForRoot(primary)) || isContained(real, primaryReal, caseInsensitiveForRoot(primaryReal))) {
+		return undefined;
+	}
+	return resolved;
+}
+
+function isOwnDeclaredArtifactTarget(candidate: string, policy: WriteConfinementPolicy, cwd: string): boolean {
+	const own = ownDeclaredArtifactPath(policy);
+	if (!own || typeof candidate !== "string" || candidate.length === 0) return false;
+	try {
+		// A hardlink shares its inode with another name, perhaps a tracked or
+		// protected file, so writing the artifact would modify that file too.
+		const existing = fileInodeIdentity(own);
+		if (existing && existing.nlink > 1n) return false;
+		const ownReal = realPathWithRemainder(own);
+		return candidateResolutions(candidate, cwd).every((resolved) =>
+			resolved === own && realPathWithRemainder(resolved) === ownReal);
+	} catch {
+		return false;
+	}
+}
 
 function declaredArtifactBasename(policy: WriteConfinementPolicy): string | undefined {
 	return policy.artifact ? path.basename(policy.artifact.trim()).toLowerCase() : undefined;
@@ -2204,13 +2147,16 @@ function repositoryWriteGuardTargetsForPaths(
 	const exceptionsByRoot = new Map<string, readonly string[]>();
 	const configuredRepositoryRoots = policyRepositoryRoots(policy, cwd);
 	for (const raw of rawTargets) {
+		// The run's own declared artifact keeps its name even inside a Git tree
+		// (#472). Only the name check is waived; inode and config checks remain.
+		const ownArtifact = isOwnDeclaredArtifactTarget(raw, policy, cwd);
 		for (const candidate of candidateResolutions(raw, cwd)) {
 			const lexicalRoot = gitTreeRootForTarget(candidate);
 			if (lexicalRoot && isProjectConfigTarget(candidate, lexicalRoot)) {
 				addTarget(trustedProjectConfig, candidate);
 				continue;
 			}
-			if (lexicalRoot && isProtectedArtifactPath(candidate, lexicalRoot, names, exceptionsByRoot, diagnostic)) {
+			if (!ownArtifact && lexicalRoot && isProtectedArtifactPath(candidate, lexicalRoot, names, exceptionsByRoot, diagnostic)) {
 				addTarget(artifactNames, candidate);
 				continue;
 			}
@@ -2245,7 +2191,7 @@ function repositoryWriteGuardTargetsForPaths(
 				addTarget(artifactNames, candidate);
 				continue;
 			}
-			if (!root) continue;
+			if (!root || ownArtifact) continue;
 			if (isProtectedArtifactPath(resolved, root, names, exceptionsByRoot, diagnostic)) {
 				addTarget(artifactNames, candidate);
 			}
@@ -2322,6 +2268,28 @@ function readOnlyWritablePath(candidate: string, policy: WriteConfinementPolicy,
 	return isWritablePath(candidate, { ...policy, roots: allowedRoots }, cwd);
 }
 
+/**
+ * Refusal for a readOnly worker's mutating git command. It names the remedy,
+ * because the usual cause is a reviewer committing or switching branches in the
+ * shared checkout it was only meant to read.
+ */
+function readOnlyGitRefusal(offending: readonly GitTargetViolation[], policy: WriteConfinementPolicy): string {
+	const allowed = readOnlyAllowedRoots(policy);
+	const literal = offending.filter((entry) => !entry.dynamic).map((entry) => entry.target);
+	const what = offending.some((entry) => entry.dynamic)
+		? "a dynamic/unresolvable target, which shell expansion hides from the check"
+		: literal.join(", ");
+	const inside = allowed.length > 0 ? allowed.join(", ") : "no directory (this worker has no scratch or artifact root)";
+	const scratch = policy.scratchRoot && allowed.includes(policy.scratchRoot)
+		? `run git with -C <repository inside ${policy.scratchRoot}>`
+		: "run git with -C <repository inside an allowed root>";
+	return (
+		`Delegate worker refused a mutating git command: readOnly slot boundary permits mutating git only inside ${inside}, ` +
+		`and this command targets ${what}. Read-only git forms (status, log, diff, show, rev-parse) stay allowed anywhere. ` +
+		`To change a repository, ${scratch}, or ask the dispatcher to run this worker with worktree: true instead of readOnly.`
+	);
+}
+
 /** Read a tool name defensively; an unreadable event carries nothing to guard. */
 function safeToolName(event: unknown): string | undefined {
 	try {
@@ -2378,6 +2346,7 @@ export function createWriteConfinementExtension(
 				}
 				const offending = targets.filter((target) => policy.readOnly === true
 					? (!readOnlyWritablePath(target, policy, context.cwd)
+						&& !isOwnDeclaredArtifactTarget(target, policy, context.cwd)
 						&& !isShallowChildWritable(target, shallowRootsForPolicy(policy, true), policy, context.cwd))
 					: (!isWritablePath(target, policy, context.cwd)
 						&& !isShallowChildWritable(target, shallowRootsForPolicy(policy, false), policy, context.cwd)));
@@ -2411,23 +2380,16 @@ export function createWriteConfinementExtension(
 				const offending = outOfRootGitTargetViolations(command, policy, context.cwd);
 				if (offending.length > 0) {
 					const dynamic = offending.some((entry) => entry.dynamic);
-					const reason = dynamic
-						? "Delegate worker refused a mutating git command with a dynamic/unresolvable target; writable-root confinement cannot verify shell expansions. Use a literal target inside the assigned writable root."
-						: confinementRefusal("git", offending.map((entry) => entry.target), policy);
-					const refusal: PolicyRefusal = { boundary: "writableRoot", toolName: "bash", reason };
+					const readOnly = policy.readOnly === true;
+					const reason = readOnly
+						? readOnlyGitRefusal(offending, policy)
+						: dynamic
+							? "Delegate worker refused a mutating git command with a dynamic/unresolvable target; writable-root confinement cannot verify shell expansions. Use a literal target inside the assigned writable root."
+							: confinementRefusal("git", offending.map((entry) => entry.target), policy);
+					const refusal: PolicyRefusal = { boundary: readOnly ? "readOnly" : "writableRoot", toolName: "bash", reason };
 					notifyRefusal(policy, refusal);
-					writeDiagnostic(`write-confinement refusal: ${reason}`, { throttleKey: refusalThrottleKey });
+					writeDiagnostic(`${readOnly ? "readOnly" : "write-confinement"} refusal: ${reason}`, { throttleKey: refusalThrottleKey });
 					return { block: true, reason };
-				}
-				if (policy.readOnly === true) {
-					const readOnlyReason = readOnlyBashRefusal(command, context.cwd);
-					if (readOnlyReason) {
-						const reason = `Delegate worker refused bash: ${readOnlyReason}; boundary=readOnly.`;
-						const refusal: PolicyRefusal = { boundary: "readOnly", toolName: "bash", reason };
-						notifyRefusal(policy, refusal);
-						writeDiagnostic(`readOnly refusal: ${reason}`, { throttleKey: refusalThrottleKey });
-						return { block: true, reason };
-					}
 				}
 			}
 		} catch (error) {

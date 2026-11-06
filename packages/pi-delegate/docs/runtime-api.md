@@ -55,9 +55,9 @@ Submission/control failures throw `DelegateRuntimeError` with a stable `code`
 `input-unreadable`, or `control-unavailable`) instead of requiring callers to
 parse prose. The native handler sets each code: an unknown run for `harvest` or
 a missing saved chain (root or nested reference) is `not-found`; a nested
-caller's writable-root confinement refusal is `invalid-confinement`, including a
-read-only (write-confined `readOnly`) caller that dispatches a child slot without
-`readOnly: true`; a steer the
+caller's writable-root confinement refusal is `invalid-confinement`. A read-only
+(write-confined `readOnly`) caller is clamped like any confined caller: it may
+dispatch a writable child inside its own roots; a steer the
 run cannot accept is `control-unavailable`.
 
 `reads` and `worktree: true` are rejected at the shared native/client boundary. The
@@ -82,6 +82,32 @@ const receipt = await delegate.dispatch({
 // Later, in response to the ordinary completion event/wake:
 const result = await delegate.harvest(receipt.runId);
 ```
+
+## Effective agents and worker tools
+
+`resolveEffectiveAgents(cwd, { scope, projectTrusted })` returns native dispatch's
+configured and overridden definitions, including package-root discovery warnings.
+Project-local package settings require trust. Unknown frontmatter keys arrive raw
+in each agent's `metadata`.
+
+`await resolveEffectiveWorkerTools({ cwd, agent, config, run })` loads the worker's
+extensions through native worker preparation (include/exclude/extra paths, the
+worker's own Fabric acknowledgement) and binds its tools, then releases them.
+Loading runs under the agent's `env` with `run.env` layered over it. `run` takes
+the delegate `runs[]` fields `escalation`, `readOnly`, `parentTranscriptSearch`,
+`confineWrites` and `env`.
+
+The result contains:
+
+- `toolNames`: admitted registry tools plus run-supplied escalation/transcript tools.
+  Lifecycle registration can change this snapshot.
+- `extensionToolSelectors`: live grants; an empty snapshot does not invalidate them.
+- `inheritsWorkspaceTools`: bound inheritance without an allowlist or readOnly confinement.
+
+`fabric_exec` is listed only when the worker's attributed Fabric accepts the host
+policy. A declared `tools: []` rejects like any allowlist with no usable tools.
+Final capability decisions use the actual worker binding; application admission
+rules stay in the host.
 
 ## Capability matrix
 

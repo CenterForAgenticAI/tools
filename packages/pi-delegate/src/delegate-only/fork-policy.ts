@@ -31,10 +31,11 @@ export function resolveDelegateOnlySteeringSurface(surface: ResolvedToolSurface)
 	if (!getActiveDelegateOnlyMode()) return surface;
 
 	// `undefined` means Pi's ordinary read/bash/edit/write defaults. Materialize
-	// those only for an implicit surface; an explicit extension-only allowlist
-	// must remain least-privilege rather than gaining unrelated built-ins.
+	// those, plus the run's own tools, only for an implicit surface; an explicit
+	// extension-only allowlist must remain least-privilege rather than gaining
+	// unrelated built-ins.
 	const ordinaryTools = surface.tools ?? (
-		surface.hasExplicitAllowlist ? [] : ["read", "bash", "edit", "write"]
+		surface.hasExplicitAllowlist ? [] : ["read", "bash", "edit", "write", ...surface.runToolNames]
 	);
 	const tools = ordinaryTools.filter((name) => !DELEGATE_ONLY_DENIED_TOOLS.has(name));
 	if (!tools.includes("delegate_control")) tools.push("delegate_control");

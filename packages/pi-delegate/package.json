@@ -1,5 +1,5 @@
 {
-  "version": "0.11.1",
+  "version": "0.12.0",
   "description": "Multi-shape pi subagent delegation: supervised forks, direct workers, chain steps, detached drivers, steering, and worktree isolation.",
   "type": "module",
   "main": "dist/index.js",
@@ -104,21 +104,35 @@
     "access": "public"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "1.0.2",
-    "@earendil-works/pi-coding-agent": "1.0.2",
-    "@earendil-works/pi-tui": "1.0.2",
+    "@earendil-works/chord": "1.5.0",
+    "@earendil-works/pi-agent-core": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-codemode": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-mcp": "1.5.0",
+    "@earendil-works/pi-telemetry": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
     "@eslint/js": "^10.0.1",
     "c8": "^11.0.0",
     "eslint": "^10.7.0",
     "tsx": "^4.19.0",
-    "typebox": "1.3.34",
+    "typebox": "1.4.4",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.64.0"
   },
   "peerDependencies": {
+    "@centerforagenticai/pi-daemon": "*",
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
+  },
+  "optionalDependencies": {
+    "@centerforagenticai/pi-daemon": "^0.4.0"
+  },
+  "peerDependenciesMeta": {
+    "@centerforagenticai/pi-daemon": {
+      "optional": true
+    }
   }
 }

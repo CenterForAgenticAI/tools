@@ -22,8 +22,6 @@ export interface NestedDelegateCallerPolicy {
 	 * `writableRoots: ["/"]` and write anywhere through that child.
 	 */
 	confinement?: WriteConfinementPolicy;
-	/** Read-only callers may only delegate explicitly read-only children. */
-	readOnly?: boolean;
 	/** Immutable absolute deadline inherited by an explicitly nested direct call. */
 	parentDeadlineAtMs?: number;
 }
@@ -68,7 +66,6 @@ export function nestedDelegatePolicyForAgent(
 			? { nestedDelegateAgents: [...allowedAgents] }
 			: {}),
 		...(confinement ? { confinement } : {}),
-		...(confinement?.readOnly === true ? { readOnly: true } : {}),
 	};
 }
 
@@ -211,32 +208,11 @@ export function validateNestedDelegateConfinement(
 			"Have an unconfined caller own this saved chain."
 		);
 	}
-	if (confinement.readOnly === true) {
-		const slots: Array<{ readOnly?: unknown }> = [];
-		if (shape === "supervised") slots.push(...(Array.isArray(params?.agents) ? params.agents : []));
-		else if (shape === "parallel-direct") slots.push(...(Array.isArray(params?.tasks) ? params.tasks : []));
-		else if (shape === "single-direct") slots.push(params);
-		else if (shape === "chain") {
-			for (const step of Array.isArray(params?.chain) ? params.chain : []) {
-				if (Array.isArray(step?.parallel)) slots.push(...step.parallel);
-				else slots.push(step);
-			}
-		}
-		if (slots.some((slot) => slot?.readOnly !== true)) {
-			// #288: state the remedy, not just the rule. The location differs by
-			// dispatch shape, and naming the wrong one is worse than naming none:
-			// a legacy single-direct caller sets `readOnly` at the top level, not
-			// on any entry. A saved chain is resolved to its leaves before this
-			// check, so its remedy lives in the chain definition, not the call.
-			const remedy =
-				shape === "single-direct"
-					? "Set `readOnly: true` on the dispatch."
-					: shape === "chain"
-						? "Set `readOnly: true` on every chain step (in the saved chain definition when the chain is named)."
-						: "Set `readOnly: true` on every run entry.";
-			return `delegate: ${caller} is read-only and may dispatch only child slots with readOnly: true. ${remedy}`;
-		}
-	}
+
+	// A readOnly caller is clamped exactly like any other confined caller: its
+	// children may be writable, but only inside the caller's roots (#606).
+	// readOnly guards the caller's own write, edit and git calls; it was never
+	// isolation, so it no longer forces every child to be readOnly too.
 
 	// A detached driver runs as a separate `pi` process, so delegate
 	// cannot install a write guard in it at all. A confined caller must not be

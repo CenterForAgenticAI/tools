@@ -353,6 +353,7 @@ export function boundRunTimeoutTranscript(transcript: readonly TranscriptEntry[]
 		role: entry.role,
 		text: truncateRecoveryText(entry.text, TIMEOUT_TRANSCRIPT_ENTRY_MAX_BYTES),
 		...(entry.timestamp === undefined ? {} : { timestamp: entry.timestamp }),
+		...(entry.durationMs === undefined ? {} : { durationMs: entry.durationMs }),
 		...(entry.toolName === undefined ? {} : { toolName: truncateRecoveryText(entry.toolName, TIMEOUT_TRANSCRIPT_ENTRY_MAX_BYTES) }),
 		...(entry.toolCallId === undefined ? {} : { toolCallId: truncateRecoveryText(entry.toolCallId, TIMEOUT_TRANSCRIPT_ENTRY_MAX_BYTES) }),
 		...(entry.toolMeta === undefined ? {} : { toolMeta: truncateRecoveryText(entry.toolMeta, TIMEOUT_TRANSCRIPT_ENTRY_MAX_BYTES) }),

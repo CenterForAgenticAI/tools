@@ -47,11 +47,12 @@
  *   interactive:            boolean. Routes worker UI prompts to the overlay (Phase 3c).
  *   maxSubagentDepth:       integer cap on recursive delegate depth.
  *   allowNestedDelegate:    boolean opt-in for delegate-family tools requested in `tools:`.
+ *   fabric:                 boolean. `false` keeps the native tool surface even when pi-fabric is loaded.
  *   nestedDelegateAgents:   optional YAML array child-agent allow-list enforced when this worker calls `delegate`.
  *
  * Snake_case aliases and CSV list values remain readable for legacy files, but
  * are deprecated; new files should use the camelCase names and YAML arrays above.
- * Unknown fields are preserved in `extraFields` rather than silently dropped.
+ * Unknown fields are preserved verbatim in `metadata` rather than silently dropped.
  *
  * Package-shipped agents and chains (source="package") additionally come from
  * the same opted-in package agent directories: `pi-delegate.agents` paths or
@@ -221,6 +222,8 @@ export interface AgentConfig {
 	interactive?: boolean;
 	maxSubagentDepth?: number;
 	allowNestedDelegate?: boolean;
+	/** `false` keeps the worker on native tools even when Fabric could be admitted (#582). */
+	fabric?: boolean;
 	nestedDelegateAgents?: string[];
 	/** Supervised-run absolute budget override; 0 explicitly disables. */
 	maxDurationMs?: number;
@@ -229,8 +232,8 @@ export interface AgentConfig {
 	/** This agent's partial escalation-policy layer. [spec §5, Q4] */
 	escalation?: EscalationConfig;
 
-	// Other unknown keys are preserved verbatim in extraFields.
-	extraFields?: Record<string, string>;
+	/** Unknown frontmatter keys with their raw YAML values. */
+	metadata?: Record<string, unknown>;
 }
 
 
@@ -484,6 +487,7 @@ const KNOWN_FIELDS = new Set([
 	"max_subagent_depth",
 	"allowNestedDelegate",
 	"allow_nested_delegate",
+	"fabric",
 	"nestedDelegateAgents",
 	"nested_delegate_agents",
 	"maxDurationMs",
@@ -609,18 +613,15 @@ export function splitToolList(raw: unknown): {
 	tools: string[] | undefined;
 	mcpDirectTools: string[] | undefined;
 } {
-	const all = splitCsv(raw);
-	if (!all) return { tools: undefined, mcpDirectTools: undefined };
+	if (raw === undefined) return { tools: undefined, mcpDirectTools: undefined };
+	// A declared list stays declared even when empty, so it fails closed.
 	const tools: string[] = [];
 	const mcp: string[] = [];
-	for (const t of all) {
+	for (const t of splitCsv(raw) ?? []) {
 		if (t.startsWith("mcp:")) mcp.push(t.slice(4));
 		else tools.push(t);
 	}
-	return {
-		tools: tools.length > 0 ? tools : undefined,
-		mcpDirectTools: mcp.length > 0 ? mcp : undefined,
-	};
+	return { tools, mcpDirectTools: mcp.length > 0 ? mcp : undefined };
 }
 
 function parseBoolLoose(
@@ -659,6 +660,23 @@ function parseBoolMaybe(
 	}
 	if (raw !== undefined) warnInvalidValue(field ?? "boolean field", raw, "true or false", filePath, warnings);
 	return undefined;
+}
+
+/**
+ * `fabric:` narrows the worker's tool surface, so it fails closed (#587): a
+ * value that is neither `true` nor `false` (such as `no`, `off`, `0` or a
+ * list) is a botched opt-out and keeps the native tools, with a warning.
+ */
+function parseFabricField(raw: unknown, filePath?: string, warnings?: string[]): boolean | undefined {
+	if (raw === undefined) return undefined;
+	if (typeof raw === "boolean") return raw;
+	if (typeof raw === "string") {
+		const v = raw.trim().toLowerCase();
+		if (v === "true") return true;
+		if (v === "false") return false;
+	}
+	warnInvalidValue("fabric", raw, "true or false; treating it as fabric: false, so the worker keeps native tools", filePath, warnings);
+	return false;
 }
 
 function parseSystemPromptMode(
@@ -901,12 +919,15 @@ function loadAgentsFromDir(
 			}
 			let content: string;
 			try {
-				if (!budget) {
-					content = fs.readFileSync(filePath, "utf-8");
-				} else {
-					const fd = fs.openSync(filePath, "r");
-					try {
-						const stat = fs.fstatSync(fd);
+				// A symlinked entry can name a FIFO or device; opening it blocking
+				// would stall every discovery caller. Read regular files only.
+				const fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+				try {
+					const stat = fs.fstatSync(fd);
+					if (!stat.isFile()) continue;
+					if (!budget) {
+						content = fs.readFileSync(fd, "utf-8");
+					} else {
 						if (stat.size > budget.limits.maxFileBytes) {
 							budget.degraded = true;
 							budget.truncated = true;
@@ -922,9 +943,9 @@ function loadAgentsFromDir(
 							continue;
 						}
 						content = buffer.subarray(0, bytesRead).toString("utf-8");
-					} finally {
-						fs.closeSync(fd);
 					}
+				} finally {
+					fs.closeSync(fd);
 				}
 			} catch {
 				continue;
@@ -1018,12 +1039,7 @@ function loadAgentsFromDir(
 			continue;
 		}
 
-		const extraFields: Record<string, string> = {};
-		for (const [key, value] of Object.entries(frontmatter)) {
-			if (KNOWN_FIELDS.has(key)) continue;
-			// Preserve as string so the shape is stable for downstream readers.
-			extraFields[key] = typeof value === "string" ? value : String(value);
-		}
+		const metadata = Object.fromEntries(Object.entries(frontmatter).filter(([key]) => !KNOWN_FIELDS.has(key)));
 
 		agents.push({
 			name,
@@ -1057,11 +1073,12 @@ function loadAgentsFromDir(
 			maxSubagentDepth,
 			allowNestedDelegate: parseBoolMaybe(frontmatter.allowNestedDelegate ?? frontmatter.allow_nested_delegate, "allowNestedDelegate", filePath, warnings),
 			nestedDelegateAgents: splitCsv(frontmatter.nestedDelegateAgents ?? frontmatter.nested_delegate_agents),
+			fabric: parseFabricField(frontmatter.fabric, filePath, warnings),
 			maxDurationMs: firstValidTimeoutMs(frontmatter.maxDurationMs, frontmatter.max_duration_ms),
 			windDownGraceMs: firstValidTimeoutMs(frontmatter.windDownGraceMs, frontmatter.wind_down_grace_ms),
 			escalation,
 			packageName: source === "package" ? packageName : undefined,
-			extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
+			metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
 		});
 		}
 	} finally {

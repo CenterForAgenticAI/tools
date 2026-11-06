@@ -4,12 +4,12 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "paths": {
-      "@caair/pi-daemon/client": [
-        "./node_modules/@caair/pi-daemon/dist/client/index.d.ts",
+      "@centerforagenticai/pi-daemon/client": [
+        "./node_modules/@centerforagenticai/pi-daemon/dist/client/index.d.ts",
         "./types/pi-daemon-stubs/client/index.d.ts"
       ],
-      "@caair/pi-daemon/protocol": [
-        "./node_modules/@caair/pi-daemon/dist/protocol/index.d.ts",
+      "@centerforagenticai/pi-daemon/protocol": [
+        "./node_modules/@centerforagenticai/pi-daemon/dist/protocol/index.d.ts",
         "./types/pi-daemon-stubs/protocol/index.d.ts"
       ]
     },
