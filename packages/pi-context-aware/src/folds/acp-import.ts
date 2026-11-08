@@ -175,6 +175,8 @@ export function importAcpSideFile(input: AcpImportInput): AcpImportResult {
 			hiddenIds,
 			range: { startId: carrierId, endId: covered[covered.length - 1] ?? carrierId },
 			refs: { start: block.startRef ?? "", end: block.endRef ?? "" },
+			// The only guard on these ids: imported holds only ids that passed BLOCK_ID,
+			// so out-of-range or unknown ids drop here (readFoldRecord would reject a record holding one).
 			directBlockIds: block.directBlockIds.filter((id) => imported.has(id)),
 			compressedTokens: block.compressedTokens,
 			createdAt: block.createdAt,
@@ -215,7 +217,7 @@ function readLegacyBlock(raw: unknown): LegacyBlock | string {
 		...(typeof topic === "string" && topic.length > 0 ? { topic } : {}),
 		summary,
 		effectiveMessageIds: [...effectiveMessageIds],
-		directBlockIds: (directBlockIds ?? []).filter((id) => BLOCK_ID.test(id)),
+		directBlockIds: [...(directBlockIds ?? [])],
 		compressedTokens: nonNegative(block.compressedTokens),
 		createdAt: nonNegative(block.createdAt),
 		active,

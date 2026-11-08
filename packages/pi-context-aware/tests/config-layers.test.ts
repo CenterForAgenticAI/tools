@@ -42,10 +42,10 @@ test("first-user settings resolve per leaf through global, project and session, 
 		readConfigLayer({ folds: { firstUserMessage: "keep-under-tokens" } }, "project"),
 		...readPolicyEntryLayers([policyEntry("session", { "folds.firstUserMessageMaxTokens": 100 })]),
 	]);
-	assert.deepEqual(resolved.config.folds, { firstUserMessage: "keep-under-tokens", firstUserMessageMaxTokens: 100, condensedSkills: false });
+	assert.deepEqual(resolved.config.folds, { firstUserMessage: "keep-under-tokens", firstUserMessageMaxTokens: 100, condensedSkills: false, engine: "auto" });
 	assert.equal(resolved.byPath.get("folds.firstUserMessage")?.layer, "project");
 	assert.equal(resolved.byPath.get("folds.firstUserMessageMaxTokens")?.layer, "session");
-	assert.deepEqual(resolveConfigLayers([]).config.folds, { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000, condensedSkills: false });
+	assert.deepEqual(resolveConfigLayers([]).config.folds, { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000, condensedSkills: false, engine: "auto" });
 	assert.equal(readConfigLayer({ folds: { condensedSkills: true } }, "project").values.get("folds.condensedSkills"), true);
 	assert.deepEqual(readConfigLayer({ folds: { condensedSkills: "yes" } }, "project").rejected, ["folds.condensedSkills"]);
 	for (const limit of [0, -1, 1.5, "8000", Infinity]) {
@@ -402,4 +402,9 @@ test("sessionNaming.model refs must be non-empty provider/id strings", () => {
 	assert.deepEqual(resolveConfigLayers([good]).config.sessionNaming?.models, ["z-ai/glm-5.3-flash", "openai/gpt-5.6-luna"]);
 	const bad = readConfigLayer({ sessionNaming: { models: [] } }, "global");
 	assert.equal(resolveConfigLayers([bad]).config.sessionNaming?.models, DEFAULT_SESSION_NAMING_CONFIG.models);
+});
+
+test("#309: folds.engine rejects an unknown value and keeps a known one", () => {
+	assert.deepEqual(readConfigLayer({ folds: { engine: "turbo" } }, "project").rejected, ["folds.engine"]);
+	assert.equal(readConfigLayer({ folds: { engine: "compaction-only" } }, "project").values.get("folds.engine"), "compaction-only");
 });

@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -55,6 +56,6 @@ test("erasure wins before second runtime activation: shutdown and input block pr
 	} finally {
 		if (savedAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = savedAgent;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });

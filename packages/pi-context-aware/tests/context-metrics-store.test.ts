@@ -100,3 +100,10 @@ test("the record copies named, typed fields: free text in any field is dropped",
 	assert.equal(record.compaction?.writer, "other");
 	assert.equal(record.band, null);
 });
+
+test("folds.tiers is null when the input has none, a filtered list when it has one, and [] stays []", () => {
+	const tiersOf = (tiers?: readonly number[]) => buildMetricsRecord(input(1, "s1", { folds: { requested: 0, accepted: 0, refused: {}, dropped: {}, ...(tiers ? { tiers } : {}) } })).folds.tiers;
+	assert.equal(tiersOf(), null);
+	assert.deepEqual(tiersOf([1, 4, 2]), [1, 2]);
+	assert.deepEqual(tiersOf([]), []);
+});

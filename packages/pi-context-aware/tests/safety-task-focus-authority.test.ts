@@ -3,6 +3,7 @@
  * The production before_agent_start handler regenerates both prompt surfaces.
  * Mutations: disable transcript-authority replay; omit either prompt surface.
  */
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -100,6 +101,6 @@ test("REQ-C1: folding task and focus calls cannot replace authority or its promp
 		live?.session.dispose();
 		if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });

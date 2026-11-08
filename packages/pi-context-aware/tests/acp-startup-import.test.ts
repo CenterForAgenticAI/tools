@@ -9,7 +9,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 
 import { registerFoldEngine } from "../src/folds/fold-engine.js";
 import { registerAcpStartupImport } from "../src/folds/acp-startup-import.js";
-import { FOLD_ENTRY_TYPE } from "../src/folds/fold-entries.js";
+import { FOLD_ENTRY_TYPE, readFoldRecord } from "../src/folds/fold-entries.js";
 import { importAcpSideFile } from "../src/folds/acp-import.js";
 import { SessionDatabase } from "../src/erasure/database.js";
 
@@ -365,3 +365,18 @@ test("#279 acp-import bounds block and run ids to nine digits", () => {
 	assert.deepEqual(nine.skippedBlocks, []);
 });
 
+
+test("#308 acp-import drops directBlockIds entries that are out of range or not imported", () => {
+	const { manager, ids } = longSession(4);
+	const result = importAcpSideFile({
+		sideFileText: sideOf([
+			blockFor("b1", ids.slice(0, 2), { active: false }),
+			blockFor("b2", ids, { tier: 2, directBlockIds: ["b1", "b1000000000", `b${"9".repeat(400)}`, "b7"] }),
+		]),
+		entries: manager.getEntries(), branch: manager.getBranch(), sessionId: manager.getSessionId(),
+	}) as { status: string; records: { blockId: string }[] };
+	assert.equal(result.status, "imported");
+	const b2 = result.records.find((r) => r.blockId === "b2") as unknown as { directBlockIds: string[] };
+	assert.deepEqual(b2.directBlockIds, ["b1"]);
+	for (const record of result.records) assert.notEqual(readFoldRecord(record), undefined, `${record.blockId} survives readFoldRecord`);
+});

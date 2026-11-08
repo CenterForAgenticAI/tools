@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -61,7 +62,7 @@ async function withFixture(options: { config?: Record<string, unknown>; withFabr
 	} finally {
 		if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 }
 

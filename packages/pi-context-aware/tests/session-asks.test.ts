@@ -110,7 +110,7 @@ async function withFixture(
 		await settle();
 		await body(fixture);
 	} finally {
-		fixture.cleanup();
+		await fixture.cleanup();
 	}
 }
 

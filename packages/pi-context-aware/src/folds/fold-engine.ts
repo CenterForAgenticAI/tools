@@ -52,7 +52,14 @@ import {
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 
-import { isBillionContextPiLoaded, type RegisteredToolView } from "../compaction/compaction-blocker.js";
+import type { RegisteredToolView } from "../compaction/compaction-blocker.js";
+import {
+	engineOverrideContradictsPresence,
+	foldModeForEngine,
+	resolveContextEngine,
+	type ContextEngine,
+	type ContextEngineOverride,
+} from "./engine-resolver.js";
 import { foldStateFromBranch, planFold, summaryLimitOf, validFoldRefs, type FoldCondenser } from "./fold-adapter.js";
 import { FOLD_NOTICE_TYPE, type FoldHintView } from "./fold-hints.js";
 import { renderEarlierFoldCalls } from "./fold-call-render.js";
@@ -108,8 +115,15 @@ export function resolveFoldConfig(ctx: Pick<ExtensionContext, "cwd" | "sessionMa
 export type FoldMode = "live" | "shadow";
 
 /** Shadow while billion-context-pi owns context management; live otherwise. */
-export function foldModeFor(tools: readonly RegisteredToolView[]): FoldMode {
-	return isBillionContextPiLoaded(tools) ? "shadow" : "live";
+export function foldModeFor(tools: readonly RegisteredToolView[], override: ContextEngineOverride = "auto"): FoldMode {
+	return foldModeForEngine(resolveContextEngine({ tools, override }));
+}
+
+/** What `context_status` reports about the engine. */
+export interface EngineReport {
+	readonly engine: ContextEngine;
+	/** The override forces `folds` while billion-context-pi is loaded. */
+	readonly contradictsPresence: boolean;
 }
 
 /** A request the engine refused. `code` is set when the refusal is not a planner error. */
@@ -196,6 +210,8 @@ export interface QueuedFoldPlan {
 }
 export interface FoldEngine {
 	mode(ctx: ExtensionContext): FoldMode;
+	/** The resolved context engine for this session, cached with the mode. */
+	engine(ctx: ExtensionContext): EngineReport;
 	/** Copy the state the next live per-turn pass would read, without creating or changing it. */
 	snapshotTurnMemory(ctx: ExtensionContext): FoldTurnMemory;
 	/** Plan a fold now; in live mode, queue it for the next boundary. */
@@ -211,6 +227,7 @@ type SessionKey = ExtensionContext["sessionManager"];
 /** Register the boundary handlers. Returns the engine handle for a later tool surface. */
 export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions = {}): FoldEngine {
 	const modes = new WeakMap<SessionKey, FoldMode>();
+	const reports = new WeakMap<SessionKey, EngineReport>();
 	const queues = new WeakMap<SessionKey, QueuedFold[]>();
 	const dropped = new WeakMap<SessionKey, DroppedFold[]>();
 	/** Drops a restart or tree change found that no notice on the branch names yet; the next drain reports them. */
@@ -236,9 +253,16 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 			// until the tools can be read, so nothing is written by mistake.
 			return "shadow";
 		}
-		const mode = foldModeFor(tools);
+		const override = resolveFoldConfig(ctx).engine ?? "auto";
+		const engine = resolveContextEngine({ tools, override });
+		const mode = foldModeForEngine(engine);
 		modes.set(ctx.sessionManager, mode);
+		reports.set(ctx.sessionManager, { engine, contradictsPresence: engineOverrideContradictsPresence({ tools, override }) });
 		return mode;
+	};
+	const engineOf = (ctx: ExtensionContext): EngineReport => {
+		const mode = modeOf(ctx);
+		return reports.get(ctx.sessionManager) ?? { engine: mode === "live" ? "folds" : "compaction-only", contradictsPresence: false };
 	};
 	const contextWindow = (ctx: ExtensionContext): number =>
 		ctx.model?.contextWindow && ctx.model.contextWindow > 0 ? ctx.model.contextWindow : (options.fallbackContextWindow ?? 200_000);
@@ -278,6 +302,7 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 
 	pi.on("session_start", (_event, ctx) => {
 		modes.delete(ctx.sessionManager);
+		reports.delete(ctx.sessionManager);
 		rebuildQueue(ctx);
 	});
 	// Moving to another point of the session tree changes the branch. Requests
@@ -458,6 +483,7 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 
 	return {
 		mode: modeOf,
+		engine: engineOf,
 		snapshotTurnMemory: (ctx) => {
 			const memory = turnMemory.get(ctx.sessionManager);
 			return memory ? cloneFoldTurnMemory(memory) : createFoldTurnMemory();

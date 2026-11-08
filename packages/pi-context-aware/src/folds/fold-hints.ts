@@ -52,6 +52,11 @@ export interface FoldHintView {
 
 export interface FoldHints extends FoldHintView {
 	register(registration: unknown): FoldHintResult;
+	/**
+	 * Register several hints as one: all are stored, or none is and the first error is returned.
+	 * A contributor's hints use it (pi-context-aware#300).
+	 */
+	registerAll(registrations: readonly unknown[]): FoldHintResult;
 	/** Remove an owner's hints. Its keys stay claimed for the session. Returns how many hints were removed. */
 	endOwner(ownerKey: unknown): number;
 }
@@ -71,8 +76,9 @@ export const MAX_HINTS = 256;
 /** `summarize` is not called for `details` whose JSON is longer than this. */
 export const MAX_HINT_DETAILS_CHARS = 16_000;
 /**
- * A `verbatim` message longer than this folds as usual. A call whose result is longer folds
- * with it (the fold adapter drops the hint), so no hint can pin a large result.
+ * A `verbatim` message longer than this folds as usual. A call whose result is longer, and a
+ * result whose call is longer, fold together (the fold adapter drops the hint), so no hint can
+ * pin a large call or result.
  */
 export const MAX_VERBATIM_CHARS = 16_000;
 
@@ -256,6 +262,29 @@ export function createFoldHints(): FoldHints {
 	};
 	for (const registration of BUILT_IN) store(registration, true);
 
+	const registerAll = (registrations: readonly unknown[]): FoldHintResult => {
+		const checked: { key: string; hint: StoredHint }[] = [];
+		for (const registration of registrations) {
+			const one = validate(registration, false);
+			if (typeof one === "string") return { ok: false, error: one };
+			const owner = owners.get(one.key);
+			if (owner !== undefined && owner !== one.hint.ownerKey) {
+				return { ok: false, error: `${one.key.replace(/^(custom|tool):/u, "")} is owned by another extension in this session` };
+			}
+			checked.push(one);
+		}
+		const added = new Set(checked.map(({ key }) => key).filter((key) => !owners.has(key)));
+		if (owners.size + added.size > MAX_HINTS) return { ok: false, error: `at most ${MAX_HINTS} hint keys per session` };
+		let replaced = false;
+		for (const { key, hint } of checked) {
+			replaced ||= hints.has(key);
+			owners.set(key, hint.ownerKey);
+			if (hint.policy === "default") hints.delete(key);
+			else hints.set(key, hint);
+		}
+		return { ok: true, replaced };
+	};
+
 	const resolve = (key: string, name: string, details: unknown, size: number): ResolvedFoldHint | undefined => {
 		const hint = hints.get(key);
 		if (!hint || hint.policy === "default") return undefined;
@@ -292,6 +321,7 @@ export function createFoldHints(): FoldHints {
 
 	return {
 		register: (registration) => store(registration, false),
+		registerAll,
 		endOwner(ownerKey) {
 			if (typeof ownerKey !== "string" || ownerKey === CONTEXT_AWARE_HINT_OWNER) return 0;
 			let removed = 0;

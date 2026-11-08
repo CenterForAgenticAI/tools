@@ -327,6 +327,7 @@ test("a signal delivered during run-root cleanup still cancels the wrapper", asy
 	].join("\n");
 
 	let driven = false;
+	let startedSeen = false;
 	let result;
 	try {
 		result = await runWrapper([process.execPath, "--input-type=module", "-e", childScript], {
@@ -338,6 +339,7 @@ test("a signal delivered during run-root cleanup still cancels the wrapper", asy
 				void (async () => {
 					const deadline = Date.now() + 10000;
 					while (!fs.existsSync(startedFile) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+					startedSeen = fs.existsSync(startedFile);
 					child.kill("SIGTERM");
 					fs.writeFileSync(gateFile, "go\n");
 				})();
@@ -347,8 +349,33 @@ test("a signal delivered during run-root cleanup still cancels the wrapper", asy
 		fs.rmSync(handshake, { recursive: true, force: true });
 	}
 	assert.ok(driven, "the child never reported that it had written its entries");
+	assert.ok(startedSeen, "the wrapper never announced that cleanup had begun, so the signal did not land inside cleanup");
 
 	assert.ok(result.signal === "SIGTERM" || result.code === 143, `expected cleanup-time SIGTERM cancellation, got ${JSON.stringify(result)}`);
+});
+
+test("a signal raised at the end of cleanup still cancels the wrapper", async () => {
+	// The child exits 0. The wrapper signals itself from inside cleanup, with no gate
+	// to hold cleanup open. The signal is sent before the asynchronous run-root
+	// removal, so the handler records it during that removal; a synchronous removal
+	// would leave it unhandled and the wrapper would exit 0.
+	const parent = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-raise-"));
+	try {
+		const result = await runWrapper([process.execPath, "-e", "0"], {
+			env: { TMPDIR: parent, PI_TEST_CLEANUP_RAISE: "SIGTERM" },
+			timeoutMs: 15000,
+		});
+		assert.ok(result.signal === "SIGTERM" || result.code === 143, `expected cancellation by the cleanup-time SIGTERM, got ${JSON.stringify(result)}`);
+		assert.deepEqual(fs.readdirSync(parent), [], "the run root must be gone");
+	} finally {
+		fs.rmSync(parent, { recursive: true, force: true });
+	}
+});
+
+test("an unsupported PI_TEST_CLEANUP_RAISE value is ignored", () => {
+	const result = spawnSync(process.execPath, [wrapper, "true"], { encoding: "utf8", env: { ...process.env, PI_TEST_CLEANUP_RAISE: "SIGKILL" } });
+	assert.equal(result.status, 0);
+	assert.equal(result.signal, null);
 });
 
 test("the wrapper preserves an ordinary exit status", () => {

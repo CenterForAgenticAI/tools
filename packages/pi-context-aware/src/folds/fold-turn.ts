@@ -40,7 +40,7 @@
 import type { ContextEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import { elideImageParts, planNativeMediaElision, type MediaElisionPlan, type ProjectedEntryView } from "../media/media-fold.js";
-import { foldStateFromBranch } from "./fold-adapter.js";
+import { foldStateFromBranch, latestReplacementText, protectedField } from "./fold-adapter.js";
 import { renderEarlierFoldCalls } from "./fold-call-render.js";
 import { foldRecordsOnBranch, type FoldRecord } from "./fold-entries.js";
 import { activeHides, planHides, withPointer } from "./hide-entries.js";
@@ -51,6 +51,13 @@ import {
 	defaultConfig,
 	defaultCountTokens,
 	defaultPrompts,
+	createContentStore,
+	runPipeline,
+	validateConfig,
+	type CcrEffect,
+	type PipelineNode,
+	type ProcessTurnInput,
+	type ProcessTurnResult,
 	renderNudgeText,
 	viableRanges,
 	type CompressionBlock,
@@ -62,6 +69,7 @@ import {
 	type NudgeState,
 } from "./kernel/index.js";
 import { isSummaryMessageId, SUMMARY_HEADER } from "./kernel/prune.js";
+import { buildCompressibleRanges, computeProtectedRefs, mergeRangesToThreshold } from "./kernel/recommend.js";
 import { DEFAULT_PRESSURE_LADDER, type PressureLadderConfig } from "../policy/context-policy.js";
 import { countMessageTokens, renderVisibleRefs } from "./kernel/index.js";
 
@@ -154,6 +162,12 @@ export interface FoldTurnInput {
 	readonly config?: Partial<Config>;
 	/** Also decide the nudge billion-context-pi 0.1.83 would send (parity evidence). */
 	readonly compatibility?: boolean;
+	/**
+	 * Which messages the nudge's protected zone counts as the user's (pi-context-aware#319), the rule
+	 * `planFold` uses. `typed` (the default) counts only a message a person typed; `all-user-role` is
+	 * billion-context-pi's, and the parity preview sets it.
+	 */
+	readonly protectedZone?: "typed" | "all-user-role";
 	/** The pressure ladder in force; the nudge, emergency and truncation thresholds come from it. Defaults to the starting ladder. */
 	readonly ladder?: PressureLadderConfig;
 }
@@ -276,12 +290,22 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 		const at = state.messages.findIndex((message) => message.id === hide.record.targetId);
 		if (at >= 0) state.messages[at] = { ...state.messages[at]!, text: hide.text };
 	}
+	// A condensed-hint swap (pi-context-aware#317) replaces an entry's text without hiding it. The kernel reads
+	// entries as written, so it is given the swapped text; without it the request would rebuild the original body.
+	const carrierIds = new Set(records.map((record) => record.carrierId));
+	const hidden = new Set(activeHides(input.branch).map((hide) => hide.record.targetId));
+	for (const [targetId, text] of latestReplacementText(input.branch)) {
+		if (carrierIds.has(targetId) || hidden.has(targetId)) continue;
+		const at = state.messages.findIndex((message) => message.id === targetId);
+		if (at >= 0) state.messages[at] = { ...state.messages[at]!, text };
+	}
 	const memory = input.memory;
 	const kernel = restoreMemory(state.kernel, memory);
 	asBillionContextBlocks(kernel, state.messages);
 	const limit = headroomLimit(input.model);
 	const config = turnConfig(input.model.contextWindow, input.config, input.ladder);
 	const core = createCore();
+	const zone = input.protectedZone ?? "typed";
 	const allImages = imageTokens(input.projection.entries);
 	const sys = input.systemPromptTokens;
 	const sentWithAllImages = estimateTokens(state.messages, coveredMessageIds(kernel), allImages) + sys;
@@ -304,7 +328,7 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 			if (Math.abs(meter.viewTokens - sent) > Math.max(1_000, 0.1 * sent)) tokenCount = floors(meter.viewTokens);
 		} else {
 			const cap = config.modelContextLimit > 0 ? Math.max(0, Math.floor(config.truncate.threshold * config.modelContextLimit) - 1) : Number.MAX_SAFE_INTEGER;
-			const probe = core.processTurn({ messages: state.messages, state: structuredClone(kernel), config, tokenCount: Math.min(tokenCount, cap) });
+			const probe = nativeTurn(core, { messages: state.messages, state: structuredClone(kernel), config, tokenCount: Math.min(tokenCount, cap) }, input.branch, zone);
 			const viewTokens = estimateTokens(probe.messages, coveredMessageIds(probe.state), images) + sys;
 			if (Math.abs(viewTokens - tokenCount) > Math.max(1_000, 0.1 * tokenCount)) tokenCount = floors(viewTokens);
 		}
@@ -322,7 +346,7 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 	const windowKernel = input.compatibility && limit !== config.modelContextLimit ? structuredClone(kernel) : undefined;
 	const truncationKernel = windowKernel ? structuredClone(kernel) : undefined;
 	const textBefore = new Map(state.messages.map((message) => [message.id, message.text ?? ""]));
-	const turn = core.processTurn({ messages: state.messages, state: kernel, config, tokenCount });
+	const turn = nativeTurn(core, { messages: state.messages, state: kernel, config, tokenCount }, input.branch, zone);
 	const emergency = emergencyOf(memory, config, tokenCount, textBefore, turn);
 	memory.nudge = turn.state.nudge;
 	memory.tokenSnapshot = turn.state.tokenSnapshot;
@@ -394,6 +418,45 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 		...(emergency ? { emergency } : {}),
 		...(nudgeFix ? { nudgeFix } : {}),
 		...(denominator ? { denominator } : {}),
+	};
+}
+
+/**
+ * The kernel's processTurn with its recommend stage on the protected zone planFold uses
+ * (pi-context-aware#319). The kernel counts every user-role message, an extension-injected
+ * custom_message included, as the latest user message, so its recommendation hid the history after
+ * one. Only that node is replaced; prune, CCR and truncation are the kernel's. Without an injected
+ * message on the branch, or in all-user-role mode, the kernel's own processTurn runs.
+ */
+function nativeTurn(core: CompressionCore, input: ProcessTurnInput, branch: readonly SessionEntry[], zone: "typed" | "all-user-role"): ProcessTurnResult {
+	if (zone === "all-user-role" || !branch.some((entry) => entry.type === "custom_message")) return core.processTurn(input);
+	const errors = validateConfig(input.config);
+	if (errors.length > 0) console.warn(`[acp-kernel] Config validation warnings: ${errors.join("; ")}. Thresholds may not fire correctly.`);
+	const contentStore = input.contentStore ?? createContentStore();
+	const recommend: PipelineNode = {
+		name: "recommend",
+		run(io, ctx) {
+			const protectedRefs = protectedField(io.messages, io.state, ctx.config, branch, zone).protectedMessageIds
+				?? computeProtectedRefs(io.messages, io.state, ctx.config, ctx.countTokens);
+			const contextRanges = buildCompressibleRanges(io.messages, io.state, ctx.config, protectedRefs, ctx.countTokens);
+			const recommendation = {
+				contextRanges,
+				recommendedRanges: mergeRangesToThreshold(contextRanges.compressible, ctx.config.compress.minCompressRange),
+				nothingToCompress: contextRanges.compressible.length === 0,
+			};
+			return { ...io, effects: { ...io.effects, recommendation } };
+		},
+	};
+	const nodes = core.defaultNodes().map((node) => node.name === "recommend" ? recommend : node);
+	const result = runPipeline(nodes, { messages: input.messages, state: input.state, effects: {} }, { config: input.config, tokenCount: input.tokenCount, countTokens: defaultCountTokens, contentStore });
+	const ccr = result.effects.ccr as CcrEffect | undefined;
+	return {
+		messages: result.messages,
+		state: { ...result.state, lastPassIds: input.messages.map((message) => message.id) },
+		nudge: result.effects.nudge,
+		terminalEscape: result.effects.terminalEscape,
+		truncationSkipped: result.effects.truncationSkipped,
+		contentStore: ccr?.store ?? contentStore,
 	};
 }
 

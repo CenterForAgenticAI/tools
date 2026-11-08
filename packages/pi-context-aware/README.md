@@ -68,7 +68,7 @@ One prompt section guides the context tools, within 1,500 tokens.
 | Commands | `/context-status`, `/context-aware-*` | Inspect pressure and configure seed, model, ambiguity, and proactive behavior. |
 | Commands | `/focus`, `/sessions`, `/tasks`, `/checkin` | Inspect durable workstream state, task state, and session health. |
 | Commands | `/context-cache-*` | Inspect and manage scoped context-cache documents. |
-| Command | `/session-erase <session-id>` | Permanently erase a closed session, with fork/cache confirmation and an erasure receipt. |
+| Command | `/session-erase <session-id> [--range <ref>..<ref> \| --match <literal>]` | Permanently erase a closed session, or only a range or matching text in it, with preview, per-fork confirmation and an erasure receipt. |
 | Export | `@centerforagenticai/pi-context-aware/context-service` | Discover the typed protocol-v1 service over `pi.events`. |
 
 Every command, parameter, and example is in [commands and concepts](docs/commands-and-concepts.md), [configuration](docs/configuration.md), and [session tasks](docs/session-tasks.md). The service contract is in [context-service.md](docs/context-service.md).

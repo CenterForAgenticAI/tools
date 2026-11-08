@@ -155,6 +155,63 @@ test("migrateCachePool reports failure instead of throwing when the destination 
 	}
 });
 
+test("migrateCachePool reports a lock timeout as the cause of the failure", () => {
+	const root = tmpDir();
+	const source = path.join(root, "source");
+	const destination = path.join(root, "destination");
+	try {
+		writeManifest(source, { version: 1, files: { "legacy.md": cacheEntry("2026-07-20T00:00:00.000Z") } });
+		fs.writeFileSync(path.join(source, "legacy.md"), "legacy content");
+		fs.mkdirSync(destination, { recursive: true });
+		fs.writeFileSync(path.join(destination, ".manifest.lock"), JSON.stringify({ pid: 4242, startTime: "100", token: "live" }));
+
+		const result = migrateCachePool(source, destination, { timeoutMs: 100, pollMs: 1, isAlive: () => true, startTimeOf: (pid) => (pid === 4242 ? "100" : "self") });
+		assert.deepEqual(result.failedFiles, ["legacy.md"]);
+		assert.match(result.error ?? "", /Timed out after 100 ms waiting for the context-cache manifest lock/);
+		assert.equal(fs.existsSync(path.join(destination, "legacy.md")), false);
+	} finally {
+		cleanup(root);
+	}
+});
+
+test("migrateCachePool reports an error raised under the lock with its message", () => {
+	const root = tmpDir();
+	const source = path.join(root, "source");
+	const destination = path.join(root, "destination");
+	const originalWriteFileSync = fsMutable.writeFileSync;
+	try {
+		writeManifest(source, { version: 1, files: { "legacy.md": cacheEntry("2026-07-20T00:00:00.000Z") } });
+		fs.writeFileSync(path.join(source, "legacy.md"), "legacy content");
+		// The lock owner record is written with writeFileSync on a descriptor; fail it.
+		fsMutable.writeFileSync = ((target: unknown, ...rest: unknown[]) => {
+			if (typeof target === "number") throw new Error("synthetic lock write failure");
+			return (originalWriteFileSync as (...args: unknown[]) => void)(target, ...rest);
+		}) as typeof fsMutable.writeFileSync;
+
+		const result = migrateCachePool(source, destination);
+		assert.deepEqual(result.failedFiles, ["legacy.md"]);
+		assert.equal(result.error, "synthetic lock write failure");
+	} finally {
+		fsMutable.writeFileSync = originalWriteFileSync;
+		cleanup(root);
+	}
+});
+
+test("migrateCachePool leaves error unset on a successful migration", () => {
+	const root = tmpDir();
+	const source = path.join(root, "source");
+	const destination = path.join(root, "destination");
+	try {
+		writeManifest(source, { version: 1, files: { "legacy.md": cacheEntry("2026-07-20T00:00:00.000Z") } });
+		fs.writeFileSync(path.join(source, "legacy.md"), "legacy content");
+		const result = migrateCachePool(source, destination);
+		assert.deepEqual(result.migratedFiles, ["legacy.md"]);
+		assert.equal(Object.hasOwn(result, "error"), false);
+	} finally {
+		cleanup(root);
+	}
+});
+
 test("the migration ledger records a source durably so it is never re-imported", () => {
 	const root = tmpDir();
 	const ledgerFile = path.join(root, "context-cache", "_migrations.json");

@@ -103,9 +103,9 @@ You can also use a loaded Pi prompt template as the explicit seed:
 /compact-then /review-auth src/auth.ts
 ```
 
-The seed is an invocation, not text. Before compacting, context-aware checks that `/review-auth` is registered with Pi (`pi.getCommands()`); an unknown command stops the run with an error and nothing is compacted. After compaction completes, it delivers exactly one message, `/review-auth src/auth.ts`, as a follow-up with `expandPromptTemplates: true`. Pi then runs it as it would a direct invocation: prompt template frontmatter controls apply, and registered extension or skill commands are dispatched. The arguments are forwarded as typed, the compacted summary is the context, and no separate seed message is sent. The invocation is not rewritten by the seed rewrite model.
+The seed is an invocation, not text. Before compacting, context-aware checks that `/review-auth` is registered with Pi (`pi.getCommands()`); if no command of that name is registered, the text is not an invocation: context-aware shows an info notice (`/tmp is not a registered command; using the text as the seed.`) and uses the whole text as a free-text seed. After compaction completes, it delivers exactly one message, `/review-auth src/auth.ts`, as a follow-up with `expandPromptTemplates: true`. Pi then runs it as it would a direct invocation: prompt template frontmatter controls apply, and registered extension or skill commands are dispatched. The arguments are forwarded as typed, the compacted summary is the context, and no separate seed message is sent. The invocation is not rewritten by the seed rewrite model.
 
-If Pi cannot dispatch the command after compaction, context-aware reports an error naming the command and the cause. It never falls back to sending the command text as a seed. Free-text seeds are unchanged.
+If Pi cannot dispatch the command after compaction, context-aware reports an error naming the command and the cause. It never falls back to sending the command text as a seed. Before sending, it checks that the session has a model and that the model's provider has configured auth; if not, it sends nothing, writes no delivery marker and reports the reason. A failure inside Pi after that check (for example an input-handler error) still surfaces only as Pi's generic "Extension error", because `sendUserMessage` returns no result. Free-text seeds are unchanged.
 
 ### 3. Compact without writing a seed
 
@@ -409,7 +409,7 @@ With an explicit seed:
 /compact-then continue with item #3
 ```
 
-A loaded prompt template invocation is also accepted and resolved before rewriting:
+A seed that starts with a slash word is a command invocation. Any registered command (prompt template or extension command) is accepted, checked before compaction, and run after it:
 
 ```text
 /compact-then /review-auth src/auth.ts
@@ -492,7 +492,7 @@ Declined documents remain on disk but disappear from recall and automatic cache 
 Untracked cache files, including anonymous staging leftovers, cannot be attributed to one session.
 They stay untouched and appear in the receipt. Review these files separately before the fold-engine cut-over.
 
-Erasure removes the transcript, its `.acp.json` side file, registry projections and crash debris, parity diagnostics, and SQLite discovery rows.
+Erasure removes the transcript, its `.acp.json` side file, registry projections and crash debris, parity diagnostics, the per-session metrics file, and SQLite discovery rows.
 Live registry locks also refuse erasure. Dead locks, reclaim directories, and temporary projections disappear with their session.
 Focus, tasks, naming, telemetry, compaction summaries, native folds, and originals stored in the transcript disappear with it.
 The command commits session ids to `<configuredAgentDir>/context-aware.sqlite` before deletion and checkpoints the SQLite WAL afterward.
@@ -508,11 +508,11 @@ Pi can rewrite migrations, repair a missing newline, or append missing thinking 
 
 A cancellable SDK opening handshake is still necessary before any session file load/write. The SDK must hold opening protection through activation.
 
-About one second after session start, and at once on refused-session start and shutdown, context-aware checks whether an erased id's transcript, `.acp.json` side file, or parity record returned. A warning lists each detected path. It deletes nothing automatically. The check reads only each transcript's first line, and it is skipped when the ledger has no erased ids.
+About one second after session start, and at once on refused-session start and shutdown, context-aware checks whether an erased id's transcript, `.acp.json` side file, parity record, or metrics file returned. A warning lists each detected path. It deletes nothing automatically. The check reads only each transcript's first line, and it is skipped when the ledger has no erased ids.
 
 A returned file can be a backup you restored on purpose. Close the refused session. Run `/session-erase <session-id>` from another session to delete the returned data, with the normal consent dialogs.
 
-The command accepts ids already in the ledger, even if only a side file or parity record remains. Side-only restores use Pi's filename convention or the refused session's known path for identification.
+The command accepts ids already in the ledger, even if only a side file, parity record, or metrics file remains. Side-only restores use Pi's filename convention or the refused session's known path for identification.
 
 The id-only ledger cannot identify a renamed side file without its transcript.
 The database is the shared profile database for future fold and historical-backfill rows.
@@ -529,6 +529,26 @@ About one second after session start, missing-source detection runs in the backg
 Pi writes a transcript with a session's first user or assistant message, so a session closed before its first prompt leaves a discovery row and no file. context-aware records that first message just before Pi writes the file. When no live process holds a missing session, no message was recorded for it, its transcript was never seen on disk, and it left no `.acp.json` side file, parity record, registry entry, or cache document, the sweep drops the row silently and notes the count in `context-aware-debug.log`.
 Any other missing transcript is reported once, and its discovery row is kept. This includes sources recorded by earlier versions, which kept no write history. A missing path can mean an unmounted disk or a moved directory, not intentional deletion. Transcripts that one sweep finds missing share one notice. If a transcript comes back and later goes missing again, it is reported again.
 To erase the unavailable session's profile stores, name its id with `/session-erase <session-id>` and confirm through the same fork, cache, and final consent dialogs. Moved copies are not searched for or deleted.
+
+### `/session-erase <session-id> --range <ref>..<ref>` and `--match <literal>`
+
+Erase part of a closed session and keep the rest:
+
+```text
+/session-erase <session-id> --range m00012..m00020
+/session-erase <session-id> --match <literal text>
+```
+
+`--session <id-or-path>` names the session instead of the leading id; a path must lie below `<agentDir>/sessions`. `--range` takes an acp ref (`m00012`) or an entry id on each side, and both must lie on one path of the session tree. `--match` is a literal string, not a pattern.
+
+- **What is erased.** Message text, tool-call arguments and tool output of the chosen entries become `[erased <date>]`. `--match` searches exactly those fields. It never changes ids, parent links, roles, types or tool-call ids, so the tree and call/result pairs stay valid. A compaction or branch summary that covers an erased range is erased too, with the fold record and context edits that carry its text.
+- **Preview, then confirmation.** Nothing is written until you confirm a preview that lists the entry ids, the derived stores that hold a copy (fold side file, parity and metrics records, context-cache documents and descriptions), and every fork that holds a copy. Each fork is then asked separately. A declined fork is not opened for writing and stays byte-identical.
+- **Receipt.** The receipt lists `Erased`, `Failed` and `Untouched` (declined forks, stores that still hold the text or could not be cleaned), then the limits below. The preview and the receipt hold ids, counts and paths only, never the erased text.
+- **Ledger.** The `erased_entries` table records the session id, entry id, a SHA-256 hash of the session id, entry id and original line and the date. It holds no text.
+- **Refused, with nothing written.** A session that is open (current session, live lease, live registry projection, or liveness that cannot be established), a range that does not resolve or runs backwards, a session path outside the sessions directory, an empty match, and a match inside a line that is not a readable session entry. The live-session path waits for an upstream Pi API and is not supported.
+- **Limits.** Fabric's memory index is not cleaned. Backups, exports and other extensions' stores are not searched. A `--match` literal is removed from derived stores whole, so a short literal removes every derived document that contains it. A `--range` removes derived documents only for erased strings of 12 characters or more.
+
+`/session-erase <session-id>` without a flag still erases the whole session as described above.
 
 ### Context cache management
 

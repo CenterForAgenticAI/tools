@@ -38,6 +38,18 @@ export function readStoreFile(file: string): string {
 	} finally { fs.closeSync(fd); }
 }
 
+export interface StoreFileRead { readonly text: string; readonly dev: number; readonly ino: number; readonly size: number; readonly mtimeMs: number; readonly mode: number }
+
+/** Like readStoreFile, plus the identity a later rename must still match. */
+export function readStoreFileWithIdentity(file: string): StoreFileRead {
+	const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+	try {
+		const info = fs.fstatSync(fd);
+		if (!info.isFile() || info.nlink !== 1 || (process.getuid && info.uid !== process.getuid())) throw new Error("Not a private regular store file");
+		return { text: fs.readFileSync(fd, "utf8"), dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, mode: info.mode & 0o777 };
+	} finally { fs.closeSync(fd); }
+}
+
 /** First line only, at most `limit` bytes: a header is small, a transcript can be hundreds of megabytes. */
 export function readStoreHeader(file: string, limit = 64 * 1024): string {
 	const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);

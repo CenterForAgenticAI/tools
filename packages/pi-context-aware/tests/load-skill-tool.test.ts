@@ -356,3 +356,67 @@ test("the captured list is replaced, not accumulated, when the prompt changes", 
 	assert.equal(result.details.error, "unknown", "a skill dropped from the prompt must stop resolving");
 	assert.deepEqual(result.details.available, ["test-execution"]);
 });
+
+const GLAB_OLD = "/pkg/modules/glab/skills/glab/SKILL.md";
+const GLAB_NEW = "/moved/skills/glab/SKILL.md";
+const glabSkill = (filePath: string): DiscoveredSkill => ({ name: "glab", description: "d", filePath });
+
+test("a skill whose captured path is gone loads from the source that holds it now, and later calls skip the dead path", async () => {
+	let discoveries = 0;
+	const harness = registered({
+		contents: { [GLAB_NEW]: "# moved glab body" },
+		discover: async () => { discoveries += 1; return [glabSkill(GLAB_NEW)]; },
+	});
+	harness.agentStart({ systemPrompt: PROMPT, systemPromptOptions: { skills: [glabSkill(GLAB_OLD)] } });
+	const first = await harness.call("glab");
+	assert.match(first.content[0]!.text, /# moved glab body/);
+	assert.match(first.content[0]!.text, /loaded from \/moved\/skills\/glab\/SKILL\.md/);
+	assert.match(first.content[0]!.text, /earlier path \/pkg\/modules\/glab\/skills\/glab\/SKILL\.md no longer exists/);
+	assert.equal(first.details.path, GLAB_NEW);
+	const second = await harness.call("glab");
+	assert.equal(second.details.path, GLAB_NEW);
+	assert.equal(discoveries, 1);
+	assert.deepEqual(harness.reads, [GLAB_OLD, GLAB_NEW, GLAB_NEW]);
+});
+
+test("a skill removed from every source names the stale path and /reload", async () => {
+	const harness = registered({ contents: {}, discover: async () => [] });
+	harness.agentStart({ systemPrompt: PROMPT, systemPromptOptions: { skills: [glabSkill(GLAB_OLD)] } });
+	const result = await harness.call("glab");
+	assert.equal(result.details.error, "unreadable");
+	assert.equal(result.details.stalePath, true);
+	assert.equal(result.details.path, GLAB_OLD);
+	assert.match(result.content[0]!.text, /no discovered source holds the skill now/);
+	assert.match(result.content[0]!.text, /\/reload/);
+});
+
+test("rediscovery that throws keeps the plain unreadable message", async () => {
+	const harness = registered({ contents: {}, discover: async () => { throw new Error("boom"); } });
+	harness.agentStart({ systemPrompt: PROMPT, systemPromptOptions: { skills: [glabSkill(GLAB_OLD)] } });
+	const result = await harness.call("glab");
+	assert.equal(result.details.error, "unreadable");
+	assert.equal(result.details.stalePath, undefined);
+	assert.match(result.content[0]!.text, /Report this rather than looking/);
+});
+
+test("a read error other than ENOENT does not trigger rediscovery", async () => {
+	let discoveries = 0;
+	const reads: string[] = [];
+	let tool: Tool | undefined;
+	let start: ((event: unknown, ctx: unknown) => unknown) | undefined;
+	registerLoadSkillTool(
+		{
+			registerTool: (definition) => { tool = definition as unknown as Tool; },
+			on: (_event, handler) => { start = handler as typeof start; },
+		},
+		(filePath) => { reads.push(filePath); throw Object.assign(new Error(`EACCES: permission denied, open '${filePath}'`), { code: "EACCES" }); },
+		async () => { discoveries += 1; return [glabSkill(GLAB_NEW)]; },
+	);
+	start!({ systemPrompt: PROMPT, systemPromptOptions: { skills: [glabSkill(GLAB_OLD)] } }, { cwd: process.cwd(), isProjectTrusted: () => true });
+	const result = (await tool!.execute!("c", { name: "glab" }, undefined, undefined, {})) as { content: Array<{ text: string }>; details: Record<string, unknown> };
+	assert.equal(result.details.error, "unreadable");
+	assert.equal(result.details.stalePath, undefined);
+	assert.match(result.content[0]!.text, /EACCES/);
+	assert.equal(discoveries, 0);
+	assert.deepEqual(reads, [GLAB_OLD]);
+});

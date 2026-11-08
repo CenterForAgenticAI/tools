@@ -263,9 +263,15 @@ export interface AcceptedSourceInput {
 export function acceptedSourceOf(input: AcceptedSourceInput): FoldSource | undefined {
 	const order = new Map(input.branch.map((entry, index) => [entry.id, index]));
 	const covered = [...new Set(input.plan.records.flatMap(coveredEntryIds))].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
-	const startEntryId = covered[0];
-	const endEntryId = covered[covered.length - 1];
-	if (startEntryId === undefined || endEntryId === undefined) return undefined;
+	if (covered.length === 0) return undefined;
+	// A condensed-hint swap edits an entry the fold does not hide. The range edges include it, so the
+	// plan made at the drain (from the edge refs) reaches it; the covered ids and digest stay hidden-only.
+	const carriers = new Set(input.plan.records.map((record) => record.carrierId));
+	const swapped = input.plan.drafts.flatMap((draft) =>
+		draft.type === "context_edit" && draft.replacement !== null && !carriers.has(draft.targetId) ? [draft.targetId] : []);
+	const spanned = [...new Set([...covered, ...swapped])].filter((id) => order.has(id)).sort((a, b) => order.get(a)! - order.get(b)!);
+	const startEntryId = spanned[0] ?? covered[0]!;
+	const endEntryId = spanned[spanned.length - 1] ?? covered[covered.length - 1]!;
 	const blockId = (ref: string): string | undefined => {
 		const parsed = parseBoundary(ref);
 		return parsed?.kind === "block" ? `b${parsed.numericId}` : undefined;

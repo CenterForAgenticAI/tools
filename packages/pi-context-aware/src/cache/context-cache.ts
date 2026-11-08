@@ -7,7 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import * as path from "node:path";
 import { erasedSessionIds } from "../erasure/database.js";
-import { isManifestLockFileName, withManifestLock } from "./manifest-lock.js";
+import { isManifestLockFileName, withManifestLock, type ManifestLockOptions } from "./manifest-lock.js";
 
 /** Only known profile pool layouts supply authority; arbitrary caller directories remain standalone. */
 export function erasedIdsForCacheDirectory(cacheDir: string): ReadonlySet<string> {
@@ -76,6 +76,8 @@ export interface CacheMigrationResult {
 	migratedFiles: string[];
 	/** Entries that could not be copied. A non-empty list means the migration is incomplete. */
 	failedFiles: string[];
+	/** Why the whole migration failed (lock timeout or an error inside the locked step). Set only on that path. */
+	error?: string;
 }
 
 export interface CacheMigrationLedgerEntry {
@@ -178,7 +180,7 @@ function copyMigratedCacheFile(sourceFile: string, destinationFile: string, dest
  * A source entry replaces a destination entry only when both timestamps are
  * valid and the source is newer. Ambiguous entries are skipped conservatively.
  */
-export function migrateCachePool(sourceDir: string, destinationDir: string): CacheMigrationResult {
+export function migrateCachePool(sourceDir: string, destinationDir: string, lockOptions: ManifestLockOptions = {}): CacheMigrationResult {
 	if (path.resolve(sourceDir) === path.resolve(destinationDir)) return { changed: false, migratedFiles: [], failedFiles: [] };
 	const erased = erasedIdsForCacheDirectory(destinationDir);
 	const sourceManifest = readManifest(sourceDir);
@@ -188,10 +190,11 @@ export function migrateCachePool(sourceDir: string, destinationDir: string): Cac
 	if (Object.keys(sourceManifest.files).length === 0) return { changed: false, migratedFiles: [], failedFiles: [] };
 
 	try {
-		return withManifestLock(destinationDir, () => migrateCachePoolLocked(sourceDir, destinationDir, sourceManifest));
-	} catch {
+		return withManifestLock(destinationDir, () => migrateCachePoolLocked(sourceDir, destinationDir, sourceManifest), lockOptions);
+	} catch (err) {
 		// Best-effort: a lock that cannot be taken leaves the destination untouched.
-		return { changed: false, migratedFiles: [], failedFiles: Object.keys(sourceManifest.files) };
+		// The cause is returned so the caller can log it.
+		return { changed: false, migratedFiles: [], failedFiles: Object.keys(sourceManifest.files), error: err instanceof Error ? err.message : String(err) };
 	}
 }
 

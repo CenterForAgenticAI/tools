@@ -557,3 +557,60 @@ test("a nudge-fix note that contradicts itself is a recorder fault", () => {
 		assert.match(parityEvidenceFault(record(bad)) ?? "", /nudgeFix/u, JSON.stringify(bad));
 	}
 });
+
+// ---- pi-context-aware#319: the nudge uses the protected zone planFold uses --------------------
+
+/** Three large archived exchanges, a typed request, two steps, an injected note and a short reply. */
+function injectedSession(typedAfterNote = false): SessionManager {
+	const manager = SessionManager.inMemory("/tmp");
+	for (let i = 1; i <= 3; i++) {
+		manager.appendMessage({ role: "user", content: "Archive " + i + ". " + "Invented archive review text. ".repeat(1_200), timestamp: 1 });
+		manager.appendMessage(fauxAssistantMessage("Reviewed " + i + ". " + "Invented archive answer text. ".repeat(1_200)));
+	}
+	if (!typedAfterNote) manager.appendMessage({ role: "user", content: "Latest typed request.", timestamp: 1 });
+	for (let i = 1; i <= 2; i++) manager.appendMessage(fauxAssistantMessage("Step " + i + ". " + "Invented step text. ".repeat(1_200)));
+	manager.appendCustomMessageEntry("other-extension.status", "An injected note.", true);
+	if (typedAfterNote) manager.appendMessage({ role: "user", content: "Latest typed request.", timestamp: 1 });
+	manager.appendMessage(fauxAssistantMessage("Short."));
+	return manager;
+}
+const rangeLines = (nudge: string | undefined) => (nudge ?? "").split("\n").filter((line) => /^ {2}m\d{5}\u2013m\d{5} /u.test(line)).map((line) => line.trim().split(/\s+/u)[0]!);
+const zoneTurn = (manager: SessionManager, protectedZone?: "typed" | "all-user-role") =>
+	prepareFoldTurn({ ...turnInput(manager, createFoldTurnMemory(), { contextWindow: 120_000 }), config: { ...CONFIG, preserveRecentMessages: 1 }, ...(protectedZone ? { protectedZone } : {}) });
+
+test("#319: the nudge keeps the typed request out of its ranges and offers the history around an injected message", () => {
+	const manager = injectedSession();
+	const sent = zoneTurn(manager);
+	// m00001-m00006 archive, m00007 typed request, m00008-m00009 steps, m00010 injected note, m00011 short reply.
+	assert.deepEqual(rangeLines(sent?.nudge), ["m00001\u2013m00006", "m00008\u2013m00010"]);
+	for (const range of rangeLines(sent?.nudge)) {
+		const [start, end] = range.split("\u2013") as [string, string];
+		const plan = planFold({ branch: manager.getBranch(), startRef: start, endRef: end, summary: SUMMARY(1), modelContextLimit: 120_000, config: { ...CONFIG, preserveRecentMessages: 1 } });
+		assert.ok(plan.ok, "planFold accepts the listed range " + range + ": " + JSON.stringify(plan));
+	}
+});
+
+test("#319: all-user-role keeps the kernel's zone for the nudge", () => {
+	const sent = zoneTurn(injectedSession(), "all-user-role");
+	// The injected note is the latest user message, so the typed request is not protected and joins the range.
+	assert.deepEqual(rangeLines(sent?.nudge), ["m00001\u2013m00009"]);
+});
+
+test("#319: the adapter turn pass matches the kernel's when no injected message moves the boundary", () => {
+	// A typed request after the note: the note is not the latest user message, so both rules agree.
+	for (const manager of [injectedSession(true), nudgeSession()]) {
+		const memories = { typed: createFoldTurnMemory(), kernel: createFoldTurnMemory() };
+		const typed = prepareFoldTurn({ ...turnInput(manager, memories.typed, { contextWindow: 120_000 }), protectedZone: "typed" });
+		const kernel = prepareFoldTurn({ ...turnInput(manager, memories.kernel, { contextWindow: 120_000 }), protectedZone: "all-user-role" });
+		assert.ok(typed?.nudge, "the session is over the nudge threshold");
+		// The appended nudge message carries Date.now(); everything else must match.
+		const stable = (messages: readonly Message[] | undefined) => messages?.slice(0, -1);
+		assert.deepEqual(stable(typed?.messages), stable(kernel?.messages));
+		assert.equal(typed?.messages.length, kernel?.messages.length);
+		assert.equal(typed?.nudge, kernel?.nudge);
+		assert.deepEqual(typed?.tokens, kernel?.tokens);
+		assert.deepEqual(memories.typed.nudge, memories.kernel.nudge);
+		assert.deepEqual(memories.typed.lastPassIds, memories.kernel.lastPassIds);
+		assert.deepEqual(memories.typed.tokenSnapshot, memories.kernel.tokenSnapshot);
+	}
+});

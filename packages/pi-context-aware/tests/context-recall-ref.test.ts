@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -214,7 +215,7 @@ test("REQ-193-7: through the extension, recall tools are registered on the erasu
 		else process.env.HOME = previousHome;
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 

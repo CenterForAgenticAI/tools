@@ -648,7 +648,7 @@ function liveRequest(preview: SessionManager, input: PreviewInput): { messages: 
 	const prepared = previewFoldTurnState({
 		messages: preview.buildSessionContext().messages.filter((message) => message.role !== "system"), projection, branch: preview.getBranch(), contextEntries: preview.buildContextEntries(),
 		model, systemPromptTokens: turn.systemPromptTokens ?? 0, ...(turn.hostTokens !== undefined ? { hostTokens: turn.hostTokens } : {}), memory: input.turnMemory ?? createFoldTurnMemory(),
-		compatibility: true,
+		compatibility: true, protectedZone: "all-user-role",
 		...(turn.ladder ? { ladder: turn.ladder } : {}),
 	});
 	const result = prepared.result;

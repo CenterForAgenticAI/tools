@@ -29,6 +29,30 @@ test("the reader summarises the fixture sessions and tolerates a torn last line 
 	assert.equal(summary.total.cacheReadShare, 450 / 800);
 });
 
+test("pressure at each fold is the pressure of the request that made the fold", async () => {
+	const { registerMetricsRecorder, DEFAULT_METRICS_SETTINGS } = await import("../dist/metrics/recorder.js");
+	const { metricsSessionFile } = await import("../dist/metrics/records.js");
+	const { mkdtempSync, rmSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const root = mkdtempSync(join(tmpdir(), "metrics-sum-"));
+	try {
+		const recorder = registerMetricsRecorder({
+			agentDir: () => root, settings: () => DEFAULT_METRICS_SETTINGS,
+			ladder: () => ({ foldNudgeStartFraction: 0.45, foldNudgeEndFraction: 0.75, seededCompactionFraction: 0.9, recoverableHideFraction: 0.95 }),
+		});
+		const ctx = { sessionManager: { getSessionId: () => "s", getLeafId: () => "l", getBranch: () => [] }, model: { id: "m", contextWindow: 1000 } };
+		const turn = (before) => ({ messages: [], sources: [], dropped: [], tokens: { before, after: before } });
+		recorder.observers.onTurn(ctx, turn(200));
+		recorder.observers.onRequest(ctx, { ok: true, mode: "live", queued: true, blockIds: ["b"], warnings: [] });
+		recorder.observers.onTurn(ctx, turn(800));
+		recorder.close(ctx);
+		await recorder.flush();
+		const summary = summarise(parseMetrics(readFileSync(metricsSessionFile(root, "s"), "utf8")));
+		assert.deepEqual(summary.sessions[0].foldPressures, [0.2]);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("the command prints a summary for a directory and fails without arguments", () => {
 	const ok = spawnSync(process.execPath, [script, fixtures], { encoding: "utf8" });
 	assert.equal(ok.status, 0);

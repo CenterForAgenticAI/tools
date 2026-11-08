@@ -35,6 +35,7 @@ import {
 	snapshotLayer,
 	type ModeLayerState,
 } from "./modes-state.js";
+import { CONTEXT_TOOL_NAMES } from "../context-tools/surface.js";
 import { isReadOnlyShellCommand } from "./read-only-shell.js";
 
 export { MODE_MESSAGE_TYPE, MODE_STATE_ENTRY_TYPE, MODE_STATE_ENTRY_TYPE_V1 } from "./modes-state.js";
@@ -574,6 +575,8 @@ export function createContextAwareModesV1(deps: ContextAwareModesRuntimeDeps): C
 	};
 	/** Every layer's rules apply: the first block wins, blocked tools before policies before guards. */
 	const handleToolCall = (toolName: string, input: Record<string, unknown>): ToolBlock | undefined => {
+		// The context tools change only the session's own context: no mode, policy or guard blocks them (exact names).
+		if (CONTEXT_TOOL_NAMES.has(toolName)) return undefined;
 		const live = layers.map(available).filter((definition): definition is RuntimeDefinition => definition !== undefined);
 		for (const definition of live) {
 			if (definition.blockedTools.has(toolName)) return { block: true, reason: blockedByMode(toolName, definition) };

@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -33,10 +34,10 @@ import { buildWorkstreamContextEnvelope } from "../src/workstream/workstream-con
 const testAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-cache-agent-"));
 const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = testAgentDir;
-test.after(() => {
+test.after(async () => {
 	if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
-	fs.rmSync(testAgentDir, { recursive: true, force: true });
+	await removeFixtureDir(testAgentDir);
 });
 
 type AgentMessage = Parameters<typeof convertToLlm>[0][number];
@@ -385,8 +386,8 @@ Under pressure: compact at a phase boundary, and recall instead of guessing or a
 		// Focus deliberately gained an outer named tag; its legacy envelope stays unchanged.
 		assert.equal(prompt, `${legacyPrompt}\n\n${focusBlock}`);
 	} finally {
-		fs.rmSync(cacheDir, { recursive: true, force: true });
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(cacheDir);
+		await removeFixtureDir(root);
 	}
 });
 
@@ -427,7 +428,7 @@ test("system prompt stays byte-identical as cached-document age advances without
 		assert.doesNotMatch(first.systemPrompt ?? "", /architecture\.md/);
 	} finally {
 		Date.now = realNow;
-		fs.rmSync(sessionDir, { recursive: true, force: true });
+		await removeFixtureDir(sessionDir);
 	}
 });
 
@@ -511,7 +512,7 @@ test("scopes cache pools by worktree when session directories are shared", async
 		restoreDateNow();
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
@@ -562,11 +563,11 @@ test("a worktree session reads the repository pool but not a sibling worktree po
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
-test("all cache injection paths keep newest entries and render one bounded remainder", () => {
+test("all cache injection paths keep newest entries and render one bounded remainder", async () => {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-cache-listing-")));
 	const agentRoot = path.join(root, "agent");
 	const cwd = path.join(root, "worktree");
@@ -629,11 +630,11 @@ test("all cache injection paths keep newest entries and render one bounded remai
 		restoreDateNow();
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
-test("worktree read-through renders repository documents but never sibling scratch", () => {
+test("worktree read-through renders repository documents but never sibling scratch", async () => {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-cache-read-through-")));
 	const worktree = path.join(root, "worktree");
 	const repo = path.join(root, "repo");
@@ -668,11 +669,11 @@ test("worktree read-through renders repository documents but never sibling scrat
 		assert.match(block ?? "", /2 reference documents from prior sessions are available\. Run \/context-cache-list/);
 		assert.doesNotMatch(block ?? "", /sibling|lane\.md|repo\.md/);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
-test("empty scopes produce no cache output from any injection path", () => {
+test("empty scopes produce no cache output from any injection path", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-cache-empty-"));
 	const agentRoot = path.join(root, "agent");
 	const cwd = path.join(root, "empty");
@@ -691,7 +692,7 @@ test("empty scopes produce no cache output from any injection path", () => {
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
@@ -759,7 +760,7 @@ test("legacy project pools migrate once, preserve sources, and leave forks untou
 		restoreDateNow();
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
@@ -794,7 +795,41 @@ test("a symlinked non-Git cwd migrates its legacy pool", async () => {
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
+	}
+});
+
+test("a migration that fails under the lock logs its cause", async () => {
+	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-cache-migration-error-")));
+	const agentRoot = path.join(root, "agent");
+	const actual = path.join(root, "a", "b");
+	const cwd = path.join(root, "a-b");
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	try {
+		fs.mkdirSync(actual, { recursive: true });
+		fs.symlinkSync(actual, cwd, "dir");
+		process.env.PI_CODING_AGENT_DIR = agentRoot;
+		const legacy = path.join(agentRoot, "sessions", legacySessionDirectoryName(cwd), "context");
+		writeManifest(legacy, { version: 1, files: { "stuck.md": {
+			description: "Stuck migration",
+			createdBy: "old",
+			updatedBy: "old",
+			created: "2026-07-20T00:00:00.000Z",
+			updated: "2026-07-20T00:00:00.000Z",
+			sizeBytes: 5,
+		} } });
+		fs.writeFileSync(path.join(legacy, "stuck.md"), "stuck content");
+		// A regular file where the scoped pool's parent directory belongs, so taking the lock throws.
+		fs.writeFileSync(path.join(agentRoot, "context-cache"), "not a directory");
+
+		const handlers = registerExtension();
+		await runBeforeAgentStart(handlers, createContext(() => 1, 200_000, path.join(root, "shared-session"), cwd), "inspect stuck cache");
+		const log = fs.readFileSync(path.join(agentRoot, "context-aware-debug.log"), "utf8");
+		assert.match(log, /migration from .* incomplete, 1 file\(s\) failed: .*ENOTDIR/u);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		await removeFixtureDir(root);
 	}
 });
 
@@ -833,7 +868,7 @@ test("an orphaned legacy pool is reported once without migration or deletion", a
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
@@ -856,7 +891,7 @@ test("an empty shared fork pool is not reported at all", async () => {
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
@@ -908,7 +943,7 @@ test("a migrated document removed from the scoped pool is not resurrected", asyn
 		restoreDateNow();
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
@@ -963,7 +998,7 @@ test("a legacy pool whose slug collides across projects is never migrated", asyn
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
@@ -1128,6 +1163,6 @@ test("/context-cache-list names every document, including a promoted artifact be
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });

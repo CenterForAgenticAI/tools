@@ -341,10 +341,12 @@ fallback:
 | --- | --- |
 | `cache-origin` | Blocking. The candidate declares cache reference material as its origin. Normal generated and explicit-seed flows do not use this origin, but the guard rejects it defensively. |
 | `cache-material-originated-term` | Advisory. A whole cache artifact filename is retained as a passive reference and excluded from authority-bearing objective, project, deliverable, constraint, and permission data. |
-| `project-switch` | Blocking for generated handoffs when a canonical GitLab reference or repository-root path names an ungrounded project. Advisory for explicit seeds, whose exact raw or resolved prompt-template text remains operative. |
+| `project-switch` | Blocking for generated handoffs when a canonical GitLab reference or repository-root path names an ungrounded project. Advisory for explicit seeds, whose exact seed text, or command invocation text, remains operative. |
 | `objective-switch` | Blocking. The candidate both introduces new objective terms and explicitly says to switch, replace, abandon, or start a different task, objective, project, repository, deliverable, or focus. |
 | `side-effect-authority-change` | Blocking for generated handoffs. An explicit generated claim added, removed, strengthened, weakened, or misattributed local-edit, local-commit, remote-Git-write, provider-metadata-write, or named-target authority. |
 | `mutation-authority-escalation` | Advisory. The legacy lexical permission snapshot remains telemetry only; it does not refuse a handoff. |
+
+A delivery marker records a hash of the message it announces, so a prompt the user types between the marker and that message still counts as user authority. Markers from older sessions have no hash and keep first-in-first-out pairing. A refusal's `authorityGuardGroundingMessages` lists, for each user message, its position, where its authority came from (`typed`, `delivery-marker-authoritative`, `delivery-marker-generated` or `generated-seed-echo`) and a hash of its text, never the text.
 
 `repository-switch` was removed because the normal call path had no independent
 candidate repository target. Candidate and baseline repository values both came
@@ -850,13 +852,17 @@ Shape:
 }
 ```
 
-The file is `<agent dir>/context-aware/metrics/v1/<session-id>.jsonl`, mode 0600 in a directory only you can use; a symlinked or foreign-owned path is refused. Each line is a record with `v: 1` holding: time, session id, branch leaf id, model id, window; tokens before and after the per-turn pass, pressure fraction and ladder band (`ok`, `warn`, `urgent`); the kind of nudge sent; emergency truncation and hide counts; folds requested, accepted, refused and dropped at turn end (counts by reason code); a compaction that committed since the last record (writer, tokens before and after); and the previous turn's provider usage (input, output, cache read, cache write). Each field is copied by name and checked. No message text, summary, tool argument or error text is written.
+The file is `<agent dir>/context-aware/metrics/v1/<session-id>.jsonl`, mode 0600 in a directory only you can use; a symlinked or foreign-owned path is refused. Each line is a record with `v: 1` holding: time, session id, branch leaf id, model id, window; tokens before and after the per-turn pass, pressure fraction and ladder band (`ok`, `warn`, `urgent`); the kind of nudge sent; emergency truncation and hide counts; folds requested, accepted, refused and dropped during that request (counts by reason code; `refused` and `dropped` are breakdowns, not request counts, so a refusal with several reasons counts once under each, and a refusal with no code and no error text counts as `unknown`); a compaction that committed during that request (writer, tokens before and after); and the previous turn's provider usage (input, output, cache read, cache write). The writer is `context-aware`, `fabric`, `extension`, `pi`, `malformed` or `none`; older records may also say `other` or `unknown`. Pi reports no token count until an assistant replies after a compaction, so the record waits for the first measured count and holds it as `tokensAfter`. It is never estimated. After three records with no measured count it is written with `tokensAfter: null`. Each field is copied by name and checked. No message text, summary, tool argument or error text is written.
 
 When a file would pass `maxBytes`, the oldest records are dropped first. When the directory would pass `maxDirBytes`, the oldest other session files are removed. `/session-erase` removes the session's file.
 
 The default is on for every profile. Profile-specific defaults are not implemented; set `contextMetrics.enabled` to `false` to switch it off.
 
-Summarise a set of sessions with `node scripts/context-metrics-summary.mjs <metrics-dir | file.jsonl>...` (add `--json` for machine output): folds per session, refusal reasons, pressure at each fold, compactions and cache-read share. A torn last line and records of another version are skipped.
+Summarise a set of sessions with `node <package dir>/scripts/context-metrics-summary.mjs <metrics-dir | file.jsonl>...` (`<package dir>` is the installed package, `node_modules/<package name>`; in a source checkout the path is `scripts/context-metrics-summary.mjs`; add `--json` for machine output): folds per session, refusal reasons, pressure at each fold, compactions and cache-read share. A torn last line and records of another version are skipped.
+
+A record is written once its request is over, so a fold asked for after request N is counted in record N, with the pressure of that request, and the last request of a session is written when the session ends. Files written before this change count each fold one record late, so a summary over old and new files mixes the two.
+
+In a record, `folds.tiers` is `null` when the recorder did not learn the tier of each fold (the fold engine does not report it today), and a list of tiers (1 to 3) when it did; `[]` means the source reported that no fold was made. Records written before this distinction carry `[]` where the tiers were unknown, so read an empty list in an older file as unknown. Readers accept both forms; the record version stays 1.
 
 ## `imageStripping`
 
@@ -977,7 +983,8 @@ Controls whether a native fold can replace the session's first user message
   "folds": {
     "firstUserMessage": "keep",
     "firstUserMessageMaxTokens": 8000,
-    "condensedSkills": false
+    "condensedSkills": false,
+    "engine": "auto"
   }
 }
 ```
@@ -994,6 +1001,14 @@ skill block that has a captured `condensed.md` with that condensed text, and a
 compaction resends each skill still in use in condensed form. It stays off by
 default until a replay comparison shows agents still follow a skill's hard
 rules after the swap. See [skills.md](skills.md#condensed-skills).
+
+`engine` defaults to `auto`: the native folds run unless billion-context-pi is
+loaded, and then compaction alone runs with the native folds in shadow. `folds`
+and `compaction-only` force one engine. It is a debugging and rollback switch,
+not a context policy. When `folds` is forced while billion-context-pi is loaded,
+the setting wins and `context_status` shows a warning. The engine is chosen once
+per session, so a change applies at the next session start or reload.
+`context_status` and the service snapshot report it as `engine`.
 
 `firstUserMessageMaxTokens` defaults to `8000` and must be a positive whole
 number. It affects only `keep-under-tokens`. A folded opening is replaced by a

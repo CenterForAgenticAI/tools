@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -52,6 +53,10 @@ export interface Harness {
 export interface SessionOptions {
 	/** Enable the compaction owner claim and stand in Fabric on the session's event bus. */
 	readonly ownerClaim?: boolean;
+	/** Let Pi's compaction run to its commit instead of cancelling it after the probe sees it. */
+	readonly completeCompaction?: boolean;
+	/** More extensions, loaded after context-aware (for example a registered command). */
+	readonly extensions?: readonly ExtensionFactory[];
 }
 
 let loadCounter = 0;
@@ -92,7 +97,7 @@ export async function withSession(
 	const probe: ExtensionFactory = (pi) => {
 		pi.on("session_before_compact", (event) => {
 			preparations.push(event.preparation);
-			return { cancel: true };
+			return options.completeCompaction ? undefined : { cancel: true };
 		});
 	};
 	const contextAware: ExtensionFactory = async (pi) => {
@@ -113,7 +118,7 @@ export async function withSession(
 			modelRuntime,
 			// Pi's own threshold compaction stays off; every compaction here is requested.
 			settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
-			resourceLoaderOptions: { eventBus, extensionFactories: [probe, contextAware], noExtensions: true },
+			resourceLoaderOptions: { eventBus, extensionFactories: [probe, contextAware, ...(options.extensions ?? [])], noExtensions: true },
 		});
 		const sessionManager = SessionManager.inMemory(cwd);
 		history(sessionManager);
@@ -134,7 +139,7 @@ export async function withSession(
 		else process.env.HOME = previousHome;
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 }
 

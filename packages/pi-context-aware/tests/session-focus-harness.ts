@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -58,6 +59,8 @@ export interface FocusFixture {
 	turnMessage(messageType?: "user" | "custom" | "legacy-user"): Promise<string>;
 	/** Provider request without a new outer run (automatic compaction retry). */
 	continueRequest(): Promise<string>;
+	/** The messages the `context` handler chain returns for `seed`, unflattened. */
+	requestMessages(seed?: ReadonlyArray<Record<string, unknown>>): Promise<Array<Record<string, unknown>>>;
 	/** Run the agent_end handlers: one attempt is over, and Pi may retry it. */
 	endAttempt(): Promise<void>;
 	/** Run agent_end then agent_settled: the whole run is over. */
@@ -68,7 +71,7 @@ export interface FocusFixture {
 	shutdown(): Promise<void>;
 	/** Navigate with /tree: make `branch` the session's entries, then run the session_tree handlers. */
 	navigate(branch: readonly unknown[]): Promise<void>;
-	cleanup(): void;
+	cleanup(): Promise<void>;
 }
 
 let counter = 0;
@@ -139,12 +142,17 @@ export async function focusFixture(entries: unknown[] = [], options: FocusFixtur
 	} as unknown as ExtensionContext;
 	await events.get("session_start")?.[0]?.({ reason: entries.length > 0 ? "resume" : "new" }, ctx);
 
-	async function continueRequest(): Promise<string> {
-		let messages: Array<{ content?: unknown }> = [];
+	async function requestMessages(seed: ReadonlyArray<Record<string, unknown>> = []): Promise<Array<Record<string, unknown>>> {
+		let messages: Array<Record<string, unknown>> = [...seed];
 		for (const handler of events.get("context") ?? []) {
 			const result = await handler({ type: "context", messages }, ctx) as { messages?: typeof messages } | undefined;
 			if (result?.messages) messages = result.messages;
 		}
+		return messages;
+	}
+
+	async function continueRequest(): Promise<string> {
+		const messages = await requestMessages();
 		return messages.map((message) => typeof message.content === "string" ? message.content : "").join("\n");
 	}
 
@@ -200,17 +208,18 @@ export async function focusFixture(entries: unknown[] = [], options: FocusFixtur
 			for (const handler of events.get("session_tree") ?? []) await handler({}, ctx);
 		},
 		continueRequest,
+		requestMessages,
 		endAttempt,
 		endRun,
 		async turnMessage(messageType) {
 			return (await turn(messageType)).message;
 		},
-		cleanup() {
+		async cleanup() {
 			if (previousHome === undefined) delete process.env.HOME;
 			else process.env.HOME = previousHome;
 			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-			fs.rmSync(home, { recursive: true, force: true });
+			await removeFixtureDir(home);
 		},
 	};
 }

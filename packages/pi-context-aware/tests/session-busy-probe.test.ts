@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -33,8 +34,8 @@ function agentDir(): string {
 	return dir;
 }
 
-test.after(() => {
-	for (const dir of created) fs.rmSync(dir, { recursive: true, force: true });
+test.after(async () => {
+	for (const dir of created) await removeFixtureDir(dir);
 });
 
 function writeDelegate(dir: string, value: unknown): void {

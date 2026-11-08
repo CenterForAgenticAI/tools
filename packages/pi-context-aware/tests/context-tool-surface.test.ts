@@ -14,7 +14,7 @@ import { decideContextToolSurface } from "../src/context-tools/surface.js";
 // This file compiles to <root>/.test-dist/tests/, so the package root is two levels up.
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 // Pi gives a package-loaded extension the path of its pi.extensions entry, the
-// .ts wrapper; `pi -e ./dist/extension.js` gives the bundle's path.
+// bundle dist/extension.js; `pi -e ./dist/extension.js` gives the same path.
 const OWN_BUNDLE = path.join(PACKAGE_ROOT, "dist", "extension.js");
 const OWN_SOURCE_ENTRY = path.join(PACKAGE_ROOT, "src", "index.ts");
 const BCP_PATH = "/profile/node_modules/billion-context-pi/dist/index.js";

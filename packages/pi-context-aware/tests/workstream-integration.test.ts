@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -176,7 +177,7 @@ test("final integration registers and executes durable workstream lifecycle and 
     else process.env.HOME = priorHome;
     if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
-    fs.rmSync(root, { recursive: true, force: true });
+    await removeFixtureDir(root);
   }
 });
 
@@ -240,7 +241,7 @@ esac
     else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
     if (priorCmuxBin === undefined) delete process.env.CMUX_BIN;
     else process.env.CMUX_BIN = priorCmuxBin;
-    fs.rmSync(root, { recursive: true, force: true });
+    await removeFixtureDir(root);
   }
 });
 
@@ -283,7 +284,7 @@ test("disabled cmux projections stay fail-open without a false degraded health d
     else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
     if (priorCmuxBin === undefined) delete process.env.CMUX_BIN;
     else process.env.CMUX_BIN = priorCmuxBin;
-    fs.rmSync(root, { recursive: true, force: true });
+    await removeFixtureDir(root);
   }
 });
 
@@ -322,7 +323,7 @@ test("final integration consumes optional launcher handoff without owning launch
     else process.env.HOME = priorHome;
     if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
-    fs.rmSync(root, { recursive: true, force: true });
+    await removeFixtureDir(root);
   }
 });
 
@@ -368,7 +369,7 @@ test("launcher acknowledgement failures degrade health without leaking secrets",
     else process.env.HOME = priorHome;
     if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
-    fs.rmSync(root, { recursive: true, force: true });
+    await removeFixtureDir(root);
   }
 });
 
@@ -419,6 +420,6 @@ test("transcript authority suppresses a divergent launcher handoff", async () =>
     else process.env.HOME = priorHome;
     if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
-    fs.rmSync(root, { recursive: true, force: true });
+    await removeFixtureDir(root);
   }
 });

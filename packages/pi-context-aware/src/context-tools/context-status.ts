@@ -38,7 +38,7 @@ const MAX_LISTED = 40;
 
 /** What the tool reads from the extension; the module owns no state. */
 export interface ContextStatusHost {
-	readonly engine: Pick<FoldEngine, "mode" | "pending" | "dropped">;
+	readonly engine: Pick<FoldEngine, "mode" | "engine" | "pending" | "dropped">;
 	/** Pi's reported size, or null when no window is known. An unmeasured size says so. */
 	readonly usage: (ctx: ExtensionContext) => UsageView | null;
 	readonly ladder: (ctx: ExtensionContext) => PressureLadderConfig;
@@ -114,6 +114,7 @@ function skillsView(ctx: ExtensionContext): { text: string; details: Record<stri
 
 function foldsView(ctx: ExtensionContext, host: ContextStatusHost): { text: string; details: Record<string, unknown> } {
 	const mode = host.engine.mode(ctx);
+	const { engine, contradictsPresence } = host.engine.engine(ctx);
 	const pending = host.engine.pending(ctx);
 	const dropped = host.engine.dropped(ctx);
 	const records = foldRecordsOnBranch(ctx.sessionManager.getBranch()).map(({ record }) => record);
@@ -121,6 +122,8 @@ function foldsView(ctx: ExtensionContext, host: ContextStatusHost): { text: stri
 	const active = records.filter((record) => !absorbed.has(record.blockId));
 	const listed = active.slice(-MAX_LISTED);
 	const lines = [
+		"Engine: " + engine + ".",
+		...(contradictsPresence ? ["Warning: folds.engine forces folds while billion-context-pi is loaded; the override wins."] : []),
 		"Fold engine: " + (mode === "live" ? "live (pi-context-aware owns folding)" : "shadow (billion-context-pi owns folding; nothing is written here)") + ".",
 		"Pending fold requests: " + pending + ".",
 		"Dropped in the last batch: " + dropped.length + ".",
@@ -133,6 +136,7 @@ function foldsView(ctx: ExtensionContext, host: ContextStatusHost): { text: stri
 		text: lines.join("\n"),
 		details: {
 			available: true,
+			engine,
 			mode,
 			pending,
 			dropped: dropped.slice(0, MAX_LISTED).map((drop) => ({ startRef: drop.startRef, endRef: drop.endRef, errors: [...drop.errors], ...(drop.code ? { code: drop.code } : {}) })),

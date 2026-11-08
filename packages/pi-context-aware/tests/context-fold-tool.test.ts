@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -30,7 +31,7 @@ interface Live {
 	readonly requests: Context["messages"][];
 	readonly manager: SessionManager;
 	prompt(text: string, responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0]): Promise<void>;
-	dispose(): void;
+	dispose(): void | Promise<void>;
 }
 
 async function liveSession(): Promise<Live> {
@@ -67,10 +68,10 @@ async function liveSession(): Promise<Live> {
 			await session.prompt(text);
 			await session.waitForIdle();
 		},
-		dispose() {
+		async dispose() {
 			session.dispose();
 			if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeFixtureDir(cwd);
 		},
 	};
 }
@@ -123,7 +124,7 @@ test("#189: an earlier context_fold call shows a block pointer for each written 
 		assert.ok(entry?.type === "message" && entry.message.role === "assistant");
 		const stored = entry.message.content.find((part) => part.type === "toolCall");
 		assert.deepEqual(stored?.type === "toolCall" ? stored.arguments : undefined, call);
-	} finally { live.dispose(); }
+	} finally { await live.dispose(); }
 });
 
 test("#189: the same tool call run again is answered as a replay and writes nothing new", async () => {
@@ -145,7 +146,7 @@ test("#189: the same tool call run again is answered as a replay and writes noth
 		// The accepted item's recovery record is in the result details (fold-recovery.ts contract).
 		assert.equal(scanFoldRequests(live.manager.getBranch()).dropped.length, 0);
 		assert.equal((results[0]!.details as { requestId?: string } | undefined)?.requestId, "fold-call-r#0");
-	} finally { live.dispose(); }
+	} finally { await live.dispose(); }
 });
 
 // pi-context-aware#287: the call a model sent, ranges as a JSON string with from/to bounds, was refused by
@@ -168,5 +169,5 @@ test("#287: a ranges string with from/to bounds passes Pi's validation and folds
 		const args = shown?.type === "toolCall" ? shown.arguments : undefined;
 		assert.equal(typeof args?.ranges, "string", "the argument keeps its name and string shape");
 		assert.deepEqual(JSON.parse(args!.ranges as string), [{ from: "m00002", to: "m00003", topic: "Opening", summary: "summary kept in block b1 (" + SUMMARY_ONE.length + " chars)" }]);
-	} finally { live.dispose(); }
+	} finally { await live.dispose(); }
 });

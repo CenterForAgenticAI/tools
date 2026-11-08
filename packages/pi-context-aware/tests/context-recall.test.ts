@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -46,7 +47,7 @@ interface Fixture {
 	tool(name: string): RecallTool;
 	start(ctx?: ExtensionContext): Promise<void>;
 	call(name: string, params: Record<string, unknown>, ctx?: ExtensionContext): Promise<ContextRecallResult>;
-	restore(): void;
+	restore(): void | Promise<void>;
 }
 
 function sessionDirFor(agentDir: string, cwd: string): string {
@@ -142,12 +143,12 @@ async function fixture(options: { billionContextPi?: boolean } = {}): Promise<Fi
 		tool,
 		start: async (startCtx = ctx) => { await host.handler("session_start")({ type: "session_start", reason: "startup" }, startCtx); },
 		call: (name, params, callCtx = ctx) => tool(name).execute(`${name}-call`, params, new AbortController().signal, undefined, callCtx),
-		restore() {
+		async restore() {
 			if (previousHome === undefined) delete process.env.HOME;
 			else process.env.HOME = previousHome;
 			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-			fs.rmSync(root, { recursive: true, force: true });
+			await removeFixtureDir(root);
 		},
 	};
 }
@@ -183,7 +184,7 @@ test("REQ-193-1: each scope returns the fixture hits inside it and none outside 
 		const all = await f.call("context_recall", { query: "marker", scope: "all-projects" });
 		assert.deepEqual(transcriptFiles(all), ["other.jsonl", "prior.jsonl"]);
 		assert.deepEqual(markersIn(all), ["MARKER-PRIOR", "MARKER-OTHER", "MARKER-CACHE"]);
-	} finally { f.restore(); }
+	} finally { await f.restore(); }
 });
 
 test("REQ-193-1: one call returns a labelled transcripts section and a labelled cache-documents section", async () => {
@@ -204,7 +205,7 @@ test("REQ-193-1: one call returns a labelled transcripts section and a labelled 
 			assert.deepEqual(result.details.cache_documents.stores, ["context-cache"]);
 			assert.equal(result.details.cache_documents.scanned_sessions, 0);
 		}
-	} finally { f.restore(); }
+	} finally { await f.restore(); }
 });
 
 test("REQ-193-1: a regex query searches transcripts only and says the cache documents were skipped", async () => {
@@ -220,7 +221,7 @@ test("REQ-193-1: a regex query searches transcripts only and says the cache docu
 		const invalid = await f.call("context_recall", { query: "(", regex: true });
 		assert.equal(invalid.isError, true);
 		assert.equal(invalid.details.error, "invalid regex");
-	} finally { f.restore(); }
+	} finally { await f.restore(); }
 });
 
 test("REQ-193-1: transcript snippets are redacted like recall excerpts", async () => {
@@ -239,7 +240,7 @@ test("REQ-193-1: transcript snippets are redacted like recall excerpts", async (
 		assert.ok(!text(result).includes(credential), text(result));
 		// The cache engine searched cache documents only, and its no-match line says so.
 		assert.match(text(result), /No matching evidence found in context-cache documents\. No inference was made\./u);
-	} finally { f.restore(); }
+	} finally { await f.restore(); }
 });
 
 test("REQ-193-7: an erased session is not returned even when the host still lists it", async () => {
@@ -259,7 +260,7 @@ test("REQ-193-7: an erased session is not returned even when the host still list
 			assert.deepEqual(result.details.transcripts.results.map((hit) => path.basename(hit.sessionPath)), ["kept.jsonl"], scope);
 			assert.doesNotMatch(text(result), /erased\.jsonl|ERASURE-MARKER erased/u, scope);
 		}
-	} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	} finally { await removeFixtureDir(root); }
 });
 
 test("REQ-193-7: through the extension, an erased prior session is not returned by context_recall", async () => {
@@ -276,7 +277,7 @@ test("REQ-193-7: through the extension, an erased prior session is not returned 
 			assert.deepEqual(result.details.transcripts.results, [], name);
 			assert.doesNotMatch(text(result), /MARKER-PRIOR lives/u, name);
 		}
-	} finally { f.restore(); }
+	} finally { await f.restore(); }
 });
 
 const REMOVED_ALIASES = ["search_prior_sessions", "session_recall", "session_compaction_history", "compact_session", "compress", "decompress", "search_context", "acp_status"];
@@ -290,7 +291,7 @@ test("REQ-193-3: session_start registers context_recall direct and none of the r
 		for (const removed of REMOVED_ALIASES) assert.equal(f.host.tools.has(removed), false, removed);
 		for (const owned of ["context_status", "context_compact", "context_fold"]) assert.equal(f.host.tools.has(owned), true, `${owned} registers beside context_recall (pi-context-aware#189, #194)`);
 		assert.match(JSON.stringify(f.tool("context_recall")), /memory\.recall/u, "the description points programs to Fabric memory.recall");
-	} finally { f.restore(); }
+	} finally { await f.restore(); }
 });
 
 test("REQ-193-3: with billion-context-pi loaded, this extension registers none of the removed names", async () => {
@@ -299,7 +300,7 @@ test("REQ-193-3: with billion-context-pi loaded, this extension registers none o
 		await f.start();
 		assert.equal(f.tool("context_recall").exposure, "direct");
 		for (const removed of REMOVED_ALIASES) assert.equal(f.registrations.includes(removed), false, removed);
-	} finally { f.restore(); }
+	} finally { await f.restore(); }
 });
 
 test("REQ-193-3: a second session_start registers each tool once", async () => {
@@ -310,7 +311,7 @@ test("REQ-193-3: a second session_start registers each tool once", async () => {
 		const count = (name: string) => f.registrations.filter((registered) => registered === name).length;
 		assert.equal(count("context_recall"), 1);
 		for (const removed of REMOVED_ALIASES) assert.equal(count(removed), 0, removed);
-	} finally { f.restore(); }
+	} finally { await f.restore(); }
 });
 
 // -- A real Pi session --------------------------------------------------------
@@ -359,11 +360,11 @@ async function realSession(withBillionContextPi: boolean) {
 		stub: () => { assert.ok(stub); return stub; },
 		registered,
 		tool: (name: string) => session.getAllTools().find((tool) => tool.name === name),
-		cleanup() {
+		async cleanup() {
 			session.dispose();
 			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeFixtureDir(cwd);
 		},
 	};
 }
@@ -381,14 +382,14 @@ test("REQ-193-3: a real Pi session declares context_recall and none of the remov
 		for (const removed of REMOVED_ALIASES) assert.equal(absent.tool(removed), undefined, removed);
 		assert.ok(absent.session.getActiveToolNames().includes("context_recall"));
 		assert.match(absent.session.systemPrompt, /\bcontext_recall\b/u);
-	} finally { absent.cleanup(); }
+	} finally { await absent.cleanup(); }
 
 	const loaded = await realSession(true);
 	try {
 		assert.equal(loaded.tool("context_recall")?.exposure, "direct");
 		assert.equal(loaded.tool("search_context")?.description, STUB_PATH_NOTE, "billion-context-pi keeps its own search_context");
 		assert.equal(loaded.tool("decompress"), undefined, "decompress is not registered while billion-context-pi is loaded");
-	} finally { loaded.cleanup(); }
+	} finally { await loaded.cleanup(); }
 });
 
 test("recall numeric fields retain finite-number admission", () => {

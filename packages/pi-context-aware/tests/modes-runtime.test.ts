@@ -1155,7 +1155,8 @@ function queuedExitHarness(failOn: "sendMessage" | "onChange", onQueuedExitError
 
 for (const hook of ["sendMessage", "onChange"] as const) {
 	test(`a queued run-end exit whose ${hook} throws does not fail the outer enter, and the queue keeps draining`, async () => {
-		const h = queuedExitHarness(hook);
+		const layers: { id: string; layer: string }[] = [];
+		const h = queuedExitHarness(hook, (_error, layer) => { layers.push(layer); });
 		const a = h.runtime.defineMode(definition("one", "a", { layer: { name: "l1", rank: 1 } }));
 		const b = h.runtime.defineMode(definition("two", "a", { layer: { name: "l2", rank: 2 } }));
 		const c = h.runtime.defineMode(definition("three", "a", { layer: { name: "l3", rank: 3 } }));
@@ -1167,6 +1168,11 @@ for (const hook of ["sendMessage", "onChange"] as const) {
 		assert.deepEqual(h.runtime.layers().map((snapshot) => snapshot.id), ["three"], "both ended layers left");
 		assert.deepEqual(storedLayerIds(h.entries), ["three"]);
 		assert.deepEqual(h.reports.map((error) => (error as Error).message), ["exit hook failed", "exit hook failed"], "one report per failed exit");
+		assert.deepEqual(
+			[...layers].sort((x, y) => x.id.localeCompare(y.id)),
+			[{ id: "one", layer: "l1" }, { id: "two", layer: "l2" }],
+			"the reporter learns which mode and layer each failed exit belonged to",
+		);
 	});
 }
 
@@ -1253,3 +1259,25 @@ test("a migrated mode@1 default layer has the shape of MODE_DEFAULT_LAYER_SLOT",
 	assert.ok(isModeDefaultLayerShape(layer.layer, layer.rank, layer.pinned === true));
 	assert.equal(layer.rank, 0, "behaviour is unchanged while the slot rank is 0");
 });
+
+const CONTEXT_TOOLS = ["context_fold", "context_compact", "context_status", "context_recall"];
+
+test("the four context tools run in a mode whose policy, blockedTools and guard would refuse them", async () => {
+	const h = harness();
+	const a = h.runtime.defineMode(definition("review", "a", { blockedTools: CONTEXT_TOOLS, toolPolicy: { allowedTools: ["read"] }, guard: () => ({ block: true, reason: "no" }), layer: { name: "stance", rank: 2 } }));
+	const b = h.runtime.defineMode(definition("build", "b", { toolPolicy: { allowedTools: ["edit"] }, layer: { name: "stage", rank: 1 } }));
+	for (const mode of [a, b]) {
+		assert.equal(mode.status, "ok");
+		if (mode.status === "ok") assert.deepEqual(await mode.handle.enter(), { status: "ok" });
+	}
+	for (const name of CONTEXT_TOOLS) assert.equal(h.runtime.handleToolCall(name, {}), undefined, name);
+});
+
+test("the context tool exemption is by exact name: look-alikes and other tools are still refused", async () => {
+	const h = await enteredWithPolicy({ allowedTools: ["read"] });
+	for (const name of ["context_fold2", "Context_Fold", "context_fold ", "context_foldx", "write", "edit", "fabric_exec"]) {
+		assert.deepEqual(h.runtime.handleToolCall(name, {}), { block: true, reason: "Tool " + name + " is not allowed by mode review." }, name);
+	}
+	assert.ok(h.runtime.handleToolCall("bash", { command: "rm -rf src" }));
+});
+

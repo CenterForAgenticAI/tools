@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
@@ -26,7 +27,7 @@ interface Fixture {
 	readonly ownerClaimSignals: readonly AbortSignal[];
 	start(session?: FakeSession): Promise<void>;
 	commit(entry: unknown, session?: FakeSession, eventEntry?: unknown): Promise<void>;
-	dispose(): void;
+	dispose(): void | Promise<void>;
 }
 
 function contextAwareClaimSignal(value: unknown): AbortSignal | undefined {
@@ -159,13 +160,13 @@ async function fixture(options: {
 				compactionEntry: eventEntry,
 			}, target.ctx);
 		},
-		dispose() {
+		async dispose() {
 			occupyingClaim?.release();
 			if (previousHome === undefined) delete process.env.HOME;
 			else process.env.HOME = previousHome;
 			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-			fs.rmSync(root, { recursive: true, force: true });
+			await removeFixtureDir(root);
 		},
 	};
 }
@@ -264,7 +265,7 @@ test("REQ-DUP-001: Fabric's engine warns once per session and a new session warn
 		await f.commit(fabricEngineEntry("fabric-4"));
 		assert.deepEqual(writerWarnings(f.notices), [], "returning to session A must not warn a second time");
 	} finally {
-		f.dispose();
+		await f.dispose();
 	}
 });
 
@@ -279,7 +280,7 @@ test("REQ-DUP-002: another extension warns once and names its compactor", async 
 			"Unexpected committed compaction writer: rival-compactor. Context-aware held the compaction claim, but another writer won. Check the loaded compaction extensions and their order.",
 		]);
 	} finally {
-		f.dispose();
+		await f.dispose();
 	}
 });
 
@@ -300,7 +301,7 @@ test("REQ-DUP-002: a detail-less or opaque extension commit warns as an unnamed 
 				"Unexpected committed compaction writer: another extension. Context-aware held the compaction claim, but another writer won. Check the loaded compaction extensions and their order.",
 			], label);
 		} finally {
-			f.dispose();
+			await f.dispose();
 		}
 	}
 });
@@ -322,7 +323,7 @@ test("REQ-DUP-003: context-aware, its Fabric fallback, Pi, and malformed entries
 		] as const) await f.commit(entry);
 		assert.deepEqual(writerWarnings(f.notices), []);
 	} finally {
-		f.dispose();
+		await f.dispose();
 	}
 });
 
@@ -334,7 +335,7 @@ test("a no-Fabric claim yield does not warn for Fabric's writer", async () => {
 		await f.commit(fabricEngineEntry("no-fabric"));
 		assert.deepEqual(writerWarnings(f.notices), []);
 	} finally {
-		f.dispose();
+		await f.dispose();
 	}
 });
 
@@ -347,7 +348,7 @@ test("a refused claim yield does not warn for Fabric's writer", async () => {
 		await f.commit(fabricEngineEntry("refused"));
 		assert.deepEqual(writerWarnings(f.notices), []);
 	} finally {
-		f.dispose();
+		await f.dispose();
 	}
 });
 
@@ -362,7 +363,7 @@ test("a faulted claim yield does not warn for Fabric's writer", async () => {
 		await f.commit(fabricEngineEntry("faulted"));
 		assert.deepEqual(writerWarnings(f.notices), []);
 	} finally {
-		f.dispose();
+		await f.dispose();
 	}
 });
 
@@ -376,7 +377,7 @@ test("a released claim does not warn for Fabric's writer", async () => {
 		await f.commit(fabricEngineEntry("released"));
 		assert.deepEqual(writerWarnings(f.notices), []);
 	} finally {
-		f.dispose();
+		await f.dispose();
 	}
 });
 
@@ -394,7 +395,7 @@ test("expected ownership yields do not warn for a Fabric writer", async () => {
 			await f.commit(fabricEngineEntry(`expected-fabric-${label}`));
 			assert.deepEqual(writerWarnings(f.notices), [], label);
 		} finally {
-			f.dispose();
+			await f.dispose();
 		}
 	}
 });
@@ -412,7 +413,7 @@ test("the newest branch compaction wins when Pi reports an older entry with the 
 			"Unexpected committed compaction writer: rival-compactor. Context-aware held the compaction claim, but another writer won. Check the loaded compaction extensions and their order.",
 		]);
 	} finally {
-		f.dispose();
+		await f.dispose();
 	}
 });
 
@@ -451,7 +452,7 @@ test("a writer observer failure cannot stop later session_compact bookkeeping", 
 		await f.commit(fabricEngineEntry("observer-failure"));
 		assert.ok(reads >= 2, "later bookkeeping reads the session id after the observer failure");
 	} finally {
-		f.dispose();
+		await f.dispose();
 	}
 });
 
@@ -496,7 +497,7 @@ test("the last committed writer appears in context status and the typed snapshot
 		await status.handler("", f.session.ctx);
 		assert.match(f.notices.at(-1)?.message ?? "", /Last committed compaction writer: Fabric/u);
 	} finally {
-		f.dispose();
+		await f.dispose();
 	}
 });
 
@@ -525,7 +526,7 @@ test("#283: /context-status and the context_status tool report the same writer f
 			assert.deepEqual(result.details.writer, expected);
 		}
 	} finally {
-		f.dispose();
+		await f.dispose();
 	}
 });
 

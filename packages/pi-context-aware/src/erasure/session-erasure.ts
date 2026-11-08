@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { mutateManifest, readManifest } from "../cache/context-cache.js";
+import { isManifestLockFileName } from "../cache/manifest-lock.js";
 import { paritySessionFile } from "../parity/records.js";
 import { metricsSessionFile } from "../metrics/records.js";
 import { SessionDatabase, SessionOpenError, sessionDatabaseFile, validateSessionId } from "./database.js";
@@ -25,7 +26,7 @@ export interface ErasureOptions {
 	readonly sessions: readonly ErasureSession[];
 	readonly confirm: (title: string, message: string) => Promise<boolean>;
 }
-interface CacheTarget { directory: string; file: string }
+export interface CacheTarget { directory: string; file: string }
 class ErasureRefusal extends Error {}
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const externalStores = [
@@ -34,13 +35,13 @@ const externalStores = [
 	"Shared context-aware-debug.log: not erased (diagnostics are not attributable by session).",
 ];
 
-interface RegistryInventory {
+export interface RegistryInventory {
 	files: string[];
 	projections: string[];
 	owners: string[];
 	directories: string[];
 }
-function registryInventory(agentDir: string, ids: ReadonlySet<string>): RegistryInventory {
+export function registryInventory(agentDir: string, ids: ReadonlySet<string>): RegistryInventory {
 	const root = path.join(agentDir, "session-registry", "v1");
 	const inventory: RegistryInventory = { files: [], projections: [], owners: [], directories: [] };
 	for (const directory of storeDirectories(agentDir, root)) {
@@ -64,7 +65,7 @@ function registryInventory(agentDir: string, ids: ReadonlySet<string>): Registry
 	}
 	return inventory;
 }
-function registryIsOpen(agentDir: string, ids: ReadonlySet<string>): boolean {
+export function registryIsOpen(agentDir: string, ids: ReadonlySet<string>): boolean {
 	const inventory = registryInventory(agentDir, ids);
 	for (const file of [...inventory.projections, ...inventory.owners]) {
 		const record = withStoreDirectory(agentDir, path.dirname(file), (held) => JSON.parse(readStoreFile(path.join(held, path.basename(file))))) as { state?: string; pid?: number };
@@ -76,16 +77,20 @@ function registryIsOpen(agentDir: string, ids: ReadonlySet<string>): boolean {
 	}
 	return false;
 }
-function cacheInventory(agentDir: string, ids: ReadonlySet<string>): { targets: CacheTarget[]; unattributed: string[]; owners: Set<string> } {
-	const unattributed: string[] = [];
-	const owners = new Set<string>();
-	const directories = [
+/** Every context-cache pool directory below the profile's two cache roots. */
+export function cachePoolDirectories(agentDir: string): string[] {
+	return [
 		...storeDirectories(agentDir, path.join(agentDir, "context-cache")).filter((directory) => directory !== path.join(agentDir, "context-cache")),
 		...storeDirectories(agentDir, path.join(agentDir, "sessions")).filter((directory) => path.basename(directory) === "context"),
 	];
+}
+function cacheInventory(agentDir: string, ids: ReadonlySet<string>): { targets: CacheTarget[]; unattributed: string[]; owners: Set<string> } {
+	const unattributed: string[] = [];
+	const owners = new Set<string>();
+	const directories = cachePoolDirectories(agentDir);
 	const targets = directories.flatMap((directory) => withStoreDirectory(agentDir, directory, (held) => {
 		if (!fs.existsSync(path.join(held, "_manifest.json"))) {
-			for (const name of fs.readdirSync(held)) unattributed.push(`Unattributed cache file (not erased): ${path.join(directory, name)}`);
+			for (const name of fs.readdirSync(held)) if (!isManifestLockFileName(name)) unattributed.push(`Unattributed cache file (not erased): ${path.join(directory, name)}`);
 			return [];
 		}
 		const raw = JSON.parse(readStoreFile(path.join(held, "_manifest.json"))) as { version?: number; files?: unknown };
@@ -93,7 +98,7 @@ function cacheInventory(agentDir: string, ids: ReadonlySet<string>): { targets: 
 		const manifest = readManifest(held);
 		if (Object.keys(raw.files).length !== Object.keys(manifest.files).length) throw new Error(`Unattributable cache entries: ${directory}`);
 		for (const name of fs.readdirSync(held)) {
-			if (name !== "_manifest.json" && !Object.hasOwn(manifest.files, name)) unattributed.push(`Unattributed cache file (not erased): ${path.join(directory, name)}`);
+			if (name !== "_manifest.json" && !isManifestLockFileName(name) && !Object.hasOwn(manifest.files, name)) unattributed.push(`Unattributed cache file (not erased): ${path.join(directory, name)}`);
 		}
 		return Object.entries(manifest.files)
 			.filter(([, entry]) => ids.has(entry.createdBy) || ids.has(entry.updatedBy))
@@ -104,7 +109,7 @@ function cacheInventory(agentDir: string, ids: ReadonlySet<string>): { targets: 
 	}));
 	return { targets, unattributed, owners };
 }
-function removeCacheTarget(agentDir: string, target: CacheTarget): void {
+export function removeCacheTarget(agentDir: string, target: CacheTarget): void {
 	withStoreDirectory(agentDir, target.directory, (held) => {
 		mutateManifest(held, (manifest) => {
 			// Remove first; never hide a failed deletion by dropping its manifest entry.

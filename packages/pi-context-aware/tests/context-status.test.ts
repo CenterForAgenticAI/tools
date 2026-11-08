@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -23,7 +24,7 @@ interface StatusDetails {
 	measured?: boolean; tokens?: number; fraction?: number; stage?: string; thresholds?: unknown;
 	available?: boolean; count?: number; compactions: { id: string; writer?: unknown }[] & { available?: boolean; writer?: unknown };
 	writer?: unknown;
-	mode?: string; pending?: number; activeCount?: number;
+	mode?: string; engine?: string; pending?: number; activeCount?: number;
 	dropped: { startRef: string; endRef: string; errors: string[] }[];
 	active: { blockId: string; topic: string }[];
 	pressure: { stage: string }; folds: { mode: string };
@@ -62,7 +63,7 @@ interface Setup {
 	tool(name: string): StatusTool;
 }
 
-function setUp(options: { tokens: number | null; mode?: "live" | "shadow"; pending?: number; bcp?: boolean }): Setup {
+function setUp(options: { tokens: number | null; mode?: "live" | "shadow"; pending?: number; bcp?: boolean; contradicts?: boolean }): Setup {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-context-status-")));
 	const host = createHostPi();
 	const manager = foldedSession();
@@ -73,6 +74,7 @@ function setUp(options: { tokens: number | null; mode?: "live" | "shadow"; pendi
 	}) as ExtensionContext;
 	const engine: ContextStatusHost["engine"] = {
 		mode: () => options.mode ?? "live",
+		engine: () => ({ engine: (options.mode ?? "live") === "live" ? "folds" : "compaction-only", contradictsPresence: options.contradicts ?? false }),
 		pending: () => options.pending ?? 0,
 		dropped: () => [{ startRef: "m00090", endRef: "m00091", errors: ["Range is too small to fold."], code: undefined as never }],
 	};
@@ -190,6 +192,18 @@ test("#194: the folds view reports the engine's mode, pending and dropped reques
 	const shadow = await call(setUp({ tokens: 100_000, mode: "shadow" }), "context_status", { view: "folds" });
 	assert.equal(shadow.details.mode, "shadow");
 	assert.match(shadow.content[0]!.text, /shadow \(billion-context-pi owns folding/u);
+	assert.equal(shadow.details.engine, "compaction-only");
+	assert.match(shadow.content[0]!.text, /^Engine: compaction-only\./mu);
+	assert.doesNotMatch(shadow.content[0]!.text, /Warning: folds\.engine/u);
+	const live = await call(setUp({ tokens: 100_000 }), "context_status", { view: "folds" });
+	assert.equal(live.details.engine, "folds");
+	assert.match(live.content[0]!.text, /^Engine: folds\./mu);
+});
+
+test("#309: an override that contradicts billion-context-pi presence shows one warning line", async () => {
+	const result = await call(setUp({ tokens: 100_000, contradicts: true }), "context_status", { view: "folds" });
+	const warnings = result.content[0]!.text.split("\n").filter((line) => line.startsWith("Warning: folds.engine"));
+	assert.equal(warnings.length, 1);
 });
 
 test("#194: with no view, context_status returns all four views", async () => {
@@ -240,7 +254,7 @@ test("#194: through the real extension, session_start registers context_status a
 	} finally {
 		if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 

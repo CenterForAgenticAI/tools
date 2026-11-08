@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -157,7 +158,7 @@ test("an opening message kept by folds.firstUserMessage keep still shrinks its s
 	const { skillFile } = skillDir();
 	const manager = session(verbMessage(skillFile));
 	condensed(manager).capturePrompt(verbMessage(skillFile), [{ name: "delivering-work", filePath: skillFile }], manager);
-	fold(manager, "m00004", { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000 });
+	fold(manager, "m00004", { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000, engine: "auto" });
 	const shown = firstUserText(manager);
 	assert.ok(shown.startsWith(PREFIX) && shown.endsWith(SUFFIX));
 	assert.match(shown, new RegExp(CONDENSED_MARKER, "u"));
@@ -431,4 +432,81 @@ test("the service reports the registration capability only when register and end
 	assert.equal(supportsContextAwareCondensedSkillsV1(full), true);
 	const partial = { skills: { loaded: () => [], condensed: true, register: () => ({ ok: true, stored: true }) } } as unknown as ContextAwareServiceV1;
 	assert.equal(supportsContextAwareCondensedSkillsV1(partial), false);
+});
+
+// The request pipeline: the registered "context" handlers and the before_provider_request hook,
+// run over the messages Pi built from the session (pi-context-aware#325).
+type PipelineHandler = (event: Record<string, unknown>, ctx: unknown) => unknown | Promise<unknown>;
+
+async function loadPipeline(manager: SessionManager) {
+	const handlers = new Map<string, PipelineHandler[]>();
+	const noop = () => undefined;
+	const bus = { emit: noop, on: () => noop };
+	const api = new Proxy({ events: bus, on: (name: string, handler: PipelineHandler) => { handlers.set(name, [...(handlers.get(name) ?? []), handler]); }, getActiveTools: () => [], getAllTools: () => [], getCommands: () => [], getFlag: noop } as Record<string, unknown>, {
+		get: (target, key: string) => (key in target ? target[key] : noop),
+	});
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "condensed-pipeline-"));
+	const previous = { HOME: process.env.HOME, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR };
+	process.env.HOME = home;
+	process.env.PI_CODING_AGENT_DIR = path.join(home, "agent");
+	try {
+		const extension = await import("../src/index.js");
+		extension.default(api as never);
+	} finally {
+		for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+	}
+	const ctx = { cwd: home, hasUI: false, model: { api: "anthropic-messages", contextWindow: 200_000 }, getContextUsage: () => ({ tokens: 1_000 }), getSystemPrompt: () => "", isProjectTrusted: () => true, isIdle: () => true, ui: {}, sessionManager: manager };
+	return {
+		ctx,
+		handlers,
+		/** Run every handler of one event in Pi order, each seeing the previous handler's output. */
+		async run(name: string, event: Record<string, unknown>, key: string, whole = false): Promise<unknown> {
+			let current = event;
+			for (const handler of handlers.get(name) ?? []) {
+				const next = await handler(current, ctx) as Record<string, unknown> | undefined;
+				// before_provider_request returns the replacement payload itself; context returns { messages }.
+				if (whole) { if (next !== undefined) current = { ...current, [key]: next }; }
+				else if (next && typeof next === "object" && key in next) current = { ...current, [key]: next[key] };
+			}
+			return current[key];
+		},
+		cleanup: () => removeFixtureDir(home),
+	};
+}
+
+async function pipelineRequest(manager: SessionManager) {
+	const pipeline = await loadPipeline(manager);
+	try {
+		assert.ok((pipeline.handlers.get("context") ?? []).length > 0, "the context handlers are registered");
+		const messages = await pipeline.run("context", { type: "context", messages: manager.buildSessionContext().messages }, "messages") as unknown[];
+		const payload = { model: "m", messages };
+		const sent = await pipeline.run("before_provider_request", { type: "before_provider_request", payload }, "payload", true);
+		assert.ok((pipeline.handlers.get("before_provider_request") ?? []).length > 0, "the provider hook is registered");
+		return { messages: messages.map((message) => JSON.stringify(message)), encoded: JSON.stringify(sent) };
+	} finally {
+		await pipeline.cleanup();
+	}
+}
+
+test("the registered context handlers and provider hook send the full body and never the condensed text (/skill: message)", async () => {
+	const { skillFile } = skillDir();
+	const slash = `<skill name="delivering-work" location="${skillFile}">\nReferences are relative to here.\n\n${FULL_MARKER}\n</skill>\n\nship it`;
+	const manager = session(slash);
+	condensed(manager).capturePrompt(slash, [{ name: "delivering-work", filePath: skillFile }], manager);
+	assert.ok(condensedSkillsOnBranch(manager.getBranch()).has(skillFile), "the condensed form is stored, so a leak would have something to send");
+	const request = await pipelineRequest(manager);
+	assert.ok(request.messages.some((message) => message.includes(FULL_MARKER)), "the full body is shown");
+	for (const message of request.messages) assert.doesNotMatch(message, new RegExp(CONDENSED_MARKER, "u"));
+	assert.match(request.encoded, new RegExp(FULL_MARKER, "u"));
+	assert.doesNotMatch(request.encoded, new RegExp(CONDENSED_MARKER, "u"));
+});
+
+test("the registered context handlers and provider hook send the full body and never the condensed text (verb message)", async () => {
+	const { skillFile } = skillDir();
+	const manager = session(verbMessage(skillFile));
+	condensed(manager).capturePrompt(verbMessage(skillFile), [{ name: "delivering-work", filePath: skillFile }], manager);
+	const request = await pipelineRequest(manager);
+	assert.ok(request.messages.some((message) => message.includes(FULL_MARKER)), "the full body is shown");
+	for (const message of request.messages) assert.doesNotMatch(message, new RegExp(CONDENSED_MARKER, "u"));
+	assert.doesNotMatch(request.encoded, new RegExp(CONDENSED_MARKER, "u"));
 });

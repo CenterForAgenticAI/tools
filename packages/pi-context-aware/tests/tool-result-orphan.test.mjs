@@ -27,6 +27,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import process from "node:process";
 import { stream } from "@earendil-works/pi-ai/api/anthropic-messages";
+import { removeFixtureDir } from "../.test-dist/tests/fixture-cleanup.js";
 
 const MODEL = {
 	id: "claude-opus-5",
@@ -314,7 +315,7 @@ async function throughContextHook(messages) {
 		else process.env.HOME = previousHome;
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeFixtureDir(home);
 	}
 }
 

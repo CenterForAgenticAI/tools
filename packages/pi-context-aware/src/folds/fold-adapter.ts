@@ -229,7 +229,7 @@ export function foldStateFromBranch(
 	return { records, active, messages, kernel: state };
 }
 
-function latestReplacementText(branch: readonly SessionEntry[]): Map<string, string> {
+export function latestReplacementText(branch: readonly SessionEntry[]): Map<string, string> {
 	const texts = new Map<string, string>();
 	for (const entry of branch) {
 		if (entry.type !== "context_edit") continue;
@@ -541,9 +541,10 @@ function hintsOnBranch(branch: readonly SessionEntry[], hints: FoldHintView | un
 }
 
 /**
- * A `verbatim` call keeps its result visible, so a small call would pin a result over the cap.
- * Such a call folds with its result: drop the hint from the call's entry and from every result
- * that pairs with it, so the entry and its results fold together.
+ * A `verbatim` pair keeps both sides visible, so a large side would pin the other. A pair with a
+ * result over the cap, or a call over the cap (#312), folds whole: drop the hint from the call's
+ * entry and from every result that pairs with it, so the entry and its results fold together.
+ * The call side is measured without its own hint, because `resolve` already dropped it.
  */
 function dropOversizedPairs(branch: readonly SessionEntry[], found: Map<string, ResolvedFoldHint>): void {
 	const resultOf = new Map<string, { id: string; size: number }>();
@@ -552,10 +553,12 @@ function dropOversizedPairs(branch: readonly SessionEntry[], found: Map<string, 
 		resultOf.set(entry.message.toolCallId, { id: entry.id, size: contentLength(entry.message.content) });
 	}
 	for (const entry of branch) {
-		if (entry.type !== "message" || entry.message.role !== "assistant" || found.get(entry.id)?.policy !== "verbatim") continue;
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 		const callIds = entry.message.content.flatMap((part) => (part.type === "toolCall" ? [part.id] : []));
 		const results = callIds.flatMap((id) => resultOf.get(id) ?? []);
-		if (!results.some((result) => result.size > MAX_VERBATIM_CHARS)) continue;
+		const callOversized = results.some((result) => found.get(result.id)?.policy === "verbatim") && contentLength(entry.message.content) > MAX_VERBATIM_CHARS;
+		const resultOversized = found.get(entry.id)?.policy === "verbatim" && results.some((result) => result.size > MAX_VERBATIM_CHARS);
+		if (!callOversized && !resultOversized) continue;
 		found.delete(entry.id);
 		for (const result of results) found.delete(result.id);
 	}
@@ -566,9 +569,10 @@ function dropOversizedPairs(branch: readonly SessionEntry[], found: Map<string, 
  * (pi-context-aware#284). Pi sends a `custom_message` as a user-role message, but only a message a
  * person typed moves the boundary: the engine's own rules run with every `custom_message` counted
  * as the assistant's. Typed user messages are unchanged. In `all-user-role` mode, or without a
- * `custom_message` on the branch, the engine computes the zone itself.
+ * `custom_message` on the branch, the engine computes the zone itself. The per-turn nudge
+ * (fold-turn.ts) uses this same helper, so the two rules cannot drift (pi-context-aware#319).
  */
-function protectedField(
+export function protectedField(
 	messages: CoreMessage[],
 	state: CompressionState,
 	config: Config,

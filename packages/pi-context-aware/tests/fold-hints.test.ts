@@ -17,6 +17,7 @@ import {
 	MAX_HINT_LINE_CHARS,
 	MAX_HINT_OWNER_CHARS,
 	applyHintsToCompaction,
+	contentLength,
 	createFoldHints,
 } from "../src/folds/fold-hints.js";
 import type { Config } from "../src/folds/kernel/index.js";
@@ -404,16 +405,16 @@ test("compaction input: a fold whose carrier is a hinted message keeps its summa
 	}
 });
 // #293: a small verbatim call must not pin a result over the cap.
-function askResult(manager: SessionManager, ids: Array<[string, number]>): { call: string; results: string[] } {
-	const call = manager.appendMessage(fauxAssistantMessage(ids.map(([id]) => fauxToolCall("ask", { questions: [{ id: "q", question: QUESTION }] }, { id })), { stopReason: "toolUse" }));
+function askResult(manager: SessionManager, ids: Array<[string, number]>, pad = 0): { call: string; results: string[] } {
+	const call = manager.appendMessage(fauxAssistantMessage(ids.map(([id]) => fauxToolCall("ask", { questions: [{ id: "q", question: QUESTION }], pad: "A".repeat(pad) }, { id })), { stopReason: "toolUse" }));
 	const results = ids.map(([id, size]) => manager.appendMessage({ role: "toolResult", toolCallId: id, toolName: "ask", content: [{ type: "text", text: "R".repeat(size) }], isError: false, timestamp: Date.now() }));
 	return { call, results };
 }
 
-function foldAskSession(sizes: Array<[string, number]>): { covered: string[]; call: string; results: string[]; context: string } {
+function foldAskSession(sizes: Array<[string, number]>, pad = 0): { covered: string[]; call: string; results: string[]; context: string } {
 	const manager = SessionManager.inMemory("/tmp");
 	user(manager, "OPENING-REQUEST");
-	const { call, results } = askResult(manager, sizes);
+	const { call, results } = askResult(manager, sizes, pad);
 	assistant(manager, "DECIDED");
 	user(manager, "NEXT-REQUEST");
 	assistant(manager, "NEXT-ANSWER");
@@ -449,4 +450,31 @@ test("#293: an entry with a small and a large result folds whole, leaving no spl
 	assert.ok(session.covered.includes(session.call), "the call entry folds");
 	assert.ok(session.results.every((id) => session.covered.includes(id)), "both results fold with it");
 	assert.doesNotMatch(session.context, /RRRRRRRRRR/u);
+});
+
+// #312: a verbatim call over the cap must not pin its small result.
+function callLength(pad: number): number {
+	const manager = SessionManager.inMemory("/tmp");
+	const { call } = askResult(manager, [["len-1", 10]], pad);
+	const entry = manager.getBranch().find((candidate) => candidate.id === call);
+	assert.ok(entry && entry.type === "message" && entry.message.role === "assistant");
+	return contentLength(entry.message.content);
+}
+
+test("#312: a verbatim call with a 25,000-character argument and a small result folds with it", () => {
+	const session = foldAskSession([["bigcall-1", 1_000]], 25_000);
+	assert.ok(session.covered.includes(session.call) && session.covered.includes(session.results[0]!), "the call and its result are both folded");
+	assert.doesNotMatch(session.context, /AAAAAAAAAA/u, "the large argument is hidden");
+	assert.doesNotMatch(session.context, /RRRRRRRRRR/u, "the small result folds with its call");
+});
+
+test("#312: the call-side cap is inclusive", () => {
+	const base = callLength(0);
+	const atPad = MAX_VERBATIM_CHARS - base;
+	assert.equal(callLength(atPad), MAX_VERBATIM_CHARS, "the fixture counts exactly the cap");
+	assert.equal(callLength(atPad + 1), MAX_VERBATIM_CHARS + 1, "the fixture counts one over the cap");
+	const at = foldAskSession([["calledge-1", 1_000]], atPad);
+	assert.equal(at.covered.includes(at.call) || at.covered.includes(at.results[0]!), false, "16,000 characters stay visible");
+	const over = foldAskSession([["calledge-2", 1_000]], atPad + 1);
+	assert.ok(over.covered.includes(over.call) && over.covered.includes(over.results[0]!), "16,001 characters fold both");
 });

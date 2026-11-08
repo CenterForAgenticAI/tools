@@ -210,6 +210,7 @@ export interface ContextMetricsConfig {
 }
 
 export type FirstUserMessageMode = "keep" | "fold" | "keep-under-tokens";
+export type FoldsEngineSetting = "auto" | "folds" | "compaction-only";
 export interface FoldsConfig {
 	firstUserMessage: FirstUserMessageMode;
 	firstUserMessageMaxTokens: number;
@@ -219,8 +220,10 @@ export interface FoldsConfig {
 	 * comparison is recorded. Absent means off.
 	 */
 	condensedSkills?: boolean;
+	/** Debugging and rollback switch for the context engine (pi-context-aware#309). `auto` follows billion-context-pi presence. */
+	engine?: FoldsEngineSetting;
 }
-export const DEFAULT_FOLDS_CONFIG: FoldsConfig = { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000, condensedSkills: false };
+export const DEFAULT_FOLDS_CONFIG: FoldsConfig = { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000, condensedSkills: false, engine: "auto" };
 
 export interface Config {
 	folds?: FoldsConfig;
@@ -490,6 +493,7 @@ export const CONFIG_LEAVES: readonly LeafDescriptor[] = [
 	{ path: "folds.firstUserMessage", parse: oneOf(["keep", "fold", "keep-under-tokens"]), fallback: DEFAULT_FOLDS_CONFIG.firstUserMessage },
 	{ path: "folds.firstUserMessageMaxTokens", parse: positiveInteger(1), fallback: DEFAULT_FOLDS_CONFIG.firstUserMessageMaxTokens },
 	{ path: "folds.condensedSkills", parse: bool, fallback: DEFAULT_FOLDS_CONFIG.condensedSkills },
+	{ path: "folds.engine", parse: oneOf(["auto", "folds", "compaction-only"]), fallback: DEFAULT_FOLDS_CONFIG.engine },
 	{ path: "seedMode", parse: oneOf(["auto-gen", "user-approve"]), fallback: DEFAULT_CONFIG.seedMode },
 	{ path: "sessionRole", parse: oneOf(["foreground", "worker"]), fallback: DEFAULT_CONFIG.sessionRole },
 	{ path: "compactionModel", parse: nullableString, fallback: DEFAULT_CONFIG.compactionModel },

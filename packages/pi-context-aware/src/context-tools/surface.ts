@@ -11,7 +11,8 @@
 
 import type { ToolExposure } from "@earendil-works/pi-coding-agent";
 
-import { isBillionContextPiLoaded, type CompactionBlocker, type RegisteredToolView } from "../compaction/compaction-blocker.js";
+import type { CompactionBlocker, RegisteredToolView } from "../compaction/compaction-blocker.js";
+import { resolveContextEngine, type ContextEngine } from "../folds/engine-resolver.js";
 
 export type ContextToolName = "context_recall" | "context_status" | "context_compact" | "context_fold";
 
@@ -20,19 +21,24 @@ export interface ContextToolSurfaceEntry {
 	readonly exposure: ToolExposure;
 }
 
+/** The context tools: they change only the session's own context, so no mode blocks them. */
+export const CONTEXT_TOOL_NAMES: ReadonlySet<string> = new Set<ContextToolName>(["context_recall", "context_status", "context_compact", "context_fold"]);
+
 const NEW_TOOLS: readonly ContextToolName[] = ["context_recall", "context_status", "context_compact"];
 
 /**
  * The names to register for one session, in registration order.
  *
  * @param tools what `pi.getAllTools()` returns at `session_start`.
+ * @param engine the resolved context engine (`resolveContextEngine`). `context_fold` is left out for `compaction-only`.
  * @param blocker the session's compaction blocker (`detectCompactionBlocker`).
  *   Compacting cannot finish while a blocker cancels it, so `context_compact` is hidden then.
  */
 export function decideContextToolSurface(
 	tools: readonly RegisteredToolView[],
 	blocker: CompactionBlocker | undefined,
+	engine: ContextEngine = resolveContextEngine({ tools }),
 ): ContextToolSurfaceEntry[] {
-	const names = [...NEW_TOOLS, ...(isBillionContextPiLoaded(tools) ? [] : ["context_fold" as const])];
+	const names = [...NEW_TOOLS, ...(engine === "compaction-only" ? [] : ["context_fold" as const])];
 	return names.map((name) => ({ name, exposure: blocker && name === "context_compact" ? "hidden" : "direct" }));
 }

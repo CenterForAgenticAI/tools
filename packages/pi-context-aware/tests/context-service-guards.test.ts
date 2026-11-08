@@ -183,3 +183,13 @@ test("the fold-hints guard refuses registerHint and endOwner without the hints f
 	assert.equal(supportsContextAwareFoldHintsV1(off), false);
 	assert.equal(supportsContextAwareFoldHintsV1(on), true);
 });
+
+test("the fold-hints guard refuses a service with endOwner but no registerHint", () => {
+	const noRegisterHint = { protocolVersion: 1, folds: { hints: true, endOwner: noop } } as unknown as ContextAwareServiceV1;
+	assert.equal(supportsContextAwareFoldHintsV1(noRegisterHint), false);
+});
+
+test("the fold-hints guard refuses a service with registerHint but no endOwner", () => {
+	const noEndOwner = { protocolVersion: 1, folds: { hints: true, registerHint: noop } } as unknown as ContextAwareServiceV1;
+	assert.equal(supportsContextAwareFoldHintsV1(noEndOwner), false);
+});

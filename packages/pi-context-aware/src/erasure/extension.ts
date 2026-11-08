@@ -6,6 +6,7 @@ import { SessionDatabase, UnsafeDatabaseFileError } from "./database.js";
 import { eraseSession, formatErasureReceipt, missingSessionSources, missingSourceNotice, sweepMissingSessions, type ErasureSession } from "./session-erasure.js";
 import { readStoreHeader, storeDirectories, withStoreDirectory } from "./files.js";
 import { restoredErasedSessions } from "./restored.js";
+import { parseEraseArgs, runTextErasure, TEXT_USAGE } from "./erase-command.js";
 
 /** SDK listAll(customDir) is flat: explicitly list the profile root and its project directories. */
 export async function discoverProfileSessions(agentDir: string): Promise<ErasureSession[]> {
@@ -208,8 +209,25 @@ export function registerSessionErasure(pi: ExtensionAPI, agentDirectory: () => s
 		if (blocked) reportRestored(ctx);
 	});
 	pi.registerCommand("session-erase", {
-		description: "Permanently erase a closed session and its derived data. Usage: /session-erase <session-id>. User confirmations required; open sessions are refused.",
+		description: "Permanently erase a closed session and its derived data. Usage: /session-erase <session-id>, or /session-erase <session-id> --range <ref>..<ref> | --match <literal> to erase part of a session. User confirmations required; open sessions are refused.",
 		async handler(args, ctx) {
+			const request = parseEraseArgs(args);
+			if (request) {
+				if (!ctx.hasUI) { notify(ctx, TEXT_USAGE, "warning"); return; }
+				if (request.kind === "usage") { notify(ctx, request.message, "warning"); return; }
+				try {
+					await flushParity();
+					const agentDir = agentDirectory();
+					const outcome = await runTextErasure({
+						agentDir, request, currentSessionId: ctx.sessionManager.getSessionId(), sessions: await discoverProfileSessions(agentDir),
+						confirm: (title, message) => ctx.ui.confirm(title, message),
+					});
+					notify(ctx, outcome.text, outcome.status === "complete" ? "info" : outcome.status === "cancelled" ? "info" : "warning");
+				} catch {
+					notify(ctx, "Session erasure: incomplete. Could not list or access profile stores; nothing was erased.", "error");
+				}
+				return;
+			}
 			const id = args.trim();
 			if (!ctx.hasUI || !id || /\s/u.test(id)) {
 				notify(ctx, "Usage: /session-erase <session-id> in interactive Pi. Close the target session first.", "warning");

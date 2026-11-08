@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -262,7 +263,7 @@ test("pressure telemetry modes install the exact model-visible context-awareness
 			assert.equal(contextAwarenessSection(result.firstSystemPrompt), expected, mode);
 			if (mode === "off") assert.equal(result.second, undefined, "off mode emits no empty usage marker");
 		} finally {
-			fs.rmSync(result.root, { recursive: true, force: true });
+			await removeFixtureDir(result.root);
 		}
 	}
 });
@@ -299,7 +300,7 @@ test("off mode omits pressure telemetry while preserving task and restart text",
 		Date.now = originalNow;
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
@@ -316,7 +317,7 @@ test("wires one hidden restart notice into the first agent start only", async ()
 		assert.match(content, /<context-telemetry source=/);
 		assert.doesNotMatch(String(result.second?.content), /pi process was restarted/);
 	} finally {
-		fs.rmSync(result.root, { recursive: true, force: true });
+		await removeFixtureDir(result.root);
 	}
 });
 
@@ -356,7 +357,7 @@ test("restart notice, task state, and usage telemetry share one late message", a
 		assert.ok(content.indexOf("<session-restart") < content.indexOf("<pressure"));
 	} finally {
 		Date.now = originalNow;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
@@ -377,7 +378,7 @@ test("keeps interleaved restart notices isolated by session", async () => {
 		assert.match(String(second?.message?.content), /approximately 5 minutes away/);
 	} finally {
 		Date.now = originalNow;
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
@@ -387,7 +388,7 @@ test("restartNotice.enabled false suppresses wiring completely", async () => {
 		assert.doesNotMatch(String(result.first?.content), /session-restart/);
 		assert.doesNotMatch(String(result.second?.content), /session-restart/);
 	} finally {
-		fs.rmSync(result.root, { recursive: true, force: true });
+		await removeFixtureDir(result.root);
 	}
 });
 
@@ -399,7 +400,7 @@ test("falls back to a standalone notice without usage telemetry", async () => {
 		assert.match(String(result.first?.content), /pi process was restarted/);
 		assert.equal(result.second, undefined);
 	} finally {
-		fs.rmSync(result.root, { recursive: true, force: true });
+		await removeFixtureDir(result.root);
 	}
 });
 
@@ -409,6 +410,6 @@ test("resolves the away gap at injection time rather than session start", async 
 		assert.match(String(result.first?.content), /approximately 2 minutes away/);
 		assert.doesNotMatch(String(result.second?.content), /session-restart/);
 	} finally {
-		fs.rmSync(result.root, { recursive: true, force: true });
+		await removeFixtureDir(result.root);
 	}
 });

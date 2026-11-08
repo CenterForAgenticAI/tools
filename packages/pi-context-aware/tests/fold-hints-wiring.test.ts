@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -27,6 +28,7 @@ import {
 } from "../src/context-service.js";
 import { createFoldHints, MAX_HINT_CONDENSED_CHARS } from "../src/folds/fold-hints.js";
 import { planFold } from "../src/folds/fold-adapter.js";
+import { acceptedSourceOf } from "../src/folds/fold-recovery.js";
 
 // pi-context-aware#294: the fold-hint wiring in src/index.ts, driven through the extension itself.
 // Seams: the discovered service (folds.registerHint / endOwner), the session_before_compact handler,
@@ -39,7 +41,7 @@ const LINE = "demo status: green";
 const SUMMARY = "TASK AS OF THIS BLOCK: the opening exchange settled the plan. Decisions: keep the numbered order. Files: src/index.ts.";
 const OWNER = "wiring-test";
 
-function seedWindow(name: string, summarizer = false): { dir: string; restore: () => void } {
+function seedWindow(name: string, summarizer = false): { dir: string; restore: () => void | Promise<void> } {
 	const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-hint-wiring-" + name + "-")));
 	const agentDir = path.join(dir, "agent");
 	fs.mkdirSync(agentDir, { recursive: true });
@@ -52,10 +54,10 @@ function seedWindow(name: string, summarizer = false): { dir: string; restore: (
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 	return {
 		dir,
-		restore() {
+		async restore() {
 			if (previous.home === undefined) delete process.env.HOME; else process.env.HOME = previous.home;
 			if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeFixtureDir(dir);
 		},
 	};
 }
@@ -138,7 +140,7 @@ interface Bench {
 	readonly model: unknown;
 	start(label: string): Promise<{ ctx: ExtensionContext; service: ContextAwareServiceV1 }>;
 	compact(ctx: ExtensionContext, preparation: Record<string, unknown>, branchEntries?: unknown[]): Promise<string>;
-	dispose(): void;
+	dispose(): void | Promise<void>;
 }
 
 async function bench(): Promise<Bench> {
@@ -175,7 +177,7 @@ async function bench(): Promise<Bench> {
 			assert.equal(seen.length, before + 1, "one summary request");
 			return seen.at(-1)!;
 		},
-		dispose() { faux.unregister(); compat.resetApiProviders(); window.restore(); },
+		async dispose() { faux.unregister(); compat.resetApiProviders(); await window.restore(); },
 	};
 }
 
@@ -201,7 +203,7 @@ test("#294: the discovered service offers fold hints, and a registered hint reac
 		assert.ok(prompt.includes("extension message kept as one line"), "the hint's marker line is what the summarizer reads");
 		assert.ok(prompt.includes(LINE), prompt);
 		assert.equal(prompt.includes("DEMO-BODY-SECRET"), false, "the message body does not reach the summarizer");
-	} finally { b.dispose(); }
+	} finally { await b.dispose(); }
 });
 
 test("#294: hints are per session, and endOwner removes only that owner's hints", async () => {
@@ -225,7 +227,7 @@ test("#294: hints are per session, and endOwner removes only that owner's hints"
 		const inA = await b.compact(a.ctx, preparation([demoMessage(), { role: "user", content: "next", timestamp: 1_700_000_000_005 }]));
 		assert.equal(inA.includes("session b line"), false, "session A does not see session B's hint");
 		assert.ok(inA.includes("DEMO-BODY-SECRET"), "session A still folds nothing for demo-status");
-	} finally { b.dispose(); }
+	} finally { await b.dispose(); }
 });
 
 // ---- session_before_compact -----------------------------------------------------------------------
@@ -243,7 +245,7 @@ test("#294: compaction names verbatim tools and drops a read note through the ha
 		assert.equal(prompt.includes("READ-NOTE-BODY"), false, "a note the assistant already answered is dropped");
 		assert.ok(prompt.includes("TOOL-RESULT-VERBATIM"));
 		assert.ok(prompt.includes("Quote every call and result of these tools word for word in the summary, as decisions: demo_tool."), "the instruction reaches the summarizer");
-	} finally { b.dispose(); }
+	} finally { await b.dispose(); }
 });
 
 test("#294: a fold carrier keeps its summary through the handler (CR-HINT-CARRIER-SUMMARY-LOST)", async () => {
@@ -260,7 +262,7 @@ test("#294: a fold carrier keeps its summary through the handler (CR-HINT-CARRIE
 		const prompt = await b.compact(ctx, preparation([carrier, { role: "user", content: "next", timestamp: 1_700_000_000_020 }]), branch);
 		assert.ok(prompt.includes("CARRIER-FOLD-SUMMARY-9c1"), "the fold summary reaches the summarizer");
 		assert.equal(prompt.includes("extension message kept as one line"), false, "the carrier is not rewritten as a one-line message");
-	} finally { b.dispose(); }
+	} finally { await b.dispose(); }
 });
 
 test("#294: the condensed policy puts the condensed text into the compaction input", async () => {
@@ -272,7 +274,7 @@ test("#294: the condensed policy puts the condensed text into the compaction inp
 		const prompt = await b.compact(ctx, preparation([demoMessage(), { role: "user", content: "next", timestamp: 1_700_000_000_030 }]));
 		assert.ok(prompt.includes(CONDENSED), "the condensed text is what the summarizer reads");
 		assert.equal(prompt.includes("DEMO-BODY-SECRET"), false);
-	} finally { b.dispose(); }
+	} finally { await b.dispose(); }
 });
 
 test("#294: a hint transform that throws leaves the compaction input unchanged and compaction goes on", async () => {
@@ -295,7 +297,7 @@ test("#294: a hint transform that throws leaves the compaction input unchanged a
 		assert.ok(prompt.includes("DEMO-BODY-SECRET"), "the raw event is used when the transform fails");
 		const log = fs.readFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, "context-aware-debug.log"), "utf8");
 		assert.match(log, /fold hints: compaction transform failed: Error: transform boom/u, "the failure is logged through debugLog");
-	} finally { b.dispose(); }
+	} finally { await b.dispose(); }
 });
 
 // ---- a live fold turn ------------------------------------------------------------------------------
@@ -305,7 +307,7 @@ interface Live {
 	readonly manager: SessionManager;
 	service(): ContextAwareServiceV1 | undefined;
 	prompt(text: string, responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0]): Promise<void>;
-	dispose(): void;
+	dispose(): void | Promise<void>;
 }
 
 async function liveSession(): Promise<Live> {
@@ -343,7 +345,7 @@ async function liveSession(): Promise<Live> {
 			await session.prompt(text);
 			await session.waitForIdle();
 		},
-		dispose() { session.dispose(); window.restore(); },
+		async dispose() { session.dispose(); await window.restore(); },
 	};
 }
 const CONDENSED_SOURCE = "full demo skill text";
@@ -363,7 +365,7 @@ async function foldTurn(hint: Record<string, unknown> | undefined): Promise<stri
 		]);
 		await live.prompt("What next?", [fauxAssistantMessage("Next.")]);
 		return JSON.stringify(live.requests.at(-1)!.map((message) => message.content));
-	} finally { live.dispose(); }
+	} finally { await live.dispose(); }
 }
 
 test("#294: a fold turn through the extension uses the registered one-line hint, and differs without it", async () => {
@@ -376,10 +378,43 @@ test("#294: a fold turn through the extension uses the registered one-line hint,
 	assert.equal(plain.includes(LINE), false, "without the hint the fold records no line");
 });
 
-// A live fold turn does not show the condensed swap today: the boundary plans again over only the entries the
-// fold hides, and the swapped entry is no longer among them. This gap is not covered by a live-fold test and is
-// tracked as a follow-up issue (finding CR-CONDENSED-LIVE-FOLD-GAP).
-// The fold plan itself, with the same registry the service writes to, does carry the swap.
+test("#317: a live fold turn shows the condensed hint's text instead of the message body", async () => {
+	const condensed = { ownerKey: OWNER, match: { customType: "demo-status" }, policy: "condensed" as const, condensed: CONDENSED };
+	const hinted = await foldTurn(condensed);
+	const plain = await foldTurn(undefined);
+	assert.equal(hinted.split(CONDENSED).length - 1, 1, "the condensed text is sent once");
+	assert.equal(hinted.includes(CONDENSED_SOURCE), false, "the message body is not sent");
+	assert.ok(hinted.includes(SUMMARY.slice(0, 40)), "the fold was written");
+	assert.ok(plain.includes(SUMMARY.slice(0, 40)), "the unhinted fold was written");
+	assert.equal(plain.includes(CONDENSED), false, "without the hint no condensed text appears");
+});
+
+test("#317: the accepted source spans a swapped entry at the range edge but covers only hidden entries", () => {
+	const manager = SessionManager.inMemory("/tmp");
+	const hints = createFoldHints();
+	assert.ok(hints.register({ ownerKey: OWNER, match: { customType: "demo-status" }, policy: "condensed", condensed: CONDENSED }).ok);
+	manager.appendMessage({ role: "user", content: "OPENING " + "archived detail ".repeat(40), timestamp: 1 });
+	const swappedId = manager.appendCustomMessageEntry("demo-status", BODY, true, { state: "green" });
+	manager.appendMessage(fauxAssistantMessage("FIRST-ANSWER " + "archived detail ".repeat(40)));
+	manager.appendMessage({ role: "user", content: "NEXT request " + "archived detail ".repeat(40), timestamp: 2 });
+	manager.appendMessage(fauxAssistantMessage("NEXT answer " + "archived detail ".repeat(40)));
+	for (const name of ["MORE", "LAST"]) {
+		manager.appendMessage({ role: "user", content: name + " request", timestamp: 3 });
+		manager.appendMessage(fauxAssistantMessage(name + " answer"));
+	}
+	const branch = manager.getBranch();
+	const config = { compress: { minCompressRange: 0, maxSummaryLength: 20_000, minSummaryLength: 10 }, preserveRecentMessages: 2, preserveRecentTokens: 0 };
+	const request = { startRef: "m00002", endRef: "m00004", summary: SUMMARY };
+	const plan = planFold({ ...request, branch, modelContextLimit: 64_000, config: config as never, hints });
+	assert.ok(plan.ok, JSON.stringify(plan));
+	const source = acceptedSourceOf({ request, plan, branch, contextEntries: manager.buildContextEntries() });
+	assert.ok(source);
+	assert.equal(source.startEntryId, swappedId, "the range starts at the swapped entry");
+	assert.equal(source.coveredEntryIds.includes(swappedId), false, "the swapped entry is not a covered (hidden) entry");
+});
+
+// The live path is covered by the #317 test above. This one checks the fold plan itself,
+// with the same registry the service writes to.
 test("#294: the condensed policy swaps the message for its condensed text in a fold plan", () => {
 	const manager = SessionManager.inMemory("/tmp");
 	const hints = createFoldHints();

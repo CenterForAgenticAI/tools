@@ -237,6 +237,39 @@ test("duplicate event IDs resolve conflicting chain metadata independently of in
 	assert.equal(firstOrder.snapshot?.eventId, secondOrder.snapshot?.eventId);
 	assert.equal(firstOrder.duplicateEventIds, 1);
 	assert.equal(secondOrder.duplicateEventIds, 1);
+	for (const result of [firstOrder, secondOrder]) {
+		assert.equal(result.chainValid, true);
+		const kept = result.candidates.find((candidate) => candidate.snapshot.eventId === "event-2");
+		assert.equal(kept?.priorRevision, 1);
+		assert.equal(kept?.previousEventId, "event-1");
+	}
+});
+
+/** Two duplicates of event-2 with identical snapshots; the metadata loser has the smaller entryId, so only the metadata key keeps it from winning. */
+function metadataDuplicates(winner: { priorRevision: number; previousEventId: string }, loser: { priorRevision: number; previousEventId: string }) {
+	const first = workstreamEntry(snapshot(1, "first"), { entryId: "entry-1", timestamp: now });
+	const second = workstreamEntry(snapshot(2, "second", "event-2"), { entryId: "entry-z-winner", timestamp: now });
+	const win = { ...second, data: { ...second.data, ...winner } };
+	const lose = { ...second, id: "entry-a-loser", data: { ...second.data, ...loser } };
+	return [replayWorkstreamEntries([first, lose, win]), replayWorkstreamEntries([first, win, lose])];
+}
+
+test("duplicate event IDs that differ only in previousEventId keep the lower metadata key", () => {
+	for (const result of metadataDuplicates({ priorRevision: 1, previousEventId: "event-1" }, { priorRevision: 1, previousEventId: "event-x" })) {
+		assert.equal(result.duplicateEventIds, 1);
+		assert.equal(result.chainValid, true);
+		const kept = result.candidates.find((candidate) => candidate.snapshot.eventId === "event-2");
+		assert.equal(kept?.previousEventId, "event-1");
+	}
+});
+
+test("duplicate event IDs that differ only in priorRevision keep the lower metadata key", () => {
+	for (const result of metadataDuplicates({ priorRevision: 1, previousEventId: "event-1" }, { priorRevision: 99, previousEventId: "event-1" })) {
+		assert.equal(result.duplicateEventIds, 1);
+		assert.equal(result.chainValid, true);
+		const kept = result.candidates.find((candidate) => candidate.snapshot.eventId === "event-2");
+		assert.equal(kept?.priorRevision, 1);
+	}
 });
 
 test("replay selects a complete lineage through a non-preferred competing revision branch", () => {

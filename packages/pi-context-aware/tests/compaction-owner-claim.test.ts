@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -32,7 +33,7 @@ interface Env {
 	readonly root: string;
 	readonly agentDir: string;
 	configure(config: Record<string, unknown>): void;
-	restore(): void;
+	restore(): void | Promise<void>;
 }
 
 function setUpEnv(initial: Record<string, unknown>): Env {
@@ -52,12 +53,12 @@ function setUpEnv(initial: Record<string, unknown>): Env {
 		root,
 		agentDir,
 		configure,
-		restore() {
+		async restore() {
 			if (previousHome === undefined) delete process.env.HOME;
 			else process.env.HOME = previousHome;
 			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-			fs.rmSync(root, { recursive: true, force: true });
+			await removeFixtureDir(root);
 		},
 	};
 }
@@ -71,7 +72,7 @@ interface Fixture {
 	beforeCompact(overrides?: Record<string, unknown>): Promise<unknown>;
 	settle(): Promise<void>;
 	shutdown(): Promise<void>;
-	dispose(): void;
+	dispose(): void | Promise<void>;
 }
 
 let loadCounter = 0;
@@ -98,7 +99,7 @@ async function fixture(options: {
 		beforeCompact: (overrides) => host.handler("session_before_compact")(compactionEvent(overrides), session.ctx),
 		settle: async () => { await host.handler("agent_settled")({}, session.ctx); await fabric?.flush(); },
 		shutdown: async () => { await host.handler("session_shutdown")({}, session.ctx); },
-		dispose: () => env.restore(),
+		dispose: async () => { await env.restore(); },
 	};
 }
 
@@ -108,7 +109,7 @@ async function withFixture(options: Parameters<typeof fixture>[0], body: (f: Fix
 		await body(f);
 	} finally {
 		await f.shutdown().catch(() => {});
-		f.dispose();
+		await f.dispose();
 	}
 }
 
@@ -1054,7 +1055,7 @@ test("CR-004: the claim's version is read from package.json under any scope of t
 			assert.equal(isThisPackageName(name), false, String(name));
 		}
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 
@@ -1076,11 +1077,11 @@ test("FU-001: without this package's own manifest, another package's manifest fu
 				// The same layout with its own manifest is read.
 				fs.writeFileSync(path.join(own, "package.json"), JSON.stringify({ name: "pi-context-aware", version: "1.2.3" }));
 				assert.equal(readPackageVersion(file), "1.2.3", `own manifest under ${layout.join("/")}`);
-				fs.rmSync(own, { recursive: true, force: true });
+				await removeFixtureDir(own);
 			}
 		}
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });
 

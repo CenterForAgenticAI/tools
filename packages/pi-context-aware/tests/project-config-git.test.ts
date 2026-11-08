@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -78,6 +79,6 @@ test("extension load finds the top-level project config with one git command", {
 		assert.deepEqual(configured.gitCommands, [`-C ${nested} rev-parse --show-toplevel`]);
 		assert.equal(configured.tools.has("context_compact"), false);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeFixtureDir(root);
 	}
 });

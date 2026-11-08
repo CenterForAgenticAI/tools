@@ -24,10 +24,10 @@ export type MetricsNudgeKind = (typeof NUDGE_KINDS)[number];
 /** Reason codes of a refused or dropped fold: the parity reject codes plus the engine's own drop and failure codes. */
 export const FOLD_REASON_CODES = [
 	"summary-empty", "summary-short", "summary-long", "unknown-ref", "dangling-ref", "consumed", "protected-zone", "split", "too-small", "no-fold", "header-missing", "stub-summary",
-	"coverage-changed", "source-changed", "too-large", "entry-missing", "branch-changed", "refused", "plan-failed", "other",
+	"coverage-changed", "source-changed", "too-large", "entry-missing", "branch-changed", "refused", "plan-failed", "other", "unknown",
 ] as const;
 export type FoldReasonCode = (typeof FOLD_REASON_CODES)[number];
-export const COMPACTION_WRITERS = ["context-aware", "fabric", "other", "unknown"] as const;
+export const COMPACTION_WRITERS = ["context-aware", "fabric", "extension", "pi", "malformed", "none", "other", "unknown"] as const;
 export type MetricsCompactionWriter = (typeof COMPACTION_WRITERS)[number];
 
 export interface MetricsInput {
@@ -44,7 +44,7 @@ export interface MetricsInput {
 	readonly nudge?: MetricsNudgeKind | null;
 	readonly emergency?: { readonly truncated: number; readonly hides: number; readonly skipped: boolean; readonly terminal: boolean } | null;
 	readonly passFailed?: boolean;
-	readonly folds: { readonly requested: number; readonly accepted: number; readonly refused: Readonly<Record<string, number>>; readonly dropped: Readonly<Record<string, number>>; readonly tiers?: readonly number[] };
+	readonly folds: { readonly requested: number; readonly accepted: number; readonly refused: Readonly<Record<string, number>>; readonly dropped: Readonly<Record<string, number>>; readonly tiers?: readonly number[] | null };
 	readonly compaction?: { readonly writer: string; readonly tokensBefore: number | null; readonly tokensAfter: number | null } | null;
 	readonly usage?: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number } | null;
 }
@@ -69,7 +69,7 @@ export interface MetricsRecord {
 		readonly accepted: number;
 		readonly refused: Readonly<Record<string, number>>;
 		readonly dropped: Readonly<Record<string, number>>;
-		readonly tiers: readonly number[];
+		readonly tiers: readonly number[] | null;
 	};
 	readonly compaction: { readonly writer: MetricsCompactionWriter; readonly tokensBefore: number | null; readonly tokensAfter: number | null } | null;
 	readonly usage: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number } | null;
@@ -117,7 +117,7 @@ export function buildMetricsRecord(input: MetricsInput): MetricsRecord {
 			accepted: count(input.folds.accepted),
 			refused: codeCounts(input.folds.refused),
 			dropped: codeCounts(input.folds.dropped),
-			tiers: (input.folds.tiers ?? []).filter((tier) => tier === 1 || tier === 2 || tier === 3).slice(0, 64),
+			tiers: input.folds.tiers ? input.folds.tiers.filter((tier) => tier === 1 || tier === 2 || tier === 3).slice(0, 64) : null,
 		},
 		compaction: compaction ? { writer: writerOf(compaction.writer), tokensBefore: num(compaction.tokensBefore), tokensAfter: num(compaction.tokensAfter) } : null,
 		usage: usage ? { input: count(usage.input), output: count(usage.output), cacheRead: count(usage.cacheRead), cacheWrite: count(usage.cacheWrite) } : null,
@@ -130,6 +130,33 @@ function sessionFileStem(sessionId: string): string {
 }
 export function metricsSessionFile(agentDir: string, sessionId: string): string {
 	return path.join(agentDir, ...METRICS_STORE_DIRS, `${sessionFileStem(sessionId)}.jsonl`);
+}
+
+/**
+ * The `seq` of the last line of a session's metrics file, so a resumed session or a new process keeps
+ * counting. 0 for a missing or empty file, or when the last line is not a record with a positive integer `seq`.
+ * The oldest-first trim keeps the newest lines, so the last line always holds the highest `seq`.
+ */
+export async function lastMetricsSeq(agentDir: string, sessionId: string): Promise<number> {
+	const name = `${sessionFileStem(sessionId)}.jsonl`;
+	const dir = await openStoreDir(agentDir, false, METRICS_STORE_DIRS);
+	if (!dir) return 0;
+	try {
+		let text: string;
+		try {
+			const handle = await openStoreFile(dir, name, constants.O_RDONLY);
+			try { text = await handle.readFile("utf8"); } finally { await handle.close(); }
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+			throw error;
+		}
+		const last = text.split("\n").filter((line) => line.length > 0).at(-1);
+		if (last === undefined) return 0;
+		try {
+			const seq = (JSON.parse(last) as { seq?: unknown }).seq;
+			return typeof seq === "number" && Number.isSafeInteger(seq) && seq > 0 ? seq : 0;
+		} catch { return 0; }
+	} finally { await dir.handle.close(); }
 }
 
 export interface MetricsLimits {

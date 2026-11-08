@@ -527,7 +527,9 @@ so it applies billion-context-pi's rule and the two engines are compared on the 
 zone. The difference therefore never reaches a comparison, and it has no register entry:
 an entry whose predicate cannot match would be dead. If the preview ever planned with the
 native rule, a `protected-zone` refusal by billion-context-pi against a native fold would
-need an entry and a row in the table above.
+need an entry and a row in the table above. The live per-turn nudge follows the same native
+rule (pi-context-aware#319), and the preview passes `protectedZone: "all-user-role"` to it too.
+
 
 ### The recoverable hide (FP-205)
 

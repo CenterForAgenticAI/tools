@@ -50,6 +50,7 @@ export class SessionDatabase {
 			CREATE TABLE IF NOT EXISTS session_sources (session_id TEXT PRIMARY KEY, path TEXT NOT NULL) WITHOUT ROWID;
 			CREATE TABLE IF NOT EXISTS session_source_state (session_id TEXT PRIMARY KEY, written INTEGER NOT NULL, reported INTEGER NOT NULL) WITHOUT ROWID;
 			CREATE TABLE IF NOT EXISTS open_sessions (session_id TEXT NOT NULL, pid INTEGER NOT NULL, owner TEXT NOT NULL, PRIMARY KEY(session_id, pid, owner)) WITHOUT ROWID;
+			CREATE TABLE IF NOT EXISTS erased_entries (session_id TEXT NOT NULL, entry_id TEXT NOT NULL, content_hash TEXT NOT NULL, erased_on TEXT NOT NULL, PRIMARY KEY(session_id, entry_id)) WITHOUT ROWID;
 		`);
 	}
 	close(): void { this.db.close(); }
@@ -152,6 +153,18 @@ export class SessionDatabase {
 				this.forget(id);
 			}
 		});
+	}
+	/** Ids and hashes of entries tombstoned inside a session, never their text. Committed before the file is replaced. */
+	recordEntryErasures(sessionId: string, erasedOn: string, entries: readonly { readonly entryId: string; readonly hash: string }[]): void {
+		validateSessionId(sessionId);
+		this.transaction(() => {
+			const insert = this.db.prepare("INSERT OR REPLACE INTO erased_entries VALUES (?, ?, ?, ?)");
+			for (const entry of entries) insert.run(sessionId, entry.entryId, entry.hash, erasedOn);
+		});
+	}
+	erasedEntries(sessionId: string): readonly { entryId: string; hash: string; erasedOn: string }[] {
+		return this.db.prepare("SELECT entry_id, content_hash, erased_on FROM erased_entries WHERE session_id = ? ORDER BY entry_id").all(sessionId)
+			.map((row) => ({ entryId: String(row.entry_id), hash: String(row.content_hash), erasedOn: String(row.erased_on) }));
 	}
 	/** An external removal drops derived discovery rows, not a tombstone. */
 	forget(id: string): void {

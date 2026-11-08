@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -200,6 +201,6 @@ test("a shutdown in one in-memory session does not suppress another session's qu
 		await runtimeA?.dispose();
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeFixtureDir(cwd);
 	}
 });

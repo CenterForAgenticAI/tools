@@ -15,7 +15,7 @@ async function withFixture(body: (fixture: FocusFixture) => Promise<void>, entri
 	try {
 		await body(fixture);
 	} finally {
-		fixture.cleanup();
+		await fixture.cleanup();
 	}
 }
 
@@ -250,7 +250,7 @@ test("brief hints respect tool reachability and rewrite the invocation", async (
 			const blocks = briefBlocks(await fixture.turnMessage());
 			if (activeTools.includes("fabric_exec")) assert.match(blocks[0] ?? "", /extensions\.session_focus/);
 			else assert.deepEqual(blocks, []);
-		} finally { fixture.cleanup(); }
+		} finally { await fixture.cleanup(); }
 	}
 });
 

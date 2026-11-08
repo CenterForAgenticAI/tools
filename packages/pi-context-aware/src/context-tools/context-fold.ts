@@ -159,7 +159,7 @@ function entriesOf(raw: unknown): unknown[] | string | undefined {
 		}
 	}
 	if (Array.isArray(value)) return value;
-	if (isRecord(value)) return Array.isArray(value.ranges) ? value.ranges : [value];
+	if (isRecord(value)) return Array.isArray(value.ranges) ? value.ranges : Array.isArray(value.content) ? value.content : [value];
 	return undefined;
 }
 
@@ -170,6 +170,20 @@ function entriesOf(raw: unknown): unknown[] | string | undefined {
  * A string that is not a JSON value is read as a whole, and its items are numbered in the order recovered.
  */
 export function foldItems(params: { readonly topic?: unknown; readonly content?: unknown; readonly ranges?: unknown }): (FoldItem | null)[] | string {
+	const read = readFold(params);
+	return typeof read === "string" ? read : read.items;
+}
+
+interface FoldRead {
+	readonly items: (FoldItem | null)[];
+	/** The parser's reason for each null item, by position; "" for a readable item. */
+	readonly reasons: readonly string[];
+}
+
+/** The kernel's reason for one dropped entry, without its "entry N: " prefix. */
+const reasonOf = (reasons: readonly string[] | undefined): string => (reasons?.[0] ?? "not a range").replace(/^entry \d+: /u, "");
+
+function readFold(params: { readonly topic?: unknown; readonly content?: unknown; readonly ranges?: unknown }): FoldRead | string {
 	const raw = params[pickFoldRangesKey(params)];
 	if (raw === undefined || raw === null) return "No ranges given. " + SHAPE_HINT;
 	const entries = entriesOf(raw);
@@ -179,21 +193,31 @@ export function foldItems(params: { readonly topic?: unknown; readonly content?:
 		return { startRef: range.startRef, endRef: range.endRef, summary: range.summary, ...(own ? { topic: own } : {}) };
 	};
 	let items: (FoldItem | null)[];
+	let reasons: string[] = [];
 	if (typeof entries === "string") {
-		items = parseCompressArgs({ content: entries }).ranges.map(toItem);
+		const parsed = parseCompressArgs({ content: entries });
+		items = parsed.ranges.map(toItem);
+		if (items.length === 0) reasons = ["the text holds no range (" + parsed.diagnostics.kind + ")"];
 	} else if (entries === undefined) {
 		return "The ranges are not an array. " + SHAPE_HINT;
 	} else {
 		if (entries.length === 0) return "No ranges provided.";
 		if (entries.length > MAX_FOLD_ITEMS_PER_CALL) return "A call may fold at most " + MAX_FOLD_ITEMS_PER_CALL + " ranges.";
+		reasons = [];
 		items = entries.map((entry): FoldItem | null => {
-			const range = parseCompressArgs({ content: [normalizedEntry(entry)] }).ranges[0];
+			const parsed = parseCompressArgs({ content: [normalizedEntry(entry)] });
+			const range = parsed.ranges[0];
+			reasons.push(range ? "" : reasonOf(parsed.diagnostics.invalidReasons));
 			return range ? toItem(range) : null;
 		});
 	}
 	if (items.length > MAX_FOLD_ITEMS_PER_CALL) return "A call may fold at most " + MAX_FOLD_ITEMS_PER_CALL + " ranges.";
-	if (items.every((item) => item === null)) return "No readable range in the call. " + SHAPE_HINT;
-	return items;
+	if (items.every((item) => item === null)) {
+		const named = reasons.map((reason, index) => (reason ? "item " + (index + 1) + ": " + reason : "")).filter(Boolean);
+		const why = named.length > 0 ? " " + named.join("; ") + "." : reasons.length === 1 ? " " + reasons[0] + "." : "";
+		return "No readable range in the call." + why + " " + SHAPE_HINT;
+	}
+	return { items, reasons };
 }
 
 export interface ContextFoldDetails {
@@ -202,8 +226,9 @@ export interface ContextFoldDetails {
 
 /** Run one call: one engine request per item, ids by position. */
 export function runFold(engine: Pick<FoldEngine, "request">, ctx: ExtensionContext, toolCallId: string, params: ContextFoldInput) {
-	const items = foldItems(params);
-	if (typeof items === "string") return { content: [{ type: "text" as const, text: items }], details: undefined, isError: true };
+	const read = readFold(params);
+	if (typeof read === "string") return { content: [{ type: "text" as const, text: read }], details: undefined, isError: true };
+	const { items, reasons } = read;
 	const summaryMaxChars = summaryLimitOf(params.summaryMaxChars);
 	const lines: string[] = [];
 	const recoveries: FoldRequestRecovery[] = [];
@@ -211,7 +236,7 @@ export function runFold(engine: Pick<FoldEngine, "request">, ctx: ExtensionConte
 	items.forEach((item, index) => {
 		const label = "range " + (index + 1);
 		if (!item) {
-			lines.push(label + ": not a { startId, endId, summary } range; skipped.");
+			lines.push(label + ": " + (reasons[index] || "not a { startId, endId, summary } range") + "; skipped.");
 			return;
 		}
 		const result = engine.request(ctx, { ...item, ...(summaryMaxChars !== undefined ? { summaryMaxChars } : {}), requestId: toolCallId + "#" + index });

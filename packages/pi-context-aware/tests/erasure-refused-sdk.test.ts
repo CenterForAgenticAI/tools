@@ -1,3 +1,4 @@
+import { removeFixtureDir } from "./fixture-cleanup.js";
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -48,7 +49,7 @@ async function refusedRuntime() {
 	await session.bindExtensions({ shutdownHandler: () => { shutdowns++; } });
 	assert.equal(shutdowns, 1);
 	return { session, manager, file, intruder: intruder!,
-		cleanup: () => { session.dispose(); if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous; fs.rmSync(root, { recursive: true, force: true }); } };
+		cleanup: async () => { session.dispose(); if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous; await removeFixtureDir(root); } };
 }
 
 test("real SDK refuses focus edit and tasks add dispatched before input", async () => {
@@ -58,7 +59,7 @@ test("real SDK refuses focus edit and tasks add dispatched before input", async 
 		await r.session.prompt("/tasks add Resurrected task");
 		assert.equal(fs.existsSync(r.file), false);
 		assert.equal(r.manager.getEntries().filter((entry) => entry.type === "custom").length, 0);
-	} finally { r.cleanup(); }
+	} finally { await r.cleanup(); }
 });
 
 test("another extension's custom-message turn is aborted, but SDK still persists its abort-error assistant", async () => {
@@ -79,5 +80,5 @@ test("another extension's custom-message turn is aborted, but SDK still persists
 		const disk = fs.readFileSync(r.file, "utf8");
 		assert.match(disk, /"errorMessage":"This operation was aborted"/u);
 		assert.doesNotMatch(disk, /Resurrected task|Private assistant reply|context-aware.tasks|context-aware.naming/u);
-	} finally { r.cleanup(); }
+	} finally { await r.cleanup(); }
 });

@@ -10,6 +10,7 @@ import { metricsSessionFile } from "../src/metrics/records.js";
 import { answerRecall } from "../src/cache/recall.js";
 import { boundCacheDocuments, migrateCachePool, promoteCacheFile, readManifest, writeCacheFile, writeManifest } from "../src/cache/context-cache.js";
 import { sessionDatabaseFile } from "../src/erasure/database.js";
+import { MANIFEST_LOCK_FILE_NAME, MANIFEST_LOCK_TAKEOVER_FILE_NAME } from "../src/cache/manifest-lock.js";
 import { createRegistryProjection, createSessionRegistry } from "../src/session/session-registry.js";
 import { asPiSessionId, asWorkstreamId } from "../src/workstream/workstream-schema.js";
 
@@ -210,6 +211,27 @@ test("erasure reports unattributed cache crash debris without deleting it", asyn
 		assert.ok(receipt.untouched.includes(`Unattributed cache file (not erased): ${otherOrphan}`));
 		assert.equal(fs.readFileSync(orphan, "utf8"), "UNATTRIBUTED PRIVATE CACHE TEXT");
 		assert.equal(fs.readFileSync(otherOrphan, "utf8"), "UNATTRIBUTED MIGRATION TEXT");
+	} finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("erasure does not report the manifest lock files as unattributed cache documents", async () => {
+	const f = fixture();
+	try {
+		const stray = path.join(f.cache, "stray.tmp");
+		fs.writeFileSync(stray, "STRAY");
+		fs.writeFileSync(path.join(f.cache, MANIFEST_LOCK_FILE_NAME), "{}");
+		fs.writeFileSync(path.join(f.cache, MANIFEST_LOCK_TAKEOVER_FILE_NAME), "{}");
+		const pool = path.join(f.root, "context-cache", "no-manifest-pool");
+		fs.mkdirSync(pool);
+		fs.writeFileSync(path.join(pool, MANIFEST_LOCK_FILE_NAME), "{}");
+		fs.writeFileSync(path.join(pool, MANIFEST_LOCK_TAKEOVER_FILE_NAME), "{}");
+		const poolStray = path.join(pool, "stray2.tmp");
+		fs.writeFileSync(poolStray, "STRAY2");
+		const receipt = await eraseSession({ agentDir: f.root, sessionId: "old", currentSessionId: "current", sessions: f.sessions, confirm: async () => true });
+		assert.equal(receipt.status, "complete");
+		assert.ok(receipt.untouched.includes(`Unattributed cache file (not erased): ${stray}`));
+		assert.ok(receipt.untouched.includes(`Unattributed cache file (not erased): ${poolStray}`));
+		assert.deepEqual(receipt.untouched.filter((entry) => entry.includes(".manifest.lock")), []);
 	} finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 

@@ -158,6 +158,9 @@ export interface ContextAwareEffectiveModeV1 {
 	proactiveCompaction?: ContextAwareProactiveCompactionConfigV1;
 }
 
+/** Which engine manages context: the native folds, or compaction only (billion-context-pi owns folding). */
+export type ContextAwareEngineV1 = "folds" | "compaction-only";
+
 export interface ContextAwareSnapshotV1 {
 	protocolVersion: typeof CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION;
 	capturedAt: string;
@@ -178,6 +181,8 @@ export interface ContextAwareSnapshotV1 {
 	/** Added compatibly in protocol v1. Older producers may omit it. */
 	proactiveCompaction?: ContextAwareProactiveCompactionLifecycleV1;
 	effectiveMode: ContextAwareEffectiveModeV1;
+	/** Added compatibly in protocol v1. The context engine in use; older producers may omit it. */
+	engine?: ContextAwareEngineV1;
 	provenance: {
 		provider: "context-aware";
 		protocolVersion: typeof CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION;
@@ -218,6 +223,7 @@ export interface ContextAwareSnapshotSourceV1 {
 	effectiveMode: ContextAwareEffectiveModeV1;
 	/** Telemetry band edges from the session's pressure ladder. Defaults to the default ladder. */
 	pressureBands?: ContextAwarePressureBandEdgesV1;
+	engine?: ContextAwareEngineV1;
 }
 
 export interface ContextAwareHandoffBoundsV1 {
@@ -699,6 +705,54 @@ export interface ContextAwareFoldsV1 {
 	endOwner(ownerKey: string): number;
 }
 
+/** The space a contributor may fill in one call. */
+export interface ContextAwareContributionBudgetV1 {
+	readonly maxChars: number;
+}
+
+/** One text a contributor asks context-aware to show. `id` is stable for the same piece of content. */
+export interface ContextAwareContributionV1 {
+	/** 1-128 characters of letters, digits and . _ : @ / -; unique within one render result. */
+	readonly id: string;
+	/** At most 4,000 characters. A longer text, or one over the remaining budget, is skipped, never cut. */
+	readonly text: string;
+}
+
+/** A fold hint a contributor registers with its registration; the ownerKey is the contributor's. */
+export type ContextAwareContributorHintV1 = Omit<ContextAwareFoldHintRegistrationV1, "ownerKey">;
+
+/**
+ * A contributor: text another extension asks context-aware to show the model.
+ * Only these fields are read.
+ */
+export interface ContextAwareContributorRegistrationV1 {
+	/** 1-200 printable characters. `context-aware` is reserved. One live registration per key per session. */
+	readonly ownerKey: string;
+	/**
+	 * Called synchronously before each agent run. Return every contribution that should be in context;
+	 * context-aware shows only those that are due: never shown on this branch, changed, or no longer in
+	 * context because a fold, a compaction or a context edit removed their last showing.
+	 * A throw or a value that is not an array of contributions skips this owner for the turn.
+	 */
+	render(budget: ContextAwareContributionBudgetV1): readonly ContextAwareContributionV1[];
+	/** Text appended to a compaction summary that context-aware writes. At most 4,000 characters; longer is skipped. */
+	carry?(budget: ContextAwareContributionBudgetV1): string | null;
+	/** Fold hints for this owner's own messages and tools, registered all or none. */
+	readonly hints?: readonly ContextAwareContributorHintV1[];
+}
+
+export type ContextAwareContributorResultV1 =
+	| { readonly ok: true }
+	| { readonly ok: false; readonly error: string };
+
+/** Contributors (pi-context-aware#300). Check with `supportsContextAwareContributorsV1`. */
+export interface ContextAwareContributorsV1 {
+	readonly v1: true;
+	register(registration: ContextAwareContributorRegistrationV1): ContextAwareContributorResultV1;
+	/** Remove a live contributor. Returns false when none is registered under the key. Its fold hints stay. */
+	endOwner(ownerKey: string): boolean;
+}
+
 export interface ContextAwareServiceV1 {
 	readonly protocolVersion: typeof CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION;
 	getSnapshot(): ContextAwareSnapshotV1;
@@ -710,6 +764,8 @@ export interface ContextAwareServiceV1 {
 	skills?: ContextAwareSkillsV1;
 	/** Added compatibly in protocol v1. Older producers may omit it. */
 	folds?: ContextAwareFoldsV1;
+	/** Added compatibly in protocol v1. Older producers may omit it. */
+	contributors?: ContextAwareContributorsV1;
 	requestHandoff(
 		request: ContextAwareHandoffRequestV1,
 		options?: { signal?: AbortSignal },
@@ -783,6 +839,19 @@ export function supportsContextAwareFoldHintsV1(
 	return service?.folds?.hints === true
 		&& typeof service.folds.registerHint === "function"
 		&& typeof service.folds.endOwner === "function";
+}
+
+/**
+ * Return true when the producer accepts contributors (pi-context-aware#300). When it is false,
+ * context-aware is absent or older: the caller injects through Pi's hooks and tracks its own
+ * last showing instead, and never does both.
+ */
+export function supportsContextAwareContributorsV1(
+	service: ContextAwareServiceV1 | undefined,
+): service is ContextAwareServiceV1 & { contributors: ContextAwareContributorsV1 } {
+	return service?.contributors?.v1 === true
+		&& typeof service.contributors.register === "function"
+		&& typeof service.contributors.endOwner === "function";
 }
 
 /** Return true when a discovered producer implements the additive promotion capability. */
@@ -907,6 +976,7 @@ export function buildContextAwareSnapshotV1(source: ContextAwareSnapshotSourceV1
 			}
 			: {}),
 		effectiveMode: { ...source.effectiveMode },
+		...(source.engine ? { engine: source.engine } : {}),
 		provenance: {
 			provider: "context-aware",
 			protocolVersion: CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION,

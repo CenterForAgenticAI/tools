@@ -15,6 +15,7 @@ export const ALLOWED_ROOT_ENTRIES = new Set([
 	".gitignore",
 	".gitlab",
 	".gitlab-ci.yml",
+	".gauntlet", // gauntlet-quality baseline and draft module-boundary rules, committed so later runs compare against them.
 	".graft", // Repository workflow records.
 	".work", // pi-work workspecs and drafts.
 	".public-release.json",

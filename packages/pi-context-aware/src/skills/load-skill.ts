@@ -355,17 +355,55 @@ export function registerLoadSkillTool(
 				});
 			}
 
-			const { skill, shadowed } = resolved;
+			let { skill, shadowed } = resolved;
 			let body: string;
+			let movedFrom: string | undefined;
 			try {
 				body = readSkill(skill.filePath);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				return textResult(
-					`load_skill: "${skill.name}" is discovered at ${skill.filePath}, but reading it failed: ${message}. ` +
+				const code = (error as { code?: unknown }).code;
+				const missing = code === "ENOENT" || code === "ENOTDIR" || /\b(ENOENT|ENOTDIR)\b/.test(message);
+				const stalePath = skill.filePath;
+				const plain = () => textResult(
+					`load_skill: "${skill.name}" is discovered at ${stalePath}, but reading it failed: ${message}. ` +
 						"Report this rather than looking for the file somewhere else.",
-					{ error: "unreadable", requested: params.name, path: skill.filePath },
+					{ error: "unreadable", requested: params.name, path: stalePath },
 				);
+				if (!missing || !fallbackContext) return plain();
+				// The path is stale: the skill moved or was removed after discovery. Discover again
+				// (not the memoised fallback, which may be stale too) and use only paths it returns.
+				let fresh: readonly DiscoveredSkill[];
+				try {
+					fresh = await discoverSkills(fallbackContext.cwd, fallbackContext.projectTrusted);
+				} catch {
+					return plain();
+				}
+				const again = resolveSkill(params.name, fresh);
+				let recovered: { skill: DiscoveredSkill; body: string; shadowed: string[] } | undefined;
+				if (again.ok) {
+					const candidates = [again.skill, ...[...fresh].reverse().filter((other) => other.name === again.skill.name && other.filePath !== again.skill.filePath)];
+					for (const candidate of candidates) {
+						if (candidate.filePath === stalePath) continue;
+						try {
+							recovered = { skill: candidate, body: readSkill(candidate.filePath), shadowed: candidate === again.skill ? [...again.shadowed] : [] };
+							break;
+						} catch {
+							// Try the next discovered copy.
+						}
+					}
+				}
+				if (!recovered) {
+					return textResult(
+						`load_skill: "${skill.name}" was discovered at ${stalePath}, but that file no longer exists (${message}), and no discovered source holds the skill now. ` +
+							"Run /reload to refresh the skill list. Report this rather than looking for the file somewhere else.",
+						{ error: "unreadable", requested: params.name, path: stalePath, stalePath: true },
+					);
+				}
+				({ skill, body, shadowed } = recovered);
+				movedFrom = stalePath;
+				const recoveredSkill = skill;
+				captured = [...declared.filter((entry) => entry.filePath !== stalePath && entry.filePath !== recoveredSkill.filePath), recoveredSkill];
 			}
 
 			const decision = registry?.decide({
@@ -379,13 +417,14 @@ export function registerLoadSkillTool(
 			const header = fromFallback
 				? `Skill "${skill.name}" loaded from ${skill.filePath}. This skill is outside this agent's declared skill set; it was resolved from Pi's full discovered skill set.`
 				: `Skill "${skill.name}" loaded from ${skill.filePath}.`;
+			const moved = movedFrom === undefined ? "" : ` The earlier path ${movedFrom} no longer exists.`;
 			const note = shadowed.length > 0
 				? ` This copy shadows ${shadowed.length} other discovered copy/copies: ${shadowed.join(", ")}.`
 				: "";
 			const changed = decision?.kind === "body" && decision.changed
 				? " The file changed since this skill was last loaded; this copy replaces the earlier one."
 				: "";
-			const text = `${header}${note}${changed}\n\n${body}`;
+			const text = `${header}${moved}${note}${changed}\n\n${body}`;
 			registry?.record({ toolCallId, name: skill.name, path: skill.filePath, body, resultText: text });
 			options.onBody?.({ name: skill.name, filePath: skill.filePath }, ctx);
 			return textResult(text, {

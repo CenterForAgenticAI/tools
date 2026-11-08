@@ -58,6 +58,38 @@ test("duplicate and empty artifactIds are backfilled with collision suffixes", (
 	});
 });
 
+test("a backfilled id that collides with an earlier explicit id gets the -2 suffix", () => {
+	withTempDir((dir) => {
+		const legacyB = stableLegacyArtifactId(dir, "b.md");
+		writeRawManifest(dir, {
+			"a.md": { ...oldestShapeEntry(), artifactId: legacyB },
+			"b.md": oldestShapeEntry(),
+		});
+		const files = readManifest(dir).files;
+		assert.equal(files["a.md"]?.artifactId, legacyB);
+		assert.equal(files["b.md"]?.artifactId, `${legacyB}-2`);
+		const ids = Object.values(files).map((entry) => entry.artifactId);
+		assert.equal(new Set(ids).size, ids.length);
+	});
+});
+
+test("a second collision increments the suffix to -3", () => {
+	withTempDir((dir) => {
+		const legacyC = stableLegacyArtifactId(dir, "c.md");
+		writeRawManifest(dir, {
+			"x.md": { ...oldestShapeEntry(), artifactId: legacyC },
+			"y.md": { ...oldestShapeEntry(), artifactId: `${legacyC}-2` },
+			"c.md": oldestShapeEntry(),
+		});
+		const files = readManifest(dir).files;
+		assert.equal(files["x.md"]?.artifactId, legacyC);
+		assert.equal(files["y.md"]?.artifactId, `${legacyC}-2`);
+		assert.equal(files["c.md"]?.artifactId, `${legacyC}-3`);
+		const ids = Object.values(files).map((entry) => entry.artifactId);
+		assert.equal(new Set(ids).size, ids.length);
+	});
+});
+
 for (const field of REQUIRED_FIELDS) {
 	test(`an entry missing ${field} is malformed: dropped from the view, file kept, sibling survives`, () => {
 		withTempDir((dir) => {

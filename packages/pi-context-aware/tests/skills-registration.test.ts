@@ -119,7 +119,7 @@ test("the first request after opting out refreshes saved guidance without editin
 		skills.capturePrompt(original, [{ name: "example", filePath: location }], manager);
 		const plan = planFold({ branch: manager.getBranch(), startRef: "m00001", endRef: "m00002", summary: "The first exchange completed.",
 			modelContextLimit: 64_000, config: { ...SAFETY_CONFIG, preserveRecentMessages: 0, preserveRecentTokens: 0 },
-			folds: { firstUserMessage: "fold", firstUserMessageMaxTokens: 8_000 }, condenser: createSkillCondenser(manager.getBranch())! });
+			folds: { firstUserMessage: "fold", firstUserMessageMaxTokens: 8_000, engine: "auto" }, condenser: createSkillCondenser(manager.getBranch())! });
 		assert.ok(plan.ok, JSON.stringify(plan));
 		applyFoldDrafts(manager, plan.drafts);
 		const oldBlock = skills.resendText(manager, () => false)!.content;

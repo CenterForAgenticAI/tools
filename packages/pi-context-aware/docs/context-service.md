@@ -75,6 +75,7 @@ const snapshot = service.getSnapshot();
 - the current compaction coordinator state (`idle`, `queued`, or `running`);
 - optional proactive lifecycle state (`idle`, `pending`, `generating`, `queued`, `compacting`, `cooldown`, `failed`, or `cancelled`), including a run ID, trigger count, cancellation stage, cooldown deadline, and last failure when known;
 - effective seed rewrite, ambiguity, compaction-model, and proactive-compaction modes. The proactive configuration includes a steady-state stall threshold and a first-output grace period for reasoning models: thinking/tool-call stream events reset liveness without becoming seed text, text output starts the steady-state threshold, and an absolute five-minute ceiling remains in force. Current producers also include `commitDrainTimeoutMs`, how long a prepared compaction waits for an in-flight agent run to end before the commit is abandoned and queued again; this additive protocol-v1 leaf may be absent from older producers.
+- the context engine in use, `engine`: `folds` or `compaction-only` (billion-context-pi owns folding). It was added compatibly to protocol v1, so older producers omit it;
 - provider/protocol/session provenance.
 
 The proactive-compaction snapshot is the same resolved representation used by runtime checks and status commands:
@@ -396,7 +397,9 @@ if (supportsContextAwareModeToolPoliciesV1(service)) {
 
 An invalid policy (a non-array `allowedTools`, too many or invalid names, a non-boolean `readOnlyShell`, or a non-function `lifted`) refuses the definition with `INVALID_REQUEST`. The runtime copies only these three fields into its own definition and never keeps the caller's object, so changing the object after `defineMode` changes nothing.
 
-Each tool call is checked in this order: `blockedTools`, then the policy, then `guard`. A tool in `blockedTools` is refused even if `allowedTools` lists it. The guard sees only calls the policy let through, and it still runs while the policy is lifted. A refusal reason is fixed text naming the tool and the mode; it never repeats the command or other input. With several layers active, a call must pass every layer: all `blockedTools` lists first, then every policy, then every guard, and the first refusal wins. A layer's `lifted` lifts only that layer's policy. An unavailable orphan mode enforces nothing until its owner defines it again.
+**Context tools are never blocked.** `context_fold`, `context_compact`, `context_status` and `context_recall` change only the session's own context, never the workspace, so no mode blocks them. They run in every mode, and `blockedTools`, `allowedTools` and `guard` entries for them have no effect. The match is by exact name, whichever extension registers the tool: another extension's tool with one of these names passes too.
+
+Each other tool call is checked in this order: `blockedTools`, then the policy, then `guard`. A tool in `blockedTools` is refused even if `allowedTools` lists it. The guard sees only calls the policy let through, and it still runs while the policy is lifted. A refusal reason is fixed text naming the tool and the mode; it never repeats the command or other input. With several layers active, a call must pass every layer: all `blockedTools` lists first, then every policy, then every guard, and the first refusal wins. A layer's `lifted` lifts only that layer's policy. An unavailable orphan mode enforces nothing until its owner defines it again.
 
 #### What the policy sees
 
@@ -588,6 +591,68 @@ Context-aware registers these under its own ownerKey:
 | `customType: "ask-me"` | `one-line` | The `/ask-me` command sends its prompt as a custom message with `details: { flags: string[], focus: string }`. A fold keeps only `/ask-me ran: <flags> <focus>`; the prompt body is not kept. A message the operator types is not this marker. |
 | `toolName: "ask"` | `verbatim` | The questions asked and the operator's answers are decisions; they stay word for word. |
 | `customType: "context-aware.fold-notice"` | `drop-after-read` | The notice that an accepted fold was not written is read once. |
+
+## Contributors
+
+An extension can give context-aware text to show the model, and leave it to context-aware to decide when that text is shown again. Check the capability with `supportsContextAwareContributorsV1`; producers without it remain valid, and the guard is `false` for them.
+
+```ts
+import {
+	discoverContextAwareServiceV1,
+	supportsContextAwareContributorsV1,
+} from "@centerforagenticai/pi-context-aware/context-service";
+
+pi.on("session_start", () => {
+	const service = discoverContextAwareServiceV1(pi.events, "my-extension");
+	if (!supportsContextAwareContributorsV1(service)) {
+		// Older or absent context-aware: inject through Pi's own hooks and track the last showing yourself.
+		return;
+	}
+	service.contributors.register({
+		ownerKey: "my-extension",
+		render: ({ maxChars }) => [{ id: "brief", text: currentBrief() }],
+		carry: ({ maxChars }) => currentBrief(),
+		hints: [{ match: { customType: "my-status" }, policy: "drop-after-read" }],
+	});
+	// result: { ok: true } or { ok: false, error }
+});
+// When the extension stops contributing: service.contributors.endOwner("my-extension") returns true or false.
+```
+
+Use one path or the other, never both: when the guard is true, do not also inject the same text through Pi's hooks.
+
+**When a text is shown.** Before each agent run, context-aware calls each owner's `render`, in registration order, and places the texts that are due in its own per-turn message, in the order `render` returned them. That message is the one that carries the task list and the brief; contributed texts come after those and before the restart notice and the context telemetry. A text is due when:
+
+- it has not been shown on the current branch;
+- its text changed since it was last shown (compared by SHA-256 digest); or
+- its last showing is no longer in the model's context: a fold covers it, a compaction dropped it, or a context edit hid it. A fold summary that quotes the text does not count as a showing.
+
+A text that is not due is left out, so an unchanged text costs nothing on later turns. With no contributor registered, or with nothing due, the per-turn message is exactly what it was without this API.
+
+**The last-shown record.** Each turn that shows contributions appends one `context-aware.contributor-shown.v1` custom entry, `{ version: 1, shown: [{ ownerKey, contributionId, textDigest }] }`. It never holds the text. The record belongs to the per-turn message that follows it on the branch. Context-aware reads these records from the branch every turn, so a reload, a resume and a `/tree` move all replay it; a branch that never showed a text shows it.
+
+**Budgets.** `render` and `carry` receive `{ maxChars }`, the most they can be given this time.
+
+| Bound | Limit |
+|---|---|
+| One contribution text | 4,000 characters |
+| All contributors in one turn | 8,000 characters, filled in registration order; one owner may use all of it |
+| One owner's `carry` text | 4,000 characters |
+| All `carry` text in one summary | 8,000 characters |
+| Contributions per `render` call | 32 |
+| Contributors per session, hints per registration | 32 each |
+
+A text over its limit, or over what is left, is skipped and never cut. It stays due, so it is shown on a later turn when it fits.
+
+**Carry.** When context-aware writes a compaction summary, it appends each owner's `carry` text, labelled `[<ownerKey>]`, under the heading `Carried by extensions (not user intent):`. `carry` returns a string, or `null` for nothing. When context-aware does not write the summary (another compactor claims it, or Pi's own summarizer runs), carry text is not added; the compaction still drops the last showing, so `render` brings the text back on the next turn.
+
+Rules:
+
+- **One live owner per key per session.** A second `register` for a live owner is refused with `<ownerKey> is already registered in this session`. `endOwner(ownerKey)` removes the owner and returns `true`, or `false` when it was not registered; the key can then be registered again. The ownerKey `context-aware` is reserved.
+- `register` copies only its own named fields (`ownerKey`, `render`, `carry`, `hints`) and reads them once. `ownerKey` is 1-200 printable characters. `render` must be a function, and `carry` a function when given.
+- `render` runs synchronously and returns an array of `{ id, text }`. An `id` is 1-128 characters of letters, digits and `. _ : @ / -`, unique within one call. Only `id` and `text` are read. A `render` that throws, returns a promise, returns something that is not such an array, or repeats an id is skipped for that turn, with a line in the debug log; the turn goes on. The same holds for `carry`.
+- `hints` are [fold hints](#fold-hints) without an `ownerKey`. They are registered under the contributor's `ownerKey`, all or none: when one is refused, `register` is refused with `hints: <reason>` and nothing is registered. A hint's own `ownerKey` field is ignored. `endOwner` leaves the hints in place, as `folds.endOwner` does for hints.
+- Contributors are held in memory for the session. Register again after every `session_start`. The last-shown records are in the session and survive.
 
 ## What is not an integration API
 

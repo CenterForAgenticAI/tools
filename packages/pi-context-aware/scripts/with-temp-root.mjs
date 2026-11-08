@@ -89,7 +89,13 @@ let cleaned = false;
  * With PI_TEST_CLEANUP_GATE_FILE set, cleanup then waits (up to 10 s) for that
  * file to appear. A test waits for the started file, signals the wrapper, then
  * creates the gate file, so the signal always lands inside cleanup whatever the
- * host load. Both are inert when unset.
+ * host load.
+ *
+ * With PI_TEST_CLEANUP_RAISE set to SIGINT, SIGTERM or SIGHUP, cleanup sends that
+ * signal to this process after announceCleanup and before the run root is removed. No
+ * gate is involved, so the handler runs only because the removal is asynchronous.
+ * Any other value is ignored.
+ * All three hooks are inert when unset.
  */
 async function announceCleanup() {
 	const startedFile = process.env.PI_TEST_CLEANUP_STARTED_FILE;
@@ -112,6 +118,7 @@ async function cleanup() {
 	if (cleaned) return;
 	cleaned = true;
 	await announceCleanup();
+	raiseTestSignal();
 	if (keep) {
 		console.error(`with-temp-root: keeping ${runRoot} (PI_KEEP_TEST_TMP=1)`);
 		return;
@@ -123,6 +130,12 @@ async function cleanup() {
 		// silent either -- a leak is exactly what this script exists to stop.
 		console.error(`with-temp-root: could not remove ${runRoot}: ${error.message}`);
 	}
+}
+
+/** Test hook: see announceCleanup. Only the three signals the wrapper handles are accepted. */
+function raiseTestSignal() {
+	const name = process.env.PI_TEST_CLEANUP_RAISE;
+	if (name === "SIGINT" || name === "SIGTERM" || name === "SIGHUP") process.kill(process.pid, name);
 }
 
 /**

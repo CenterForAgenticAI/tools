@@ -108,7 +108,7 @@ test("#287: a call with neither content nor ranges is refused with the expected 
 test("#287: an entry that is not a range is skipped, and the others fold", () => {
 	const { text, pending, result } = run({ ranges: [{ summary: "no bounds" }, { from: "m00002", to: "m00003", summary: SUMMARY }] });
 	assert.equal(result.isError, false, text);
-	assert.match(text, /range 1: not a \{ startId, endId, summary \} range; skipped\./u);
+	assert.match(text, /range 1: missing range bounds.*; skipped\./u);
 	assert.match(text, /range 2 \(m00002\.\.m00003\) accepted/u);
 	assert.equal(pending, 1);
 });
@@ -197,3 +197,25 @@ test("#290: the tool and the call renderer read the same key", () => {
 		assert.deepEqual(part.arguments.content, args.content, "the empty key is untouched");
 	}
 });
+
+test("#362: an unreadable call names each failing item and the parser's reason", () => {
+	const one = run({ content: [{ startId: "m00005", summary: "x" }] });
+	assert.equal(one.result.isError, true);
+	assert.match(one.text, /item 1: missing range bounds/u);
+	assert.match(one.text, /Expected /u);
+	const two = run({ content: [{ startId: "m00005", endId: "m00006" }, "nope"] });
+	assert.match(two.text, /item 1: missing summary/u);
+	assert.match(two.text, /item 2: /u);
+});
+
+test("#362: a skipped item in a partly accepted call gives its reason", () => {
+	const { result, text } = run({ content: [{ startId: "m00001", endId: "m00002", summary: SUMMARY }, { startId: "m00003", endId: "m00004" }] });
+	assert.notEqual(result.isError, true);
+	assert.match(text, /range 2: missing summary; skipped\./u);
+});
+
+test("#362: content given as a JSON string of an object that wraps the array under content is read", () => {
+	const item = { startId: "m00005", endId: "m00009", summary: "s" };
+	assert.deepEqual(foldItems({ content: JSON.stringify({ content: [item] }) }), [{ startRef: "m00005", endRef: "m00009", summary: "s" }]);
+});
+

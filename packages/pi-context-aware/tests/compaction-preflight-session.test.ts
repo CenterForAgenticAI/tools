@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentSessionEvent, ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
 
 import { NOTHING_TO_COMPACT_TOOL_MESSAGE } from "../src/compaction/compaction-outcome.js";
@@ -151,4 +151,41 @@ test("a compact.request through the owner claim hands an idle session Pi compact
 		assert.equal(compactionStarts(events), 1);
 		assert.ok(preparations[0]!.messagesToSummarize.length > 0, "Pi found history to summarize");
 	}, { ownerClaim: true });
+});
+
+test("/compact-then /<command> sends the command as a command only after Pi's compaction is committed", async () => {
+	const seen: string[] = [];
+	const command: ExtensionFactory = (api) => {
+		api.registerCommand("phase-two", {
+			description: "Starts the next phase",
+			handler: async (args) => {
+				seen.push(args);
+				api.sendUserMessage(`PHASE-TWO-RAN ${args}`);
+			},
+		});
+	};
+	const summary = fauxAssistantMessage("## Goal\nMigration summary.");
+	const reply = fauxAssistantMessage("Phase two started.");
+	await withSession(largeHistory, [summary, reply], async ({ session, events, notifications }) => {
+		await session.prompt("/compact-then /phase-two --fast now");
+		await waitFor(() => seen.length > 0, "the command to run");
+		await settle(session);
+
+		assert.deepEqual(notifications.filter((message) => /could not be invoked|Compaction failed/u.test(message)), []);
+		assert.deepEqual(seen, ["--fast now"], "the registered command ran once, with its arguments");
+		const entries = session.sessionManager.getEntries();
+		const compactionAt = entries.findIndex((entry) => entry.type === "compaction");
+		assert.ok(compactionAt >= 0, "the transcript holds a compaction entry");
+		const after = entries.slice(compactionAt + 1);
+		const userTexts = after
+			.filter((entry) => entry.type === "message" && entry.message.role === "user")
+			.map((entry) => JSON.stringify((entry as { message: { content: unknown } }).message.content));
+		assert.equal(userTexts.length, 1, "exactly one user message follows the compaction: no seed message");
+		assert.match(userTexts[0]!, /PHASE-TWO-RAN --fast now/u, "it is the command's own output, not the literal /compact-then text");
+		assert.doesNotMatch(userTexts[0]!, /compact-then|\/phase-two/u);
+		const before = entries.slice(0, compactionAt);
+		assert.ok(!before.some((entry) => JSON.stringify(entry).includes("PHASE-TWO-RAN")), "nothing of the command precedes the compaction");
+		const order = events.map((event) => event.type).filter((type) => type === "compaction_end" || type === "message_start");
+		assert.ok(order.includes("compaction_end"));
+	}, { completeCompaction: true, extensions: [command] });
 });

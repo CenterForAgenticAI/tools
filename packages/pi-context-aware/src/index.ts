@@ -71,6 +71,7 @@ import { compatCanDispatch } from "./platform/model-transport.js";
 import { registerAcpStartupImport } from "./folds/acp-startup-import.js";
 import { foldModeFor, registerFoldEngine, resolveFoldConfig } from "./folds/fold-engine.js";
 import { applyHintsToCompaction, createFoldHints, type FoldHints, type FoldHintView } from "./folds/fold-hints.js";
+import { appendCarrySection, createContributors, CONTRIBUTOR_SHOWN_ENTRY_TYPE, type Contributors } from "./contributors/contributors.js";
 import { foldEngineFingerprint } from "./parity/fingerprint.js";
 import { registerFoldParityRecorder } from "./parity/recorder.js";
 import { registerMetricsRecorder } from "./metrics/recorder.js";
@@ -177,6 +178,7 @@ import {
 	type ContextAwareProactiveCompactionSourcesV1,
 	type ContextAwareServiceV1,
 	type ContextAwareSkillsV1,
+	type ContextAwareContributorsV1,
 	type ContextAwareFoldsV1,
 } from "./context-service.js";
 import { stripHistoricalImages } from "./media/image-stripping.js";
@@ -408,7 +410,6 @@ import {
 } from "./compaction/compaction-ownership.js";
 import {
 	detectCompactionBlocker,
-	isBillionContextPiLoaded,
 	type CompactionBlocker,
 	type RegisteredToolView,
 } from "./compaction/compaction-blocker.js";
@@ -455,6 +456,7 @@ import {
 import type { RecallCachePool } from "./cache/recall.js";
 import { createContextRecallSurface } from "./context-tools/context-recall.js";
 import { decideContextToolSurface } from "./context-tools/surface.js";
+import { resolveContextEngine, type ContextEngineOverride } from "./folds/engine-resolver.js";
 import { createContextFoldSurface } from "./context-tools/context-fold.js";
 import { createContextStatusSurface } from "./context-tools/context-status.js";
 import { seedContinuation, seedContinuationRefusalMessage, type SeedContinuation } from "./compaction/seed-continuation.js";
@@ -1214,7 +1216,7 @@ function migrateLegacyCachePools(ctx: ExtensionContext, destinationDir: string, 
 		const result = migrateCachePool(sourceDir, destinationDir);
 		if (result.failedFiles.length > 0) {
 			// Incomplete. Leave it unrecorded so a later run can finish the job.
-			debugLog(`context cache: migration from ${sourceDir} incomplete, ${result.failedFiles.length} file(s) failed`);
+			debugLog(`context cache: migration from ${sourceDir} incomplete, ${result.failedFiles.length} file(s) failed${result.error ? `: ${result.error}` : ""}`);
 			allSettled = false;
 			continue;
 		}
@@ -2951,7 +2953,7 @@ function generatedSeedProvenanceForContext(ctx: ExtensionContext): GeneratedSeed
 
 function groundedSideEffectAuthorityForContext(ctx: ExtensionContext): SideEffectAuthoritySurface | undefined {
 	let latest: SideEffectAuthoritySurface | undefined;
-	const pendingDeliveries: Array<SideEffectAuthoritySurface | undefined> = [];
+	const pendingDeliveries: Array<PendingDelivery<SideEffectAuthoritySurface | undefined>> = [];
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (!entry || typeof entry !== "object") continue;
 		const candidate = entry as { type?: unknown; customType?: unknown; data?: unknown; message?: { role?: unknown } };
@@ -2965,16 +2967,47 @@ function groundedSideEffectAuthorityForContext(ctx: ExtensionContext): SideEffec
 			if (marker?.retracted === true) pendingDeliveries.pop();
 			else {
 				const authority = recordedExtensionDeliveryAuthority(candidate.data);
-				pendingDeliveries.push(authority?.kind === "user-authoritative" ? authority.sideEffectAuthority : undefined);
+				pendingDeliveries.push({
+					value: authority?.kind === "user-authoritative" ? authority.sideEffectAuthority : undefined,
+					...deliveryContentHash(candidate.data),
+				});
 			}
 			continue;
 		}
 		if (candidate.type === "message" && candidate.message?.role === "user" && pendingDeliveries.length > 0) {
-			const surface = pendingDeliveries.shift();
-			if (surface) latest = surface;
+			const delivery = takePendingDelivery(pendingDeliveries, seedMessageText(candidate.message));
+			if (delivery?.value) latest = delivery.value;
 		}
 	}
 	return latest;
+}
+
+/** A delivery marker waiting for its message. `hash` is absent on legacy markers. */
+interface PendingDelivery<T> {
+	readonly value: T;
+	readonly hash?: string;
+}
+
+function deliveryContentHash(data: unknown): { hash: string } | Record<string, never> {
+	const hash = data && typeof data === "object" ? (data as { contentHash?: unknown }).contentHash : undefined;
+	return typeof hash === "string" && /^[a-f0-9]{64}$/u.test(hash) ? { hash } : {};
+}
+
+/**
+ * Take the marker that belongs to a user message.
+ *
+ * A marker is written before its message, so the user can type a prompt in
+ * between. A marker that records the hash of what it delivers is matched by that
+ * hash. A message matching no hashed marker goes to the oldest legacy marker, or,
+ * with none, is the user's own and leaves every marker waiting. Legacy markers
+ * hold no hash, so they keep the old first-in-first-out pairing.
+ */
+function takePendingDelivery<T>(pending: Array<PendingDelivery<T>>, messageText: string): PendingDelivery<T> | undefined {
+	const hash = seedTextHash(messageText);
+	const exact = pending.findIndex((delivery) => delivery.hash === hash);
+	if (exact >= 0) return pending.splice(exact, 1)[0];
+	const legacy = pending.findIndex((delivery) => delivery.hash === undefined);
+	return legacy >= 0 ? pending.splice(legacy, 1)[0] : undefined;
 }
 
 type ExtensionDeliveryAuthority =
@@ -3000,29 +3033,49 @@ function recordedExtensionDeliveryAuthority(data: unknown): ExtensionDeliveryAut
 	return undefined;
 }
 
+/** Where one user message's authority came from. Carries a hash, never the text. */
+interface GroundingMessage {
+	readonly index: number;
+	readonly origin: "typed" | "delivery-marker-authoritative" | "delivery-marker-generated" | "generated-seed-echo";
+	readonly textHash: string;
+}
+
 function authoritativeSeedConversation(ctx: ExtensionContext): string {
+	return authoritativeSeedGrounding(ctx).text;
+}
+
+function authoritativeSeedGrounding(ctx: ExtensionContext): { text: string; messages: GroundingMessage[] } {
 	const generated = generatedSeedProvenanceForContext(ctx);
 	const generatedTexts = new Set(generated.flatMap((entry) => [entry.seed, entry.deliveredText]));
 	const authoritativeTexts: string[] = [];
-	const pendingDeliveries: Array<ExtensionDeliveryAuthority | undefined> = [];
+	const messages: GroundingMessage[] = [];
+	const pendingDeliveries: Array<PendingDelivery<ExtensionDeliveryAuthority | undefined>> = [];
+	let index = 0;
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type === "custom" && entry.customType === EXTENSION_DELIVERY_ENTRY_TYPE) {
 			const marker = entry.data as { retracted?: unknown } | undefined;
 			if (marker?.retracted === true) pendingDeliveries.pop();
-			else pendingDeliveries.push(recordedExtensionDeliveryAuthority(entry.data));
+			else pendingDeliveries.push({ value: recordedExtensionDeliveryAuthority(entry.data), ...deliveryContentHash(entry.data) });
 			continue;
 		}
 		if (entry.type !== "message" || entry.message.role !== "user") continue;
-		const deliveryAuthority = pendingDeliveries.shift();
-		if (deliveryAuthority?.kind === "extension-generated") continue;
-		const text = stripCacheReference(
-			deliveryAuthority?.kind === "user-authoritative"
-				? deliveryAuthority.text
-				: seedMessageText(entry.message),
-		);
-		if (text.length > 0 && !generatedTexts.has(text)) authoritativeTexts.push(text);
+		const messageText = seedMessageText(entry.message);
+		const deliveryAuthority = takePendingDelivery(pendingDeliveries, messageText)?.value;
+		const textHash = seedTextHash(messageText);
+		const position = index++;
+		if (deliveryAuthority?.kind === "extension-generated") {
+			messages.push({ index: position, origin: "delivery-marker-generated", textHash });
+			continue;
+		}
+		const text = stripCacheReference(deliveryAuthority?.kind === "user-authoritative" ? deliveryAuthority.text : messageText);
+		if (text.length > 0 && generatedTexts.has(text)) {
+			messages.push({ index: position, origin: "generated-seed-echo", textHash });
+			continue;
+		}
+		messages.push({ index: position, origin: deliveryAuthority ? "delivery-marker-authoritative" : "typed", textHash });
+		if (text.length > 0) authoritativeTexts.push(text);
 	}
-	return authoritativeTexts.join("\n\n");
+	return { text: authoritativeTexts.join("\n\n"), messages };
 }
 
 function cacheAuthorityReference(ctx: ExtensionContext): string | undefined {
@@ -3116,7 +3169,7 @@ function guardSeedForContext(
 	candidate: string,
 	origin: "generated-follow-up" | "explicit-raw-seed",
 	authoritativeText = authoritativeSeedConversation(ctx),
-): ReturnType<typeof guardGeneratedSeed> {
+): ReturnType<typeof guardGeneratedSeed> & { readonly groundingMessages: GroundingMessage[] } {
 	const workstream = authoritativeWorkstream(ctx);
 	const options = {
 		origin,
@@ -3133,9 +3186,10 @@ function guardSeedForContext(
 		// are weighed as separate instructions rather than one flattened string.
 		currentMutationAuthority: latestMutationAuthorityFromText(`${authoritativeText}\n\n${workstream?.objective ?? ""}`),
 	};
-	return seedAuthorityGuardMode(ctx) === "off"
+	const result = seedAuthorityGuardMode(ctx) === "off"
 		? acceptSeedWithoutGuard(candidate, options)
 		: guardGeneratedSeed(candidate, options);
+	return { ...result, groundingMessages: authoritativeSeedGrounding(ctx).messages };
 }
 
 // A refusal fallback is branded so an explicit operator seed cannot be dropped or
@@ -3391,6 +3445,8 @@ interface SeedHandoffMetadata {
 	authorityGuardCandidate?: SeedAuthoritySnapshot;
 	authorityGuardGrounded?: SeedAuthoritySnapshot;
 	authorityGuardChanges?: SideEffectAuthorityChange[];
+	/** Which messages grounded the guard and where each one's authority came from (hashes only). */
+	authorityGuardGroundingMessages?: GroundingMessage[];
 	authorityGuardCandidateText?: string;
 	authorityGuardCandidateTextTruncated?: boolean;
 	authorityGuardTriggers?: SeedAuthorityTrigger[];
@@ -3457,7 +3513,7 @@ function recordSeedAuthorityRefusal(
 }
 
 function authorityDecisionMetadata(
-	authority: SeedAuthorityGuardResult,
+	authority: SeedAuthorityGuardResult & { readonly groundingMessages?: readonly GroundingMessage[] },
 	fallback?: RefusedSeedFallback,
 ): Pick<SeedHandoffMetadata,
 	| "authorityGuardAccepted"
@@ -3466,6 +3522,7 @@ function authorityDecisionMetadata(
 	| "authorityGuardCandidate"
 	| "authorityGuardGrounded"
 	| "authorityGuardChanges"
+	| "authorityGuardGroundingMessages"
 	| "authorityGuardCandidateText"
 	| "authorityGuardCandidateTextTruncated"
 	| "authorityGuardTriggers"
@@ -3480,6 +3537,9 @@ function authorityDecisionMetadata(
 		authorityGuardCandidate: authority.candidate,
 		authorityGuardGrounded: authority.grounded,
 		authorityGuardChanges: authority.authorityChanges.map((change) => ({ ...change })),
+		...(authority.groundingMessages === undefined ? {} : {
+			authorityGuardGroundingMessages: authority.groundingMessages.map((message) => ({ index: message.index, origin: message.origin, textHash: message.textHash })),
+		}),
 		authorityGuardCandidateText: authority.candidateText,
 		authorityGuardCandidateTextTruncated: authority.candidateTextTruncated,
 		authorityGuardTriggers: authority.triggers.map((trigger) => ({ ...trigger, values: [...trigger.values] })),
@@ -4539,6 +4599,7 @@ function discardSessionCompaction(
 	extensionCompactionFailures.delete(sessionKey);
 	clearRetainedSummariesForSession(sessionKey);
 	compactionFlights.delete(sessionKey);
+	compactionStartedQuiet.delete(sessionKey);
 	if (pending && flight && pending.runId === flight.runId && (flight.state === "queued" || flight.state === "running")) {
 		pending.lifecycle?.onState(pending.runId, { state: "cancelled", stage });
 	}
@@ -4814,10 +4875,12 @@ function sendExtensionUserMessage(
 			authorityText: authority.text,
 			...(authority.sideEffectAuthority === undefined ? {} : { sideEffectAuthority: authority.sideEffectAuthority }),
 		};
+	// Lets a reader pair this marker with its own message even when the user types in between.
+	const contentHash = { contentHash: seedTextHash(seedMessageText({ content })) };
 	let marked = false;
 	if (typeof appendEntry === "function") {
 		try {
-			appendEntry(EXTENSION_DELIVERY_ENTRY_TYPE, { schemaVersion: 1, reason, ...authorityData });
+			appendEntry(EXTENSION_DELIVERY_ENTRY_TYPE, { schemaVersion: 1, reason, ...authorityData, ...contentHash });
 			marked = true;
 		} catch (error) {
 			debugLog(`extension delivery marker failed (${reason}): ${compactError(error)}`);
@@ -4829,7 +4892,7 @@ function sendExtensionUserMessage(
 	} catch (error) {
 		// Retract the claim: no message arrived for it to describe.
 		try {
-			appendEntry?.(EXTENSION_DELIVERY_ENTRY_TYPE, { schemaVersion: 1, reason, ...authorityData, retracted: true });
+			appendEntry?.(EXTENSION_DELIVERY_ENTRY_TYPE, { schemaVersion: 1, reason, ...authorityData, ...contentHash, retracted: true });
 		} catch (retractError) {
 			debugLog(`extension delivery marker retraction failed (${reason}): ${compactError(retractError)}`);
 		}
@@ -4965,7 +5028,9 @@ function sendCompactionRecoveryFollowUp(
 		debugLog("suppressed compaction recovery handoff because compaction is unavailable to context-aware");
 		return;
 	}
-	const followUp = buildFollowUp(seed);
+	const commandInvocation = metadata?.commandInvocation;
+	// A command seed is dispatched as a command, never rebuilt as recovery text.
+	const followUp = commandInvocation === undefined ? buildFollowUp(seed) : seed;
 	if (!followUp) return;
 	const sessionKey = sessionMetadataKey(ctx);
 	if (hasInterruptedRecoveryPending(sessionKey)) {
@@ -4973,12 +5038,28 @@ function sendCompactionRecoveryFollowUp(
 			pi,
 			ctx,
 			sessionKey,
-			() => sendCompactionRecoveryFollowUp(pi, ctx, seed, buildFollowUp, metadata),
+			// Only a command seed carries the failure into the replay, for its notice.
+			() => sendCompactionRecoveryFollowUp(pi, ctx, seed, buildFollowUp, metadata, commandInvocation === undefined ? undefined : failure),
 			failure,
 		);
 		return;
 	}
 	extensionCompactionFailures.delete(sessionKey);
+	if (commandInvocation !== undefined) {
+		// A worker's next prompt belongs to its supervisor: nothing is dispatched.
+		if (!roleBehaviour(ctx).autoSendSeed) return;
+		const commandName = metadata?.commandName;
+		const notice = `Compaction failed: ${failure?.message ?? "compaction did not complete"}; running /${commandName ?? "command"} without compaction`;
+		debugLog(notice);
+		// Not safeUi: it skips a context without UI, and this notice must not be dropped by a guard.
+		try {
+			ctx.ui.notify(notice, "error");
+		} catch (notifyError) {
+			debugLog(`compaction recovery command notice failed: ${compactError(notifyError)}`);
+		}
+		deliverCompactThenCommand(pi, ctx, commandInvocation, commandName);
+		return;
+	}
 	if (metadata?.seedOrigin !== "generated-follow-up") {
 		const authorityText = metadata?.seedApprovalEdited === undefined
 			? metadata?.rawSeedPrompt ?? seed
@@ -5045,23 +5126,56 @@ function sendCompactionRecoveryFollowUp(
  * naming the command. It never falls back to sending the command text as a seed.
  */
 function deliverCompactThenCommand(pi: ExtensionAPI, ctx: ExtensionContext, invocation: string, commandName: string | undefined): void {
+	const unavailable = compactThenSendUnavailableReason(ctx);
+	if (unavailable) {
+		reportCompactThenDispatchFailure(ctx, invocation, commandName, unavailable);
+		return;
+	}
 	try {
-		sendExtensionUserMessage(
-			pi,
-			"compaction-seed",
-			{ kind: "user-authoritative", text: invocation },
-			invocation,
-			{ deliverAs: "followUp", expandPromptTemplates: true },
-		);
+		const options = { deliverAs: "followUp", expandPromptTemplates: true } as const;
+		// Pi runs an extension command directly and appends no user message, so a marker
+		// written for it would never be claimed and would take the user's next message.
+		// Templates, skills and unknown sources expand into a user message: keep the marker.
+		const runsAsExtensionCommand = commandName !== undefined
+			&& pi.getCommands().some((command) => command.name === commandName && command.source === "extension");
+		if (runsAsExtensionCommand) pi.sendUserMessage(invocation, options);
+		else sendExtensionUserMessage(pi, "compaction-seed", { kind: "user-authoritative", text: invocation }, invocation, options);
 	} catch (error) {
-		const message = `Compaction finished, but /${commandName ?? "command"} could not be invoked: ${compactError(error)}. It was not sent as seed text; run ${invocation} yourself.`;
-		debugLog(message);
-		// Not safeUi: it skips a context without UI, and this error must not be dropped by a guard.
-		try {
-			ctx.ui.notify(message, "error");
-		} catch (notifyError) {
-			debugLog(`compact-then command dispatch failure notice failed: ${compactError(notifyError)}`);
-		}
+		reportCompactThenDispatchFailure(ctx, invocation, commandName, compactError(error));
+	}
+}
+
+/**
+ * Pi's sendUserMessage returns void and reports a rejected send only through its
+ * generic extension error, so a failure after the call cannot be observed here.
+ * The two causes that can be known beforehand are checked instead: no model, and
+ * a model whose provider has no configured auth. Remaining gap: a failure inside
+ * Pi after this check (for example an input-handler error) still surfaces only as
+ * Pi's generic "Extension error", pending an upstream promise or error callback.
+ * A registry without hasConfiguredAuth cannot answer, so it is not treated as a failure.
+ */
+function compactThenSendUnavailableReason(ctx: ExtensionContext): string | undefined {
+	const model = ctx.model;
+	if (!model) return "no model is selected";
+	const registry = ctx.modelRegistry as { hasConfiguredAuth?: (model: Model<Api>) => boolean } | null | undefined;
+	if (typeof registry?.hasConfiguredAuth !== "function") return undefined;
+	let configured: boolean;
+	try {
+		configured = registry.hasConfiguredAuth(model);
+	} catch {
+		return undefined;
+	}
+	return configured ? undefined : `no API key is available for provider ${model.provider ?? "unknown"}`;
+}
+
+function reportCompactThenDispatchFailure(ctx: ExtensionContext, invocation: string, commandName: string | undefined, reason: string): void {
+	const message = `Compaction finished, but /${commandName ?? "command"} could not be invoked: ${reason}. It was not sent as seed text; run ${invocation} yourself.`;
+	debugLog(message);
+	// Not safeUi: it skips a context without UI, and this error must not be dropped by a guard.
+	try {
+		ctx.ui.notify(message, "error");
+	} catch (notifyError) {
+		debugLog(`compact-then command dispatch failure notice failed: ${compactError(notifyError)}`);
 	}
 }
 
@@ -5709,6 +5823,15 @@ const overflowRecoveryArmed = new Set<string>();
 const overflowRecoveryAttempted = new Set<string>();
 /** When the latest user turn began, per session. An overflow reply that started earlier belongs to an older request. */
 const latestUserInputAt = new Map<string, number>();
+
+/** True when the host reports a run in flight; a host without `isIdle` or one that throws is not busy. */
+function hostReportsBusy(ctx: ExtensionContext): boolean {
+	try {
+		return typeof ctx.isIdle === "function" && ctx.isIdle() === false;
+	} catch {
+		return false;
+	}
+}
 // Repetition guard (pi-context-aware#255): one tracker per session, plus the warnings owed to calls.
 const repetitionTrackers = new Map<string, RepetitionTracker>();
 const repetitionWarnings = new Map<string, string>();
@@ -5750,6 +5873,10 @@ const providerDrainReasons = new Map<string, ProviderDrainReason>();
  * and is waited for instead of aborted (issue #291).
  */
 const compactionStartedQuiet = new Map<string, boolean>();
+/** Test seam: whether a quiet-start flag is still held for the session. */
+export function hasCompactionStartedQuiet(sessionKey: string): boolean {
+	return compactionStartedQuiet.has(sessionKey);
+}
 const shuttingDownSessions = new Set<string>();
 
 type ProactiveCompactionRequest = {
@@ -7474,18 +7601,10 @@ const compactFields = {
 				"Optional extra focus for the compaction summary itself, separate from the seed prompt. Use this to call out information that must survive the compaction even if it isn't part of the next phase's prompt (e.g. 'preserve the exact error message from step 3').",
 		})),
 	rewrite_seed: opt(bool({ description: "Override config for this call. true rewrites the seed before compaction; false preserves legacy raw-seed behavior." })),
-	ambiguity_mode: opt(stringEnum(["inherit", "ask", "cautious-proceed", "always-proceed"], {
-			description:
-				"Override config for this call. ask blocks on ambiguous seeds; cautious-proceed/always-proceed synthesize a self-contained prompt without user intervention.",
-		})),
 };
-// Only the exported type uses this schema now that compact_session is gone (pi-context-aware!297).
-const _compactSchema = obj(compactFields, { open: true });
-export type CompactSessionInput = Static<typeof _compactSchema>;
 
-/** context_compact takes the handoff arguments except ambiguity_mode (pi-context-aware#194). */
-const { ambiguity_mode: _ambiguityMode, ...contextCompactFields } = compactFields;
-const contextCompactSchema = obj(contextCompactFields, { open: true });
+/** context_compact takes the handoff arguments only; it has no ambiguity_mode (pi-context-aware#194). */
+const contextCompactSchema = obj(compactFields, { open: true });
 
 // context_compact's share of the context-tool guidance budget (pi-context-aware#195).
 const CONTEXT_COMPACT_SNIPPET = "context_compact({ seed_prompt, summary_focus? }) ends a phase and starts the next one with a fresh budget.";
@@ -8608,7 +8727,7 @@ function sessionLineageReferences(ctx: ExtensionContext): {
 	return { parentSessionFile, lineageSessionFiles, compactions, sessionFile };
 }
 
-function buildServiceSnapshot(ctx: ExtensionContext) {
+function buildServiceSnapshot(ctx: ExtensionContext, pi?: ExtensionAPI) {
 	const cfg = readConfig(ctx);
 	const usage = readUsage(ctx);
 	const cacheDir = getCacheDir(ctx);
@@ -8663,6 +8782,7 @@ function buildServiceSnapshot(ctx: ExtensionContext) {
 			proactiveCompaction: { ...cfg.proactiveCompaction },
 		},
 		pressureBands: contextPolicyBands(cfg),
+		...(pi ? { engine: resolveContextEngine({ tools: registeredToolViews(pi), override: resolveFoldConfig(ctx).engine ?? "auto" }) } : {}),
 	});
 }
 
@@ -8729,14 +8849,16 @@ function createContextAwareService(
 	policy: ContextPolicyController,
 	condensed: Pick<ContextAwareSkillsV1, "register" | "endOwner">,
 	folds: ContextAwareFoldsV1,
+	contributors: ContextAwareContributorsV1,
 ): ContextAwareServiceV1 {
 	return {
 		protocolVersion: CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION,
-		getSnapshot: () => buildServiceSnapshot(ctx),
+		getSnapshot: () => buildServiceSnapshot(ctx, pi),
 		modes: modes.capability(),
 		policy: policy.capability(ctx),
 		skills: { loaded: () => loadedSkillsOf(ctx.sessionManager), condensed: true, ...condensed },
 		folds,
+		contributors,
 		promoteArtifact(request): ContextAwareArtifactPromotionResultV1 {
 			let validated: ReturnType<typeof validateContextAwareArtifactPromotionRequestV1>;
 			try {
@@ -9078,8 +9200,8 @@ function createContextAwareService(
 			let state: "queued" | "running" = "queued";
 			if (arbitrateQueuedInteraction({ isIdle: ctx.isIdle() }).mayRun) {
 				try {
-					runPendingCompaction(pi, ctx);
-					state = "running";
+					// Only a call that started a compaction reports running; a deferred start stays queued.
+					if (runPendingCompaction(pi, ctx) !== undefined) state = "running";
 				} catch (err) {
 					return {
 						status: "failed",
@@ -9312,8 +9434,7 @@ export default function (pi: ExtensionAPI) {
 				ownerHandoffs.set(sessionKey, { runId, ...(seed === undefined ? {} : { seed }) });
 				let state: "queued" | "running" = "queued";
 				if (arbitrateQueuedInteraction({ isIdle: ctx.isIdle() }).mayRun) {
-					runPendingCompaction(pi, ctx);
-					state = "running";
+					if (runPendingCompaction(pi, ctx) !== undefined) state = "running";
 				}
 				return { status: state, runId };
 			},
@@ -9482,7 +9603,7 @@ export default function (pi: ExtensionAPI) {
 			if (typeof appendEntry === "function") appendEntry.call(pi, customType, data);
 		},
 		// Pointers only while the native fold engine is live, by the engine's own mode decision.
-		pointersEnabled: () => foldModeFor(registeredToolViews(pi)) === "live",
+		pointersEnabled: () => foldModeFor(registeredToolViews(pi), engineOverride) === "live",
 		restoreInvocation: () => {
 			const reachability = extensionToolReachability(pi, "context_recall");
 			if (!reachability.available) return undefined;
@@ -9495,6 +9616,13 @@ export default function (pi: ExtensionAPI) {
 		let hints = foldHintRegistries.get(ctx.sessionManager);
 		if (!hints) foldHintRegistries.set(ctx.sessionManager, hints = createFoldHints());
 		return hints;
+	};
+	// Contributors (pi-context-aware#300): one registry per session; their hints go to the session's fold hints.
+	const contributorRegistries = new WeakMap<object, Contributors>();
+	const contributorsOf = (ctx: ExtensionContext): Contributors => {
+		let contributors = contributorRegistries.get(ctx.sessionManager);
+		if (!contributors) contributorRegistries.set(ctx.sessionManager, contributors = createContributors(foldHintsOf(ctx)));
+		return contributors;
 	};
 	// Condensed skills (pi-context-aware#181), off unless folds.condensedSkills is on.
 	// The context of the newest run decides whether the setting is on for a load.
@@ -9628,6 +9756,8 @@ export default function (pi: ExtensionAPI) {
 
 	let registerHandoffSurfaces: (ctx?: ExtensionContext) => void = () => {};
 	let registerContextRecallSurface: (ctx: ExtensionContext) => void = () => {};
+	/** `folds.engine` as of the last session_start; the skill registry has no ctx to read it with. */
+	let engineOverride: ContextEngineOverride = "auto";
 	let disposeContextService = () => {};
 	let contextServiceAbortController: AbortController | undefined;
 
@@ -9749,6 +9879,10 @@ export default function (pi: ExtensionAPI) {
 					hints: true,
 					registerHint: (registration) => foldHintsOf(ctx).register(registration),
 					endOwner: (ownerKey) => foldHintsOf(ctx).endOwner(ownerKey),
+				}, {
+					v1: true,
+					register: (registration) => contributorsOf(ctx).register(registration),
+					endOwner: (ownerKey) => contributorsOf(ctx).endOwner(ownerKey),
 				}),
 			);
 		}
@@ -10013,6 +10147,8 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", async (_event, ctx) => {
 		activeBriefRecoveries.delete(ctx.sessionManager);
+		// Write the session's open metrics record before anything can remove the agent directory.
+		metricsRecorder.close(ctx);
 		// Withdraw first, so Fabric's engine compacts again even if later shutdown work fails.
 		claimController.shutdown();
 		ownerClaimCtx = undefined;
@@ -10107,7 +10243,9 @@ export default function (pi: ExtensionAPI) {
 		if (event.source !== "interactive" && event.source !== "rpc") return;
 		const sessionKey = sessionMetadataKey(ctx);
 		rememberDeliveredPrompt(sessionKey, event.text, event.images);
-		latestUserInputAt.set(sessionKey, Date.now());
+		// Only input that starts a new request, sent while Pi is idle, makes an older reply stale.
+		// A steer or follow-up queued mid-request must not make that request's own overflow look stale.
+		if (event.streamingBehavior === undefined && !hostReportsBusy(ctx)) latestUserInputAt.set(sessionKey, Date.now());
 		const preparation = proactivePreparationJobs.get(sessionKey);
 		if (preparation && proactiveSessionOwnerMatchesContext(ctx, preparation.owner)) {
 			cancelProactivePreparation(ctx, "superseded", "New user input superseded proactive seed preparation.");
@@ -10224,6 +10362,11 @@ export default function (pi: ExtensionAPI) {
 		const briefDelivery = recoveringBrief?.text ? null : planBriefDelivery(briefEntries, isUserTriggeredAgentStart(event), audience !== "worker" && focusTool.available);
 		const briefMessage = briefDelivery === null ? null : renderReachableToolInvocation(briefDelivery.text, "session_focus", focusTool);
 		if (briefDelivery !== null) pi.appendEntry(BRIEF_DELIVERY_ENTRY_TYPE, briefDelivery.receipt);
+		// Contributed text rides after the task list and brief. The shown record is appended before the
+		// per-turn message it anchors to; with no contributor the message is unchanged.
+		const contributorTurn = contributorsOf(ctx).planTurn(ctx.sessionManager, debugLog);
+		const contributorMessage = contributorTurn.text;
+		if (contributorTurn.shown.length > 0) pi.appendEntry(CONTRIBUTOR_SHOWN_ENTRY_TYPE, { version: 1, shown: contributorTurn.shown });
 		// Branch-derived metadata is stable between requests until a compaction
 		// changes the current branch, so its section changes only then.
 		let compactionCountPrompt: string | null = null;
@@ -10270,10 +10413,10 @@ export default function (pi: ExtensionAPI) {
 					bands: contextPolicyBands(config),
 				});
 			if (usageMessage === undefined) {
-				if (restartMessage || tasksContextMessage || briefMessage) {
+				if (restartMessage || tasksContextMessage || briefMessage || contributorMessage) {
 					result.message = {
 						customType: restartMessage ? "context-aware-restart-notice" : "context-aware-task-state",
-						content: [tasksContextMessage, briefMessage, restartMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
+						content: [tasksContextMessage, briefMessage, contributorMessage, restartMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
 						display: false,
 					};
 				}
@@ -10281,7 +10424,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			result.message = {
 				customType: "context-aware-usage-marker",
-				content: [tasksContextMessage, briefMessage, restartMessage, usageMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
+				content: [tasksContextMessage, briefMessage, contributorMessage, restartMessage, usageMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
 				display: false,
 				details: sizeUnmeasured
 					? { band: "UNKNOWN", percent: null, headroom: null }
@@ -10291,10 +10434,10 @@ export default function (pi: ExtensionAPI) {
 						headroom: u.headroom,
 					},
 			};
-		} else if (restartMessage || tasksContextMessage || briefMessage) {
+		} else if (restartMessage || tasksContextMessage || briefMessage || contributorMessage) {
 			result.message = {
 				customType: restartMessage ? "context-aware-restart-notice" : "context-aware-task-state",
-				content: [tasksContextMessage, briefMessage, restartMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
+				content: [tasksContextMessage, briefMessage, contributorMessage, restartMessage].filter((part) => part !== null && part !== undefined).join("\n\n"),
 				display: false,
 			};
 		}
@@ -10636,6 +10779,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
+			summary = appendCarrySection(summary, contributorsOf(ctx).carrySection(debugLog));
 			summary = annotateSummaryWithTranscript(summary, transcriptPath);
 			let details = annotateDetailsWithHandoff(
 				resultBase ? (resultBase as { details?: unknown }).details : undefined,
@@ -11076,8 +11220,10 @@ export default function (pi: ExtensionAPI) {
 	});
 	registerContextRecallSurface = (ctx: ExtensionContext): void => {
 		const tools = registeredToolViews(pi);
-		const surface = decideContextToolSurface(tools, sessionCompactionBlocker(ctx));
-		contextRecallSurface.apply(surface, isBillionContextPiLoaded(tools));
+		engineOverride = resolveFoldConfig(ctx).engine ?? "auto";
+		const engine = resolveContextEngine({ tools, override: engineOverride });
+		const surface = decideContextToolSurface(tools, sessionCompactionBlocker(ctx), engine);
+		contextRecallSurface.apply(surface, engine === "compaction-only");
 		contextFoldSurface.apply(surface);
 		contextStatusSurface.apply(surface);
 	};
@@ -11095,7 +11241,7 @@ export default function (pi: ExtensionAPI) {
 	// -- 6. Command: /compact-then ------------------------------------------
 	const registerCompactThenCommand = (): void => pi.registerCommand("compact-then", {
 		description:
-			"Compact and start a new phase. Usage: /compact-then [<seed prompt> | /<prompt-template> <args>] [--model <provider/id>]. Loaded prompt templates are resolved before seed rewriting. With no seed, generates one per the configured mode (see /context-aware-mode). A selected model is applied after compaction and persists for later turns.",
+			"Compact and start a new phase. Usage: /compact-then [<seed prompt> | /<command> <args>] [--model <provider/id>]. A seed that starts with /<command> runs that registered command after compaction, with no seed rewriting; an unknown command aborts before compacting. With no seed, generates one per the configured mode (see /context-aware-mode). A selected model is applied after compaction and persists for later turns.",
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			const compactionConfig = readConfig(ctx);
@@ -11124,11 +11270,12 @@ export default function (pi: ExtensionAPI) {
 			if (explicit) {
 				commandInvocation = parseCommandInvocation(explicit);
 				if (commandInvocation !== null) {
-					// Checked before compaction, which cannot be undone: an unknown command aborts here.
+					// Checked before compaction, which cannot be undone. An unregistered first word is not an
+					// error: the whole text is a free-text seed, as it was before command invocations existed.
 					const requested = commandInvocation.name;
 					if (!pi.getCommands().some((command) => command.name === requested)) {
-						ctx.ui.notify(`Cannot run /${requested} after compaction: no such command is registered. Nothing was compacted.`, "error");
-						return;
+						ctx.ui.notify(`/${requested} is not a registered command; using the text as the seed.`, "info");
+						commandInvocation = null;
 					}
 				}
 				rawSeed = explicit;
@@ -11265,7 +11412,7 @@ export default function (pi: ExtensionAPI) {
 	/** The tool follows the context tool surface decision (direct, hidden under a compaction blocker) and is hidden where nothing would deliver the seed. */
 	const applyCompactTools = (ctx: ExtensionContext | undefined, cfg: EffectiveConfig): void => {
 		const unreachable = cfg.compactionBlocker !== undefined || !compactSessionContinuation().available;
-		const surface = ctx ? decideContextToolSurface(registeredToolViews(pi), sessionCompactionBlocker(ctx)) : undefined;
+		const surface = ctx ? decideContextToolSurface(registeredToolViews(pi), sessionCompactionBlocker(ctx), resolveContextEngine({ tools: registeredToolViews(pi), override: resolveFoldConfig(ctx).engine ?? "auto" })) : undefined;
 		const exposure: ToolExposure = unreachable ? "hidden" : surface?.find((entry) => entry.name === "context_compact")?.exposure ?? "direct";
 		if (registeredCompactExposure === exposure) return;
 		registerCompactTool(exposure);

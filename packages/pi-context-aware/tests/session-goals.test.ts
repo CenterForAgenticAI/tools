@@ -14,7 +14,7 @@ async function withFixture(body: (fixture: FocusFixture) => Promise<void>, entri
 	try {
 		await body(fixture);
 	} finally {
-		fixture.cleanup();
+		await fixture.cleanup();
 	}
 }
 
