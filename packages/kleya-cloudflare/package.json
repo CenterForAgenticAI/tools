@@ -1,6 +1,6 @@
 {
-  "version": "0.1.0",
-  "description": "Kleya host for Cloudflare Workers and Durable Objects (WP-14): one direct Durable Object per root conversation.",
+  "version": "0.2.0",
+  "description": "Kleya host for Cloudflare Workers and Durable Objects: one Durable Object per session, on the host core.",
   "type": "module",
   "exports": {
     "./object": "./src/object.ts"
@@ -26,9 +26,9 @@
     "access": "public"
   },
   "dependencies": {
-    "@centerforagenticai/kleya-client": "0.1.0",
-    "@centerforagenticai/kleya-server": "0.1.0",
-    "@earendil-works/chord": "1.3.0",
-    "@earendil-works/pi-durable": "1.3.0"
+    "@centerforagenticai/kleya-client": "0.2.0",
+    "@centerforagenticai/kleya-server": "0.2.0",
+    "@earendil-works/chord": "1.5.0",
+    "@earendil-works/pi-durable": "1.5.0"
   }
 }
