@@ -1,26 +1,88 @@
 {
-  "version": "0.1.0",
-  "description": "Kleya server runtime that runs beside pi-durable. Skeleton (WP-0): subpaths only, no root barrel.",
+  "version": "0.2.0",
+  "description": "The Kleya server runtime beside pi-durable: session grants, the session host with its Node ports, the HTTP turn API, product HTTP tools and a model gateway.",
   "type": "module",
   "exports": {
-    "./grants": "./src/grants.ts",
-    "./context": "./src/context.ts",
-    "./feed": "./src/feed.ts",
-    "./host": "./src/host.ts",
-    "./host/chord": "./src/host/chord.ts",
-    "./tools": "./src/tools.ts",
-    "./tools/openapi": "./src/tools/openapi.ts",
-    "./interaction": "./src/interaction.ts",
-    "./exec": "./src/exec.ts",
-    "./egress": "./src/egress.ts",
-    "./events": "./src/events.ts",
-    "./testing": "./src/testing.ts"
+    "./grants": {
+      "kleya-source": "./src/grants.ts",
+      "types": "./lib/grants.d.ts",
+      "default": "./lib/grants.js"
+    },
+    "./context": {
+      "kleya-source": "./src/context.ts",
+      "types": "./lib/context.d.ts",
+      "default": "./lib/context.js"
+    },
+    "./feed": {
+      "kleya-source": "./src/feed.ts",
+      "types": "./lib/feed.d.ts",
+      "default": "./lib/feed.js"
+    },
+    "./host": {
+      "kleya-source": "./src/host.ts",
+      "types": "./lib/host.d.ts",
+      "default": "./lib/host.js"
+    },
+    "./http": {
+      "kleya-source": "./src/http.ts",
+      "types": "./lib/http.d.ts",
+      "default": "./lib/http.js"
+    },
+    "./node": {
+      "kleya-source": "./src/node.ts",
+      "types": "./lib/node.d.ts",
+      "default": "./lib/node.js"
+    },
+    "./tools": {
+      "kleya-source": "./src/tools.ts",
+      "types": "./lib/tools.d.ts",
+      "default": "./lib/tools.js"
+    },
+    "./tools/openapi": {
+      "kleya-source": "./src/tools/openapi.ts",
+      "types": "./lib/tools/openapi.d.ts",
+      "default": "./lib/tools/openapi.js"
+    },
+    "./interaction": {
+      "kleya-source": "./src/interaction.ts",
+      "types": "./lib/interaction.d.ts",
+      "default": "./lib/interaction.js"
+    },
+    "./exec": {
+      "kleya-source": "./src/exec.ts",
+      "types": "./lib/exec.d.ts",
+      "default": "./lib/exec.js"
+    },
+    "./egress": {
+      "kleya-source": "./src/egress.ts",
+      "types": "./lib/egress.d.ts",
+      "default": "./lib/egress.js"
+    },
+    "./gateway": {
+      "kleya-source": "./src/gateway.ts",
+      "types": "./lib/gateway.d.ts",
+      "default": "./lib/gateway.js"
+    },
+    "./events": {
+      "kleya-source": "./src/events.ts",
+      "types": "./lib/events.d.ts",
+      "default": "./lib/events.js"
+    },
+    "./testing": {
+      "kleya-source": "./src/testing.ts",
+      "types": "./lib/testing.d.ts",
+      "default": "./lib/testing.js"
+    }
   },
   "files": [
     "src",
+    "lib",
     "README.md",
     "LICENSE"
   ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
   "sideEffects": false,
   "name": "@centerforagenticai/kleya-server",
   "license": "MIT",
@@ -37,8 +99,13 @@
     "access": "public"
   },
   "dependencies": {
-    "@centerforagenticai/kleya-client": "0.1.0",
-    "@earendil-works/chord": "1.3.0",
-    "@earendil-works/pi-durable": "1.3.0"
+    "@centerforagenticai/kleya-client": "0.2.0",
+    "@earendil-works/chord": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-durable": "1.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2"
   }
 }
