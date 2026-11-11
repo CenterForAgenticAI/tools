@@ -1,17 +1,33 @@
 {
-  "version": "0.1.0",
-  "description": "Kleya client: Feed catch-up and protocol types for browsers and product frontends. Skeleton (WP-0).",
+  "version": "0.2.0",
+  "description": "Wire protocol types and cursor helpers for Kleya clients; the Feed client and its IndexedDB cache are still empty.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./protocol": "./src/protocol.ts",
-    "./indexeddb": "./src/indexeddb.ts"
+    ".": {
+      "kleya-source": "./src/index.ts",
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./protocol": {
+      "kleya-source": "./src/protocol.ts",
+      "types": "./lib/protocol.d.ts",
+      "default": "./lib/protocol.js"
+    },
+    "./indexeddb": {
+      "kleya-source": "./src/indexeddb.ts",
+      "types": "./lib/indexeddb.d.ts",
+      "default": "./lib/indexeddb.js"
+    }
   },
   "files": [
     "src",
+    "lib",
     "README.md",
     "LICENSE"
   ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
   "sideEffects": false,
   "name": "@centerforagenticai/kleya-client",
   "license": "MIT",
@@ -26,5 +42,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
   }
 }

@@ -2,7 +2,7 @@
 
 The Kleya client for browsers and product frontends: Feed catch-up by cursor, reconnect, a cache interface and the wire protocol types. It has no runtime dependency.
 
-Status: skeleton. The subpaths exist and load; their contents arrive with work package WP-2.
+Status: in progress. Every subpath exists and loads; only `./protocol` has its contents: the ids, conversation refs, cursors, wire types, error codes and limits that the server's turn API speaks. `.` and `./indexeddb` are still empty.
 
 | Subpath | Holds |
 |---|---|
