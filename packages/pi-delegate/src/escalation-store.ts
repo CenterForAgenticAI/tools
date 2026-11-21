@@ -199,6 +199,13 @@ export interface EscalationOutcome {
 	at: string;
 }
 
+/** Durable evidence that the consumer session persisted the reply. */
+export interface EscalationReceipt {
+	requestId: string;
+	toolCallId: string;
+	receivedAt: string;
+}
+
 /** Version of the durable outcome shape emitted by this implementation. */
 export const ESCALATION_OUTCOME_VERSION = 1 as const;
 
@@ -412,6 +419,10 @@ export function resolveEscalationRequestsDir(agentDir: string, rootRunId: string
 
 export function resolveEscalationResultsDir(agentDir: string, rootRunId: string): string {
 	return path.join(resolveEscalationsDir(agentDir, rootRunId), "results");
+}
+
+export function resolveEscalationReceiptsDir(agentDir: string, rootRunId: string): string {
+	return path.join(resolveEscalationsDir(agentDir, rootRunId), "receipts");
 }
 
 export function resolveEscalationMailboxesDir(agentDir: string, rootRunId: string): string {
@@ -699,6 +710,25 @@ export function readOutcome(args: ReadEscalationArgs): EscalationOutcome | null 
 	const request = readEscalationRequest(args);
 	if (!request) return null;
 	return readOutcomeUnchecked(args.agentDir, args.rootRunId, args.requestId);
+}
+
+export function readEscalationReceipt(args: ReadEscalationArgs): EscalationReceipt | null {
+	const value = readJson(receiptFileFor(args.agentDir, args.rootRunId, args.requestId));
+	return isRecord(value) && value.requestId === args.requestId && typeof value.toolCallId === "string" &&
+		typeof value.receivedAt === "string" ? value as unknown as EscalationReceipt : null;
+}
+
+/** A recorded receipt is final. */
+export function recordEscalationReceipt(args: ReadEscalationArgs, toolCallId: string): EscalationReceipt {
+	const file = receiptFileFor(args.agentDir, args.rootRunId, args.requestId);
+	ensureOwnerOnlyDir(path.dirname(file));
+	return withStateFileLock(file, () => {
+		const existing = readEscalationReceipt(args);
+		if (existing) return existing;
+		const receipt = { requestId: args.requestId, toolCallId, receivedAt: new Date().toISOString() };
+		atomicWriteJson(file, receipt);
+		return receipt;
+	});
 }
 
 /**
@@ -1264,6 +1294,11 @@ function requestFileFor(agentDir: string, rootRunId: string, requestId: string):
 function resultFileFor(agentDir: string, rootRunId: string, requestId: string): string {
 	assertSafeStem(requestId, "requestId");
 	return path.join(resolveEscalationResultsDir(agentDir, rootRunId), `${requestId}.json`);
+}
+
+function receiptFileFor(agentDir: string, rootRunId: string, requestId: string): string {
+	assertSafeStem(requestId, "requestId");
+	return path.join(resolveEscalationReceiptsDir(agentDir, rootRunId), `${requestId}.json`);
 }
 
 function mailboxFileFor(

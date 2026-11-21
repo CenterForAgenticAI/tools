@@ -38,8 +38,8 @@ import type { Extension } from "@earendil-works/pi-coding-agent";
 import { getOptionalGlobalToolEntries, type AgentConfig } from "./agents.js";
 import type { EffectiveEscalationPolicy } from "./escalation-policy.js";
 import { assertReadOnlyValue } from "./write-confinement.js";
-import { TASKS_TOOL_NAME } from "./task-seam.js";
-import { FOCUS_TOOL_NAME } from "./focus-seam.js";
+import { TASK_TOOL_NAMES } from "./task-seam.js";
+import { FOCUS_TOOL_NAMES } from "./focus-seam.js";
 import { PARENT_TRANSCRIPT_SEARCH_TOOL_NAME } from "./parent-transcript-search.js";
 import {
 	isPiDelegatePackageIdentifier,
@@ -125,7 +125,7 @@ export { ESCALATE_AMENDMENT_TOOL, ESCALATE_BLOCKER_TOOL, ESCALATE_DECISION_TOOL,
  * "Unknown tool names are ignored"). The caller decides whether a claimant is
  * actually present; see `claimedSessionToolNames`.
  */
-export const SESSION_DECLARATION_TOOL_NAMES: readonly string[] = [TASKS_TOOL_NAME, FOCUS_TOOL_NAME];
+export const SESSION_DECLARATION_TOOL_NAMES: readonly string[] = [...TASK_TOOL_NAMES, ...FOCUS_TOOL_NAMES];
 
 /**
  * Which claimed session-declaration tools a surface should gain.

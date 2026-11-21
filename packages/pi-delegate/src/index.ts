@@ -1,3 +1,4 @@
+import { typedLiteral, stringEnum } from "./schema-values.js";
 /**
  * delegate extension
  *
@@ -12,14 +13,13 @@
 import { DELEGATE_COMPLETE_CUSTOM_TYPE, DELEGATE_EVENTS, emitDelegateEvent } from "./events.js";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	type ToolDefinition,
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { Type, type TProperties, type TSchema, type TObject } from "typebox";
+import * as s from "@earendil-works/pi-schema";
 import { DELEGATE_RUNTIME_CAPABILITIES } from "./runtime-contract.js";
 export * from "./runtime-contract.js";
 import { prepareRuntimeToolArguments, RuntimeBoundaryError } from "./runtime-boundary.js";
@@ -56,7 +56,7 @@ import {
 } from "./control-surface.js";
 import { type ControlVisibilityState, visibleControlTools } from "./control-visibility.js";
 import { resolveChildCwd } from "./cwd-resolution.js";
-import { DelegateParams as CanonicalDelegateParams, prepareArguments } from "./delegate-params.js";
+import { DelegateParams as CanonicalDelegateParams, DelegateParamsWithoutManagement, prepareArguments, setManagementActionsEnabled } from "./delegate-params.js";
 import { buildDispatchEvidence, daemonDispatchEntries, persistDispatchEvidence, projectDispatchSteps, readDispatchEvidence, type DispatchEvidence } from "./dispatch-evidence.js";
 import { compileDelegateRuns, hasSupervisedProgress, SUPERVISED_PROGRESS_WARNING } from "./delegate-runs.js";
 import { assertNoRemovedArtifactFieldsAtIngress } from "./delegate-normalize.js";
@@ -99,7 +99,7 @@ import {
 } from "./pending-wakes.js";
 import { controlHints, modelInterfaceFor, setModelInterfaceProbe, type DelegateModelInterface } from "./model-interface.js";
 import { registerChildCompletionGate, waitForSessionShutdown } from "./worker-session-lifecycle.js";
-import { handleManagementAction, ManagementConfigSchema } from "./agent-management.js";
+import { handleManagementAction } from "./agent-management.js";
 import {
 	deliverEscalationToHolder,
 	drainUserEscalations,
@@ -133,7 +133,6 @@ import { applyInvocationOverrides, type InvocationAgentOverrides } from "./invoc
 import {
 	captureRunTimeoutDeadline,
 	isHardCancelEnabled,
-	MAX_TIMEOUT_MS,
 	resolveRunTimeoutPolicy,
 } from "./fork-timeout.js";
 import { wireSignalToDispatch } from "./dispatch-signal.js";
@@ -525,7 +524,6 @@ export {
 	type CliDelegateTaskInput,
 } from "./cli-delegate.js";
 
-const MAX_PARALLEL_ENTRIES = 6;
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_MAX_ROUNDS = 5;
 
@@ -681,60 +679,7 @@ function rootRunIdForNewRun(runId: string): string {
 	return currentLineageFrame()?.rootRunId ?? deserializeLineage(process.env)?.rootRunId ?? runId;
 }
 
-// SCHEMA BUDGET (issue: tool-schema context cost): these shared field schemas
-// are inlined by TypeBox into every slot that spreads them — 6 slots for the
-// escalation/confinement/removed-plane groups, 9-11 for skill/thinking/model.
-// A character trimmed here is a character saved 6-11 times in the serialized
-// tool schema the model carries in every request, so descriptions are kept to
-// the minimum a caller needs to pick the field. Full prose lives in
-// `docs/delegate-tool-api.md`.
-const InvocationSkillOverrideSchema = Type.Union(
-	[Type.String(), Type.Array(Type.String()), Type.Literal(false)],
-	{ description: "Skill name(s); false disables skills." },
-);
-function withDescription<T extends TSchema>(schema: T, description: string): T {
-	return { ...schema, description } as T;
-}
-
-const SlotSkillOverrideSchema = withDescription(
-	InvocationSkillOverrideSchema,
-	"false disables.",
-);
-const InvocationFallbackModelsSchema = Type.Union(
-	[Type.String(), Type.Array(Type.String())],
-	{ description: "Fallback model refs; comma-separated string or array." },
-);
-const SlotFallbackModelsSchema = withDescription(
-	InvocationFallbackModelsSchema,
-	"Fallback refs.",
-);
-const InvocationThinkingOverrideSchema = Type.Union([Type.String(), Type.Literal(false)], {
-	description: "Thinking level; false clears it.",
-});
-const SlotThinkingOverrideSchema = withDescription(
-	InvocationThinkingOverrideSchema,
-	"false clears.",
-);
-const RemovedPlaneConfigFields = {
-	decisionPlane: Type.Optional(Type.Unknown({ description: "Removed; ignored." })),
-	decisionRouting: Type.Optional(Type.Unknown({ description: "Removed; ignored." })),
-};
-
-function ClosedItemSchema<T extends TProperties>(properties: T): TObject<T> & { propertyNames: TSchema } {
-	const schema = Type.Object(properties, { additionalProperties: false }) as TObject<T> & { propertyNames: TSchema };
-	schema.propertyNames = Type.Union(
-		Object.keys(properties).map((key) => Type.Literal(key)) as unknown as [TSchema, TSchema, ...TSchema[]],
-	);
-	return schema;
-}
-
-/** Exact predecessor reference. Kept compact because this schema is reused in
- * all three ordinary delegate slot positions. */
-const RetryOfSchema = Type.Object({
-	runId: Type.String(),
-	forkName: Type.String(),
-}, { additionalProperties: false });
-
+// Canonical provider/runtime parameters live in delegate-params.ts.
 export function resolveHeartbeatConfig(
 	item: { heartbeat_interval_ms?: number; max_consecutive_heartbeats?: number },
 	defaults: { intervalMs?: number; maxConsecutive?: number } = {},
@@ -745,99 +690,6 @@ export function resolveHeartbeatConfig(
 	};
 }
 
-const EscalationTimeoutBehaviorSchema = Type.Union([
-	Type.Literal("useDefault"),
-	Type.Literal("noDefaultError"),
-	Type.Literal("cancel"),
-]);
-const EscalationPerKindTimeoutMsSchema = Type.Object({
-	decision: Type.Optional(Type.Integer({ minimum: 1 })),
-	blocker: Type.Optional(Type.Integer({ minimum: 1 })),
-	amendment: Type.Optional(Type.Integer({ minimum: 1 })),
-}, { additionalProperties: false });
-const EscalationPerKindTimeoutBehaviorSchema = Type.Object({
-	decision: Type.Optional(EscalationTimeoutBehaviorSchema),
-	blocker: Type.Optional(EscalationTimeoutBehaviorSchema),
-	amendment: Type.Optional(EscalationTimeoutBehaviorSchema),
-}, { additionalProperties: false });
-const EscalationInvocationSchema = Type.Union([
-	Type.Literal("off"),
-	Type.Literal("local"),
-	Type.Object({
-		mode: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("local")])),
-		authority: Type.Optional(Type.Object({
-			decision: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("implementation"), Type.Literal("all")])),
-			blocker: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("all")])),
-			amendment: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("all")])),
-			tags: Type.Optional(Type.Array(Type.String())),
-		}, { additionalProperties: false })),
-		intermediate: Type.Optional(Type.Boolean()),
-		hopTimeoutMs: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])),
-		timeoutMs: Type.Optional(Type.Union([
-			Type.Integer({ minimum: 1 }),
-			EscalationPerKindTimeoutMsSchema,
-		])),
-		timeoutBehavior: Type.Optional(Type.Union([
-			EscalationTimeoutBehaviorSchema,
-			EscalationPerKindTimeoutBehaviorSchema,
-		])),
-		holdStrategy: Type.Optional(Type.Union([
-			Type.Literal("hold-open"),
-			Type.Literal("park"),
-		], {
-			description: '"park" is reserved and rejected.',
-		})),
-	}, { additionalProperties: false }),
-], {
-	description:
-		'Escalation policy: "off" disables; "local" enables. Object form is a partial override. Requires background; reject await:true or sync:true.'
-});
-const SlotEscalationInvocationSchema = withDescription(
-	EscalationInvocationSchema,
-	"Per-slot escalation; requires background; reject await:true or sync:true."
-);
-const EscalationSlotField = {
-	escalation: Type.Optional(SlotEscalationInvocationSchema),
-};
-const EscalationRootField = {
-	escalation: Type.Optional(EscalationInvocationSchema),
-};
-
-/**
- * Per-slot writable-root authority (issue #51). Every shape carries the same
- * pair so a mixed invocation can widen or waive confinement independently per
- * worker. See `docs/write-confinement.md` for what is enforced and what is not.
- */
-const WriteConfinementSlotFields = {
-	writableRoots: Type.Optional(
-		Type.Array(Type.String()),
-	),
-	confineWrites: Type.Optional(
-		Type.Boolean(),
-	),
-	readOnly: Type.Optional(Type.Boolean()),
-};
-const WriteConfinementRootFields = {
-	writableRoots: Type.Optional(
-		Type.Array(Type.String(), {
-			description: "Extra writable roots beyond cwd, per-run scratch, and artifact roots; absolute or main-cwd-relative.",
-		}),
-	),
-	confineWrites: Type.Optional(
-		Type.Boolean({
-			description: "Confine writes to cwd, scratch, and `writableRoots`.",
-		}),
-	),
-	readOnly: Type.Optional(Type.Boolean({
-		description: "Enforce read-only policy.",
-	})),
-};
-
-/**
- * Wrap-up steer delivered to a fork's supervisor clone when the wall-clock
- * budget elapses. Distinguishable from a user/parent steer so the supervisor
- * knows to drive the worker to a final answer immediately (REQ-WIND-1).
- */
 const FORK_WIND_DOWN_STEER =
 	"[wind-down] This fork has reached its wall-clock budget. Stop starting new work and " +
 	"wrap up NOW: get the worker's final answer (or salvage its best current output) and call " +
@@ -846,37 +698,6 @@ const FORK_WIND_DOWN_STEER =
 const WALL_CLOCK_BUDGET_ACK =
 	"Budget acknowledgement: max_duration_ms can trigger wind-down, but hard cancellation is off while enforceWallClockBudget is false and perForkMaxDurationMs is 0.";
 
-
-// NAMING CONVENTION (issue #13 nit): the TOOL-FACING schema uses snake_case
-// field names (`snippet_last_n`, `clone_mode`, `max_rounds`, ...) because
-// that's the convention models are trained on for tool args; everything
-// INTERNAL uses camelCase (`snippetLastN`, `cloneMode`, `maxRounds`). The
-// mapping happens exactly once, at the tool-arg ingestion boundary (the
-// `execute` handlers below) — never deeper in the stack.
-// ── The dispatched checklist ───────────────────────────────────────────────
-// Named `checklist`, NOT `tasks`, on purpose: `tasks` is already this tool's
-// parallel-direct worker array, so a slot field of the same name would read
-// `tasks: [{agent, task, tasks: [...]}]` — two unrelated meanings one nesting
-// level apart. Given the Apr 2026 "1488 forks" incident, an ambiguity a model
-// can resolve the wrong way is not worth matching the issue's wording.
-//
-// Deliberately loose: a bare array of strings is what a caller actually
-// writes, and `parseSlotTasks` tolerates both that and the object form. A
-// schema strict enough to reject a half-right checklist would fail the whole
-// dispatch over a cosmetic detail.
-//
-// The description is carried ONCE, on the supervised slot, and the other three
-// shapes take the bare array. This schema is sent to the provider on every
-// call, and repeating ~190 bytes of prose four times buys nothing — a model
-// that has read it on `agents` knows the shape everywhere. See the size
-// ceiling in tests/unit/schema-validation.test.ts.
-const SlotChecklistSchema = Type.Array(Type.Unknown());
-
-/**
- * Convert the task contract's snake_case owner reference once, at the tool
- * boundary. The session-entry and bus payloads use the internal camelCase
- * spelling; runners never perform a second conversion.
- */
 function normalizeTaskSeedWire(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map(normalizeTaskSeedWire);
 	if (value === null || typeof value !== "object") return value;
@@ -891,484 +712,6 @@ function normalizeTaskSeedWire(value: unknown): unknown {
 	return output;
 }
 
-const DescribedChecklistSchema = Type.Array(Type.Unknown(), {
-	description:
-		"Checklist seeded into the worker before its first turn; strings or {title,status?,note?,subtasks?}.",
-});
-
-const SlotDepthField = {
-	maxSubagentDepth: Type.Optional(
-		Type.Integer({
-			minimum: 0,
-			maximum: HARD_MAX_DEPTH,
-		}),
-	),
-};
-
-const AgentItemSchema = ClosedItemSchema({
-	retryOf: Type.Optional(RetryOfSchema),
-	name: Type.Optional(
-		Type.String({
-			description:
-				"Handle for steering/cancel/recovery. Name it after the work; defaults to the agent name with #2, #3 suffixes for duplicates.",
-		}),
-	),
-	agent: Type.String({
-		description: "Agent definition name.",
-	}),
-	task: Type.String({
-		description: "Initial task. Exact first worker turn by default; supervisor-mediated delivery may refine it.",
-	}),
-	model: Type.Optional(
-		Type.String({ description: "Worker model override: provider/id or bare id." }),
-	),
-	env: Type.Optional(Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()]), {
-		description: "Per-slot env; null unsets; lineage vars ignored.",
-	})),
-	thinking: Type.Optional(SlotThinkingOverrideSchema),
-	thinkingMin: Type.Optional(SlotThinkingOverrideSchema),
-	thinkingMax: Type.Optional(SlotThinkingOverrideSchema),
-	fallbackModels: Type.Optional(SlotFallbackModelsSchema),
-	skill: Type.Optional(SlotSkillOverrideSchema),
-	skills: Type.Optional(SlotSkillOverrideSchema),
-	clone_mode: Type.Optional(
-		StringEnum(["full", "snippet", "task_only"] as const, {
-			description:
-				'How to seed the supervisor: "full" (whole history), "snippet" (last N messages), or "task_only" (task only).',
-		}) as any,
-	),
-	task_delivery: Type.Optional(
-		StringEnum(["supervisor-mediated", "direct-first-turn"] as const, {
-			description:
-				'How to deliver the supervised slot task: "direct-first-turn" (default) delivers the caller\'s exact task to the worker first, then seeds the supervisor with that completed exchange; "supervisor-mediated" lets the supervisor compose the first turn.',
-		}) as any,
-	),
-	snippet_last_n: Type.Optional(
-		Type.Number({ description: 'Messages included by clone_mode="snippet".' }),
-	),
-	max_duration_ms: Type.Optional(
-		Type.Integer({
-			minimum: 0,
-			maximum: MAX_TIMEOUT_MS,
-			description: "Fork wall-clock budget in ms; 0 disables it unless a global ceiling applies.",
-		}),
-	),
-	wind_down_grace_ms: Type.Optional(
-		Type.Integer({
-			minimum: 0,
-			maximum: MAX_TIMEOUT_MS,
-			description: "Grace after wind-down in ms; 0 hard-cancels immediately.",
-		}),
-	),
-	max_rounds: Type.Optional(
-		Type.Number({
-			description: `Maximum accepted worker-message rounds, including the direct first turn; default ${DEFAULT_MAX_ROUNDS}.`,
-		}),
-	),
-	collapse_mode: Type.Optional(
-		StringEnum(["final_output", "summary"] as const, {
-			description:
-				'Fork result: "final_output" returns finish_delegation verbatim; "summary" refines it with summary_model when configured.',
-		}) as any,
-	),
-	summary_model: Type.Optional(
-		Type.String({
-			description: 'Summary provider/model; "auto" uses the built-in default and fails closed if unavailable.',
-		}),
-	),
-	supervisor_instructions: Type.Optional(
-		Type.String({
-			description:
-				"Guidance for the supervisor clone.",
-		}),
-	),
-	cwd: Type.Optional(
-		Type.String({
-			description:
-				"Fork working directory; absolute or main-cwd-relative. Cannot be combined with top-level `worktree`.",
-		}),
-	),
-	interactive: Type.Optional(
-		Type.Boolean({
-			description:
-				"Route worker UI prompts to the overlay; otherwise prompts auto-deny. Enable only when the user is watching.",
-		}),
-	),
-	parentTranscriptSearch: Type.Optional(Type.Boolean({ description: "Grant capped search excerpts from the parent transcript." })),
-	...WriteConfinementSlotFields,
-	...SlotDepthField,
-	heartbeat_interval_ms: Type.Optional(
-		Type.Number({
-			description: "Heartbeat silence interval override (ms).",
-		}),
-	),
-	max_consecutive_heartbeats: Type.Optional(
-		Type.Number({
-			description: "Heartbeat limit before auto-escalation.",
-		}),
-	),
-	checklist: Type.Optional(DescribedChecklistSchema),
-	...EscalationSlotField,
-	...RemovedPlaneConfigFields,
-});
-
-const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
-	description:
-		'Agent discovery scope; builtins are always available.',
-	default: "both",
-}) as any;
-
-// ── Phase A: direct-mode common per-task fields ──────────────────────────────
-// Shared between the single-agent shape and entries inside the parallel
-// `tasks: […]` shape. NOT applied to supervised `agents: […]` entries —
-// the supervisor controls the message stream, so artifact/reads/progress are
-// only meaningful in direct mode.
-const DirectTaskFields = {
-	retryOf: Type.Optional(RetryOfSchema),
-	agent: Type.String({ description: "Agent definition name." }),
-	task: Type.String({ description: "Initial task for the worker." }),
-	checklist: Type.Optional(SlotChecklistSchema),
-	cwd: Type.Optional(
-		Type.String({
-			description: "Worker cwd.",
-		}),
-	),
-	artifact: Type.Optional(
-		Type.Union([Type.String(), Type.Literal(false)], {
-			description:
-				"Name one file the worker must write as its deliverable; the runtime resolves it to the worker's artifact workspace and tells the worker the exact absolute path to write. false suppresses an agent default.",
-		}),
-	),
-	reads: Type.Optional(
-		Type.Union([Type.Array(Type.String()), Type.Literal(false)], {
-			description: "Optional context files."
-		}),
-	),
-	parentTranscriptSearch: Type.Optional(Type.Boolean({ description: "Grant capped search excerpts from the parent transcript." })),
-	progress: Type.Optional(
-		Type.Boolean({
-			description: "Write progress."
-		}),
-	),
-	model: Type.Optional(
-		Type.String({ description: "Worker model override: provider/id or bare id." }),
-	),
-	env: Type.Optional(Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()]))),
-	thinking: Type.Optional(SlotThinkingOverrideSchema),
-	thinkingMin: Type.Optional(SlotThinkingOverrideSchema),
-	thinkingMax: Type.Optional(SlotThinkingOverrideSchema),
-	fallbackModels: Type.Optional(SlotFallbackModelsSchema),
-	skill: Type.Optional(SlotSkillOverrideSchema),
-	skills: Type.Optional(SlotSkillOverrideSchema),
-	interactive: Type.Optional(
-		Type.Boolean({
-			description: "Route per-task UI prompts.",
-		}),
-	),
-	...WriteConfinementSlotFields,
-	...SlotDepthField,
-	...EscalationSlotField,
-	...RemovedPlaneConfigFields,
-};
-
-// ── Direct-mode parallel task item (used inside `tasks: [...]`) ─────────
-const ParallelDirectTaskItem = ClosedItemSchema({
-	...DirectTaskFields,
-	count: Type.Optional(
-		Type.Number({
-			minimum: 1,
-			description: "Repeat this task N times in parallel.",
-		}),
-	),
-});
-
-// ── Phase B: chain shape ────────────────────────────────────────────────────
-// Sequential pipeline of direct-worker steps with optional parallel
-// fan-out. Template variables `{task}`, `{previous}`, `{chain_dir}` are
-// substituted in each step's task body. See `src/chain-execution.ts` for
-// semantics and `docs/subagent-parity-plan.md` §4 for the full design.
-
-const ChainSequentialStepSchema = Type.Object({
-	agent: Type.String({ description: "Agent definition name." }),
-	task: Type.Optional(
-		Type.String({
-			description:
-				"Task body; supports {task}, {previous}, {chain_dir}. Later omitted tasks use {previous}.",
-		}),
-	),
-	cwd: Type.Optional(Type.String()),
-	artifact: Type.Optional(Type.Union([Type.String(), Type.Literal(false)])),
-	reads: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Literal(false)])),
-	parentTranscriptSearch: Type.Optional(Type.Boolean({ description: "Grant capped search excerpts from the parent transcript." })),
-	progress: Type.Optional(Type.Boolean()),
-	skill: Type.Optional(SlotSkillOverrideSchema),
-	skills: Type.Optional(SlotSkillOverrideSchema),
-	model: Type.Optional(Type.String()),
-	env: Type.Optional(Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()]))),
-	thinking: Type.Optional(SlotThinkingOverrideSchema),
-	thinkingMin: Type.Optional(SlotThinkingOverrideSchema),
-	thinkingMax: Type.Optional(SlotThinkingOverrideSchema),
-	fallbackModels: Type.Optional(SlotFallbackModelsSchema),
-	interactive: Type.Optional(Type.Boolean()),
-	...WriteConfinementSlotFields,
-	...SlotDepthField,
-	...EscalationSlotField,
-	...RemovedPlaneConfigFields,
-});
-
-const ChainParallelSlotSchema = Type.Object({
-	agent: Type.String(),
-	task: Type.Optional(Type.String()),
-	cwd: Type.Optional(Type.String()),
-	artifact: Type.Optional(Type.Union([Type.String(), Type.Literal(false)])),
-	reads: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Literal(false)])),
-	parentTranscriptSearch: Type.Optional(Type.Boolean({ description: "Grant capped search excerpts from the parent transcript." })),
-	progress: Type.Optional(Type.Boolean()),
-	skill: Type.Optional(SlotSkillOverrideSchema),
-	skills: Type.Optional(SlotSkillOverrideSchema),
-	model: Type.Optional(Type.String()),
-	env: Type.Optional(Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()]))),
-	thinking: Type.Optional(SlotThinkingOverrideSchema),
-	thinkingMin: Type.Optional(SlotThinkingOverrideSchema),
-	thinkingMax: Type.Optional(SlotThinkingOverrideSchema),
-	fallbackModels: Type.Optional(SlotFallbackModelsSchema),
-	interactive: Type.Optional(Type.Boolean()),
-	...WriteConfinementSlotFields,
-	...SlotDepthField,
-	...EscalationSlotField,
-	...RemovedPlaneConfigFields,
-	name: Type.Optional(Type.String()),
-	count: Type.Optional(Type.Number({ minimum: 1 })),
-});
-
-const ChainParallelStepSchema = Type.Object({
-	parallel: Type.Array(ChainParallelSlotSchema, { minItems: 1 }),
-	concurrency: Type.Optional(Type.Number()),
-	failFast: Type.Optional(Type.Boolean()),
-	worktree: Type.Optional(Type.Boolean()),
-});
-
-const ChainStepSchema = Type.Union([ChainSequentialStepSchema, ChainParallelStepSchema]);
-
-// ── Unified DelegateParams (flat object, no top-level anyOf) ───────────────
-//
-// Replaces the prior `Type.Union([SupervisedShape, SingleDirectShape,
-// ParallelDirectShape, ChainShape])`. The Union worked fine for TypeBox
-// validation but emitted JSON Schema with `anyOf: [...]` at the top level,
-// which Claude Opus 4.x is observed to mishandle: when the chosen branch's
-// array value crosses a size threshold (~1KB) the model emits the array as
-// a JSON-encoded *string* instead of as proper JSON. See the Apr 2026
-// "1488 forks" incident in the README / commit log.
-//
-// Flattening eliminates the `anyOf`. We still detect which mode the caller
-// intended via `detectShape()` at the top of `execute()` and reject calls
-// that supply more than one of `agents` / `tasks` / `chain` / `{agent,task}`.
-// Retired from the advertised surface: legacy call shapes are absorbed
-// permanently by normalizeDelegateParams() and validated by
-// DelegateParamsInternal. It is retained here (not deleted) as the executable
-// record of the pre-redesign grammar that the normalizer must keep accepting;
-// deleting it cascades through ~600 lines of shared slot fragments, which is
-// the cutover issue's scope, not this one's.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const LegacyDelegateParams = Type.Object({
-	runs: Type.Optional(Type.Array(Type.Unknown())),
-	// ── Mode selectors (mutually exclusive — runtime-enforced) ────────
-	agents: Type.Optional(
-		Type.Array(AgentItemSchema, {
-			description: `Supervised multi-turn forks (1–${MAX_PARALLEL_ENTRIES}); results collapse to one entry for each supervised fork.`,
-			minItems: 1,
-			maxItems: MAX_PARALLEL_ENTRIES,
-		}),
-	),
-	tasks: Type.Optional(
-		Type.Array(ParallelDirectTaskItem, {
-			description: `Parallel one-turn workers without a supervisor (1–${MAX_PARALLEL_ENTRIES}); \`count\` repeats an entry.`,
-			minItems: 1,
-			maxItems: MAX_PARALLEL_ENTRIES,
-		}),
-	),
-	chain: Type.Optional(
-		Type.Union(
-			[
-				Type.Array(ChainStepSchema, { minItems: 1 }),
-				Type.String(),
-			],
-			{
-				description:
-					"Inline sequential steps (including `{parallel: [...]}`) or a saved `.chain.md` name; a string is equivalent to `chainName`.",
-			},
-		),
-	),
-	chainName: Type.Optional(
-		Type.String({
-			description:
-				"Saved `.chain.md` template; mutually exclusive with an inline `chain` array.",
-		}),
-	),
-	orchestrate: Type.Optional(
-		Type.Object(
-			{
-				agent: Type.String({
-					description:
-						"Driver agent with the full inherited tool set, including `delegate`.",
-				}),
-				task: Type.String({
-					description: "Driver's initial task for the pipeline.",
-				}),
-				checklist: Type.Optional(SlotChecklistSchema),
-				model: Type.Optional(
-					Type.String({ description: "Driver model override: provider/id or bare id." }),
-				),
-				env: Type.Optional(Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()]))),
-				maxSubagentDepth: Type.Optional(
-					Type.Integer({
-						minimum: 0,
-						maximum: HARD_MAX_DEPTH,
-						description:
-							`Driver sub-dispatch depth; minimum 3 supports foreground→driver→worker→reviewer, maximum ${HARD_MAX_DEPTH}.`,
-					}),
-				),
-			},
-			{
-				description: "Legacy top-level transport for a detached driver run.",
-			},
-		),
-	),
-
-	// ── Phase C: management actions ───────────────────────────────────
-	// Distinct dispatch path: `delegate({action: ...})` reads/writes the
-	// agent + chain definition files on disk. No worker session is
-	// created. Management actions are mutually exclusive with the
-	// run shapes above; supplying both is rejected at runtime.
-	action: Type.Optional(
-		StringEnum(["list", "get", "create", "update", "delete", "canonicalize", "health"] as const, {
-			description:
-				"Manage agent/chain files; `health` reports runtime state. When set, run shapes are ignored.",
-		}) as any,
-	),
-	config: Type.Optional(
-		// Same schema TypeBox 0.34's Type.Composite built: the properties, with these options.
-		Type.Object({ ...ManagementConfigSchema.properties }, {
-			// The accepted fields are already declared structurally by
-			// ManagementConfigSchema below; re-listing them in prose duplicated
-			// ~900 chars of schema for no added information.
-			description:
-				"Closed `create`/`update` payload; lists are JSON/YAML arrays, env values are strings or null, `false` clears supported optionals, and unknown fields are rejected.",
-		}),
-	),
-	agent: Type.Optional(
-		Type.String({
-			description:
-				"Single one-turn worker with `task`; mutually exclusive with `agents`, `tasks`, and `chain`.",
-		}),
-	),
-	task: Type.Optional(
-		Type.String({
-			description:
-				"Worker task; in chain mode, the original task supplied to every step.",
-		}),
-	),
-	retryOf: Type.Optional(RetryOfSchema),
-	checklist: Type.Optional(SlotChecklistSchema),
-
-	// ── Direct-mode per-call fields (single-direct only) ──────────────
-	cwd: Type.Optional(
-		Type.String({
-			description:
-				"Worker cwd; in chain mode, the base for steps without `cwd`. Absolute or main-cwd-relative.",
-		}),
-	),
-	artifact: Type.Optional(
-		Type.Union([Type.String(), Type.Literal(false)], {
-			description:
-				"Name one file the worker must write as its deliverable; the runtime resolves it to the worker's artifact workspace and tells the worker the exact absolute path to write. `false` suppresses an agent default.",
-		}),
-	),
-	reads: Type.Optional(
-		Type.Union([Type.Array(Type.String()), Type.Literal(false)], {
-			description: "Context files.",
-		}),
-	),
-	progress: Type.Optional(
-		Type.Boolean({
-			description:
-				"Append a 'done' line to `{chainDir}/progress.md` when complete.",
-		}),
-	),
-	model: Type.Optional(
-		Type.String({
-			description: "Worker model override: provider/id or bare id.",
-		}),
-	),
-	env: Type.Optional(Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()]))),
-	thinking: Type.Optional(InvocationThinkingOverrideSchema),
-	thinkingMin: Type.Optional(InvocationThinkingOverrideSchema),
-	thinkingMax: Type.Optional(InvocationThinkingOverrideSchema),
-	fallbackModels: Type.Optional(InvocationFallbackModelsSchema),
-	...SlotDepthField,
-	skill: Type.Optional(InvocationSkillOverrideSchema),
-	skills: Type.Optional(InvocationSkillOverrideSchema),
-	interactive: Type.Optional(
-		Type.Boolean({
-			description:
-				"Route worker UI prompts to the overlay; otherwise prompts auto-deny.",
-		}),
-	),
-	...WriteConfinementRootFields,
-	// Single-direct invocation capability. Other shapes must carry this field
-	// on each slot so mixed invocations can resolve policies independently.
-	...EscalationRootField,
-	...RemovedPlaneConfigFields,
-
-	// ── Chain-mode dir override ───────────────────────────────────────
-	chainDir: Type.Optional(
-		Type.String({
-			description:
-				"Chain directory override; useful for resuming progress records.",
-		}),
-	),
-
-	// ── Common (apply across modes where meaningful) ──────────────────
-	concurrency: Type.Optional(
-		Type.Number({
-			description: `Maximum concurrent runs; default ${DEFAULT_CONCURRENCY}.`,
-		}),
-	),
-	agent_scope: Type.Optional(AgentScopeSchema),
-	worktree: Type.Optional(
-		Type.Boolean({
-			description:
-				"Fresh git worktree per delegate entry in the OS tmpdir; requires a clean tree and conflicts with per-entry `cwd`.",
-		}),
-	),
-	await: Type.Optional(
-		Type.Boolean({
-			description:
-				"Defaults to background dispatch (`runId` then a wake); use true only when the result gates the next action.",
-		}),
-	),
-	notifyOnFailure: Type.Optional(
-		Type.Boolean({
-			description:
-				"Early `delegate:fork-failed` wake for terminal background failures; aggregate completion fires regardless.",
-		}),
-	),
-	sync: Type.Optional(
-		Type.Boolean({
-			description:
-				"Deprecated alias for `await`.",
-		}),
-	),
-}, {
-	additionalProperties: true,
-	// The flat-object rationale (provider array-stringifying) is documented in
-	// the block comment above; callers do not need it, so it stays out of the
-	// serialized description.
-	description: "Choose one delegate run shape.",
-});
-
-type LegacyDelegateParams = typeof LegacyDelegateParams extends infer T ? T : never;
-/** Provider schema retains permanent legacy selectors alongside canonical runs. */
 export const DelegateParams = CanonicalDelegateParams;
 
 /** Static model-facing surface registered for the delegate tool. */
@@ -1541,6 +884,77 @@ export function reasonToErrorText(reason: CancelReason): string {
 		case "never-constructed":
 			return "aborted: worker was never constructed";
 	}
+}
+
+/** One run entry on the caller's lineage: `childIndex` -1 means "unknown entry". */
+interface CallerLineageEntry {
+	runId: string;
+	childIndex: number;
+}
+
+/**
+ * #533 — the run entries whose worker is executing the current call: the
+ * caller's own entry and every ancestor entry, root first. Empty outside a
+ * worker. The live frame is in-process truth (its idPath lists each ancestor);
+ * a cross-process frame names only its own entry and its root run.
+ */
+function callerLineageEntries(): CallerLineageEntry[] {
+	const frame = currentLineageFrame() ?? deserializeLineage(process.env) ?? deserializeLineageDetached(process.env);
+	if (!frame) return [];
+	const entries: CallerLineageEntry[] = [];
+	for (const segment of frame.idPath ?? [`${frame.runId}#${frame.childIndex}`]) {
+		const separator = segment.lastIndexOf("#");
+		const childIndex = Number(segment.slice(separator + 1));
+		if (separator <= 0 || !Number.isInteger(childIndex)) continue;
+		entries.push({ runId: segment.slice(0, separator), childIndex });
+	}
+	if (frame.rootRunId && !entries.some((entry) => entry.runId === frame.rootRunId)) {
+		entries.unshift({ runId: frame.rootRunId, childIndex: -1 });
+	}
+	return entries;
+}
+
+/**
+ * True when cancelling `runId` (one entry, or the whole run when `forkName` is
+ * omitted) would abort the worker making this call. An entry that cannot be
+ * mapped to a name counts as containing the caller.
+ */
+function cancelTargetContainsCaller(runId: string, forkName: string | undefined): boolean {
+	const containing = callerLineageEntries().filter((entry) => entry.runId === runId);
+	if (containing.length === 0) return false;
+	if (forkName === undefined) return true;
+	const names = Object.keys(getRun(runId)?.forks ?? {});
+	return containing.some((entry) => names[entry.childIndex] === undefined || names[entry.childIndex] === forkName);
+}
+
+/** True when the current call runs inside the worker of `run`'s entry `name`. */
+function cancelReentersCaller(run: DelegateDispatchState, name: string): boolean {
+	const childIndex = Object.keys(run.forks).indexOf(name);
+	return childIndex >= 0 && callerLineageEntries().some((entry) => entry.runId === run.runId && entry.childIndex === childIndex);
+}
+
+function containsCallerCancelResult(
+	runId: string,
+	forkName: string | undefined,
+	targetLineagePath?: string,
+): { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown>; isError: true } {
+	const target = targetLineagePath ?? (forkName === undefined ? `runId=${runId}` : `entry "${forkName}" of runId=${runId}`);
+	return {
+		content: [{
+			type: "text",
+			text:
+				`Cannot cancel ${target}: it contains the calling worker (your own run or an ancestor of it). ` +
+				"Cancel only runs you dispatched; to stop your own work, finish and report instead.",
+		}],
+		details: {
+			runId,
+			...(forkName !== undefined ? { forkName } : {}),
+			...(targetLineagePath !== undefined ? { targetLineagePath } : {}),
+			containsCaller: true,
+			errorCode: "authorization-denied",
+		},
+		isError: true,
+	};
 }
 
 /** Repeated cancellation joins admitted work even after its entry becomes terminal. */
@@ -3133,7 +2547,7 @@ function assertInvocationLaunchOrTerminalize(cwd: string, admitted?: DelegateDis
 	catch (error) {
 		// A retry reservation has already committed. Keep its identity and publish a
 		// terminal setup failure; never launch it under a replacement session.
-		if (admitted && admitted.completedAt === undefined) completeRun(admitted.runId, finalizePrelaunchFailures(admitted, "Invoking session replaced before launch", cwd));
+		if (admitted && admitted.completedAt === undefined) completeRun(admitted, finalizePrelaunchFailures(admitted, "Invoking session replaced before launch", cwd));
 		throw error;
 	}
 }
@@ -3306,7 +2720,7 @@ export async function executeChainShape(args: ExecuteChainShapeArgs): Promise<{
 			// Synthesise a finalResult array for the registry by flattening
 			// every step's results in chronological order.
 			const flat = out.steps.flatMap((s) => s.results);
-			completeRunWithEscalationCleanup(runId, flat);
+			completeRunWithEscalationCleanup(runState, flat);
 			appendDelegateUsageMetadata(pi, runId, "chain", flat, args.agentDir);
 			return {
 				content: [{ type: "text", text: capDelegateOnlyResult(out.combinedContent, runId, { claimAdvisory: false, runId }).text }],
@@ -3322,7 +2736,7 @@ export async function executeChainShape(args: ExecuteChainShapeArgs): Promise<{
 				isError: out.anyFailed,
 			};
 		} catch (err: any) {
-			completeRunWithEscalationCleanup(runId, []);
+			completeRunWithEscalationCleanup(runState, []);
 			throw err;
 		}
 	}
@@ -3333,7 +2747,7 @@ export async function executeChainShape(args: ExecuteChainShapeArgs): Promise<{
 		.then((out) =>
 			containDispatchTail(runId, "chain", () => {
 				const flat = out.steps.flatMap((s) => s.results);
-				if (!completeRunWithEscalationCleanup(runId, flat)) return;
+				if (!completeRunWithEscalationCleanup(runState, flat)) return;
 				notifyCompletion(
 					wakeSink,
 					{
@@ -3351,7 +2765,7 @@ export async function executeChainShape(args: ExecuteChainShapeArgs): Promise<{
 			containDispatchTail(runId, "chain", () => {
 				const message = boundedErrorMessage(err);
 				logDelegateDiagnostic(`chain dispatch runId=${diagnosticIdentityText(runId)} failed: ${diagnosticErrorText(err)}`, { agentDir: args.agentDir });
-				if (!completeRunWithEscalationCleanup(runId, [])) return;
+				if (!completeRunWithEscalationCleanup(runState, [])) return;
 				notifyCompletion(
 					wakeSink,
 					{
@@ -3522,7 +2936,7 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 		try {
 			await persistDispatchEvidence(args.agentDir, args.dispatchEvidence);
 		} catch (error) {
-			if (preRegisteredRunState) completeRun(runId, finalizePrelaunchFailures(preRegisteredRunState, diagnosticErrorText(error), executionCwd));
+			if (preRegisteredRunState) completeRun(preRegisteredRunState, finalizePrelaunchFailures(preRegisteredRunState, diagnosticErrorText(error), executionCwd));
 			return { content: [{ type: "text", text: `delegate input evidence unavailable: ${diagnosticErrorText(error)}` }], details: { forks: [], errorCode: "input-unreadable" }, isError: true };
 		}
 	}
@@ -3550,7 +2964,7 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 			});
 		} catch (err: any) {
 			if (preRegisteredRunState) {
-				completeRun(runId, finalizePrelaunchFailures(preRegisteredRunState, `Failed to create worktrees: ${diagnosticErrorText(err)}`, executionCwd));
+				completeRun(preRegisteredRunState, finalizePrelaunchFailures(preRegisteredRunState, `Failed to create worktrees: ${diagnosticErrorText(err)}`, executionCwd));
 			}
 			return {
 				content: [{ type: "text", text: `Failed to create worktrees: ${err?.message ?? err}` }],
@@ -3572,7 +2986,7 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 		chainDir = prepareChainDir({ runId });
 	} catch (error) {
 		if (preRegisteredRunState) {
-			completeRun(runId, finalizePrelaunchFailures(preRegisteredRunState, `Failed to prepare chain directory: ${diagnosticErrorText(error)}`, executionCwd));
+			completeRun(preRegisteredRunState, finalizePrelaunchFailures(preRegisteredRunState, `Failed to prepare chain directory: ${diagnosticErrorText(error)}`, executionCwd));
 		}
 		return {
 			content: [{ type: "text", text: `Failed to prepare chain directory: ${(error as Error).message}` }],
@@ -3638,11 +3052,13 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 			cancelReason: reason,
 		});
 		drainPendingPrompts(runId, taskName);
-		try {
-			await refs?.worker?.abort();
-		} catch {
+		const settled = Promise.resolve(refs?.worker?.abort()).catch(() => {
 			/* swallow */
-		}
+		});
+		// #533 — abort() waits for the worker to go idle. When this worker is the
+		// caller, it cannot go idle until this cancel returns: fire, don't wait.
+		if (cancelReentersCaller(runState, taskName)) return;
+		await settled;
 	};
 	runState.cancel = createRunCanceller(runState, cancelOneTask);
 	if (args.recoveryDescriptors && args.recoveryDescriptors.size > 0) {
@@ -3733,7 +3149,7 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 							recovery: verdict,
 							...(patch.worktreeDiff !== undefined ? { worktreeDiff: patch.worktreeDiff } : {}),
 						},
-						{ agentDir: directAgentDir, ownerSessionId: args.ownerSessionId },
+						{ agentDir: directAgentDir, ownerSessionId: args.ownerSessionId, recoveryOffer: config.recoveryOffer !== false },
 					);
 					if (disposition === "cross-boundary" || disposition === "dropped") {
 						runState.recoveryDescriptors?.delete(forkName);
@@ -3777,7 +3193,7 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 			// #287: a run that received the wall-clock wrap-up reports steered=true
 			// whether it then finished inside grace or was hard-cancelled after it.
 			applyWindDownSteered(pumped.finalResults, windDownSteeredTasks);
-			completeRunWithEscalationCleanup(runId, pumped.finalResults);
+			completeRunWithEscalationCleanup(runState, pumped.finalResults);
 			appendDelegateUsageMetadata(pi, runId, "direct", pumped.finalResults, directAgentDir);
 			const detailsBase: { runId: string; shape: "direct"; forks: RunResultDetails[]; worktreeDiffs?: WorktreeDiff[]; usage: ReturnType<typeof aggregateRunResults>; usageByFork: ReturnType<typeof summarizeRunUsages> } = {
 				runId,
@@ -3798,7 +3214,7 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 				isError: pumped.anyFailed,
 			};
 		} catch (err: any) {
-			completeRunWithEscalationCleanup(runId, []);
+			completeRunWithEscalationCleanup(runState, []);
 			throw err;
 		}
 	}
@@ -3809,7 +3225,7 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 		.then((result) =>
 			containDispatchTail(runId, "direct", () => {
 				applyWindDownSteered(result.finalResults, windDownSteeredTasks);
-				if (!completeRunWithEscalationCleanup(runId, result.finalResults)) return;
+				if (!completeRunWithEscalationCleanup(runState, result.finalResults)) return;
 				notifyCompletion(
 					wakeSink,
 					{
@@ -3827,7 +3243,7 @@ export async function executeDirectShape(args: ExecuteDirectShapeArgs): Promise<
 			containDispatchTail(runId, "direct", () => {
 				const message = boundedErrorMessage(err);
 				logDelegateDiagnostic(`direct dispatch runId=${diagnosticIdentityText(runId)} failed: ${diagnosticErrorText(err)}`, { agentDir: directAgentDir });
-				if (!completeRunWithEscalationCleanup(runId, [])) return;
+				if (!completeRunWithEscalationCleanup(runState, [])) return;
 				notifyCompletion(
 					wakeSink,
 					{
@@ -4003,10 +3419,10 @@ function effectiveAgentsFor(
  * Canonical originator terminal hook (spec invariant 6). Nested runs have a
  * different rootRunId and must not purge their root's sibling escalations.
  */
-function completeRunWithEscalationCleanup(runId: string, finalResult: RunResult[]): boolean {
-	const run = getRun(runId);
-	const rootRunId = run?.rootRunId ?? runId;
-	const completed = completeRun(runId, finalResult);
+function completeRunWithEscalationCleanup(run: DelegateDispatchState, finalResult: RunResult[]): boolean {
+	const { runId } = run;
+	const rootRunId = run.rootRunId ?? runId;
+	const completed = completeRun(run, finalResult);
 	if (!completed) return false;
 	if (rootRunId !== runId) return true;
 	cleanupEscalationsForRun({
@@ -4047,7 +3463,7 @@ export default function (pi: ExtensionAPI) {
 	const toolHost = pi as unknown as {
 		registerTool: (definition: unknown) => void;
 	};
-	const validatedTool = (definition: { name: string; parameters: TSchema; execute: RuntimeToolExecute } & Record<string, unknown>) => {
+	const validatedTool = (definition: { name: string; parameters: s.Schema; execute: RuntimeToolExecute } & Record<string, unknown>) => {
 		const execute: RuntimeToolExecute = async (id, input, signal, update, ctx) => {
 			try {
 				if (definition.name === "delegate" && input && ["create", "update", "delete", "canonicalize"].includes(String(input.action)) && isDelegateOwnedExtensionApi(pi)) throw new RuntimeBoundaryError("authorization-denied", `delegate: nested delegate workers cannot run management mutation action '${input.action}'. Agent/chain definition changes must be made from the foreground or driver session.`);
@@ -4069,7 +3485,7 @@ export default function (pi: ExtensionAPI) {
 		};
 		return { ...definition, execute };
 	};
-	const registerRuntimeTool = (definition: { name: string; parameters: TSchema; execute: RuntimeToolExecute } & Record<string, unknown>) => {
+	const registerRuntimeTool = (definition: { name: string; parameters: s.Schema; execute: RuntimeToolExecute } & Record<string, unknown>) => {
 		definition = validatedTool(definition);
 		runtimeToolExecutors.set(definition.name, definition.execute);
 		// The consolidated surface (#265) keeps every legacy executor as an
@@ -4103,7 +3519,7 @@ export default function (pi: ExtensionAPI) {
 		setActiveTools: (names: string[]) => void;
 	}>;
 	const registerDeferredTool = (
-		definition: { name: string; parameters: TSchema; execute: RuntimeToolExecute } & Record<string, unknown>,
+		definition: { name: string; parameters: s.Schema; execute: RuntimeToolExecute } & Record<string, unknown>,
 	) => {
 		definition = validatedTool(definition);
 		// The executor is available to the runtime API from the start; only the
@@ -4433,14 +3849,11 @@ export default function (pi: ExtensionAPI) {
 		// bypass pi-ai's validator.
 		//
 		// It must be NON-DESTRUCTIVE. Only a canonical `runs[]` request is compiled
-		// here; every other shape is handed to the legacy router untouched. Running
+		// here (the tool boundary already recovered a JSON-string `runs`); every
+		// other shape is handed to the legacy router untouched. Running
 		// the closed internal validator over every internal call turned previously
 		// valid dispatches into hard errors, because internal callers legitimately
 		// pass runner-level shapes the advertised contract does not describe.
-		// Recover provider-stringified array params BEFORE the runs check, so a
-		// JSON-encoded `runs` (the same Opus-style quirk handled below for the
-		// legacy keys) still reaches the compiler instead of falling through to
-		// the legacy router and dying as "unknown shape".
 		{
 			const coerceNotes = coerceStringifiedArrayParams(params);
 			if (coerceNotes.length > 0) {
@@ -5434,7 +4847,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			await persistDispatchEvidence(getAgentDir(), dispatchEvidence);
 		} catch (error) {
-			if (preRegisteredRunState) completeRun(runId, finalizePrelaunchFailures(preRegisteredRunState, diagnosticErrorText(error), ctx.cwd));
+			if (preRegisteredRunState) completeRun(preRegisteredRunState, finalizePrelaunchFailures(preRegisteredRunState, diagnosticErrorText(error), ctx.cwd));
 			return { content: [{ type: "text" as const, text: `delegate input evidence unavailable: ${diagnosticErrorText(error)}` }], details: { forks: [], errorCode: "input-unreadable" }, isError: true };
 		}
 		assertInvocationLaunchOrTerminalize(ctx.cwd, preRegisteredRunState);
@@ -5461,7 +4874,7 @@ export default function (pi: ExtensionAPI) {
 				});
 			} catch (err: any) {
 				if (preRegisteredRunState) {
-					completeRun(runId, finalizePrelaunchFailures(preRegisteredRunState, `Failed to create worktrees: ${diagnosticErrorText(err)}`, ctx.cwd));
+					completeRun(preRegisteredRunState, finalizePrelaunchFailures(preRegisteredRunState, `Failed to create worktrees: ${diagnosticErrorText(err)}`, ctx.cwd));
 				}
 				return {
 					content: [
@@ -5690,13 +5103,24 @@ export default function (pi: ExtensionAPI) {
 			// Fire BOTH aborts concurrently. allSettled so neither starves the
 			// other; errors swallowed — fork is already marked aborted, and pi
 			// tears sessions down when the dispatch completes regardless.
-			await Promise.allSettled([
+			const aborted = Promise.allSettled([
 				refs?.clone?.abort(),
 				refs?.worker?.abort(),
 			]);
-			// Backstop: after a short grace for natural propagation, enumerate
-			// descendants started on or after this fork and SIGTERM/SIGKILL any
-			// survivors. Best-effort, Unix-only; Windows is a no-op.
+			// #533 — both aborts wait for their session to go idle. When the caller
+			// runs inside this fork (its worker or its supervisor), that session is
+			// busy with this very call: fire the aborts and the sweep, don't wait.
+			if (cancelReentersCaller(runState, forkName)) {
+				void aborted.then(() => sweepForkDescendants(forkName, reason));
+				return;
+			}
+			await aborted;
+			await sweepForkDescendants(forkName, reason);
+		};
+		// Backstop: after a short grace for natural propagation, enumerate
+		// descendants started on or after this fork and SIGTERM/SIGKILL any
+		// survivors. Best-effort, Unix-only; Windows is a no-op.
+		const sweepForkDescendants = async (forkName: string, reason: CancelReason): Promise<void> => {
 			await new Promise<void>((r) => setTimeout(r, 1000));
 			const forkStartedAtMs = forkStartTimes[forkName];
 			if (forkStartedAtMs !== undefined && process.platform !== "win32") {
@@ -5846,7 +5270,7 @@ export default function (pi: ExtensionAPI) {
 									strategy: contextAvailable ? "resume" : "fresh",
 								},
 							},
-							{ agentDir: getAgentDir(), ownerSessionId },
+							{ agentDir: getAgentDir(), ownerSessionId, recoveryOffer: config.recoveryOffer !== false },
 						);
 						if (disposition === "cross-boundary" || disposition === "dropped") {
 							runState.recoveryDescriptors?.delete(forkName);
@@ -6018,7 +5442,7 @@ export default function (pi: ExtensionAPI) {
 				applyResolvedTimeoutMetadata(pumped.finalResults, resolvedReqs, timeoutDeadlines);
 				applyWindDownSteered(pumped.finalResults, windDownSteeredRuns);
 				logDelegateDiagnostic(`${syncDiagnosticBase} stage=completeRun-start`, { agentDir: getAgentDir(), level: "log" });
-				completeRunWithEscalationCleanup(runId, pumped.finalResults);
+				completeRunWithEscalationCleanup(runState, pumped.finalResults);
 				logDelegateDiagnostic(`${syncDiagnosticBase} stage=completeRun-finished`, { agentDir: getAgentDir(), level: "log" });
 				appendDelegateUsageMetadata(pi, runId, "supervised", pumped.finalResults, getAgentDir());
 				const detailsBase: { runId: string; shape: "supervised"; forks: RunResultDetails[]; worktreeDiffs?: WorktreeDiff[]; usage: ReturnType<typeof aggregateRunResults>; usageByFork: ReturnType<typeof summarizeRunUsages> } = {
@@ -6052,7 +5476,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			} catch (err: any) {
 				logDelegateDiagnostic(`${syncDiagnosticBase} stage=catch error=${diagnosticErrorText(err)}`, { agentDir: getAgentDir() });
-				completeRunWithEscalationCleanup(runId, []);
+				completeRunWithEscalationCleanup(runState, []);
 				logDelegateDiagnostic(`${syncDiagnosticBase} stage=catch-completeRun-empty`, { agentDir: getAgentDir(), level: "log" });
 				throw err;
 			} finally {
@@ -6073,7 +5497,7 @@ export default function (pi: ExtensionAPI) {
 				containDispatchTail(runId, "supervised", () => {
 					applyResolvedTimeoutMetadata(result.finalResults, resolvedReqs, timeoutDeadlines);
 					applyWindDownSteered(result.finalResults, windDownSteeredRuns);
-					if (!completeRunWithEscalationCleanup(runId, result.finalResults)) return;
+					if (!completeRunWithEscalationCleanup(runState, result.finalResults)) return;
 					notifyCompletion(
 						wakeSink,
 						{
@@ -6091,7 +5515,7 @@ export default function (pi: ExtensionAPI) {
 				containDispatchTail(runId, "supervised", () => {
 					const message = boundedErrorMessage(err);
 					logDelegateDiagnostic(`dispatch runId=${diagnosticIdentityText(runId)} failed: ${diagnosticErrorText(err)}`, { agentDir: getAgentDir() });
-					if (!completeRunWithEscalationCleanup(runId, [])) return;
+					if (!completeRunWithEscalationCleanup(runState, [])) return;
 					notifyCompletion(
 						wakeSink,
 						{
@@ -6182,8 +5606,13 @@ export default function (pi: ExtensionAPI) {
 		});
 	};
 
+	// `managementActions: false` hides list/get/create from the model and refuses
+	// them at ingress. Read-only here: migration stays deferred to an invocation.
+	const managementActions = loadConfigReadOnly(getAgentDir()).managementActions !== false;
+	setManagementActionsEnabled(managementActions);
 	registerRuntimeTool({
 		...DELEGATE_TOOL_PROMPT,
+		parameters: managementActions ? DelegateParams : DelegateParamsWithoutManagement,
 		promptGuidelines: [...DELEGATE_PROMPT_GUIDELINES],
 
 		// Model ingress (spec §4, consumer 1). Legacy call shapes are absorbed here
@@ -6239,13 +5668,13 @@ export default function (pi: ExtensionAPI) {
 			"Only the raiser's tool call is held without model-token burn. Do not poll or keep a turn open: resolve within root authority, pass upward with delegate_escalate, or ask the operator and end the turn.",
 			"Resolve only within the root agent's declared authority. Use delegate_escalate for anything beyond it; user-held requests may be resolved only after the operator has chosen.",
 		],
-		parameters: Type.Object({
-			rootRunId: Type.Optional(Type.String({ description: "Root delegation run to inspect; omit to scan all roots." })),
-			requestIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
+		parameters: s.obj({
+			rootRunId: s.opt(s.str({ description: "Root delegation run to inspect; omit to scan all roots." })),
+			requestIds: s.opt(s.arr(s.str({ minLength: 1 }), {
 				minItems: 1,
 				description: "Optional request-id filter.",
 			})),
-		}),
+		}, { open: true }),
 		async execute(_toolCallId: string, params: { rootRunId?: string; requestIds?: string[] }) {
 			const escalations = listHeldEscalations({
 				agentDir: getAgentDir(),
@@ -6267,19 +5696,19 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Selections are zero-based option indices. Never infer an operator answer: onBehalfOfUser means the user actually chose it.",
 		],
-		parameters: Type.Object({
-			rootRunId: Type.Optional(Type.String({ description: "Root delegation run; required if requestId collides across roots." })),
-			requestId: Type.String({ minLength: 1, description: "Durable escalation request id." }),
-			selected: Type.Union([
-				Type.Integer({ minimum: 0, description: "Zero-based option index." }),
-				Type.Array(Type.Integer({ minimum: 0 }), { minItems: 1 }),
+		parameters: s.obj({
+			rootRunId: s.opt(s.str({ description: "Root delegation run; required if requestId collides across roots." })),
+			requestId: s.str({ minLength: 1, description: "Durable escalation request id." }),
+			selected: s.union([
+				s.int({ minimum: 0, description: "Zero-based option index." }),
+				s.arr(s.int({ minimum: 0 }), { minItems: 1 }),
 			]),
-			customInstruction: Type.Optional(Type.String({ description: "Free-text instruction; valid only with the custom instruction option selected exclusively." })),
-			note: Type.Optional(Type.String({ description: "Optional audit note." })),
-			onBehalfOfUser: Type.Optional(Type.Boolean({
+			customInstruction: s.opt(s.str({ description: "Free-text instruction; valid only with the custom instruction option selected exclusively." })),
+			note: s.opt(s.str({ description: "Optional audit note." })),
+			onBehalfOfUser: s.opt(s.bool({
 				description: "True only when recording an option the operator explicitly chose; outcome attribution becomes user.",
 			})),
-		}),
+		}, { open: true }),
 		async execute(_toolCallId: string, params: {
 			rootRunId?: string;
 			requestId: string;
@@ -6315,12 +5744,12 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use for scope/product, security/permission, irreversible, external-side-effect, meaningful-cost, or any other request beyond root authority.",
 		],
-		parameters: Type.Object({
-			rootRunId: Type.Optional(Type.String({ description: "Root delegation run; omit to scan all roots." })),
-			requestIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
-			context: Type.Optional(Type.String({ description: "Context appended to the forwarding trace." })),
-			recommendation: Type.Optional(Type.String({ description: "Recommendation appended to the forwarding trace." })),
-		}),
+		parameters: s.obj({
+			rootRunId: s.opt(s.str({ description: "Root delegation run; omit to scan all roots." })),
+			requestIds: s.opt(s.arr(s.str({ minLength: 1 }), { minItems: 1 })),
+			context: s.opt(s.str({ description: "Context appended to the forwarding trace." })),
+			recommendation: s.opt(s.str({ description: "Recommendation appended to the forwarding trace." })),
+		}, { open: true }),
 		async execute(_toolCallId: string, params: {
 			rootRunId?: string;
 			requestIds?: string[];
@@ -6354,35 +5783,27 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use sparingly — frequent steering defeats the purpose of delegation. Prefer waiting for completion unless the entry is clearly off-track or the user explicitly asks you to intervene.",
 		],
-		parameters: Type.Object({
-			runId: Type.String({
+		parameters: s.obj({
+			runId: s.str({
 				description: "The runId returned by the originating delegate call.",
 			}),
-			forkName: Type.Optional(
-				Type.String({
+			forkName: s.opt(s.str({
 					description:
 						"Name of a specific run entry within the run. The display label shown in the widget also resolves, when exactly one live entry owns it. Omit to broadcast the message to every still-running entry in the batch \u2014 a name that cannot be resolved is an error, never a broadcast.",
-				}),
-			),
-			message: Type.String({ description: "Guidance text to deliver to the supervisor." }),
-			deliverAs: Type.Optional(
-				StringEnum(["steer", "followUp", "queue"] as const, {
+				})),
+			message: s.str({ description: "Guidance text to deliver to the supervisor." }),
+			deliverAs: s.opt(stringEnum(["steer", "followUp", "queue"] as const, {
 					description:
 						"Delivery mode: steer interrupts the current turn, followUp waits for it, queue defers to the next round. Default: steer → followUp → queue.",
-				}) as any,
-			),
-			targetLineagePath: Type.Optional(
-				Type.String({
+				})),
+			targetLineagePath: s.opt(s.str({
 					description:
 						"Lineage path `<rootRunId>/<runId>#<childIndex>` of a nested child; requires `capToken`. Omit to steer the immediate run entry.",
-				}),
-			),
-			capToken: Type.Optional(
-				Type.String({
+				})),
+			capToken: s.opt(s.str({
 					description: "Capability token authorizing a nested steer; required with `targetLineagePath`.",
-				}),
-			),
-		}),
+				})),
+		}, { open: true }),
 		async execute(_toolCallId, params: any, _signal, _onUpdate, ctx) {
 			// Nested control-inbox routing (REQ-BUS-3): when a lineage path is
 			// supplied, the target is a DEEPLY-NESTED child rather than the
@@ -6683,35 +6104,27 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Cancelling is destructive — the worker loses its in-flight state. Prefer `delegate_steer` for course-corrections. Only cancel when the user asks for it or when steering can't resolve the situation.",
 		],
-		parameters: Type.Object({
-			runId: Type.String({
+		parameters: s.obj({
+			runId: s.str({
 				description: "The runId returned by the originating delegate call.",
 			}),
-			forkName: Type.Optional(
-				Type.String({
+			forkName: s.opt(s.str({
 					minLength: 1,
 					description:
 						"Name of a specific run entry to cancel. The display label shown in the widget also resolves, when exactly one live entry owns it. Omit to cancel every still-running entry in the batch \u2014 a name that cannot be resolved is an error, never a cancel-all.",
-				}),
-			),
-			reason: Type.Optional(
-				Type.String({
+				})),
+			reason: s.opt(s.str({
 					description:
 						'Free-text note included in the log line. The cancelReason stamped on the run entry is always "supervisor" when this tool fires (distinct from "user" / "timeout" / "shutdown").',
-				}),
-			),
-			targetLineagePath: Type.Optional(
-				Type.String({
+				})),
+			targetLineagePath: s.opt(s.str({
 					description:
 						"Lineage path `<rootRunId>/<runId>#<childIndex>` of a nested child; requires `capToken`. Omit to cancel the immediate run entry.",
-				}),
-			),
-			capToken: Type.Optional(
-				Type.String({
+				})),
+			capToken: s.opt(s.str({
 					description: "Capability token authorizing a nested cancel; required with `targetLineagePath`.",
-				}),
-			),
-		}),
+				})),
+		}, { open: true }),
 		async execute(_toolCallId: string, params: Record<string, unknown>, _signal: unknown, _onUpdate: unknown, ctx: ExtensionContext) {
 			return delegateCancelTool.executeForInitiator(
 				params as DelegateCancelExecutionParams,
@@ -6738,6 +6151,18 @@ export default function (pi: ExtensionAPI) {
 					details: { runId: params.runId, forkName: params.forkName },
 					isError: true,
 				};
+			}
+			// #533 — a worker must not cancel the run entry it is executing in, or
+			// an ancestor of it. Checked before any route or ownership decision so
+			// the answer does not depend on which surface authorized the call:
+			// the cancel would await this very worker going idle and never return.
+			if (params.targetLineagePath) {
+				const segment = /\/([^/#]+)#(\d+)$/.exec(params.targetLineagePath);
+				const containsCaller = segment !== null && callerLineageEntries().some((entry) =>
+					entry.runId === segment[1] && (entry.childIndex < 0 || entry.childIndex === Number(segment[2])));
+				if (containsCaller) return containsCallerCancelResult(segment[1]!, undefined, params.targetLineagePath);
+			} else if (cancelTargetContainsCaller(params.runId, params.forkName)) {
+				return containsCallerCancelResult(params.runId, params.forkName);
 			}
 			const controlPayload =
 				params.reason !== undefined || params.forkName !== undefined
@@ -6968,6 +6393,10 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 			}
+			// A display label can resolve to the caller's own entry.
+			if (cancelForkName !== params.forkName && cancelTargetContainsCaller(params.runId, cancelForkName)) {
+				return containsCallerCancelResult(params.runId, cancelForkName);
+			}
 			if (!run.cancel) {
 				return {
 					content: [{ type: "text" as const, text: "Cancel is not wired for this run." }],
@@ -7053,16 +6482,16 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use after a delegate:fork-failed wake with recoveryAvailable=true. Target only the failed entry. Never re-run healthy siblings.",
 		],
-		parameters: Type.Object({
-			runId: Type.String({ description: "The runId from the failure wake." }),
-			forkName: Type.Optional(Type.String({ description: "The failed entry name; omit for daemon driver recovery." })),
-			strategy: Type.Optional(Type.Union([
-				Type.Literal("auto"),
-				Type.Literal("fresh"),
-				Type.Literal("resume"),
+		parameters: s.obj({
+			runId: s.str({ description: "The runId from the failure wake." }),
+			forkName: s.opt(s.str({ description: "The failed entry name; omit for daemon driver recovery." })),
+			strategy: s.opt(s.union([
+				typedLiteral("auto"),
+				typedLiteral("fresh"),
+				typedLiteral("resume"),
 			], { description: "Recovery strategy: auto (default), fresh, or resume. `resume` fails closed if no prior context is available." })),
-			message: Type.Optional(Type.String({ description: "Optional bounded guidance prepended to the recovery task as context. Incorporated on the first concurrent call; later concurrent calls see the already-launched outcome." })),
-		}),
+			message: s.opt(s.str({ description: "Optional bounded guidance prepended to the recovery task as context. Incorporated on the first concurrent call; later concurrent calls see the already-launched outcome." })),
+		}, { open: true }),
 		async execute(_toolCallId, params: any, _signal, _onUpdate, ctx) {
 			const daemonCfg = typeof params.runId === "string"
 				? readDaemonDriverRecord(getAgentDir(), params.runId)
@@ -7266,7 +6695,7 @@ export default function (pi: ExtensionAPI) {
 		name: "delegate_prompt_status",
 		label: "Delegate Prompt Status",
 		description: "Read the durable pi-daemon prompt outcome for a detached driver without acquiring a lease.",
-		parameters: Type.Object({ runId: Type.String() }),
+		parameters: s.obj({ runId: s.str() }, { open: true }),
 		async execute(_toolCallId, params: any) {
 			if (!readDaemonDriverCfg(getAgentDir(), params.runId)) {
 				return { content: [{ type: "text" as const, text: `runId=${params.runId} is not a daemon driver.` }], details: { runId: params.runId }, isError: true };
@@ -7291,7 +6720,7 @@ export default function (pi: ExtensionAPI) {
 		name: "delegate_follow_up",
 		label: "Delegate Follow Up",
 		description: "Queue a post-turn instruction for a detached pi-daemon driver.",
-		parameters: Type.Object({ runId: Type.String(), message: Type.String() }),
+		parameters: s.obj({ runId: s.str(), message: s.str() }, { open: true }),
 		async execute(_toolCallId, params: any, _signal, _onUpdate, ctx) {
 			try {
 				const daemonCfg = readDaemonDriverCfg(getAgentDir(), params.runId);
@@ -7316,15 +6745,15 @@ export default function (pi: ExtensionAPI) {
 		name: "delegate_ui_answer",
 		label: "Delegate UI Answer",
 		description: "Answer one correlated UI question for a detached pi-daemon driver while holding its driver lease.",
-		parameters: Type.Object({
-			runId: Type.String(),
-			questionId: Type.String(),
-			answer: Type.Union([
-				Type.Object({ value: Type.String() }, { additionalProperties: false }),
-				Type.Object({ confirmed: Type.Boolean() }, { additionalProperties: false }),
-				Type.Object({ cancelled: Type.Literal(true) }, { additionalProperties: false }),
+		parameters: s.obj({
+			runId: s.str(),
+			questionId: s.str(),
+			answer: s.union([
+				s.obj({ value: s.str() }, { open: false }),
+				s.obj({ confirmed: s.bool() }, { open: false }),
+				s.obj({ cancelled: typedLiteral(true) }, { open: false }),
 			]),
-		}),
+		}, { open: true }),
 		async execute(_toolCallId, params: any, _signal, _onUpdate, ctx) {
 			try {
 				const daemonCfg = readDaemonDriverCfg(getAgentDir(), params.runId);
@@ -7396,18 +6825,16 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Call once for a terminal run. Never loop or sleep waiting for one.",
 		],
-		parameters: Type.Object({
-			runId: Type.String({
+		parameters: s.obj({
+			runId: s.str({
 				description: "The runId returned by the originating delegate call.",
 			}),
-			tail: Type.Optional(Type.Boolean({ description: "Request the full bounded childlog tail." })),
-			tailLines: Type.Optional(
-				Type.Integer({
+			tail: s.opt(s.bool({ description: "Request the full bounded childlog tail." })),
+			tailLines: s.opt(s.int({
 					description: "Requested childlog tail lines; server-clamped to 256.",
 					minimum: 0,
-				}),
-			),
-		}),
+				})),
+		}, { open: true }),
 		async execute(_toolCallId, params: any) {
 			const daemonRecord = readDaemonDriverRecord(getAgentDir(), params.runId);
 			if (daemonRecord) {
@@ -7573,18 +7000,14 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Never loop or repeatedly call this waiting for a run to complete.",
 		],
-		parameters: Type.Object({
-			runId: Type.Optional(
-				Type.String({ description: "Only show this run's status. Optional — default lists all." }),
-			),
-			tail: Type.Optional(Type.Boolean({ description: "Request the full bounded childlog tail." })),
-			tailLines: Type.Optional(
-				Type.Integer({
+		parameters: s.obj({
+			runId: s.opt(s.str({ description: "Only show this run's status. Optional — default lists all." })),
+			tail: s.opt(s.bool({ description: "Request the full bounded childlog tail." })),
+			tailLines: s.opt(s.int({
 					description: "Requested childlog tail lines; server-clamped to 256.",
 					minimum: 0,
-				}),
-			),
-		}),
+				})),
+		}, { open: true }),
 		async execute(_toolCallId, params: any) {
 			// Spec 0008 / REQ-INTRO-1/2/5: resolve through the shape-agnostic
 			// resolver — NO branch on shape/transport. With a runId → that run's
@@ -7742,9 +7165,9 @@ export default function (pi: ExtensionAPI) {
 			"Search only for a focused query. Results are capped per excerpt and overall; this is not a bulk transcript export.",
 			"The parent transcript may contain user-provided secrets or other sensitive text. Use this capability only when the dispatch granted it.",
 		],
-		parameters: Type.Object({
-			query: Type.String({ minLength: 1, description: "Case-insensitive text to find in the parent transcript." }),
-		}),
+		parameters: s.obj({
+			query: s.str({ minLength: 1, description: "Case-insensitive text to find in the parent transcript." }),
+		}, { open: true }),
 		async execute(_toolCallId, params: Record<string, unknown>, _signal, _onUpdate, ctx) {
 			const snapshot = ctx ? getParentTranscriptSnapshot(ctx.sessionManager) : undefined;
 			if (!snapshot) {
@@ -7821,51 +7244,41 @@ export default function (pi: ExtensionAPI) {
 			"Status is a one-off diagnostic: its surfaced last-activity silence (`last activity <N>s ago`) is runtime/channel activity. Silence is evidence, not proof, of a stall.",
 			"Prefer action:\"steer\" or checking context over action:\"cancel\": cancellation is destructive and loses the entry's in-flight state, while steering course-corrects it.",
 		],
-		parameters: Type.Object({
-			// StringEnum, not Type.Union: a union emits anyOf/const, which is
-			// semantically identical but 304 characters larger across these two
-			// tools — paid on EVERY provider request. The `as any` is the price of
-			// two TypeBox copies resolving in this tree, and every StringEnum call
-			// site in this file already carries it. Context is the scarcer budget.
-			action: StringEnum(["status", "result", "prompt_status", "steer", "follow_up", "ui_answer", "cancel", "recover"] as const, {
+		parameters: s.obj({
+			// String enums avoid repeating a union of literals in every provider request.
+			action: stringEnum(["status", "result", "prompt_status", "steer", "follow_up", "ui_answer", "cancel", "recover"] as const, {
 				description: "Which control verb to apply.",
-			}) as any,
-			runId: Type.Optional(Type.String({ description: "Run to address. Required for every action except status." })),
-			forkName: Type.Optional(
-				Type.String({
+			}),
+			runId: s.opt(s.str({ description: "Run to address. Required for every action except status." })),
+			forkName: s.opt(s.str({
 					minLength: 1,
 					description: "Worker entry name for recover; omit for a daemon driver or on whole-run cancel.",
-				}),
-			),
+				})),
 
-			message: Type.Optional(Type.String({ description: "Guidance text; required for steer and follow_up." })),
-			questionId: Type.Optional(Type.String({ description: "Correlated daemon UI question; required for ui_answer." })),
-			answer: Type.Optional(Type.Union([
-				Type.Object({ value: Type.String() }, { additionalProperties: false }),
-				Type.Object({ confirmed: Type.Boolean() }, { additionalProperties: false }),
-				Type.Object({ cancelled: Type.Literal(true) }, { additionalProperties: false }),
+			message: s.opt(s.str({ description: "Guidance text; required for steer and follow_up." })),
+			questionId: s.opt(s.str({ description: "Correlated daemon UI question; required for ui_answer." })),
+			answer: s.opt(s.union([
+				s.obj({ value: s.str() }, { open: false }),
+				s.obj({ confirmed: s.bool() }, { open: false }),
+				s.obj({ cancelled: typedLiteral(true) }, { open: false }),
 			], { description: "Daemon UI answer; required for ui_answer." })),
-			reason: Type.Optional(Type.String({ description: "Free-text note recorded with a cancel." })),
+			reason: s.opt(s.str({ description: "Free-text note recorded with a cancel." })),
 			// These keep the LEGACY constraints. Routing bypasses each executor's
 			// own schema validation, so loosening a field here would silently
 			// accept a value the legacy tool rejected — an invalid recovery
 			// strategy would fall through to `auto` instead of erroring.
-			deliverAs: Type.Optional(
-				StringEnum(["steer", "followUp", "queue"] as const, {
+			deliverAs: s.opt(stringEnum(["steer", "followUp", "queue"] as const, {
 					description:
 						"steer delivery: steer interrupts the current turn, followUp waits for it, queue defers to the next round.",
-				}) as any,
-			),
-			strategy: Type.Optional(
-				StringEnum(["auto", "fresh", "resume"] as const, {
+				})),
+			strategy: s.opt(stringEnum(["auto", "fresh", "resume"] as const, {
 					description: "recover strategy.",
-				}) as any,
-			),
-			tail: Type.Optional(Type.Boolean({ description: "Request the full bounded childlog tail." })),
-			tailLines: Type.Optional(Type.Integer({ minimum: 0, description: "Childlog tail lines; server-clamped to 256." })),
-			targetLineagePath: Type.Optional(Type.String({ description: "Lineage path of a nested child; requires capToken." })),
-			capToken: Type.Optional(Type.String({ description: "Capability token authorizing a nested steer or cancel." })),
-		}),
+				})),
+			tail: s.opt(s.bool({ description: "Request the full bounded childlog tail." })),
+			tailLines: s.opt(s.int({ minimum: 0, description: "Childlog tail lines; server-clamped to 256." })),
+			targetLineagePath: s.opt(s.str({ description: "Lineage path of a nested child; requires capToken." })),
+			capToken: s.opt(s.str({ description: "Capability token authorizing a nested steer or cancel." })),
+		}, { open: true }),
 		async execute(toolCallId, params: Record<string, unknown>, signal, onUpdate, ctx) {
 			return routeControlAction(
 				() =>
@@ -7893,32 +7306,28 @@ export default function (pi: ExtensionAPI) {
 			"Resolve only within your declared authority; a user-held request may be resolved only after the operator has chosen. Selections are zero-based option indices, and you must never infer an operator answer: onBehalfOfUser means the user actually chose it.",
 			"Use action:\"pass_up\" for scope/product, security/permission, irreversible, external-side-effect, meaningful-cost, or any other request beyond root authority.",
 		],
-		parameters: Type.Object({
+		parameters: s.obj({
 			// Same trade as delegate_control's action.
-			action: StringEnum(["list", "resolve", "pass_up"] as const, {
+			action: stringEnum(["list", "resolve", "pass_up"] as const, {
 				description: "Which escalation verb to apply.",
-			}) as any,
-			rootRunId: Type.Optional(Type.String({ description: "Root delegation run; omit to scan every root." })),
-			requestId: Type.Optional(Type.String({ minLength: 1, description: "Escalation request; required for resolve." })),
+			}),
+			rootRunId: s.opt(s.str({ description: "Root delegation run; omit to scan every root." })),
+			requestId: s.opt(s.str({ minLength: 1, description: "Escalation request; required for resolve." })),
 			// Legacy constraints preserved for the same reason as delegate_control.
-			requestIds: Type.Optional(
-				Type.Array(Type.String({ minLength: 1 }), {
+			requestIds: s.opt(s.arr(s.str({ minLength: 1 }), {
 					minItems: 1,
 					description: "Filter for list, or the set to pass up.",
-				}),
-			),
-			selected: Type.Optional(
-				Type.Union([
-					Type.Integer({ minimum: 0, description: "Zero-based option index." }),
-					Type.Array(Type.Integer({ minimum: 0 }), { minItems: 1 }),
-				], { description: "Zero-based option index, or an array of them; required for resolve." }),
-			),
-			customInstruction: Type.Optional(Type.String({ description: "Free-text instruction, valid only with the custom option." })),
-			note: Type.Optional(Type.String({ description: "Optional audit note." })),
-			onBehalfOfUser: Type.Optional(Type.Boolean({ description: "True only when recording an answer the operator actually chose." })),
-			context: Type.Optional(Type.String({ description: "Context appended when passing up." })),
-			recommendation: Type.Optional(Type.String({ description: "Recommendation appended when passing up." })),
-		}),
+				})),
+			selected: s.opt(s.union([
+					s.int({ minimum: 0, description: "Zero-based option index." }),
+					s.arr(s.int({ minimum: 0 }), { minItems: 1 }),
+				], { description: "Zero-based option index, or an array of them; required for resolve." })),
+			customInstruction: s.opt(s.str({ description: "Free-text instruction, valid only with the custom option." })),
+			note: s.opt(s.str({ description: "Optional audit note." })),
+			onBehalfOfUser: s.opt(s.bool({ description: "True only when recording an answer the operator actually chose." })),
+			context: s.opt(s.str({ description: "Context appended when passing up." })),
+			recommendation: s.opt(s.str({ description: "Recommendation appended when passing up." })),
+		}, { open: true }),
 		async execute(toolCallId, params: Record<string, unknown>, signal, onUpdate, ctx) {
 			return routeControlAction(
 				() =>
@@ -8114,13 +7523,13 @@ export default function (pi: ExtensionAPI) {
 			return true;
 		},
 		inspectWait: (runId, ctx) => {
-			prepareRuntimeToolArguments(CONTROL_ROUTE.status, Type.Object({ runId: Type.String() }), { runId }, { control: workerControlGrants("delegate_control", process.env, exactSessionId(ctx)), workerDenied: false });
+			prepareRuntimeToolArguments(CONTROL_ROUTE.status, s.obj({ runId: s.str() }, { open: true }), { runId }, { control: workerControlGrants("delegate_control", process.env, exactSessionId(ctx)), workerDenied: false });
 			if (readDaemonDriverRecord(getAgentDir(), runId)) return runtimeToolExecutors.get(CONTROL_ROUTE.status)!("wait-inspect", { runId, tail: false }, undefined, undefined, ctx);
 			const status = resolveRunStatus(getAgentDir(), runId, undefined, { includeTail: false });
 			return { details: { dispatches: status ? [status] : [], runs: status ? [status] : [] } };
 		},
 		observe: (runId, invocation, ctx) => {
-			if (ctx) prepareRuntimeToolArguments(CONTROL_ROUTE.status, Type.Object({ runId: Type.String() }), { runId }, { control: workerControlGrants("delegate_control", process.env, exactSessionId(ctx)), workerDenied: false });
+			if (ctx) prepareRuntimeToolArguments(CONTROL_ROUTE.status, s.obj({ runId: s.str() }, { open: true }), { runId }, { control: workerControlGrants("delegate_control", process.env, exactSessionId(ctx)), workerDenied: false });
 			const update = (payload: unknown) => {
 				if (!payload || typeof payload !== "object" || !("runId" in payload) || payload.runId !== runId) return;
 				const run = getRun(runId);

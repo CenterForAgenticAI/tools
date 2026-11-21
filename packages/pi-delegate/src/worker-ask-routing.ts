@@ -1,3 +1,4 @@
+import { typedLiteral } from "./schema-values.js";
 /**
  * Worker-only compatibility routing for generic `ask` tools.
  *
@@ -7,7 +8,7 @@
  * tool with either a typed escalation adapter or an actionable denial.
  */
 
-import { Type } from "typebox";
+import * as s from "@earendil-works/pi-schema";
 import type { DefaultResourceLoader, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ResolvedEscalationConfig } from "./config.js";
 import {
@@ -55,31 +56,31 @@ export interface AskRoutingOptions {
 
 const ASK_ORIGIN = "ask" as const;
 
-const AskCategorySchema = Type.Union([
-	Type.Literal("implementation"),
-	Type.Literal("scope-product"),
-	Type.Literal("security-permission"),
+const AskCategorySchema = s.union([
+	typedLiteral("implementation"),
+	typedLiteral("scope-product"),
+	typedLiteral("security-permission"),
 ], {
 	description: "Required classification: implementation for reversible local choices; scope-product for material scope, product, or UX changes; security-permission for security or permission questions.",
 });
 
-const AskOptionSchema = Type.Union([
-	Type.String({ minLength: 1 }),
-	Type.Object({ label: Type.String({ minLength: 1 }) }),
+const AskOptionSchema = s.union([
+	s.str({ minLength: 1 }),
+	s.obj({ label: s.str({ minLength: 1 }) }, { open: true }),
 ]);
 
 /** Canonical shape an enabled adapter accepts, after `prepareAskArguments`. */
-const ENABLED_ASK_SCHEMA = Type.Object({
-	question: Type.String({ minLength: 1, description: "The bounded question to decide." }),
+const ENABLED_ASK_SCHEMA = s.obj({
+	question: s.str({ minLength: 1, description: "The bounded question to decide." }),
 	category: AskCategorySchema,
-	options: Type.Array(AskOptionSchema, { minItems: 2, maxItems: 5, description: "2–5 explicit options." }),
-	body: Type.Optional(Type.String({ description: "Additional context for the decision." })),
-	recommended: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based recommended option index." })),
-	multi: Type.Optional(Type.Boolean({ description: "Allow selecting more than one option." })),
-});
+	options: s.arr(AskOptionSchema, { minItems: 2, maxItems: 5, description: "2–5 explicit options." }),
+	body: s.opt(s.str({ description: "Additional context for the decision." })),
+	recommended: s.opt(s.int({ minimum: 0, description: "Zero-based recommended option index." })),
+	multi: s.opt(s.bool({ description: "Allow selecting more than one option." })),
+}, { open: true });
 
 /** Disabled-slot shape: accept anything so `execute` can return the denial. */
-const PERMISSIVE_ASK_SCHEMA = Type.Object({}, { additionalProperties: true });
+const PERMISSIVE_ASK_SCHEMA = { ...s.obj({}, { open: true }), additionalProperties: true };
 
 /**
  * Coerce the ask dialects a worker may emit into `ENABLED_ASK_SCHEMA`.

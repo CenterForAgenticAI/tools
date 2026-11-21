@@ -63,6 +63,7 @@ import type { EnvOverrides } from "./env-overrides.js";
 import { mergeEnvOverrides, withEnvOverrides } from "./env-overrides.js";
 import { composeReadsBlock, formatReadsWarnings } from "./context-files.js";
 import { logDelegateDiagnostic } from "./diagnostics.js";
+import { recordEscalationReceipts } from "./escalation-api.js";
 import { assertReadOnlyValue, resolveWorkerWriteAuthority, workerWriteScopeInstruction } from "./write-confinement.js";
 import { withDelegateOwnedExtensionBind } from "./delegate-session-scope.js";
 import { disposeWorkerSession } from "./worker-session-lifecycle.js";
@@ -96,6 +97,8 @@ import {
 } from "./fork-runner.js";
 import type { ResolvedBridge } from "./intercom-bridge.js";
 import { DEFAULT_DIRECT_WORKER_SILENCE_TIMEOUT_MS } from "./config.js";
+import { admitLeafWorker, installLiveWorkerSessionGate } from "./live-worker-admission.js";
+import type { LiveWorkerLease } from "./live-worker-cap.js";
 import {
 	DEFAULT_WIND_DOWN_GRACE_MS,
 	isHardCancelEnabled,
@@ -500,6 +503,10 @@ interface DirectWorkerLifecycle {
 	releaseAttemptScratchLease?: () => void;
 	/** Installed only while the logical run owns its activity-based deadline. */
 	onActivity?: (lastActivityAt: number) => void;
+	/** Live leaf-worker slot (#633), held across model attempts and released after teardown. */
+	liveWorkerLease?: LiveWorkerLease;
+	/** Set once admission ran, so a coordinator is not re-checked on every attempt. */
+	liveWorkerAdmitted?: boolean;
 }
 
 function adoptDirectAttemptScratchLease(
@@ -761,6 +768,9 @@ export async function runDirectWorker(
 				try {
 					releaseLogicalScratchLease?.();
 				} finally {
+					// After session disposal on every path, so a queued run starts only
+					// once this worker is gone.
+					lifecycle.liveWorkerLease?.release();
 					await Promise.allSettled(admittedReaders.map((entry) => entry.release()));
 					actorActivity?.dispose();
 				}
@@ -1560,6 +1570,26 @@ async function runDirectWorkerInner(
 			? undefined
 			: { artifactName: req.artifact, readOnly: req.readOnly === true };
 		if (artifactWriterRequirement) assertArtifactWriterCapability(workerSurface, artifactWriterRequirement);
+		// #633: a leaf waits for its live-worker slot before any worker runtime is
+		// built. The wall-clock and silence deadlines are armed only after session
+		// creation below, so time spent queued counts against neither.
+		if (!lifecycle.liveWorkerAdmitted) {
+			lifecycle.liveWorkerLease = await admitLeafWorker({
+				agentDir: dctx.agentDir,
+				surface: workerSurface,
+				signal: cancellationSignal,
+				runId: dctx.runId,
+				forkName: dctx.forkName ?? req.name,
+				label: `direct worker "${req.name}"`,
+				now: () => deadlineClock.now(),
+				credentialRetryBudget,
+				abortGraceMs: silenceGraceMs,
+			});
+			lifecycle.liveWorkerAdmitted = true;
+		} else {
+			// A replacement session after an idle release takes its slot back first.
+			await lifecycle.liveWorkerLease?.reacquire(cancellationSignal);
+		}
 		const releaseWorkerToolRegistration = dctx.ensureWorkerToolRegistration?.(workerSurface.tools ?? workerSurface.runToolNames);
 		for (const d of workerSurface.diagnostics)
 			logDelegateDiagnostic(d, { agentDir: dctx.agentDir, throttleKey: "tool-surface" });
@@ -1762,6 +1792,13 @@ async function runDirectWorkerInner(
 		}
 		workerSession = created.session;
 		lifecycle.workerSession = workerSession;
+		if (lifecycle.liveWorkerLease) {
+			// Idle reaper (#633): an idle worker may lose its slot; its next prompt re-takes one.
+			installLiveWorkerSessionGate(lifecycle.liveWorkerLease, workerSession, {
+				signal: cancellationSignal,
+				busy: () => awaitingEscalations > 0,
+			});
+		}
 		if (dctx.sessionRefs) dctx.sessionRefs.worker = workerSession;
 		const workerCompactionConsumer = new WorkerCompactionConsumer(sessionMgr, workerSession);
 		if (cancellationSignal.aborted) throw new Error("aborted before prompt");
@@ -1850,6 +1887,7 @@ async function runDirectWorkerInner(
 			},
 		);
 		const unsubscribe = observeWorkerSession(workerSession, dctx.ownerSessionId, (ev) => {
+			if (ev.type === "turn_end" && escalationEnabled) recordEscalationReceipts(dctx.agentDir, rootRunId, ev.toolResults);
 			try {
 				if (!promptRepairPhaseActive || !shouldPreservePromptRepairActivity(ev.type)) {
 					promptRepairPhaseActive = false;

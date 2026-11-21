@@ -12,9 +12,12 @@ import type { DelegateOnlyMode } from "./runtime-state.js";
 
 const BUILTIN_TOOL_NAME_SET = new Set<string>(BUILTIN_TOOL_NAMES);
 const OWNER_SCOPED_TOOL_NAMES = new Set([
+	"workstream_tasks",
+	"workstream_focus",
 	"session_tasks",
 	"session_focus",
 	"compact_session",
+	"context_compact",
 	"load_skill",
 ]);
 

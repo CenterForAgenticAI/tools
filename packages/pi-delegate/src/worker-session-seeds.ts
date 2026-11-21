@@ -2,13 +2,14 @@ import type { SessionThinkingPolicy } from "./thinking-policy.js";
 import { THINKING_POLICY_ENTRY_TYPE } from "./thinking-policy.js";
 import {
 	FOCUS_ENTRY_TYPE,
-	FOCUS_TOOL_NAME,
+	FOCUS_SEAM_CLAIMANTS,
 	buildFocusSeed,
+	isReadableFocusSeed,
 	type FocusSeedSessionOptions,
 } from "./focus-seam.js";
 import {
 	TASKS_ENTRY_TYPE,
-	TASKS_TOOL_NAME,
+	TASK_SEAM_CLAIMANTS,
 	buildSessionTasksSeed,
 	type SeedSessionOptions,
 	type TasksSeed,
@@ -47,6 +48,7 @@ export type WorkerSeedOutcome = "written" | "prompt-fallback" | "absent";
 
 export interface WorkerSeedAuditRow {
 	readonly id: WorkerSeedId;
+	/** The entry type written; the descriptor's default when nothing was written. */
 	readonly entryType: string;
 	readonly outcome: WorkerSeedOutcome;
 }
@@ -92,16 +94,27 @@ export function hasToolClaimant(extensions: readonly WorkerSeedExtension[] | und
 	return extensions?.some((extension) => extension.tools?.has(toolName) === true) ?? false;
 }
 
+/** The seams whose seed needs a claimant tool, each with its claimants in preference order. */
+const CLAIMED_SEAMS = [
+	["tasks", TASK_SEAM_CLAIMANTS],
+	["focus", FOCUS_SEAM_CLAIMANTS],
+] as const satisfies readonly (readonly [WorkerSeedId, readonly { readonly toolName: string }[]])[];
+
 /**
  * Which session-declaration tools a loaded extension set actually claims.
  *
  * Reported from the live extension set rather than assumed, so a surface is only
  * ever widened for a tool that something is really going to register (#338).
+ * Per seam, only the preferred loaded claimant is reported, so a host that loads
+ * both pi-workstream and pi-context-aware 0.8.x hands a worker one task tool.
  */
 export function claimedSessionToolNames(
 	extensions: readonly WorkerSeedExtension[] | undefined,
 ): string[] {
-	return [TASKS_TOOL_NAME, FOCUS_TOOL_NAME].filter((name) => hasToolClaimant(extensions, name));
+	return CLAIMED_SEAMS.flatMap(([, claimants]) => {
+		const claimed = claimants.find((candidate) => hasToolClaimant(extensions, candidate.toolName));
+		return claimed === undefined ? [] : [claimed.toolName];
+	});
 }
 
 /**
@@ -152,6 +165,7 @@ export function applyWorkerSeeds(session: WorkerSeedSession, inputs: WorkerSeedI
 	const audit: WorkerSeedAuditRow[] = [];
 	for (const current of WORKER_SEED_DESCRIPTORS) {
 		let outcome: WorkerSeedOutcome;
+		let entryType: string = current.entryType;
 		switch (current.id) {
 			case "worker-origin": {
 				const origin = inputs.origin;
@@ -184,16 +198,19 @@ export function applyWorkerSeeds(session: WorkerSeedSession, inputs: WorkerSeedI
 					outcome = "written";
 				}
 				break;
-			case "tasks":
+			case "tasks": {
+				const target = TASK_SEAM_CLAIMANTS.find((candidate) => seedableToolIsUsable(inputs, candidate.toolName));
 				if (inputs.tasks === undefined) {
 					outcome = "absent";
-				} else if (!seedableToolIsUsable(inputs, TASKS_TOOL_NAME)) {
+				} else if (target === undefined) {
 					outcome = "prompt-fallback";
 				} else {
-					session.appendCustomEntry(current.entryType, buildSessionTasksSeed(inputs.tasks.seed, inputs.tasks.options));
+					session.appendCustomEntry(target.entryType, buildSessionTasksSeed(inputs.tasks.seed, inputs.tasks.options, target));
+					entryType = target.entryType;
 					outcome = "written";
 				}
 				break;
+			}
 			case "focus":
 				if (inputs.focus === undefined) {
 					outcome = "absent";
@@ -201,16 +218,22 @@ export function applyWorkerSeeds(session: WorkerSeedSession, inputs: WorkerSeedI
 					const seed = buildFocusSeed(inputs.focus.value, inputs.focus.options);
 					if (seed === undefined) {
 						outcome = "absent";
-					} else if (!seedableToolIsUsable(inputs, FOCUS_TOOL_NAME)) {
-						outcome = "prompt-fallback";
 					} else {
-						session.appendCustomEntry(current.entryType, seed);
-						outcome = "written";
+						const target = FOCUS_SEAM_CLAIMANTS.find((candidate) => seedableToolIsUsable(inputs, candidate.toolName));
+						// A seed the receiver would reject loses the objective without a
+						// trace, so it goes to the prompt like an unclaimed one.
+						if (target === undefined || !isReadableFocusSeed(seed)) {
+							outcome = "prompt-fallback";
+						} else {
+							session.appendCustomEntry(target.entryType, seed);
+							entryType = target.entryType;
+							outcome = "written";
+						}
 					}
 				}
 				break;
 		}
-		audit.push({ id: current.id, entryType: current.entryType, outcome });
+		audit.push({ id: current.id, entryType, outcome });
 	}
 	return audit;
 }
@@ -238,12 +261,12 @@ export function formatStrippedClaimantWarning(
 	inputs: Pick<WorkerSeedInputs, "extensions" | "usableToolNames">,
 ): string | null {
 	if (inputs.usableToolNames === undefined) return null;
-	const stripped = ([["tasks", TASKS_TOOL_NAME], ["focus", FOCUS_TOOL_NAME]] as const)
-		.filter(([id, toolName]) =>
-			isWorkerSeedPromptFallback(audit, id)
-			&& hasToolClaimant(inputs.extensions, toolName)
-			&& !inputs.usableToolNames!.includes(toolName))
-		.map(([, toolName]) => toolName);
+	const usable = inputs.usableToolNames;
+	const stripped = CLAIMED_SEAMS
+		.filter(([id]) => isWorkerSeedPromptFallback(audit, id))
+		.flatMap(([, claimants]) => claimants
+			.filter((candidate) => hasToolClaimant(inputs.extensions, candidate.toolName) && !usable.includes(candidate.toolName))
+			.map((candidate) => candidate.toolName));
 	if (stripped.length === 0) return null;
 	return `worker-session-seeds: ${stripped.join(", ")} ${stripped.length === 1 ? "is" : "are"} registered by a loaded extension but absent from this worker's tool surface; `
 		+ `the seed degraded to a prompt checklist. Add ${stripped.length === 1 ? "it" : "them"} to the agent's \`tools:\` list, or dispatch without a seed.`;

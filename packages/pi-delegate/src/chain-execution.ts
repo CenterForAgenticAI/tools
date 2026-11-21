@@ -5,7 +5,7 @@
  * fan-out per step. Mirrors pi-subagents' `subagent({ chain: [...] })`
  * surface so chain files written for either extension are interchangeable.
  *
- * Schema (see `index.ts` for the TypeBox source of truth):
+ * Schema (see `delegate-params.ts` for the canonical input contract):
  *
  *   chain: [
  *     { agent, task?, ... },                         // sequential step

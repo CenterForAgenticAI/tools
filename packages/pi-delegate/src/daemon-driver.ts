@@ -458,148 +458,158 @@ export async function launchDaemonDriver(
 	connect: typeof connectDaemonLazy = connectDaemonLazy,
 ): Promise<DaemonDriverLaunchResult> {
 	assertInvocationPreparing();
-	const existing = readDaemonDriverCfg(cfg.agentDir, cfg.runId);
-	const recordedCfg = readOrchestrateCfg(cfg.agentDir, cfg.runId);
-	const pending = isDaemonPendingLaunchRecord(recordedCfg?.daemonPendingLaunch)
-		? recordedCfg.daemonPendingLaunch
-		: undefined;
-	const durableCfg = recordedCfg ?? cfg;
-	const daemonSessionId = existing?.daemonLocator?.daemonSessionId
-		?? pending?.daemonSessionId
-		?? `pi-delegate-${cfg.runId}`;
-	const idempotencyKey = existing?.daemonLocator?.idempotencyKey
-		?? pending?.idempotencyKey
-		?? `pi-delegate-${cfg.runId}-prompt`;
-	const connection = existing?.daemonConnection
-		?? (isDaemonConnectionRecord(recordedCfg?.daemonConnection) ? recordedCfg.daemonConnection : undefined)
-		?? connectionRecordFromEnvironment(cfg.agentDir, environment);
-	let client: DaemonClient;
-	try {
-		client = await connect(connectOptions(connection, environment, true));
-	} catch (error) {
-		if (existing || pending) throw new DaemonLaunchError("Could not reconnect to the persisted daemon claim; do not redispatch.", {
-			runId: cfg.runId, transport: "daemon", state: existing ? "accepted" : "uncertain", daemonSessionId, idempotencyKey,
-			...(existing?.daemonLocator ? { promptId: existing.daemonLocator.promptId } : {}),
-		}, "submission", error);
-		throw error;
-	}
-	let attachment: DaemonAttachment | undefined;
-	let lease: DaemonLease | undefined;
-	let stage = "open/create";
-	let submitted = false;
-	let acceptedLocator: DaemonRunLocator | undefined = existing?.daemonLocator;
-	try {
-		const opened = await boundedDaemonOperation(
-			"open/create",
-			openOrCreateSession(client, durableCfg, daemonSessionId),
-		);
-		const processedCursor = existing?.daemonLocator?.cursor ?? pending?.cursor ?? opened.session.cursor;
-		const promptLookup = existing?.daemonLocator !== undefined
-			? { promptId: existing.daemonLocator.promptId }
-			: pending !== undefined ? { idempotencyKey } : undefined;
-		if (promptLookup !== undefined) {
-			stage = "prompt_status";
-			const known = await boundedDaemonOperation(
-				"prompt_status",
-				client.promptStatus(daemonSessionId, promptLookup),
+	let refusedStage: string | undefined;
+	for (;;) {
+		const existing = readDaemonDriverCfg(cfg.agentDir, cfg.runId);
+		const recordedCfg = readOrchestrateCfg(cfg.agentDir, cfg.runId);
+		const pending = isDaemonPendingLaunchRecord(recordedCfg?.daemonPendingLaunch)
+			? recordedCfg.daemonPendingLaunch
+			: undefined;
+		const durableCfg = recordedCfg ?? cfg;
+		const daemonSessionId = existing?.daemonLocator?.daemonSessionId
+			?? pending?.daemonSessionId
+			?? `pi-delegate-${cfg.runId}`;
+		const idempotencyKey = existing?.daemonLocator?.idempotencyKey
+			?? pending?.idempotencyKey
+			?? `pi-delegate-${cfg.runId}-prompt`;
+		const connection = existing?.daemonConnection
+			?? (isDaemonConnectionRecord(recordedCfg?.daemonConnection) ? recordedCfg.daemonConnection : undefined)
+			?? connectionRecordFromEnvironment(cfg.agentDir, environment);
+		let client: DaemonClient;
+		try {
+			client = await connect(connectOptions(connection, environment, true));
+		} catch (error) {
+			if (existing || pending) throw new DaemonLaunchError("Could not reconnect to the persisted daemon claim; do not redispatch.", {
+				runId: cfg.runId, transport: "daemon", state: existing ? "accepted" : "uncertain", daemonSessionId, idempotencyKey,
+				...(existing?.daemonLocator ? { promptId: existing.daemonLocator.promptId } : {}),
+			}, "submission", error);
+			throw error;
+		}
+		let attachment: DaemonAttachment | undefined;
+		let lease: DaemonLease | undefined;
+		let stage = "open/create";
+		let submitted = false;
+		let locator: DaemonRunLocator | undefined = existing?.daemonLocator;
+		try {
+			if (refusedStage !== undefined) {
+				stage = "reconcile";
+				assertInvocationPreparing();
+				stage = "open/create";
+			}
+			const opened = await boundedDaemonOperation(
+				"open/create",
+				openOrCreateSession(client, durableCfg, daemonSessionId),
 			);
-			const promptId = "promptId" in known && known.promptId !== undefined
-				? known.promptId
-				: existing?.daemonLocator?.promptId;
-			if (known.state !== "unknown" && promptId !== undefined) {
-				const locator: DaemonRunLocator = {
+			const processedCursor = existing?.daemonLocator?.cursor ?? pending?.cursor ?? opened.session.cursor;
+			let disposition: DaemonDriverLaunchResult["disposition"] = "known";
+			const promptLookup = existing?.daemonLocator !== undefined
+				? { promptId: existing.daemonLocator.promptId }
+				: pending !== undefined ? { idempotencyKey } : undefined;
+			if (promptLookup !== undefined) {
+				stage = "prompt_status";
+				const known = await boundedDaemonOperation(
+					"prompt_status",
+					client.promptStatus(daemonSessionId, promptLookup),
+				);
+				const promptId = "promptId" in known && known.promptId !== undefined
+					? known.promptId
+					: existing?.daemonLocator?.promptId;
+				if (known.state !== "unknown" && promptId !== undefined) {
+					locator = {
+						daemonSessionId,
+						promptId,
+						idempotencyKey,
+						cursor: processedCursor,
+						generation: opened.session.generation,
+					};
+				} else if (refusedStage !== "prompt" || existing || known.state !== "unknown") {
+					throw new Error("Persisted prompt claim is unresolved; recover it by idempotency key, never redispatch.");
+				}
+			}
+			if (locator === undefined) {
+				stage = "attach";
+				attachment = await boundedDaemonOperation(
+					"attach",
+					client.attach(daemonSessionId, {
+						fromCursor: processedCursor,
+						live: false,
+					}),
+				);
+				let generation = opened.session.generation;
+				if (opened.session.runtime === "asleep") {
+					stage = "wake";
+					const woke = await wakeAfterContention(attachment, generation);
+					generation = woke.session.generation;
+				}
+				stage = "lease";
+				lease = await boundedDaemonOperation(
+					"lease",
+					attachment.acquireLease(generation, { ttlMs: DEFAULT_LEASE_TTL_MS }),
+				);
+				assertInvocationPreparing();
+				stage = "persist pending launch";
+				persistDaemonPendingCfg(durableCfg, { daemonSessionId, idempotencyKey, cursor: processedCursor }, connection);
+				assertInvocationPreparing();
+				stage = "prompt";
+				submitted = true;
+				const prompt = await boundedDaemonOperation(
+					"prompt",
+					lease.prompt({
+						idempotencyKey,
+						text: durableCfg.task,
+						whenBusy: "reject",
+						attribution: { label: durableCfg.agentName },
+					}),
+				);
+				const promptId = promptIdFromResult(prompt);
+				if (!promptId) {
+					throw new Error(`daemon did not return a promptId for idempotency key ${idempotencyKey}`);
+				}
+				locator = {
 					daemonSessionId,
 					promptId,
 					idempotencyKey,
 					cursor: processedCursor,
-					generation: opened.session.generation,
+					generation: prompt.outcome === "accepted" ? prompt.generation : generation,
 				};
-				acceptedLocator = locator;
-				stage = "persist locator";
-				persistDaemonCfg(durableCfg, locator, connection);
-				return {
-					runId: durableCfg.runId,
-					accepted: true,
-					locator,
-					disposition: "known",
-				};
+				disposition = prompt.outcome === "accepted" ? prompt.disposition : "known";
 			}
-			throw new Error("Persisted prompt claim is unresolved; recover it by idempotency key, never redispatch.");
+			acceptInvocation({ runId: cfg.runId, transport: "daemon", state: "accepted", daemonSessionId, promptId: locator.promptId, idempotencyKey });
+			stage = "persist locator";
+			persistDaemonCfg(durableCfg, locator, connection);
+			return {
+				runId: durableCfg.runId,
+				locator,
+				accepted: true,
+				disposition,
+			};
+		} catch (error) {
+			if (refusedStage === undefined &&
+				(stage === "wake" || stage === "lease" || stage === "prompt") &&
+				isDaemonRequestError(error) && error.code === "stale_generation") {
+				// Finally detaches the stale lease before the sole reconciliation attempt.
+				refusedStage = stage;
+				continue;
+			}
+			const detail = isDaemonRequestError(error)
+				? `${error.code}: ${error.message}`
+				: error instanceof Error ? error.message : String(error);
+			if (error instanceof DaemonLaunchError) throw error;
+			if (submitted || locator || pending) throw new DaemonLaunchError(`${stage} failed: ${detail}`, {
+				runId: cfg.runId, transport: "daemon", state: locator ? "accepted" : "uncertain", daemonSessionId, idempotencyKey,
+				...(locator ? { promptId: locator.promptId } : {}),
+			}, locator ? "locator" : "submission", error);
+			assertInvocationPreparing();
+			throw new Error(`${stage} failed: ${detail}`, { cause: error });
+		} finally {
+			if (lease && !lease.released) {
+				await boundedDaemonOperation("lease release", lease.release()).catch(() => undefined);
+			}
+			if (attachment) {
+				await boundedDaemonOperation("detach", attachment.detach()).catch(() => undefined);
+			}
+			client.close();
 		}
-		stage = "attach";
-		attachment = await boundedDaemonOperation(
-			"attach",
-			client.attach(daemonSessionId, {
-				fromCursor: processedCursor,
-				live: false,
-			}),
-		);
-		let generation = opened.session.generation;
-		if (opened.session.runtime === "asleep") {
-			stage = "wake";
-			const woke = await wakeAfterContention(attachment, generation);
-			generation = woke.session.generation;
-		}
-		stage = "lease";
-		lease = await boundedDaemonOperation(
-			"lease",
-			attachment.acquireLease(generation, { ttlMs: DEFAULT_LEASE_TTL_MS }),
-		);
-		assertInvocationPreparing();
-		stage = "persist pending launch";
-		persistDaemonPendingCfg(durableCfg, { daemonSessionId, idempotencyKey, cursor: processedCursor }, connection);
-		assertInvocationPreparing();
-		stage = "prompt";
-		submitted = true;
-		const prompt = await boundedDaemonOperation(
-			"prompt",
-			lease.prompt({
-				idempotencyKey,
-				text: durableCfg.task,
-				whenBusy: "reject",
-				attribution: { label: durableCfg.agentName },
-			}),
-		);
-		const promptId = promptIdFromResult(prompt);
-		if (!promptId) {
-			throw new Error(`daemon did not return a promptId for idempotency key ${idempotencyKey}`);
-		}
-		const locator: DaemonRunLocator = {
-			daemonSessionId,
-			promptId,
-			idempotencyKey,
-			cursor: processedCursor,
-			generation: prompt.outcome === "accepted" ? prompt.generation : generation,
-		};
-		acceptedLocator = locator;
-		acceptInvocation({ runId: cfg.runId, transport: "daemon", state: "accepted", daemonSessionId, promptId, idempotencyKey });
-		stage = "persist locator";
-		persistDaemonCfg(durableCfg, locator, connection);
-		return {
-			runId: durableCfg.runId,
-			locator,
-			accepted: true,
-			disposition: prompt.outcome === "accepted" ? prompt.disposition : "known",
-		};
-	} catch (error) {
-		const detail = isDaemonRequestError(error)
-			? `${error.code}: ${error.message}`
-			: error instanceof Error ? error.message : String(error);
-		if (error instanceof DaemonLaunchError) throw error;
-		if (submitted || acceptedLocator || pending) throw new DaemonLaunchError(`${stage} failed: ${detail}`, {
-			runId: cfg.runId, transport: "daemon", state: acceptedLocator ? "accepted" : "uncertain", daemonSessionId, idempotencyKey,
-			...(acceptedLocator ? { promptId: acceptedLocator.promptId } : {}),
-		}, acceptedLocator ? "locator" : "submission", error);
-		assertInvocationPreparing();
-		throw new Error(`${stage} failed: ${detail}`, { cause: error });
-	} finally {
-		if (lease && !lease.released) {
-			await boundedDaemonOperation("lease release", lease.release()).catch(() => undefined);
-		}
-		if (attachment) {
-			await boundedDaemonOperation("detach", attachment.detach()).catch(() => undefined);
-		}
-		client.close();
 	}
 }
 

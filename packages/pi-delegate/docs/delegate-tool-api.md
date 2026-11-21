@@ -249,7 +249,7 @@ type ChecklistItem =
   | string
   | {
       title: string;
-      status?: "pending" | "active" | "done" | "blocked" | "deferred";
+      status?: "todo" | "active" | "done" | "blocked" | "dropped" | "pending" | "deferred"; // pending and deferred are legacy spellings of todo and dropped
       note?: string;
       subtasks?: ChecklistItem[];
     };
@@ -274,19 +274,23 @@ top-level `checklist` is still accepted and normalized into it.
 
 It travels one of two ways, decided per run:
 
-- **Seeded.** When the worker loads an extension that owns a `session_tasks` tool, the checklist is written into the worker's session before its first turn, as a durable entry that survives compaction.
+- **Seeded.** When the worker can call a task-list tool, the checklist is written into the worker's session before its first turn, as a durable entry that survives compaction. Two claimants are recognized, in this order:
+  - pi-workstream's `workstream_tasks`: a `pi-workstream.tasks.v1` entry with statuses `todo`, `active`, `done`, `blocked`, `dropped`.
+  - pi-context-aware 0.8.x's `session_tasks`: a `context-aware.tasks.v1` entry with statuses `pending`, `active`, `done`, `blocked`, `deferred`. `todo` is written as `pending` and `dropped` as `deferred`.
+
+  Focus follows the same order: `workstream_focus` gets a `pi-workstream.focus-seed.v1` entry, `session_focus` a `context-aware.focus-seed.v1` entry. Readers accept both entry types and both sets of status names. Both focus readers drop the whole seed for one malformed ref, so `focus.refs` is written in the v1 ref shape: a bare string or an unknown kind becomes `{kind: "other", value}`, a ref without a non-empty value of at most 512 characters is dropped, and only the first 50 are kept. A focus seed the reader would still reject goes to the prompt instead, and the audit row says `prompt-fallback`.
 - **Degraded.** When nothing claims it, the checklist is appended to the worker's prompt as a markdown list. The worker still sees the plan; it is simply not durable. Nothing here requires an extension to be installed.
 
 The two are mutually exclusive — a checklist is never both seeded and pasted into the prompt.
 
-A driver sends the checklist only to its authoritative detached child session; it never seeds the foreground session's task list. The child makes the seeded-or-degraded decision after `session_start` and `before_agent_start` registrations and after final tool selection. If the active child scope contains a usable `session_tasks` claimant, the child writes one bounded versioned `context-aware.tasks.v1` entry before its first model request. Otherwise it injects the assignment once as Markdown. A static explicit allowlist may gain `session_tasks` for this dispatch-created obligation; a dynamic `ext:` scope must select the claimant itself. Structured and Markdown delivery remain mutually exclusive. The owner-only detached cfg retains the structured seed so replacement and recovery can reapply it without duplicating a snapshot in one child session.
+A driver sends the checklist only to its authoritative detached child session; it never seeds the foreground session's task list. The child makes the seeded-or-degraded decision after `session_start` and `before_agent_start` registrations and after final tool selection. If the active child scope contains a usable task-list claimant, the child writes one bounded versioned entry for it before its first model request: `pi-workstream.tasks.v1` for `workstream_tasks`, else `context-aware.tasks.v1` for `session_tasks`. Otherwise it injects the assignment once as Markdown. A static explicit allowlist may gain the task-list tool of the preferred loaded claimant for this dispatch-created obligation, so a host that loads both gives the child only `workstream_tasks`. When the parent's preflight sees no claimant, because it registers lazily, both `workstream_tasks` and `session_tasks` are added (Pi ignores whichever one no extension registers); a dynamic `ext:` scope must select the claimant itself. Structured and Markdown delivery remain mutually exclusive. The owner-only detached cfg retains the structured seed so replacement and recovery can reapply it without duplicating a snapshot in one child session.
 
-Sub-tasks go exactly one level deep. `blocked` and `deferred` describe different situations — "all done or deferred" is finished, "any blocked" needs a person — so both require a `note`; a status sent without one is downgraded to `pending` rather than rejected. One malformed entry is skipped rather than failing the dispatch.
+Sub-tasks go exactly one level deep. `blocked` and `dropped` (legacy: `deferred`) describe different situations — "all done or deferred" is finished, "any blocked" needs a person — so both require a `note`; a status sent without one is downgraded to `todo` rather than rejected. One malformed entry is skipped rather than failing the dispatch.
 
 Progress comes back through the existing public surfaces. In-process run-entry rows show task counts (`☑2/5`, with `⚠1` when work is blocked). Detached status and event-log records carry the child's bounded task progress. A detached terminal status, automatic completion wake, and `delegate_control(action="result")` details carry a bounded `taskLedger` naming unfinished work:
 
 ```ts
-type TaskStatus = "pending" | "active" | "done" | "blocked" | "deferred";
+type TaskStatus = "todo" | "active" | "done" | "blocked" | "dropped"; // written statuses; pending and deferred are still accepted on input
 
 interface TaskLedger {
   outcome: "complete" | "gap" | "stuck";
@@ -871,7 +875,8 @@ Exactly one driver entry per dispatch; a second rejects with `exactly one driver
 entry per dispatch; split into separate calls`. A driver entry rejects `cwd`,
 `worktree`, and `escalation`, and sends `handoff` only to the detached child.
 The child durably seeds `handoff.tasks` when its final active tool scope has a
-usable `session_tasks` claimant; otherwise it injects exactly one Markdown fallback.
+usable `workstream_tasks` or `session_tasks` claimant; otherwise it injects exactly
+one Markdown fallback.
 
 ### Full driver run
 

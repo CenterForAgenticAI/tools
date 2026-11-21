@@ -1,3 +1,4 @@
+import { typedLiteral } from "./schema-values.js";
 /**
  * Injected-I/O escalation tools and prompt contracts.
  *
@@ -7,7 +8,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { Type, type TSchema } from "typebox";
+import * as s from "@earendil-works/pi-schema";
 
 import type { ResolvedEscalationConfig } from "./config.js";
 import {
@@ -52,7 +53,7 @@ export interface EscalationTool {
 	name: string;
 	label: string;
 	description: string;
-	parameters: TSchema;
+	parameters: s.Schema;
 	execute(
 		toolCallId: string,
 		params: Record<string, unknown>,
@@ -185,9 +186,9 @@ export interface EscalationRaiseToolDeps {
 	raiseAndAwait?: typeof raiseAndAwaitEscalation;
 }
 
-const OptionSchema = Type.Union([
-	Type.String({ minLength: 1 }),
-	Type.Object({ label: Type.String({ minLength: 1, description: "Option label shown to the resolver." }) }),
+const OptionSchema = s.union([
+	s.str({ minLength: 1 }),
+	s.obj({ label: s.str({ minLength: 1, description: "Option label shown to the resolver." }) }, { open: true }),
 ]);
 
 /** Build the three §2.3 per-kind raise verbs with fully injectable runtime IO. */
@@ -198,20 +199,20 @@ export function makeEscalationRaiseTools(
 		name: ESCALATE_DECISION_TOOL,
 		label: "Escalate decision",
 		description: ESCALATE_DECISION_DESCRIPTION,
-		parameters: Type.Object({
-			header: Type.String({ minLength: 1, description: "Short bounded decision prompt." }),
-			category: Type.Union([
-				Type.Literal("implementation"),
-				Type.Literal("scope-product"),
-				Type.Literal("security-permission"),
+		parameters: s.obj({
+			header: s.str({ minLength: 1, description: "Short bounded decision prompt." }),
+			category: s.union([
+				typedLiteral("implementation"),
+				typedLiteral("scope-product"),
+				typedLiteral("security-permission"),
 			], {
 				description: "Required classification: implementation for reversible local choices; scope-product for material scope, product, or UX changes; security-permission for security or permission questions.",
 			}),
-			body: Type.Optional(Type.String({ description: "Additional decision context." })),
-			options: Type.Array(OptionSchema, { minItems: 2, maxItems: 5 }),
-			recommended: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based recommended option index." })),
-			multi: Type.Optional(Type.Boolean({ description: "Allow selecting more than one option." })),
-		}),
+			body: s.opt(s.str({ description: "Additional decision context." })),
+			options: s.arr(OptionSchema, { minItems: 2, maxItems: 5 }),
+			recommended: s.opt(s.int({ minimum: 0, description: "Zero-based recommended option index." })),
+			multi: s.opt(s.bool({ description: "Allow selecting more than one option." })),
+		}, { open: true }),
 		execute: async (toolCallId, params, signal) => {
 			const decision = normalizeDecisionPayload(params);
 			return executeRaise(deps, toolCallId, "decision", decision.payload, signal, decision.category);
@@ -221,15 +222,15 @@ export function makeEscalationRaiseTools(
 		name: ESCALATE_BLOCKER_TOOL,
 		label: "Escalate blocker",
 		description: ESCALATE_BLOCKER_DESCRIPTION,
-		parameters: Type.Object({
-			cause: Type.String({
+		parameters: s.obj({
+			cause: s.str({
 				minLength: 1,
 				description: "Blocking cause. Well-known: env-missing, input-missing, external-failure, upstream-pending, decision-needed; precise free-form causes are accepted.",
 			}),
-			description: Type.String({ minLength: 1, description: "Precise description of why work cannot proceed." }),
-			unblock: Type.Optional(Type.String({ description: "What would unblock progress." })),
-			options: Type.Optional(Type.Array(OptionSchema, { minItems: 1, maxItems: 5 })),
-		}),
+			description: s.str({ minLength: 1, description: "Precise description of why work cannot proceed." }),
+			unblock: s.opt(s.str({ description: "What would unblock progress." })),
+			options: s.opt(s.arr(OptionSchema, { minItems: 1, maxItems: 5 })),
+		}, { open: true }),
 		execute: async (toolCallId, params, signal) => {
 			const payload = normalizeBlockerPayload(params);
 			return executeRaise(deps, toolCallId, "blocker", payload, signal);
@@ -239,11 +240,11 @@ export function makeEscalationRaiseTools(
 		name: ESCALATE_AMENDMENT_TOOL,
 		label: "Escalate amendment",
 		description: ESCALATE_AMENDMENT_DESCRIPTION,
-		parameters: Type.Object({
-			target: Type.String({ minLength: 1, description: "Opaque ref for the task, plan, spec, or model to change." }),
-			change: Type.String({ minLength: 1, description: "Exact proposed change." }),
-			rationale: Type.String({ minLength: 1, description: "Why the amendment is necessary." }),
-		}),
+		parameters: s.obj({
+			target: s.str({ minLength: 1, description: "Opaque ref for the task, plan, spec, or model to change." }),
+			change: s.str({ minLength: 1, description: "Exact proposed change." }),
+			rationale: s.str({ minLength: 1, description: "Why the amendment is necessary." }),
+		}, { open: true }),
 		execute: async (toolCallId, params, signal) => {
 			const payload = normalizeAmendmentPayload(params);
 			return executeRaise(deps, toolCallId, "amendment", payload, signal);
@@ -405,26 +406,26 @@ export function makeSupervisorEscalationTools(
 		name: RESOLVE_ESCALATION_TOOL,
 		label: "Resolve escalation",
 		description: RESOLVE_ESCALATION_DESCRIPTION,
-		parameters: Type.Object({
-			requestId: Type.Optional(Type.String({ minLength: 1, description: "Pending request id; omit only when exactly one request is pending." })),
-			selected: Type.Union([
-				Type.Integer({ minimum: 0, description: "Zero-based option index." }),
-				Type.Array(Type.Integer({ minimum: 0 }), { minItems: 1 }),
+		parameters: s.obj({
+			requestId: s.opt(s.str({ minLength: 1, description: "Pending request id; omit only when exactly one request is pending." })),
+			selected: s.union([
+				s.int({ minimum: 0, description: "Zero-based option index." }),
+				s.arr(s.int({ minimum: 0 }), { minItems: 1 }),
 			]),
-			customInstruction: Type.Optional(Type.String({ description: "Free-text instruction; valid only with the custom instruction option selected exclusively." })),
-			note: Type.Optional(Type.String({ description: "Optional audit note." })),
-		}),
+			customInstruction: s.opt(s.str({ description: "Free-text instruction; valid only with the custom instruction option selected exclusively." })),
+			note: s.opt(s.str({ description: "Optional audit note." })),
+		}, { open: true }),
 		execute: async (_toolCallId, params) => executeSupervisorResolve(deps, params),
 	};
 	const escalateTool: EscalationTool = {
 		name: ESCALATE_TOOL,
 		label: "Escalate",
 		description: ESCALATE_HOP_DESCRIPTION,
-		parameters: Type.Object({
-			requestIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
-			context: Type.Optional(Type.String({ description: "Context to append to each forwarded trace." })),
-			recommendation: Type.Optional(Type.String({ description: "Recommendation to append when you have one." })),
-		}),
+		parameters: s.obj({
+			requestIds: s.opt(s.arr(s.str({ minLength: 1 }), { minItems: 1 })),
+			context: s.opt(s.str({ description: "Context to append to each forwarded trace." })),
+			recommendation: s.opt(s.str({ description: "Recommendation to append when you have one." })),
+		}, { open: true }),
 		execute: async (_toolCallId, params) => executeSupervisorPass(deps, params),
 	};
 	return [resolveTool, escalateTool];

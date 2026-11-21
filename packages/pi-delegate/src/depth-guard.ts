@@ -40,7 +40,7 @@ export const HARD_MAX_DEPTH = 16;
 /**
  * Validate a configured depth policy before it participates in cap math.
  * Runtime configuration and internal callers are not guaranteed to pass
- * through the TypeBox tool schema, so this check is the authoritative defense
+ * through the tool schema, so this check is the authoritative defense
  * against `NaN` (which would make every `attemptedDepth > effectiveMax` check
  * false) and other malformed numeric values.
  */

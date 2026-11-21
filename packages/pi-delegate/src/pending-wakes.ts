@@ -324,7 +324,23 @@ export interface CompletionMessage {
 		retry?: Array<Record<string, unknown>>;
 		retryMetadataIncomplete?: boolean;
 		retryMetadataTruncated?: boolean;
+		/** Present only when the live wake dropped or shortened data to stay bounded. */
+		truncation?: WakeDetailsTruncation;
 	};
+}
+
+/**
+ * Visible marker for a bounded `delegate:complete` wake (issue #599). The full
+ * worker transcript lives in `workerSessionFile` (or the run record), so the
+ * wake never carries a second copy of it.
+ */
+export interface WakeDetailsTruncation {
+	/** Forks whose transcript was dropped or shortened in this wake. */
+	transcriptsBounded: number;
+	/** Transcript entries omitted across all forks. */
+	transcriptEntriesOmitted: number;
+	/** Set when the overall byte cap forced a further reduction. */
+	overallCap?: { limitBytes: number; originalBytes: number; reduced: Array<"transcripts" | "priorWorkerSessions" | "collapsedContent"> };
 }
 
 export type PendingWakeKind = "completion" | "fork-failed" | "escalation-pending";
@@ -377,7 +393,7 @@ export function buildCompletionMessage(input: NotifyCompletionInput): Completion
 		details: {
 			runId,
 			...(mode ? { mode } : {}),
-			forks: projectRunResults(finalResults, { includeDetailExtensions: true }),
+			...boundWakeForks(projectRunResults(finalResults, { includeDetailExtensions: true })),
 			usage: aggregateRunResults(finalResults),
 			usageByFork: summarizeRunUsages(finalResults),
 			error,
@@ -385,6 +401,98 @@ export function buildCompletionMessage(input: NotifyCompletionInput): Completion
 			...(input.retryMetadataIncomplete ? { retryMetadataIncomplete: true } : {}),
 			...(input.retryMetadataTruncated ? { retryMetadataTruncated: true } : {}),
 		},
+	};
+}
+
+// A wake is written into the parent's session file, so every resume parses it
+// again. These limits match the ones `sanitizeRunResultForPersistence`
+// (runtime.ts) applies to a completed run's persisted transcript.
+const WAKE_TRANSCRIPT_MAX_ENTRIES = 50;
+const WAKE_TRANSCRIPT_ENTRY_TEXT_MAX_BYTES = 4096;
+/** Overall serialized cap on the bounded `details.forks` array of one wake. */
+export const MAX_WAKE_FORKS_DETAILS_BYTES = 256 * 1024;
+const WAKE_COLLAPSED_CONTENT_REDUCED_BYTES = 4096;
+
+function truncateWakeText(text: string, maxBytes: number): string {
+	const originalBytes = Buffer.byteLength(text, "utf8");
+	if (originalBytes <= maxBytes) return text;
+	const suffix = ` …[truncated ${originalBytes - maxBytes} bytes]`;
+	const budget = Math.max(0, maxBytes - Buffer.byteLength(suffix, "utf8"));
+	let head = text.slice(0, budget);
+	while (Buffer.byteLength(head, "utf8") > budget && head.length > 0) head = head.slice(0, -1);
+	return head + suffix;
+}
+
+function boundWakeTranscript(result: RunResult): { transcript: RunResult["transcript"]; omitted: number; changed: boolean } {
+	const original = Array.isArray(result.transcript) ? result.transcript : [];
+	// A recorded worker session file already holds the worker conversation, so
+	// the wake keeps only what that file lacks: supervisor messages (supervisor
+	// sessions are in-memory).
+	const candidates = typeof result.workerSessionFile === "string" && result.workerSessionFile.length > 0
+		? original.filter((entry) => entry.source === "supervisor")
+		: original;
+	let changed = false;
+	const transcript = candidates.slice(-WAKE_TRANSCRIPT_MAX_ENTRIES).map((entry) => {
+		if (typeof entry.text !== "string") return entry;
+		const text = truncateWakeText(entry.text, WAKE_TRANSCRIPT_ENTRY_TEXT_MAX_BYTES);
+		if (text === entry.text) return entry;
+		changed = true;
+		return { ...entry, text };
+	});
+	const omitted = original.length - transcript.length;
+	return { transcript, omitted, changed: changed || omitted > 0 };
+}
+
+function wakeForksBytes(forks: readonly RunResult[]): number {
+	return Buffer.byteLength(JSON.stringify(forks), "utf8");
+}
+
+/**
+ * Bound the per-run-entry payload of a live completion wake: transcripts first
+ * (dropped when `workerSessionFile` records them, otherwise capped), then an
+ * overall byte cap, with a visible `truncation` marker when anything was cut.
+ */
+function boundWakeForks(projected: RunResult[]): { forks: RunResult[]; truncation?: WakeDetailsTruncation } {
+	let transcriptsBounded = 0;
+	let transcriptEntriesOmitted = 0;
+	let forks = projected.map((result) => {
+		const { transcript, omitted, changed } = boundWakeTranscript(result);
+		if (changed) {
+			transcriptsBounded += 1;
+			transcriptEntriesOmitted += omitted;
+		}
+		return { ...result, transcript };
+	});
+	const originalBytes = wakeForksBytes(forks);
+	let overallCap: WakeDetailsTruncation["overallCap"];
+	if (originalBytes > MAX_WAKE_FORKS_DETAILS_BYTES) {
+		const reduced: NonNullable<WakeDetailsTruncation["overallCap"]>["reduced"] = [];
+		const reduce = (name: (typeof reduced)[number], apply: (result: RunResult) => RunResult): void => {
+			if (wakeForksBytes(forks) <= MAX_WAKE_FORKS_DETAILS_BYTES) return;
+			forks = forks.map(apply);
+			reduced.push(name);
+		};
+		reduce("transcripts", (result) => {
+			transcriptEntriesOmitted += result.transcript.length;
+			return { ...result, transcript: [] };
+		});
+		reduce("priorWorkerSessions", (result) => {
+			const { priorWorkerSessions: _dropped, ...rest } = result;
+			return rest as RunResult;
+		});
+		// `content` already carries each fork's result text, so the structured copy
+		// can shrink to a stub without hiding the outcome from the model.
+		reduce("collapsedContent", (result) => ({
+			...result,
+			collapsedContent: truncateWakeText(result.collapsedContent ?? "", WAKE_COLLAPSED_CONTENT_REDUCED_BYTES),
+		}));
+		overallCap = { limitBytes: MAX_WAKE_FORKS_DETAILS_BYTES, originalBytes, reduced };
+	}
+	return {
+		forks,
+		...(transcriptsBounded > 0 || overallCap
+			? { truncation: { transcriptsBounded, transcriptEntriesOmitted, ...(overallCap ? { overallCap } : {}) } }
+			: {}),
 	};
 }
 
@@ -736,9 +844,13 @@ function rememberRunFailureWakeKey(keys: Set<string>, key: string): void {
  */
 export function notifyForkFailed(
 	sink: NotifyCompletionSink,
-	input: NotifyRunFailedInput,
-	opts?: { agentDir?: string; ownerSessionId?: string },
+	requested: NotifyRunFailedInput,
+	opts?: { agentDir?: string; ownerSessionId?: string; recoveryOffer?: boolean },
 ): RunFailureWakeDisposition {
+	// `recoveryOffer: false` (config `recoveryOffer`) reports the failure but
+	// never names a recovery route: a host that binds runs to an external plan
+	// rejects the resumed clone, so the offer would only cost a failed turn.
+	const input = opts?.recoveryOffer === false ? withoutLiveRecovery(requested) : requested;
 	const key = crypto.createHash("sha256")
 		.update(String(input.runId))
 		.update("\0")

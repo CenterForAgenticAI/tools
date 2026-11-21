@@ -4,8 +4,11 @@ import { join, relative, isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
 	readOutcome,
+	readEscalationReceipt,
 	readEscalationRequest,
+	recordEscalationReceipt,
 	resolveEscalation,
+	resolveEscalationReceiptsDir,
 	resolveEscalationRequestsDir,
 	resolveEscalationResultsDir,
 	type EscalationOutcome, type EscalationRequest,
@@ -13,6 +16,8 @@ import {
 import { listEscalationRootRunIds, readHeldEscalationRequest, summarizePayload } from "./escalation-surface.js";
 import { normalizeEscalationSelection, renderRaiseOutcome } from "./escalation-tools.js";
 import { applyRequestTimeout } from "./escalation-runtime.js";
+import { SAFE_RUN_ID_RE } from "./run-id.js";
+import { logDelegateDiagnostic } from "./diagnostics-file.js";
 
 export interface EscalationScope {
 	agentDir: string;
@@ -53,29 +58,65 @@ function readRequest(args: { agentDir: string; rootRunId: string; requestId: str
 	}
 }
 
+type ToolResultMessage = { role?: unknown; toolCallId?: unknown; isError?: unknown; content?: unknown; details?: unknown };
+
+function persistedReply(message: ToolResultMessage | undefined, request: EscalationRequest, outcome: EscalationOutcome): boolean {
+	const expected = renderRaiseOutcome(request.requestId, request.kind, request.payload, outcome);
+	const details = message?.details as Record<string, unknown> | undefined;
+	return message?.role === "toolResult" && message.toolCallId === request.consumer?.toolCallId &&
+		message.isError !== true &&
+		isDeepStrictEqual(message.content, expected.content) &&
+		Object.entries(expected.details).every(([key, value]) => isDeepStrictEqual(details?.[key], value));
+}
+
 function received(scope: EscalationScope, request: EscalationRequest, outcome: EscalationOutcome): boolean {
-	if (!request.consumer) return false;
-	let text: string;
+	const consumer = request.consumer;
+	if (!consumer) return false;
+	const address = { agentDir: scope.agentDir, rootRunId: request.rootRunId, requestId: request.requestId };
+	const file = join(resolveEscalationReceiptsDir(scope.agentDir, request.rootRunId), `${request.requestId}.json`);
+	if (existsSync(file) && !contained(scope.agentDir, file)) throw new Error("escalation receipt escapes agent directory");
+	const receipt = readEscalationReceipt(address);
+	if (receipt) return receipt.toolCallId === consumer.toolCallId;
+
+	let text = "";
 	try {
-		if (!contained(scope.agentDir, request.consumer.sessionFile)) throw new Error("consumer transcript escapes agent directory");
-		text = readFileSync(request.consumer.sessionFile, "utf8");
+		if (!contained(scope.agentDir, consumer.sessionFile)) throw new Error("consumer transcript escapes agent directory");
+		text = readFileSync(consumer.sessionFile, "utf8");
 	}
 	catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-		throw error;
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
 	// A concurrently appended final line is not durable receipt evidence yet.
-	const expected = renderRaiseOutcome(request.requestId, request.kind, request.payload, outcome);
-	return text.slice(0, text.lastIndexOf("\n") + 1).split("\n").some((line) => {
+	const found = text.slice(0, text.lastIndexOf("\n") + 1).split("\n").some((line) => {
 		let entry;
 		try { entry = JSON.parse(line); }
 		catch { return false; }
-		const message = entry?.type === "message" ? entry.message : undefined;
-		return message?.role === "toolResult" && message.toolCallId === request.consumer!.toolCallId &&
-			message.isError !== true &&
-			isDeepStrictEqual(message.content, expected.content) &&
-			Object.entries(expected.details).every(([key, value]) => isDeepStrictEqual(message.details?.[key], value));
+		return entry?.type === "message" && persistedReply(entry.message, request, outcome);
 	});
+	if (found) {
+		try { recordEscalationReceipt(address, consumer.toolCallId); }
+		catch (error) {
+			logDelegateDiagnostic(`escalation receipt ${request.rootRunId}/${request.requestId} not recorded: ${(error as Error).message}`, { agentDir: scope.agentDir });
+		}
+	}
+	return found;
+}
+
+/** Called by the consumer session at turn end, after Pi has persisted the turn's tool results. */
+export function recordEscalationReceipts(agentDir: string, rootRunId: string, toolResults: readonly ToolResultMessage[]): void {
+	for (const message of toolResults) {
+		const requestId = (message.details as Record<string, unknown> | undefined)?.requestId;
+		if (typeof requestId !== "string" || !SAFE_RUN_ID_RE.test(requestId) || typeof message.toolCallId !== "string") continue;
+		try {
+			const request = readRequest({ agentDir, rootRunId, requestId });
+			const outcome = request && readOutcome({ agentDir, rootRunId, requestId, credential: request.replyEndpoint.credential });
+			if (outcome && persistedReply(message, request, outcome)) {
+				recordEscalationReceipt({ agentDir, rootRunId, requestId }, message.toolCallId);
+			}
+		} catch (error) {
+			logDelegateDiagnostic(`escalation receipt ${rootRunId}/${requestId} not recorded: ${(error as Error).message}`, { agentDir });
+		}
+	}
 }
 
 function snapshot(scope: EscalationScope, request: EscalationRequest) {

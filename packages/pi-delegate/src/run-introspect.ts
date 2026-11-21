@@ -92,6 +92,7 @@ import { actorActivitySilenceMs } from "./actor-activity.js";
 import { isSafeRunId } from "./run-id.js";
 import { buildRetryProjection, type RetryProjectionFork } from "./retry-projection.js";
 import { projectWorkerSurfaceReport, type WorkerSurfaceReason } from "./worker-surface.js";
+import { liveWorkerCapSnapshot, queuedLiveWorkerCount } from "./live-worker-cap.js";
 
 // ── Uniform shapes ───────────────────────────────────────────────────────────
 
@@ -333,6 +334,8 @@ export function formatUniformRunStatus(
 	if (phase) parts.push(`phase=${phase}`);
 	const startupPhase = safeCategorical(details.startupPhase, SAFE_STARTUP_PHASES);
 	if (startupPhase) parts.push(`startup=${startupPhase}`);
+	const liveWorkers = formatLiveWorkerCap(details.liveWorkers);
+	if (liveWorkers) parts.push(liveWorkers);
 	// Daemon-driver liveness (issue #540). The daemon path populates a key set
 	// disjoint from everything above, so without these a driver blocked on an
 	// operator question rendered as the bare `elapsed unknown`. No shape branch:
@@ -671,8 +674,38 @@ function inMemoryStatus(run: NonNullable<ReturnType<typeof getRunSnapshot>>): Un
 			...(safeRecovery ? { recovery: safeRecovery } : {}),
 			...(typeof run.detached === "boolean" ? { detached: run.detached } : {}),
 			...summarizeWorkerSurfaces(entries),
+			...(run.completedAt === undefined ? summarizeLiveWorkerCap(run.runId) : {}),
 		},
 	};
+}
+
+/**
+ * Process-wide live leaf-worker counts (#633) for a live run, shown only when a
+ * cap is configured or something is queued. `queuedHere` counts this run's
+ * entries still waiting for a slot.
+ */
+function summarizeLiveWorkerCap(runId: string): { liveWorkers?: { live: number; max: number; queued: number; queuedHere: number } } {
+	const { live, max, queued } = liveWorkerCapSnapshot();
+	if (max === 0 && queued === 0) return {};
+	return { liveWorkers: { live, max, queued, queuedHere: queuedLiveWorkerCount(runId) } };
+}
+
+function safeCount(value: unknown): number | undefined {
+	return Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : undefined;
+}
+
+/** `live workers 3/4, 2 queued (1 from this run)`; numbers only, nothing else crosses. */
+function formatLiveWorkerCap(value: unknown): string | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const record = value as Record<string, unknown>;
+	const live = safeCount(record.live);
+	const max = safeCount(record.max);
+	const queued = safeCount(record.queued);
+	if (live === undefined || max === undefined || queued === undefined) return undefined;
+	const queuedHere = safeCount(record.queuedHere) ?? 0;
+	const cap = max === 0 ? "unlimited" : String(max);
+	const queue = queued === 0 ? "" : `, ${queued} queued${queuedHere > 0 ? ` (${queuedHere} from this run)` : ""}`;
+	return `live workers ${live}/${cap}${queue}`;
 }
 
 /**

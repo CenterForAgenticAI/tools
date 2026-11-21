@@ -16,8 +16,17 @@ assert.deepEqual(Object.keys(manifest.peerDependencies ?? {}).sort(), [
   "@earendil-works/pi-ai",
   "@earendil-works/pi-coding-agent",
   "@earendil-works/pi-tui",
-  "typebox",
 ]);
+
+// Exact pin, any version: Renovate moves the Pi SDK family together, and
+// scripts/check-sdk-config.mjs holds the family to one version.
+assert.match(manifest.dependencies?.["@earendil-works/pi-schema"] ?? "", /^\d+\.\d+\.\d+$/);
+for (const name of ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "@earendil-works/pi-tui"]) assert.equal(manifest.peerDependencies[name], ">=1.5.0");
+assert.equal(manifest.peerDependencies["@centerforagenticai/pi-daemon"], "*");
+for (const name of ["typebox", "@sinclair/typebox"]) {
+  assert.equal(manifest.dependencies?.[name], undefined);
+  assert.equal(manifest.devDependencies?.[name], undefined);
+}
 
 for (const entries of Object.values(manifest.pi ?? {})) {
   for (const entry of entries) await access(path.join(root, entry));

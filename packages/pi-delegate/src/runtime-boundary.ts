@@ -1,6 +1,5 @@
-import { Type, type TSchema } from "typebox";
-import { Value } from "typebox/value";
-import { firstSchemaIssue } from "./schema-errors.js";
+import type { Schema } from "@earendil-works/pi-schema";
+import { checkSchema, firstSchemaIssue } from "./schema-errors.js";
 import { CONTROL_ROUTE, ESCALATION_ROUTE, resolveControlCall, resolveEscalationCall, type ControlAction, type EscalationAction } from "./control-surface.js";
 import { prepareRuntimeDispatchArguments } from "./delegate-params.js";
 import { UnsupportedRunOptionError } from "./delegate-runs.js";
@@ -11,7 +10,7 @@ export class RuntimeBoundaryError extends Error {
 }
 
 /** Validate before projection: unknown envelope fields cannot become executor input. */
-export function prepareRuntimeToolArguments(name: string, schema: TSchema, input: Record<string, unknown>, grants: { control?: readonly string[]; escalation?: readonly string[]; workerDenied: boolean }): Record<string, unknown> {
+export function prepareRuntimeToolArguments(name: string, schema: Schema, input: Record<string, unknown>, grants: { control?: readonly string[]; escalation?: readonly string[]; workerDenied: boolean }): Record<string, unknown> {
  if (input === null || typeof input !== "object" || Array.isArray(input)) throw new RuntimeBoundaryError("invalid-request", "Tool arguments must be an object");
  if (name === "delegate") {
   try {
@@ -26,13 +25,10 @@ export function prepareRuntimeToolArguments(name: string, schema: TSchema, input
  }
  if (input.forkName === "") throw new RuntimeBoundaryError("invalid-request", "invalid entry name: forkName must be nonblank");
  // Omitted JS optionals are absent, exactly as they are on the wire.
- const properties: Record<string, TSchema> = {};
- const declared = (schema as { properties?: Record<string, TSchema & { enum?: unknown }> }).properties ?? {};
- for (const [key, field] of Object.entries(declared)) properties[key] = Array.isArray(field.enum) ? { ...field, ...Type.Union(field.enum.map((value: string) => Type.Literal(value))) } : field;
- schema = { ...schema, properties } as TSchema;
+ const properties = schema.properties as Record<string, Schema> ?? {};
  const params: Record<string, unknown> = {};
  for (const key of Object.keys(properties)) if (input[key] !== undefined) params[key] = input[key];
- if (!Value.Check(schema, params)) {
+ if (!checkSchema(schema, params)) {
   const error = firstSchemaIssue(schema, params);
   throw new RuntimeBoundaryError("invalid-request", `${error?.path ?? name}: ${error?.message ?? "invalid parameters"}`);
  }
@@ -52,7 +48,7 @@ export function prepareRuntimeToolArguments(name: string, schema: TSchema, input
   const denied = typeof controlAction === "string" && ((grants.workerDenied && controlAction === "recover") || (grants.control !== undefined && !grants.control.includes(controlAction))) || typeof escalationAction === "string" && grants.escalation !== undefined && !grants.escalation.includes(escalationAction);
   throw new RuntimeBoundaryError(denied ? "authorization-denied" : "invalid-request", error instanceof Error ? error.message : "Invalid action");
  }
- return Value.Clone(params);
+ return structuredClone(params);
 }
 
 export type RuntimeToolName = "delegate" | "delegate_control" | "delegate_escalation" | typeof CONTROL_ROUTE[ControlAction] | typeof ESCALATION_ROUTE[EscalationAction];

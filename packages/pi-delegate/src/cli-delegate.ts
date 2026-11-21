@@ -921,14 +921,14 @@ export async function delegateFromCli(opts: CliDelegateOptions): Promise<CliDele
 					}
 				: undefined,
 		});
-		completeRun(runId, pumped.finalResults);
+		completeRun(runState, pumped.finalResults);
 	} catch (err: any) {
 		// pumpDirectWorkers shouldn't normally throw (it surfaces failures
 		// inside individual RunResult.status). If it does — most likely
 		// during worktree teardown — treat it as a catastrophic call
 		// failure: clean up the worktree and re-throw so the consumer
 		// sees a single rejection rather than a partial result.
-		completeRun(runId, []);
+		completeRun(runState, []);
 		if (worktreeSetup) {
 			try {
 				cleanupWorktrees(worktreeSetup);

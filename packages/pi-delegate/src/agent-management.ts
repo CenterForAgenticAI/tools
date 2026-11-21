@@ -1,3 +1,5 @@
+import { typedLiteral } from "./schema-values.js";
+import type { SchemaValue } from "./schema-errors.js";
 /**
  * Management actions for the `delegate` tool: list / get / create / update /
  * delete agents and chain files.
@@ -19,9 +21,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Type, type Static } from "typebox";
-import { Value } from "typebox/value";
-import { schemaIssues } from "./schema-errors.js";
+import * as jsonSchema from "@earendil-works/pi-schema";
+import { checkSchema, schemaIssues } from "./schema-errors.js";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -83,136 +84,138 @@ function defaultInheritSkills(): boolean {
 export type ManagementAction = "list" | "get" | "create" | "update" | "delete" | "canonicalize";
 export type ManagementScope = "user" | "project";
 
-const ManagementStringListSchema = Type.Union([Type.Array(Type.String()), Type.Literal(false)]);
-const ManagementEnvSchema = Type.Union([
-	Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()])),
-	Type.Literal(false),
+const ManagementStringListSchema = jsonSchema.union([jsonSchema.arr(jsonSchema.str()), typedLiteral(false)]);
+const ManagementEnvSchema = jsonSchema.union([
+	jsonSchema.map(jsonSchema.union([jsonSchema.str(), jsonSchema.nul()])),
+	typedLiteral(false),
 ]);
-const ManagementThinkingSchema = Type.Union([Type.String(), Type.Literal(false)]);
-const EscalationTimeoutBehaviorSchema = Type.Union([
-	Type.Literal("useDefault"),
-	Type.Literal("noDefaultError"),
-	Type.Literal("cancel"),
+const ManagementThinkingSchema = jsonSchema.union([jsonSchema.str(), typedLiteral(false)]);
+const EscalationTimeoutBehaviorSchema = jsonSchema.union([
+	typedLiteral("useDefault"),
+	typedLiteral("noDefaultError"),
+	typedLiteral("cancel"),
 ]);
-const EscalationAuthoritySchema = Type.Object({
-	decision: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("implementation"), Type.Literal("all")])),
-	blocker: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("all")])),
-	amendment: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("all")])),
-	tags: Type.Optional(Type.Array(Type.String())),
-}, { additionalProperties: false });
-const EscalationPerKindTimeoutMsSchema = Type.Object({
-	decision: Type.Optional(Type.Integer({ minimum: 1 })),
-	blocker: Type.Optional(Type.Integer({ minimum: 1 })),
-	amendment: Type.Optional(Type.Integer({ minimum: 1 })),
-}, { additionalProperties: false });
-const EscalationPerKindTimeoutBehaviorSchema = Type.Object({
-	decision: Type.Optional(EscalationTimeoutBehaviorSchema),
-	blocker: Type.Optional(EscalationTimeoutBehaviorSchema),
-	amendment: Type.Optional(EscalationTimeoutBehaviorSchema),
-}, { additionalProperties: false });
-const ManagementEscalationSchema = Type.Union([
-	Type.Literal("off"),
-	Type.Literal("local"),
-	Type.Literal(false),
-	Type.Object({
-		mode: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("local")])),
-		authority: Type.Optional(EscalationAuthoritySchema),
-		intermediate: Type.Optional(Type.Boolean()),
-		hopTimeoutMs: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])),
-		timeoutMs: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), EscalationPerKindTimeoutMsSchema])),
-		timeoutBehavior: Type.Optional(Type.Union([EscalationTimeoutBehaviorSchema, EscalationPerKindTimeoutBehaviorSchema])),
-		holdStrategy: Type.Optional(Type.Literal("hold-open")),
-	}, { additionalProperties: false }),
+const EscalationAuthoritySchema = jsonSchema.obj({
+	decision: jsonSchema.opt(jsonSchema.union([typedLiteral("none"), typedLiteral("implementation"), typedLiteral("all")])),
+	blocker: jsonSchema.opt(jsonSchema.union([typedLiteral("none"), typedLiteral("all")])),
+	amendment: jsonSchema.opt(jsonSchema.union([typedLiteral("none"), typedLiteral("all")])),
+	tags: jsonSchema.opt(jsonSchema.arr(jsonSchema.str())),
+}, { open: false });
+const EscalationPerKindTimeoutMsSchema = jsonSchema.obj({
+	decision: jsonSchema.opt(jsonSchema.int({ minimum: 1 })),
+	blocker: jsonSchema.opt(jsonSchema.int({ minimum: 1 })),
+	amendment: jsonSchema.opt(jsonSchema.int({ minimum: 1 })),
+}, { open: false });
+const EscalationPerKindTimeoutBehaviorSchema = jsonSchema.obj({
+	decision: jsonSchema.opt(EscalationTimeoutBehaviorSchema),
+	blocker: jsonSchema.opt(EscalationTimeoutBehaviorSchema),
+	amendment: jsonSchema.opt(EscalationTimeoutBehaviorSchema),
+}, { open: false });
+const ManagementEscalationSchema = jsonSchema.union([
+	typedLiteral("off"),
+	typedLiteral("local"),
+	typedLiteral(false),
+	jsonSchema.obj({
+		mode: jsonSchema.opt(jsonSchema.union([typedLiteral("off"), typedLiteral("local")])),
+		authority: jsonSchema.opt(EscalationAuthoritySchema),
+		intermediate: jsonSchema.opt(jsonSchema.bool()),
+		hopTimeoutMs: jsonSchema.opt(jsonSchema.union([jsonSchema.int({ minimum: 1 }), jsonSchema.nul()])),
+		timeoutMs: jsonSchema.opt(jsonSchema.union([jsonSchema.int({ minimum: 1 }), EscalationPerKindTimeoutMsSchema])),
+		timeoutBehavior: jsonSchema.opt(jsonSchema.union([EscalationTimeoutBehaviorSchema, EscalationPerKindTimeoutBehaviorSchema])),
+		holdStrategy: jsonSchema.opt(typedLiteral("hold-open")),
+	}, { open: false }),
 ]);
-export const ManagementChainWorkerStepSchema = Type.Object({
-	agent: Type.String(),
-	task: Type.Optional(Type.String()),
-	env: Type.Optional(ManagementEnvSchema),
-	artifact: Type.Optional(Type.Union([Type.String(), Type.Literal(false)])),
-	reads: Type.Optional(ManagementStringListSchema),
-	model: Type.Optional(Type.String()),
-	thinking: Type.Optional(ManagementThinkingSchema),
-	thinkingMin: Type.Optional(ManagementThinkingSchema),
-	thinkingMax: Type.Optional(ManagementThinkingSchema),
-	skills: Type.Optional(ManagementStringListSchema),
-	progress: Type.Optional(Type.Boolean()),
-}, { additionalProperties: false });
-export const ManagementChainReferenceStepSchema = Type.Object({
-	chain: Type.String(),
-	task: Type.Optional(Type.String()),
-}, { additionalProperties: false });
-export const ManagementChainRunStepSchema = Type.Object({
-	run: Type.String(),
-	command: Type.String(),
-	cwd: Type.Optional(Type.String()),
-	env: Type.Optional(ManagementEnvSchema),
-	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS })),
-}, { additionalProperties: false });
-export const ManagementChainStepSchema = Type.Union([
+export const ManagementChainWorkerStepSchema = jsonSchema.obj({
+	agent: jsonSchema.str(),
+	task: jsonSchema.opt(jsonSchema.str()),
+	env: jsonSchema.opt(ManagementEnvSchema),
+	artifact: jsonSchema.opt(jsonSchema.union([jsonSchema.str(), typedLiteral(false)])),
+	reads: jsonSchema.opt(ManagementStringListSchema),
+	model: jsonSchema.opt(jsonSchema.str()),
+	thinking: jsonSchema.opt(ManagementThinkingSchema),
+	thinkingMin: jsonSchema.opt(ManagementThinkingSchema),
+	thinkingMax: jsonSchema.opt(ManagementThinkingSchema),
+	skills: jsonSchema.opt(ManagementStringListSchema),
+	progress: jsonSchema.opt(jsonSchema.bool()),
+}, { open: false });
+export const ManagementChainReferenceStepSchema = jsonSchema.obj({
+	chain: jsonSchema.str(),
+	task: jsonSchema.opt(jsonSchema.str()),
+}, { open: false });
+export const ManagementChainRunStepSchema = jsonSchema.obj({
+	run: jsonSchema.str(),
+	command: jsonSchema.str(),
+	cwd: jsonSchema.opt(jsonSchema.str()),
+	env: jsonSchema.opt(ManagementEnvSchema),
+	timeoutMs: jsonSchema.opt(jsonSchema.int({ minimum: 1, maximum: MAX_TIMEOUT_MS })),
+}, { open: false });
+export const ManagementChainStepSchema = jsonSchema.union([
 	ManagementChainWorkerStepSchema,
 	ManagementChainReferenceStepSchema,
 	ManagementChainRunStepSchema,
 ]);
 
 /** Closed root schema for saved-chain management payloads. */
-export const ManagementChainConfigSchema = Type.Object({
-	name: Type.Optional(Type.String()),
-	description: Type.Optional(Type.String()),
-	scope: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("project")])),
-	steps: Type.Optional(Type.Array(ManagementChainStepSchema)),
-}, { additionalProperties: false });
+export const ManagementChainConfigSchema = jsonSchema.obj({
+	name: jsonSchema.opt(jsonSchema.str()),
+	description: jsonSchema.opt(jsonSchema.str()),
+	scope: jsonSchema.opt(jsonSchema.union([typedLiteral("user"), typedLiteral("project")])),
+	steps: jsonSchema.opt(jsonSchema.arr(ManagementChainStepSchema)),
+}, { open: false });
 
 /**
  * Closed management payload schema. Every field accepted here has a durable
  * representation in AgentConfig or ChainFileConfig; unknown keys are errors.
  * Lists use JSON/YAML arrays as their only management representation.
  */
-export const ManagementConfigSchema = Type.Object({
-	name: Type.Optional(Type.String()),
-	description: Type.Optional(Type.String()),
-	systemPrompt: Type.Optional(Type.Union([Type.String(), Type.Literal(false)])),
-	model: Type.Optional(Type.Union([Type.String(), Type.Literal(false)])),
-	env: Type.Optional(ManagementEnvSchema),
-	fallbackModels: Type.Optional(ManagementStringListSchema),
-	thinking: Type.Optional(ManagementThinkingSchema),
-	thinkingMin: Type.Optional(ManagementThinkingSchema),
-	thinkingMax: Type.Optional(ManagementThinkingSchema),
-	systemPromptMode: Type.Optional(Type.Union([Type.Literal("append"), Type.Literal("replace")])),
-	inheritProjectContext: Type.Optional(Type.Boolean()),
-	inheritSkills: Type.Optional(Type.Boolean()),
-	skills: Type.Optional(ManagementStringListSchema),
-	tools: Type.Optional(ManagementStringListSchema),
-	extensions: Type.Optional(ManagementStringListSchema),
-	extensionInclude: Type.Optional(ManagementStringListSchema),
-	extensionExclude: Type.Optional(ManagementStringListSchema),
-	defaultMaxRounds: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Literal(false)])),
-	stopConditionHint: Type.Optional(Type.Union([Type.String(), Type.Literal(false)])),
-	collapseMode: Type.Optional(Type.Union([Type.Literal("final_output"), Type.Literal("summary"), Type.Literal(false)])),
-	summaryModel: Type.Optional(Type.Union([Type.String(), Type.Literal(false)])),
-	escalation: Type.Optional(ManagementEscalationSchema),
-	reads: Type.Optional(ManagementStringListSchema),
-	progress: Type.Optional(Type.Boolean()),
-	artifact: Type.Optional(Type.Union([Type.String(), Type.Literal(false)])),
-	interactive: Type.Optional(Type.Boolean()),
-	maxSubagentDepth: Type.Optional(Type.Union([Type.Integer({ minimum: 0, maximum: HARD_MAX_DEPTH }), Type.Literal(false)])),
-	allowNestedDelegate: Type.Optional(Type.Union([Type.Boolean(), Type.Literal(false)])),
-	fabric: Type.Optional(Type.Boolean()),
-	nestedDelegateAgents: Type.Optional(ManagementStringListSchema),
-	maxDurationMs: Type.Optional(Type.Union([Type.Integer({ minimum: 0, maximum: MAX_TIMEOUT_MS }), Type.Literal(false)])),
-	windDownGraceMs: Type.Optional(Type.Union([Type.Integer({ minimum: 0, maximum: MAX_TIMEOUT_MS }), Type.Literal(false)])),
-	scope: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("project")])),
-	steps: Type.Optional(Type.Array(ManagementChainStepSchema)),
-}, { additionalProperties: false });
+const managementConfigSchema = jsonSchema.obj({
+	name: jsonSchema.opt(jsonSchema.str()),
+	description: jsonSchema.opt(jsonSchema.str()),
+	systemPrompt: jsonSchema.opt(jsonSchema.union([jsonSchema.str(), typedLiteral(false)])),
+	model: jsonSchema.opt(jsonSchema.union([jsonSchema.str(), typedLiteral(false)])),
+	env: jsonSchema.opt(ManagementEnvSchema),
+	fallbackModels: jsonSchema.opt(ManagementStringListSchema),
+	thinking: jsonSchema.opt(ManagementThinkingSchema),
+	thinkingMin: jsonSchema.opt(ManagementThinkingSchema),
+	thinkingMax: jsonSchema.opt(ManagementThinkingSchema),
+	systemPromptMode: jsonSchema.opt(jsonSchema.union([typedLiteral("append"), typedLiteral("replace")])),
+	inheritProjectContext: jsonSchema.opt(jsonSchema.bool()),
+	inheritSkills: jsonSchema.opt(jsonSchema.bool()),
+	skills: jsonSchema.opt(ManagementStringListSchema),
+	tools: jsonSchema.opt(ManagementStringListSchema),
+	extensions: jsonSchema.opt(ManagementStringListSchema),
+	extensionInclude: jsonSchema.opt(ManagementStringListSchema),
+	extensionExclude: jsonSchema.opt(ManagementStringListSchema),
+	defaultMaxRounds: jsonSchema.opt(jsonSchema.union([jsonSchema.int({ minimum: 1 }), typedLiteral(false)])),
+	stopConditionHint: jsonSchema.opt(jsonSchema.union([jsonSchema.str(), typedLiteral(false)])),
+	collapseMode: jsonSchema.opt(jsonSchema.union([typedLiteral("final_output"), typedLiteral("summary"), typedLiteral(false)])),
+	summaryModel: jsonSchema.opt(jsonSchema.union([jsonSchema.str(), typedLiteral(false)])),
+	escalation: jsonSchema.opt(ManagementEscalationSchema),
+	reads: jsonSchema.opt(ManagementStringListSchema),
+	progress: jsonSchema.opt(jsonSchema.bool()),
+	artifact: jsonSchema.opt(jsonSchema.union([jsonSchema.str(), typedLiteral(false)])),
+	interactive: jsonSchema.opt(jsonSchema.bool()),
+	maxSubagentDepth: jsonSchema.opt(jsonSchema.union([jsonSchema.int({ minimum: 0, maximum: HARD_MAX_DEPTH }), typedLiteral(false)])),
+	allowNestedDelegate: jsonSchema.opt(jsonSchema.union([jsonSchema.bool(), typedLiteral(false)])),
+	fabric: jsonSchema.opt(jsonSchema.bool()),
+	nestedDelegateAgents: jsonSchema.opt(ManagementStringListSchema),
+	maxDurationMs: jsonSchema.opt(jsonSchema.union([jsonSchema.int({ minimum: 0, maximum: MAX_TIMEOUT_MS }), typedLiteral(false)])),
+	windDownGraceMs: jsonSchema.opt(jsonSchema.union([jsonSchema.int({ minimum: 0, maximum: MAX_TIMEOUT_MS }), typedLiteral(false)])),
+	scope: jsonSchema.opt(jsonSchema.union([typedLiteral("user"), typedLiteral("project")])),
+	steps: jsonSchema.opt(jsonSchema.arr(ManagementChainStepSchema)),
+}, { open: false });
 
-export type ManagementConfig = Static<typeof ManagementConfigSchema>;
+// The object constraint preserves native Static inference with strictNullChecks disabled.
+export const ManagementConfigSchema: jsonSchema.Schema<SchemaValue<typeof managementConfigSchema> & object> = managementConfigSchema;
+export type ManagementConfig = SchemaValue<typeof ManagementConfigSchema>;
 
-export const RuntimeManagementSchema = Type.Object({
- action: Type.Union(["list", "get", "create", "update", "delete", "canonicalize", "health"].map((action) => Type.Literal(action))),
- agent: Type.Optional(Type.String({ minLength: 1 })),
- chainName: Type.Optional(Type.String({ minLength: 1 })),
- agent_scope: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("project"), Type.Literal("both")])),
- config: Type.Optional(Type.Unknown()),
-}, { additionalProperties: false });
+export const RuntimeManagementSchema = jsonSchema.obj({
+ action: jsonSchema.union(["list", "get", "create", "update", "delete", "canonicalize", "health"].map((action) => typedLiteral(action))),
+ agent: jsonSchema.opt(jsonSchema.str({ minLength: 1 })),
+ chainName: jsonSchema.opt(jsonSchema.str({ minLength: 1 })),
+ agent_scope: jsonSchema.opt(jsonSchema.union([typedLiteral("user"), typedLiteral("project"), typedLiteral("both")])),
+ config: jsonSchema.opt(jsonSchema.unknown()),
+}, { open: false });
 
 
 export interface ManagementParams {
@@ -306,14 +309,13 @@ function configObject(config: unknown): { value?: Record<string, unknown>; error
 }
 
 function managementConfigError(config: Record<string, unknown>): string | undefined {
-	// TypeBox reports only `Expected union value` at the array item when a
-	// discriminated saved-chain step is malformed. Run the discriminator-aware
-	// parser first so callers keep the field-specific management diagnostics.
+	// Parse saved-chain discriminants first so malformed steps retain
+	// field-specific management diagnostics.
 	if (hasKey(config, "steps")) {
 		const parsedSteps = parseStepList(config.steps);
 		if (parsedSteps.error) return parsedSteps.error;
 	}
-	if (Value.Check(ManagementConfigSchema, config)) return undefined;
+	if (checkSchema(ManagementConfigSchema, config)) return undefined;
 	for (const error of schemaIssues(ManagementConfigSchema, config)) {
 		const fieldPath = error.path
 			.split("/")
@@ -507,7 +509,7 @@ function parseStepList(raw: unknown): { steps?: ChainStepFileConfig[]; error?: s
 		const stepSchema = hasChainDiscriminant
 			? ManagementChainReferenceStepSchema
 			: hasRunDiscriminant ? ManagementChainRunStepSchema : ManagementChainWorkerStepSchema;
-		if (!Value.Check(stepSchema, item)) {
+		if (!checkSchema(stepSchema, item)) {
 			for (const validation of schemaIssues(stepSchema, item)) {
 				const suffix = validation.path
 					.split("/")

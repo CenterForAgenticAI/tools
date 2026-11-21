@@ -34,7 +34,7 @@ Install the public npm package with Pi:
 pi install npm:@centerforagenticai/pi-delegate
 ```
 
-Restart Pi or run `/reload`. The package supports the Pi versions shown above and needs Node `>=22.19`.
+Restart Pi or run `/reload`. This schema migration requires Pi `>=1.5.0` and Node `>=22.19`. Tool and runtime-result contracts use the published `@earendil-works/pi-schema` validator; no project-owned TypeBox dependency remains. Pi itself may retain TypeBox transitively. Explicit argument preparation, unknown-field refusals and semantic validation remain extension-owned.
 
 The bundled `delegate`, `worker`, and `publisher` agents are available immediately. Install compatible workflow-agent packages separately when you need roles such as `scout`, `planner`, `reviewer`, `implementer`, or `integrator`.
 

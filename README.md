@@ -22,6 +22,7 @@ Public releases of [Pi](https://github.com/earendil-works/pi) extensions, servic
 | [pi-prompt-graph](packages/pi-prompt-graph) | extension | experimental | Conditional, cyclic workflow graphs over Pi units, with bounded loops and fan-out. |
 | [pi-question](packages/pi-question) | extension | experimental | An `ask` tool for structured human questions that works in the TUI, headless hosts, and delegate workers. |
 | [pi-work](packages/pi-work) | extension | experimental | Workspec authoring, verification, and plan compilation for agent-directed work. |
+| [pi-workstream](packages/pi-workstream) | extension | experimental | A session's workstream link and task subtree for Pi: the workstream_focus and workstream_tasks tools. |
 
 Each package README lists its Pi and Node requirements, configuration, and documentation.
 

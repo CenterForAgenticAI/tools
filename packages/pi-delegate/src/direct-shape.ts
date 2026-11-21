@@ -817,11 +817,8 @@ export async function pumpDirectWorkers(args: {
 export function coerceStringifiedArrayParams(params: any): string[] {
 	if (!params || typeof params !== "object") return [];
 	const notes: string[] = [];
-	// `runs` is the advertised grammar since the #263 cutover; the same
-	// provider quirk applies to it, and missing it here meant a stringified
-	// `runs` fell through to the legacy router and died as "unknown shape" —
-	// a nested smoke worker hit exactly that.
-	for (const key of ["agents", "tasks", "chain", "runs"] as const) {
+	// The tool boundary (`prepareRuntimeDispatchArguments`) recovers a JSON-string `runs`.
+	for (const key of ["agents", "tasks", "chain"] as const) {
 		const v = params[key];
 		if (typeof v !== "string") continue;
 		try {
@@ -840,8 +837,8 @@ export function coerceStringifiedArrayParams(params: any): string[] {
 /**
  * Phase A: detect which user-facing shape was supplied.
  *
- * Order of detection matters because TypeBox.Union accepts the first
- * matching alternative — we prefer the most specific shape:
+ * Shapes can overlap structurally; the dispatcher selects the most specific
+ * matching alternative in this order:
  *   1. `agents: [...]`     → supervised
  *   2. `tasks:  [...]`     → parallel direct
  *   3. `orchestrate: {...}`→ detached orchestrate driver (spec 0005)

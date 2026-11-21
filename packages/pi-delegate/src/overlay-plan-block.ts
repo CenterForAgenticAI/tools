@@ -3,7 +3,7 @@
  *
  * ## Compact and expanded projections
  *
- * Everything here is bounded by `context-aware.tasks.v1`. The original version-1
+ * Everything here is bounded by `pi-workstream.tasks.v1`. The original version-1
  * row carried reconciliation ids, status, and a reason. Optional real titles and
  * one nested level are additive fields: old progress still parses, and old peers
  * can ignore the detail without losing the status snapshot.
@@ -25,6 +25,8 @@ const STATUS_ICON: Readonly<Record<SeedTaskStatus, IconName>> = {
 	done: "taskDone",
 	active: "taskActive",
 	blocked: "taskBlocked",
+	dropped: "taskDeferred",
+	todo: "taskPending",
 	deferred: "taskDeferred",
 	pending: "taskPending",
 };
@@ -34,6 +36,8 @@ const STATUS_TONE: Readonly<Record<SeedTaskStatus, "accent" | "warning" | "dim">
 	done: "accent",
 	active: "accent",
 	blocked: "warning",
+	dropped: "dim",
+	todo: "dim",
 	deferred: "dim",
 	pending: "dim",
 };
@@ -43,7 +47,9 @@ const STATUS_ORDER: readonly SeedTaskStatus[] = [
 	"done",
 	"active",
 	"blocked",
+	"dropped",
 	"deferred",
+	"todo",
 	"pending",
 ];
 

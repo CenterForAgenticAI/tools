@@ -233,7 +233,9 @@ function defaultListRequests(agentDir: string, rootRunId: string): EscalationReq
 function defaultReadRequest(agentDir: string, rootRunId: string, requestId: string): EscalationRequest | null {
 	const authenticated = readEscalationRequest({ agentDir, rootRunId, requestId });
 	if (authenticated) return authenticated;
-	return readOwnedRequestFiles(agentDir, rootRunId).find((request) => request.requestId === requestId) ?? null;
+	if (!isSafeStem(requestId)) return null;
+	const owned = readOwnedRequestFile(agentDir, rootRunId, `${requestId}.json`);
+	return owned?.requestId === requestId ? owned : null;
 }
 
 function defaultReadOutcome(agentDir: string, rootRunId: string, requestId: string): EscalationOutcome | null {
@@ -1088,18 +1090,19 @@ function readOwnedRequestFiles(agentDir: string, rootRunId: string): EscalationR
 	} catch {
 		return [];
 	}
-	const requests: EscalationRequest[] = [];
-	for (const name of files) {
-		try {
-			const value = JSON.parse(
-				fs.readFileSync(path.join(resolveEscalationRequestsDir(agentDir, rootRunId), name), "utf8"),
-			) as unknown;
-			if (isOwnedRequest(value, rootRunId)) requests.push(value);
-		} catch {
-			/* malformed owner files are ignored, matching store list semantics */
-		}
+	return files.flatMap((name) => readOwnedRequestFile(agentDir, rootRunId, name) ?? []);
+}
+
+function readOwnedRequestFile(agentDir: string, rootRunId: string, name: string): EscalationRequest | null {
+	try {
+		const value = JSON.parse(
+			fs.readFileSync(path.join(resolveEscalationRequestsDir(agentDir, rootRunId), name), "utf8"),
+		) as unknown;
+		return isOwnedRequest(value, rootRunId) ? value : null;
+	} catch {
+		/* malformed owner files are ignored, matching store list semantics */
+		return null;
 	}
-	return requests;
 }
 
 function isOwnedRequest(value: unknown, rootRunId: string): value is EscalationRequest {

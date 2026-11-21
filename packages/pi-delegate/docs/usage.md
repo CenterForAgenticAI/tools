@@ -563,8 +563,11 @@ and inspection hints.
 
 A detached driver carrying `handoff.tasks` uses the same structured-seed seam as
 in-process workers. After lifecycle registration and final tool selection, the
-authoritative child writes `context-aware.tasks.v1` before its first model request
-when its active scope contains a usable `session_tasks` claimant. Otherwise it
+authoritative child writes one task entry before its first model request when its
+active scope contains a usable claimant: `pi-workstream.tasks.v1` for
+`workstream_tasks`, else `context-aware.tasks.v1` (statuses `pending` and
+`deferred` in place of `todo` and `dropped`) for pi-context-aware 0.8.x's
+`session_tasks`. Otherwise it
 injects the assignment once as Markdown. These paths are mutually exclusive.
 The owner-only detached cfg retains the bounded seed so replacement and recovery
 preserve it without duplicating a snapshot in one child session. Detached status,

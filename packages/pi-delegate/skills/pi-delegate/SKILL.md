@@ -293,8 +293,8 @@ invalid — so it never fails a dispatch, and never does anything either:
 
 ### Seed and read a worker checklist
 
-When a delegated worker has several steps worth tracking and a `session_tasks`
-claimant is loaded, request a durable checklist in that entry's namespaced handoff:
+When a delegated worker has several steps worth tracking and a task-list claimant
+(pi-workstream's `workstream_tasks` or pi-context-aware 0.8.x's `session_tasks`) is loaded, request a durable checklist in that entry's namespaced handoff:
 
 ```ts
 delegate({
@@ -307,12 +307,13 @@ delegate({
 })
 ```
 
-When a `session_tasks` claimant is loaded, the runtime stores the seed as a
-`context-aware.tasks.v1` session entry and supplies the worker's list-maintenance
+When a task-list claimant is loaded, the runtime stores the seed as a session entry
+for it (`pi-workstream.tasks.v1` for `workstream_tasks`, else `context-aware.tasks.v1`
+for `session_tasks`) and supplies the worker's list-maintenance
 instruction; do not duplicate that runtime instruction here. Without a claimant,
 the worker receives a prompt checklist instead; it is not durable and has no subtree
 or progress rows to read. With a claimant, progress rows ride the
-existing `updated` bus event; read the worker's subtree with `session_tasks action=subtree`
+existing `updated` bus event; read the worker's subtree with the claimant tool (`workstream_tasks` or `session_tasks`) called with no arguments
 rather than waiting for a prose update. Worker task IDs belong to its own address space
 and are marked `id-kind="local"`; never reconcile them against the dispatcher's own `t1`/`t2` ids.
 

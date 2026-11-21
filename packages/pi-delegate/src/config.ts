@@ -171,12 +171,33 @@ export interface DelegateConfig {
 	completionNotifyStrategy?: CompletionNotifyStrategy;
 	/** Default-on per-run terminal failure wakes; false preserves aggregate-only delivery. */
 	notifyOnFailure?: boolean;
+	/**
+	 * Advertise and accept the `delegate` agent-management actions (list, get,
+	 * create, update, delete, canonicalize) and their `config` field. Default
+	 * `true`. A host that provisions the agent roster itself sets `false`: the
+	 * advertised schema omits them and ingress refuses them. Read when the
+	 * extension loads; a change takes effect after reload or restart.
+	 */
+	managementActions?: boolean;
+	/**
+	 * Name a `delegate_control` recover route in the `delegate:fork-failed` wake.
+	 * Default `true`. A host that binds runs to an external plan, which rejects a
+	 * resumed clone, sets `false`: the wake still reports the failure but offers
+	 * no recovery.
+	 */
+	recoveryOffer?: boolean;
 	/** Validated activity-ticker settings. `loadConfig` always supplies defaults. */
 	activityTicker?: ActivityTickerConfig;
 	/** Validated delegate-only settings. `loadConfig` always supplies defaults. */
 	delegateOnly?: DelegateOnlyConfig;
 	/** When true, caller/agent wall-clock budgets hard-cancel after grace. */
 	enforceWallClockBudget?: boolean;
+	/**
+	 * Process-wide cap on live leaf workers (#633). Leaves over the cap wait in
+	 * FIFO order and their budgets start when they get a slot. Absent or `0`
+	 * is unlimited. Coordinators that can dispatch workers never hold a slot.
+	 */
+	maxLiveWorkers?: number;
 	/**
 	 * Icon vocabulary for every delegate surface: the footer, the below-editor
 	 * widget, and the transcript overlay.
@@ -1051,6 +1072,14 @@ export function loadConfig(agentDir: string = defaultAgentDir(), options: LoadCo
 	}
 	out.activityTicker = parseActivityTicker(obj.activityTicker);
 	out.delegateOnly = parseDelegateOnly(obj.delegateOnly, warnConfig);
+	if (obj.maxLiveWorkers !== undefined) {
+		const value = obj.maxLiveWorkers;
+		if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+			out.maxLiveWorkers = value;
+		} else {
+			warnConfig("[delegate] ignoring invalid maxLiveWorkers; expected a non-negative safe integer (0 is unlimited)");
+		}
+	}
 	if (typeof obj.enforceWallClockBudget === "boolean") {
 		out.enforceWallClockBudget = obj.enforceWallClockBudget;
 	} else if (obj.enforceWallClockBudget !== undefined) {
@@ -1081,6 +1110,16 @@ export function loadConfig(agentDir: string = defaultAgentDir(), options: LoadCo
 		out.notifyOnFailure = obj.notifyOnFailure;
 	} else if (obj.notifyOnFailure !== undefined) {
 		warnConfig("[delegate] ignoring invalid notifyOnFailure; expected a boolean");
+	}
+	if (typeof obj.managementActions === "boolean") {
+		out.managementActions = obj.managementActions;
+	} else if (obj.managementActions !== undefined) {
+		warnConfig("[delegate] ignoring invalid managementActions; expected a boolean");
+	}
+	if (typeof obj.recoveryOffer === "boolean") {
+		out.recoveryOffer = obj.recoveryOffer;
+	} else if (obj.recoveryOffer !== undefined) {
+		warnConfig("[delegate] ignoring invalid recoveryOffer; expected a boolean");
 	}
 	if ("perForkMaxDurationMs" in obj) {
 		const v = obj.perForkMaxDurationMs;

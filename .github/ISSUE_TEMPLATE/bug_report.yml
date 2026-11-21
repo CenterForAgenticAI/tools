@@ -16,6 +16,7 @@ body:
         - "@centerforagenticai/pi-multi-account"
         - "@centerforagenticai/pi-prompt-graph"
         - "@centerforagenticai/pi-question"
+        - "@centerforagenticai/pi-workstream"
         - "@centerforagenticai/pi-dev"
         - "@centerforagenticai/pi-adaptive-thinking"
         - "@centerforagenticai/pi-intent"

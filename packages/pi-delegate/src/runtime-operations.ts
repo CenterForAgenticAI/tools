@@ -1,4 +1,5 @@
-import type { Static, TSchema } from "typebox";
+import type { SchemaValue } from "./schema-errors.js";
+import type { Schema } from "@earendil-works/pi-schema";
 import { DelegateRuntimeError, type DelegateRuntimeToolResult } from "./runtime-api.js";
 import { RuntimeInvocation, type RuntimeContextBinding, type DelegateRuntimeInvocationOptions } from "./runtime-invocation.js";
 import { isSafeRunId } from "./run-id.js";
@@ -36,11 +37,11 @@ export function resolveRuntimeForkName(action: "recover" | "steer" | "cancel", r
  return target.kind === "exact" || target.kind === "resolved" ? target.name : forkName;
 }
 export function runtimeOperations(host: RuntimeOperationHost) {
- const decode = <S extends TSchema>(schema: S, value: unknown): Static<S> => {
+ const decode = <S extends Schema>(schema: S, value: unknown): SchemaValue<S> => {
   try { return contract.decodeRuntimeResult(schema, value); }
   catch (error) { throw new DelegateRuntimeError("unsupported-capability", "Installed core returned an incompatible structured result", error); }
  };
- const call = <S extends TSchema>(capability: contract.DelegateRuntimeCapability, name: RuntimeToolName, params: Record<string, unknown>, schema: S, options?: DelegateRuntimeInvocationOptions, field?: string): Promise<Static<S>> => host.invoke(options, false, async invocation => {
+ const call = <S extends Schema>(capability: contract.DelegateRuntimeCapability, name: RuntimeToolName, params: Record<string, unknown>, schema: S, options?: DelegateRuntimeInvocationOptions, field?: string): Promise<SchemaValue<S>> => host.invoke(options, false, async invocation => {
   if (capability === "manage" && !["list", "get", "create", "update", "delete", "canonicalize"].includes(String(params.action))) throw new DelegateRuntimeError("invalid-request", "manage requires an explicit management action");
   if (!host.supports(capability)) throw new DelegateRuntimeError("unsupported-capability", `Installed core does not support ${capability}`);
   // Resolve before recovery changes the source entry. Native results use the

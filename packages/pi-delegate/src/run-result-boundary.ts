@@ -43,6 +43,8 @@ import {
 	type SeedTaskStatus,
 	type TaskLedger,
 	type TaskProgressFields,
+	countTaskProgressRows,
+	normalizeTaskStatus,
 	type TaskProgressRow,
 } from "./task-seam.js";
 
@@ -140,7 +142,7 @@ function isTranscriptRole(value: unknown): value is RunResult["transcript"][numb
 }
 
 function isSeedTaskStatus(value: unknown): value is SeedTaskStatus {
-	return value === "pending" || value === "active" || value === "done" || value === "blocked" || value === "deferred";
+	return value === "todo" || value === "pending" || value === "active" || value === "done" || value === "blocked" || value === "dropped" || value === "deferred";
 }
 
 function isRunStatus(value: unknown): value is RunResult["status"] {
@@ -194,7 +196,7 @@ export function projectTaskProgressRow(row: unknown): TaskProgressRow | undefine
 			total: 1,
 			active: row.status === "active" ? "active" : null,
 			blocked: row.status === "blocked" ? 1 : 0,
-			outcome: row.status === "blocked" ? "stuck" : row.status === "done" || row.status === "deferred" ? "complete" : "gap",
+			outcome: row.status === "blocked" ? "stuck" : row.status === "done" || row.status === "dropped" || row.status === "deferred" ? "complete" : "gap",
 			rows: [row],
 		},
 	});
@@ -234,10 +236,9 @@ function projectTaskLedger(ledger: unknown): TaskLedger | undefined {
 
 	const rows = ledger.rows.map(projectTaskProgressRow);
 	if (!rows.every((row): row is TaskProgressRow => row !== undefined) || rows.length !== canonicalCounts.total) return undefined;
-	const rowCounts = { done: 0, blocked: 0, pending: 0, active: 0, deferred: 0 };
+	const rowCounts = countTaskProgressRows(rows);
 	const rowByLogicalId = new Map<string, TaskProgressRow>();
 	for (const row of rows) {
-		rowCounts[row.status] += 1;
 		const logicalId = row.idKind === "local" ? `local:${row.localTaskId}` : `owner:${row.ownerTaskId}`;
 		if (rowByLogicalId.has(logicalId)) return undefined;
 		rowByLogicalId.set(logicalId, row);
@@ -252,7 +253,7 @@ function projectTaskLedger(ledger: unknown): TaskLedger | undefined {
 
 	const unfinished = ledger.unfinished.map((item): TaskLedger["unfinished"][number] | undefined => {
 		if (!isRecordValue(item) || !boundedString(item.id, MAX_SEED_TASK_ID_CHARS) || !boundedString(item.title, MAX_SEED_TITLE_CHARS) || !isSeedTaskStatus(item.status)) return undefined;
-		if (item.status === "done" || item.status === "deferred") return undefined;
+		if (item.status === "done" || item.status === "dropped" || item.status === "deferred") return undefined;
 		const ownerTaskId = item.ownerTaskId === undefined
 			? undefined
 			: boundedString(item.ownerTaskId, MAX_SEED_TASK_ID_CHARS)
@@ -269,7 +270,7 @@ function projectTaskLedger(ledger: unknown): TaskLedger | undefined {
 		return {
 			id: item.id,
 			title: item.title,
-			status: item.status,
+			status: normalizeTaskStatus(item.status),
 			...(note === undefined ? {} : { note }),
 			...(ownerTaskId === undefined ? {} : { ownerTaskId }),
 			...(ref === undefined ? {} : { ref }),
@@ -284,7 +285,7 @@ function projectTaskLedger(ledger: unknown): TaskLedger | undefined {
 		if (row === undefined || row.status !== item.status) return undefined;
 		unfinishedByLogicalId.set(logicalId, item);
 	}
-	const expectedUnfinished = rows.filter((row) => row.status !== "done" && row.status !== "deferred");
+	const expectedUnfinished = rows.filter((row) => row.status !== "done" && row.status !== "dropped");
 	if (unfinished.length !== expectedUnfinished.length) return undefined;
 	for (const row of expectedUnfinished) {
 		const logicalId = row.idKind === "local" ? `local:${row.localTaskId}` : `owner:${row.ownerTaskId}`;

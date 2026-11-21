@@ -24,6 +24,7 @@ import {
 	MAX_SEED_NOTE_CHARS,
 	MAX_SEED_TASK_ID_CHARS,
 	MAX_SEED_TITLE_CHARS,
+	isSeedTaskStatus,
 	type TaskProgressFields,
 } from "./task-seam.js";
 import {
@@ -35,6 +36,7 @@ import {
 	type ActivityStatusEntry,
 } from "./activity-status.js";
 import { logDelegateDiagnostic } from "./diagnostics-file.js";
+import { liveWorkerQueuePosition } from "./live-worker-cap.js";
 import { readBusEvents, type BusEvent } from "./event-bus.js";
 import {
 	preserveCorruptFile,
@@ -1718,6 +1720,10 @@ function forkShowsWorkerEvidence(fork: RunLiveState): boolean {
 	return false;
 }
 
+function forkIsQueuedForLiveWorkerSlot(run: DelegateDispatchState, fork: RunLiveState): boolean {
+	return liveWorkerQueuePosition(run.runId, fork.name) !== undefined;
+}
+
 /** A pre-establishment (never-promoted-to-running) live status. */
 function isPreEstablishmentStatus(status: RunLiveStatus): boolean {
 	return status === "constructing" || status === "pending";
@@ -1752,6 +1758,8 @@ function runNeverConstructed(
 	for (const fork of forks) {
 		if (!isPreEstablishmentStatus(fork.status)) return false;
 		if (forkShowsWorkerEvidence(fork)) return false;
+		// Waiting for a live-worker slot (#633) is a live runner, not a ghost.
+		if (forkIsQueuedForLiveWorkerSlot(run, fork)) return false;
 	}
 	if (now - run.createdAt < deadlineMs) return false;
 	// Event-bus worker evidence: any event whose address references this runId as
@@ -1878,6 +1886,9 @@ export function reapNeverConstructedRuns(
  */
 function forkIsWorkerlessGhost(run: DelegateDispatchState, fork: RunLiveState): boolean {
 	if (!isPreEstablishmentStatus(fork.status)) return false;
+	// A run queued for a live-worker slot (#633) has a runner waiting on the
+	// cancel signal; the normal cancel closure dequeues it and settles it aborted.
+	if (forkIsQueuedForLiveWorkerSlot(run, fork)) return false;
 	if (forkShowsWorkerEvidence(fork)) return false;
 	if (runtimeAgentDir !== undefined && busReferencesRun(runtimeAgentDir, run)) return false;
 	return true;
@@ -3026,7 +3037,7 @@ function boundedTaskString(value: unknown, max: number): value is string {
 
 function isStrictTaskProgressRow(value: unknown): boolean {
 	if (!isRecordValue(value)) return false;
-	if (value.status !== "pending" && value.status !== "active" && value.status !== "done" && value.status !== "blocked" && value.status !== "deferred") return false;
+	if (!isSeedTaskStatus(value.status)) return false;
 	const idKind = value.idKind === undefined ? "owner" : value.idKind;
 	if (idKind !== "owner" && idKind !== "local") return false;
 	const id = idKind === "owner" ? value.ownerTaskId : value.localTaskId;
@@ -5974,7 +5985,10 @@ function writeCompletedRunResultSidecar(run: DelegateDispatchState): boolean {
  * Returns true only for the call that won the terminal transition so callers
  * can gate one-shot side effects such as the aggregate completion wake.
  */
-export function completeRun(runId: string, finalResult: RunResult[]): boolean {
+export function completeRun(registration: string | DelegateDispatchState, finalResult: RunResult[]): boolean {
+	// Deferred producers must retain the registration admitted before their await.
+	if (typeof registration !== "string" && !hasLocalRunAuthority(registration)) return false;
+	const runId = typeof registration === "string" ? registration : registration.runId;
 	const run = runs.get(runId);
 	if (!run || run.completedAt !== undefined) return false;
 	const storedResults = finalResult.map((result) => cloneRunResult(result));

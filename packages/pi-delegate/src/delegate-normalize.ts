@@ -65,11 +65,11 @@ export function normalizeDelegateParams(input: unknown): JsonObject {
 	}
 	const agents = parseArray(value.agents);
 	if (agents) {
-		return withRuns(value, agents.map((entry, i) => normalizeRun(entry, "supervised", i)));
+		return withRuns(value, agents.map((entry, i) => normalizeEntry(entry, "supervised", i)));
 	}
 	const tasks = parseArray(value.tasks);
 	if (tasks) {
-		return withRuns(value, tasks.map((entry, i) => normalizeRun(entry, "solo", i)));
+		return withRuns(value, tasks.map((entry, i) => normalizeEntry(entry, "solo", i)));
 	}
 	const chain = parseArray(value.chain);
 	if (chain) {
@@ -99,7 +99,7 @@ export function normalizeDelegateParams(input: unknown): JsonObject {
 
 function normalizeCanonical(value: JsonObject): JsonObject {
 	const source = Array.isArray(value.runs) ? value.runs : [];
-	const runs = source.map((run: unknown, i: number) => normalizeRun(run, undefined, i));
+	const runs = source.map((run: unknown, i: number) => normalizeEntry(run, undefined, i));
 	// A canonical dispatch's top-level `task` is the shared task for entries that
 	// omit one, not a legacy `agent`+`task` selector, so it must survive.
 	return { ...withoutSelectors(value, { keepTask: true }), runs };
@@ -127,7 +127,7 @@ function normalizeInlineChain(value: JsonObject, chain: unknown[]): JsonObject {
 			const names: string[] = [];
 			for (let childIndex = 0; childIndex < step.parallel.length; childIndex++) {
 				const child = step.parallel[childIndex];
-				const run = normalizeRun(child, "solo", childIndex, `step${index + 1}`);
+				const run = normalizeRun(chainStep(child, `chain[${index}].parallel[${childIndex}]`), "solo", childIndex, `step${index + 1}`);
 				if (!run.name) run.name = uniqueName(`${run.agent ?? "step"}`, runNames(runs));
 				names.push(String(run.name));
 				if (index > 0) run.after = [...layers[index - 1]];
@@ -143,7 +143,7 @@ function normalizeInlineChain(value: JsonObject, chain: unknown[]): JsonObject {
 			layers.push(names);
 			continue;
 		}
-		const run = normalizeRun(step, "solo", 0, `step${index + 1}`);
+		const run = normalizeRun(chainStep(step, `chain[${index}]`), "solo", 0, `step${index + 1}`);
 		if (!run.name) run.name = uniqueName(`${run.agent ?? "step"}`, runNames(runs));
 		if (index > 0) run.after = [...layers[index - 1]];
 		layers.push([String(run.name)]);
@@ -190,8 +190,18 @@ function liftChainOptions(value: JsonObject, chain: unknown[]): JsonObject {
 	return result;
 }
 
-function normalizeRun(raw: unknown, mode: string | undefined, index: number, prefix = "run"): JsonObject {
-	const value = isRecord(raw) ? normalizeObject(raw) : {};
+/** A non-object entry is kept, not erased to `{}`, so validation blames the entry rather than a missing `agent`. */
+function normalizeEntry(raw: unknown, mode: string | undefined, index: number): unknown {
+	return isRecord(raw) ? normalizeRun(raw, mode, index) : raw;
+}
+
+function chainStep(raw: unknown, path: string): JsonObject {
+	if (!isRecord(raw)) throw new TypeError(`${path}: expected object, got ${raw === null ? "null" : Array.isArray(raw) ? "array" : typeof raw}`);
+	return raw;
+}
+
+function normalizeRun(raw: JsonObject, mode: string | undefined, index: number, prefix = "run"): JsonObject {
+	const value = normalizeObject(raw);
 	assertNoRemovedArtifactFields(value, `${prefix}${index + 1} field`);
 	const out: JsonObject = { ...value };
 	if (mode && out.mode === undefined) out.mode = mode;
@@ -199,7 +209,7 @@ function normalizeRun(raw: unknown, mode: string | undefined, index: number, pre
 	return out;
 }
 
-function withRuns(value: JsonObject, runs: JsonObject[]): JsonObject {
+function withRuns(value: JsonObject, runs: unknown[]): JsonObject {
 	const result = { ...withoutSelectors(value), runs };
 	return result;
 }

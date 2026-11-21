@@ -107,7 +107,7 @@ import {
 	withForkOffline,
 } from "./fork-runner.js";
 import { makeWorkerAskRoutingTool, replaceLoadedAskTools } from "./worker-ask-routing.js";
-import { applyWorkerSeeds } from "./worker-session-seeds.js";
+import { applyWorkerSeeds, claimedSessionToolNames } from "./worker-session-seeds.js";
 import {
 	assertValidTasksSeed,
 	parseTaskLedger,
@@ -115,6 +115,7 @@ import {
 	TASK_ATTEMPT_ENV,
 	TASK_ATTEMPT_FIELD,
 	TASK_LEDGER_FIELD,
+	TASK_TOOL_NAMES,
 	TASKS_SEED_ENV,
 	type TaskLedger,
 	type TaskProgressFields,
@@ -2142,14 +2143,23 @@ export async function runOrchestrateChild(
 		// construction-time tool snapshot, resolves extension membership. A static
 		// explicit allowlist is widened for this dispatch-created obligation even
 		// when the claimant registers lazily; dynamic ext: scopes must select it.
+		// Only the preferred loaded claimant is added, so a host that loads both
+		// pi-workstream and pi-context-aware gives the child one task tool, as an
+		// in-process worker gets. When the preflight sees no claimant (it may
+		// register lazily), every claimant's tool is listed; Pi ignores the one no
+		// extension registers, and the bridge picks the claimant.
+		const loadedTaskToolNames = claimedSessionToolNames(preparedResources?.loader.getExtensions().extensions)
+			.filter((name) => TASK_TOOL_NAMES.includes(name));
+		const widenedTaskToolNames = loadedTaskToolNames.length > 0 ? loadedTaskToolNames : TASK_TOOL_NAMES;
 		const effectiveRequestedToolNames = effectiveHostedSurface.tools ?? cfg.tools;
 		const requestedToolNames = liveToolScope
-			? cfg.tasks !== undefined && !hostedSurface.tools?.includes("session_tasks")
-				? effectiveRequestedToolNames?.filter((name) => name !== "session_tasks")
+			? cfg.tasks !== undefined
+				? effectiveRequestedToolNames?.filter((name) =>
+					!TASK_TOOL_NAMES.includes(name) || hostedSurface.tools?.includes(name) === true)
 				: effectiveRequestedToolNames
 			: cfg.tools;
 		const selectedToolNames = cfg.tasks !== undefined && !liveToolScope && requestedToolNames
-			? [...new Set([...requestedToolNames, "session_tasks"])]
+			? [...new Set([...requestedToolNames, ...widenedTaskToolNames])]
 			: requestedToolNames;
 		const thinkingPolicyContext = preparedResources?.thinkingPolicyContext;
 		const providerPresent = thinkingPolicyContext?.assertCompatible(
@@ -2187,7 +2197,7 @@ export async function runOrchestrateChild(
 		let thinkingPolicyRequirements: DetachedThinkingPolicyRequirements | undefined;
 		try {
 			const staticTaskToolScope = cfg.tasks !== undefined && !liveToolScope &&
-				selectedToolNames?.includes("session_tasks")
+				TASK_TOOL_NAMES.some((name) => selectedToolNames?.includes(name))
 				? preparedResources?.toolScope
 				: undefined;
 			const staticExplicitToolScope = !liveToolScope &&

@@ -1,20 +1,28 @@
-import { Type, type Static, type TSchema } from "typebox";
-import { Value } from "typebox/value";
-import { firstSchemaIssue } from "./schema-errors.js";
+import { typedLiteral } from "./schema-values.js";
+import type { SchemaValue } from "./schema-errors.js";
+import * as jsonSchema from "@earendil-works/pi-schema";
+import type { Schema } from "@earendil-works/pi-schema";
+import { checkSchema, firstSchemaIssue } from "./schema-errors.js";
 import { sanitizeName, ManagementConfigSchema, type ManagementAction, type ManagementConfig } from "./agent-management.js";
 
-const text = Type.String();
-const strings = Type.Array(text);
-const optionalText = Type.Optional(text);
-const optionalBoolean = Type.Optional(Type.Boolean());
-const object = Type.Record(text, Type.Unknown());
-const RuntimeDigestSchema = Type.Object({ kind: Type.Union([Type.Literal("task"), Type.Literal("read"), Type.Literal("checklist"), Type.Literal("focus")]), name: text, algorithm: Type.Literal("sha256"), digest: text }, { additionalProperties: true });
-const RuntimeStepSchema = Type.Object({ id: text, name: text, agent: text, kind: Type.Union([Type.Literal("worker"), Type.Literal("command")]), stepIndex: Type.Integer(), dependsOn: strings, state: Type.Union([Type.Literal("planned"), Type.Literal("started"), Type.Literal("completed"), Type.Literal("failed"), Type.Literal("aborted"), Type.Literal("skipped")]), inputDigests: Type.Array(RuntimeDigestSchema), actualInputDigests: Type.Array(Type.Object({ sequence: Type.Integer(), algorithm: Type.Literal("sha256"), digest: text })) });
-export const RuntimeStatusSchema = Type.Object({
- dispatches: Type.Array(Type.Object({ runId: text, shape: Type.Union([Type.Literal("supervised"), Type.Literal("direct"), Type.Literal("chain"), Type.Literal("driver"), Type.Literal("orchestrate"), Type.Literal("unknown")]), state: Type.Union([Type.Literal("constructing"), Type.Literal("running"), Type.Literal("terminal-done"), Type.Literal("terminal-failed"), Type.Literal("terminal-steered"), Type.Literal("terminal-paused")]), source: Type.Union([Type.Literal("in-memory"), Type.Literal("detached")]), startedAt: Type.Optional(Type.Number()), lastActivityAt: Type.Optional(Type.Number()), details: Type.Optional(Type.Object({ steps: Type.Optional(Type.Array(RuntimeStepSchema)), recovery: Type.Optional(Type.Object({ recovered: Type.Boolean(), partial: Type.Boolean(), orphanedAt: Type.Optional(Type.Number()), totalForks: Type.Integer(), recoveredForks: Type.Integer(), completedForks: Type.Integer(), pausedForks: Type.Integer(), failedForks: Type.Integer(), abortedForks: Type.Integer() })), terminalReason: optionalText, childlogTail: optionalText, childlogTailTruncated: optionalBoolean, stderrTruncated: optionalBoolean }, { additionalProperties: true })) })),
- runs: Type.Optional(Type.Array(object)), degraded: optionalBoolean, truncated: optionalBoolean,
-});
-export type DelegateRuntimeStatus = Static<typeof RuntimeStatusSchema>;
+type Intersection<S extends readonly Schema[]> = S extends readonly [infer Head extends Schema, ...infer Tail extends readonly Schema[]] ? SchemaValue<Head> & Intersection<Tail> : unknown;
+
+const finiteNumberBounds = { minimum: -Number.MAX_VALUE, maximum: Number.MAX_VALUE };
+const text = jsonSchema.str();
+const strings = jsonSchema.arr(text);
+const optionalText = jsonSchema.opt(text);
+const optionalBoolean = jsonSchema.opt(jsonSchema.bool());
+const object = jsonSchema.map(jsonSchema.unknown());
+const RuntimeDigestSchema = jsonSchema.obj({ kind: jsonSchema.union([typedLiteral("task"), typedLiteral("read"), typedLiteral("checklist"), typedLiteral("focus")]), name: text, algorithm: typedLiteral("sha256"), digest: text }, { open: true });
+const RuntimeStepSchema = jsonSchema.obj({ id: text, name: text, agent: text, kind: jsonSchema.union([typedLiteral("worker"), typedLiteral("command")]), stepIndex: jsonSchema.int(), dependsOn: strings, state: jsonSchema.union([typedLiteral("planned"), typedLiteral("started"), typedLiteral("completed"), typedLiteral("failed"), typedLiteral("aborted"), typedLiteral("skipped")]), inputDigests: jsonSchema.arr(RuntimeDigestSchema), actualInputDigests: jsonSchema.arr(jsonSchema.obj({ sequence: jsonSchema.int(), algorithm: typedLiteral("sha256"), digest: text }, { open: true })) }, { open: true });
+const runtimeStatusDetailsSchema = jsonSchema.obj({ steps: jsonSchema.opt(jsonSchema.arr(RuntimeStepSchema)), recovery: jsonSchema.opt(jsonSchema.obj({ recovered: jsonSchema.bool(), partial: jsonSchema.bool(), orphanedAt: jsonSchema.opt(jsonSchema.num(finiteNumberBounds)), totalForks: jsonSchema.int(), recoveredForks: jsonSchema.int(), completedForks: jsonSchema.int(), pausedForks: jsonSchema.int(), failedForks: jsonSchema.int(), abortedForks: jsonSchema.int() }, { open: true })), terminalReason: optionalText, childlogTail: optionalText, childlogTailTruncated: optionalBoolean, stderrTruncated: optionalBoolean }, { open: true });
+// The object constraint preserves native Static inference with strictNullChecks disabled.
+const RuntimeStatusDetailsSchema: Schema<SchemaValue<typeof runtimeStatusDetailsSchema> & object> = runtimeStatusDetailsSchema;
+export const RuntimeStatusSchema = jsonSchema.obj({
+ dispatches: jsonSchema.arr(jsonSchema.obj({ runId: text, shape: jsonSchema.union([typedLiteral("supervised"), typedLiteral("direct"), typedLiteral("chain"), typedLiteral("driver"), typedLiteral("orchestrate"), typedLiteral("unknown")]), state: jsonSchema.union([typedLiteral("constructing"), typedLiteral("running"), typedLiteral("terminal-done"), typedLiteral("terminal-failed"), typedLiteral("terminal-steered"), typedLiteral("terminal-paused")]), source: jsonSchema.union([typedLiteral("in-memory"), typedLiteral("detached")]), startedAt: jsonSchema.opt(jsonSchema.num(finiteNumberBounds)), lastActivityAt: jsonSchema.opt(jsonSchema.num(finiteNumberBounds)), details: jsonSchema.opt(RuntimeStatusDetailsSchema) }, { open: true })),
+ runs: jsonSchema.opt(jsonSchema.arr(object)), degraded: optionalBoolean, truncated: optionalBoolean,
+}, { open: true });
+export type DelegateRuntimeStatus = SchemaValue<typeof RuntimeStatusSchema>;
 export type DelegateRuntimeRunObservation =
  | { kind: "pending"; run: DelegateRuntimeStatus["dispatches"][number] }
  | { kind: "terminal"; run: DelegateRuntimeStatus["dispatches"][number] }
@@ -27,39 +35,41 @@ export function observeDelegateRuntimeStatus(status: DelegateRuntimeStatus, runI
  if (run.details?.recovery?.orphanedAt !== undefined) return { kind: "orphan", run };
  return { kind: run.state.startsWith("terminal-") ? "terminal" : "pending", run };
 }
-const RuntimeControlFields = Type.Object({
+const RuntimeControlFields = jsonSchema.obj({
  runId: optionalText, forkName: optionalText, targetLineagePath: optionalText, requestId: optionalText,
  status: optionalText, delivered: optionalText, recoveryRunId: optionalText, strategy: optionalText,
  queued: optionalBoolean, inputId: optionalText, answered: optionalBoolean, questionId: optionalText,
  alreadyTerminal: optionalBoolean, neverConstructed: optionalBoolean, posted: optionalBoolean, ok: optionalBoolean,
- aborted: optionalBoolean, cursor: Type.Optional(Type.Object({ entryId: Type.Union([text, Type.Null()]), epoch: Type.Integer() })), promptId: optionalText, closedPromptIds: Type.Optional(strings),
+ aborted: optionalBoolean, cursor: jsonSchema.opt(jsonSchema.obj({ entryId: jsonSchema.union([text, jsonSchema.nul()]), epoch: jsonSchema.int() }, { open: true })), promptId: optionalText, closedPromptIds: jsonSchema.opt(strings),
  mode: optionalText,
-});
-const controlIdentity = Type.Union([Type.Object({ runId: text }), Type.Object({ targetLineagePath: text })]);
-const routedControl = Type.Object({ requestId: text, ok: optionalBoolean });
-const terminalControl = Type.Object({ alreadyTerminal: Type.Literal(true) });
-export const RuntimeSteerSchema = Type.Intersect([RuntimeControlFields, controlIdentity, Type.Union([
- routedControl, terminalControl, Type.Object({ delivered: Type.Union([Type.Literal("steer"), Type.Literal("followUp"), Type.Literal("queued")]) }),
- Type.Object({ mode: Type.Literal("driver"), queued: Type.Boolean(), inputId: text }),
-])]);
-export const RuntimeCancelSchema = Type.Intersect([RuntimeControlFields, controlIdentity, Type.Union([
- routedControl, terminalControl, Type.Object({ neverConstructed: Type.Literal(true) }), Type.Object({ cancelled: Type.Literal(true) }),
- Type.Object({ mode: Type.Literal("driver"), aborted: Type.Boolean(), cursor: Type.Object({ entryId: Type.Union([text, Type.Null()]), epoch: Type.Integer() }) }),
-])]);
-export const RuntimeControlSchema = Type.Union([RuntimeSteerSchema, RuntimeCancelSchema]);
-export type DelegateRuntimeControlResult = Static<typeof RuntimeControlSchema>;
-export const RuntimePromptStatusSchema = Type.Object({ runId: text, mode: Type.Literal("driver"), promptStatus: Type.Object({ state: Type.Union([Type.Literal("pending"), Type.Literal("unknown"), Type.Literal("settled"), Type.Literal("failed"), Type.Literal("aborted")]), promptId: optionalText, acceptedAt: optionalText, settledAt: optionalText, terminalOutcome: optionalText, finalCursor: Type.Optional(Type.Object({ entryId: Type.Union([text, Type.Null()]), epoch: Type.Integer() })), errorCode: optionalText, reason: optionalText }, { additionalProperties: true }) });
-export type DelegateRuntimePromptStatus = Static<typeof RuntimePromptStatusSchema>;
-export const RuntimeRecoverySchema = Type.Union([
- Type.Object({ runId: text, forkName: text, status: Type.Union([Type.Literal("recovered"), Type.Literal("already-recovered")]), recoveryRunId: text, strategy: Type.Union([Type.Literal("fresh"), Type.Literal("resume")]) }),
- Type.Object({ runId: text, mode: Type.Literal("driver"), status: Type.Literal("recovered"), closedPromptIds: strings }),
- Type.Object({ runId: text, mode: Type.Literal("driver"), status: Type.Literal("reconciled"), promptId: text }),
+}, { open: true });
+const controlIdentity = jsonSchema.union([jsonSchema.obj({ runId: text }, { open: true }), jsonSchema.obj({ targetLineagePath: text }, { open: true })]);
+const routedControl = jsonSchema.obj({ requestId: text, ok: optionalBoolean }, { open: true });
+const terminalControl = jsonSchema.obj({ alreadyTerminal: typedLiteral(true) }, { open: true });
+const RuntimeSteerSchemaParts = [RuntimeControlFields, controlIdentity, jsonSchema.union([
+ routedControl, terminalControl, jsonSchema.obj({ delivered: jsonSchema.union([typedLiteral("steer"), typedLiteral("followUp"), typedLiteral("queued")]) }, { open: true }),
+ jsonSchema.obj({ mode: typedLiteral("driver"), queued: jsonSchema.bool(), inputId: text }, { open: true }),
+])] as const;
+export const RuntimeSteerSchema: Schema<Intersection<typeof RuntimeSteerSchemaParts>> = { allOf: RuntimeSteerSchemaParts };
+const RuntimeCancelSchemaParts = [RuntimeControlFields, controlIdentity, jsonSchema.union([
+ routedControl, terminalControl, jsonSchema.obj({ neverConstructed: typedLiteral(true) }, { open: true }), jsonSchema.obj({ cancelled: typedLiteral(true) }, { open: true }),
+ jsonSchema.obj({ mode: typedLiteral("driver"), aborted: jsonSchema.bool(), cursor: jsonSchema.obj({ entryId: jsonSchema.union([text, jsonSchema.nul()]), epoch: jsonSchema.int() }, { open: true }) }, { open: true }),
+])] as const;
+export const RuntimeCancelSchema: Schema<Intersection<typeof RuntimeCancelSchemaParts>> = { allOf: RuntimeCancelSchemaParts };
+export const RuntimeControlSchema = jsonSchema.union([RuntimeSteerSchema, RuntimeCancelSchema]);
+export type DelegateRuntimeControlResult = SchemaValue<typeof RuntimeControlSchema>;
+export const RuntimePromptStatusSchema = jsonSchema.obj({ runId: text, mode: typedLiteral("driver"), promptStatus: jsonSchema.obj({ state: jsonSchema.union([typedLiteral("pending"), typedLiteral("unknown"), typedLiteral("settled"), typedLiteral("failed"), typedLiteral("aborted")]), promptId: optionalText, acceptedAt: optionalText, settledAt: optionalText, terminalOutcome: optionalText, finalCursor: jsonSchema.opt(jsonSchema.obj({ entryId: jsonSchema.union([text, jsonSchema.nul()]), epoch: jsonSchema.int() }, { open: true })), errorCode: optionalText, reason: optionalText }, { open: true }) }, { open: true });
+export type DelegateRuntimePromptStatus = SchemaValue<typeof RuntimePromptStatusSchema>;
+export const RuntimeRecoverySchema = jsonSchema.union([
+ jsonSchema.obj({ runId: text, forkName: text, status: jsonSchema.union([typedLiteral("recovered"), typedLiteral("already-recovered")]), recoveryRunId: text, strategy: jsonSchema.union([typedLiteral("fresh"), typedLiteral("resume")]) }, { open: true }),
+ jsonSchema.obj({ runId: text, mode: typedLiteral("driver"), status: typedLiteral("recovered"), closedPromptIds: strings }, { open: true }),
+ jsonSchema.obj({ runId: text, mode: typedLiteral("driver"), status: typedLiteral("reconciled"), promptId: text }, { open: true }),
 ]);
-export type DelegateRuntimeRecovery = Static<typeof RuntimeRecoverySchema>;
-export const RuntimeFollowUpSchema = Type.Object({ runId: text, mode: Type.Literal("driver"), queued: Type.Boolean(), inputId: text });
-export type DelegateRuntimeFollowUp = Static<typeof RuntimeFollowUpSchema>;
-export const RuntimeUiAnswerSchema = Type.Object({ runId: text, mode: Type.Literal("driver"), answered: Type.Boolean(), questionId: text });
-export type DelegateRuntimeUiAnswerResult = Static<typeof RuntimeUiAnswerSchema>;
+export type DelegateRuntimeRecovery = SchemaValue<typeof RuntimeRecoverySchema>;
+export const RuntimeFollowUpSchema = jsonSchema.obj({ runId: text, mode: typedLiteral("driver"), queued: jsonSchema.bool(), inputId: text }, { open: true });
+export type DelegateRuntimeFollowUp = SchemaValue<typeof RuntimeFollowUpSchema>;
+export const RuntimeUiAnswerSchema = jsonSchema.obj({ runId: text, mode: typedLiteral("driver"), answered: jsonSchema.bool(), questionId: text }, { open: true });
+export type DelegateRuntimeUiAnswerResult = SchemaValue<typeof RuntimeUiAnswerSchema>;
 export interface DelegateRuntimeRecoverRequest { runId: string; forkName?: string; strategy?: "auto" | "fresh" | "resume"; message?: string }
 export interface DelegateRuntimeFollowUpRequest { runId: string; message: string }
 export type DelegateRuntimeUiAnswer = { value: string; confirmed?: never; cancelled?: never } | { confirmed: boolean; value?: never; cancelled?: never } | { cancelled: true; value?: never; confirmed?: never };
@@ -67,26 +77,32 @@ export interface DelegateRuntimeUiAnswerRequest { runId: string; questionId: str
 export interface DelegateRuntimeEscalationFilter { rootRunId?: string; requestIds?: string[] }
 export interface DelegateRuntimeResolveEscalationRequest { rootRunId?: string; requestId: string; selected: number | number[]; customInstruction?: string; note?: string; onBehalfOfUser?: boolean }
 export interface DelegateRuntimePassUpRequest extends DelegateRuntimeEscalationFilter { context?: string; recommendation?: string }
-export const RuntimeEscalationsSchema = Type.Object({ escalations: Type.Array(Type.Object({ requestId: text, rootRunId: text, kind: text, payloadSummary: text, category: optionalText, origin: optionalText, holder: Type.Object({ id: text, kind: text, position: text, isRootHolder: Type.Boolean(), isUser: Type.Boolean() }, { additionalProperties: true }), resolutionOptions: Type.Array(Type.Object({ index: Type.Integer(), label: text })), raisedAt: text, deadlines: Type.Object({ request: optionalText, hop: optionalText }), traceLength: Type.Integer(), latestAnnotation: Type.Optional(Type.Object({ context: optionalText, recommendation: optionalText })) })) });
-export type DelegateRuntimeEscalations = Static<typeof RuntimeEscalationsSchema>;
-const RuntimeEscalationMutationFields = Type.Object({ rootRunId: optionalText, requestId: optionalText, terminal: optionalBoolean, resolved: optionalBoolean, duplicate: optionalBoolean, selected: Type.Optional(Type.Array(Type.Integer())), selectedLabels: Type.Optional(strings), outcome: Type.Optional(Type.Object({ requestId: text, status: text, at: text }, { additionalProperties: true })), forwarded: Type.Optional(Type.Array(Type.Object({ requestId: text, rootRunId: text, holderId: text, holderKind: text, holderLabel: optionalText, hopDeadlineAt: optionalText }))), noops: Type.Optional(Type.Array(Type.Object({ requestId: text, rootRunId: text, status: optionalText, holderKind: optionalText, reason: optionalText }))), errors: Type.Optional(Type.Array(Type.Object({ requestId: text, rootRunId: text, error: text }))), reason: optionalText }, { additionalProperties: true });
-export const RuntimeResolveEscalationSchema = Type.Intersect([RuntimeEscalationMutationFields, Type.Object({ rootRunId: text, requestId: text, outcome: Type.Object({ requestId: text, status: text, at: text }) }), Type.Union([
- Type.Object({ terminal: Type.Literal(true) }),
- Type.Object({ resolved: Type.Boolean(), duplicate: Type.Boolean(), selected: Type.Array(Type.Integer()), selectedLabels: strings }),
-])]);
-export const RuntimePassUpSchema = Type.Intersect([RuntimeEscalationMutationFields, Type.Required(Type.Pick(RuntimeEscalationMutationFields, ["forwarded", "noops", "errors"]))]);
-export const RuntimeEscalationMutationSchema = Type.Union([RuntimeResolveEscalationSchema, RuntimePassUpSchema]);
-export type DelegateRuntimeEscalationMutation = Static<typeof RuntimeEscalationMutationSchema>;
+export const RuntimeEscalationsSchema = jsonSchema.obj({ escalations: jsonSchema.arr(jsonSchema.obj({ requestId: text, rootRunId: text, kind: text, payloadSummary: text, category: optionalText, origin: optionalText, holder: jsonSchema.obj({ id: text, kind: text, position: text, isRootHolder: jsonSchema.bool(), isUser: jsonSchema.bool() }, { open: true }), resolutionOptions: jsonSchema.arr(jsonSchema.obj({ index: jsonSchema.int(), label: text }, { open: true })), raisedAt: text, deadlines: jsonSchema.obj({ request: optionalText, hop: optionalText }, { open: true }), traceLength: jsonSchema.int(), latestAnnotation: jsonSchema.opt(jsonSchema.obj({ context: optionalText, recommendation: optionalText }, { open: true })) }, { open: true })) }, { open: true });
+export type DelegateRuntimeEscalations = SchemaValue<typeof RuntimeEscalationsSchema>;
+const RuntimeEscalationMutationFields = jsonSchema.obj({ rootRunId: optionalText, requestId: optionalText, terminal: optionalBoolean, resolved: optionalBoolean, duplicate: optionalBoolean, selected: jsonSchema.opt(jsonSchema.arr(jsonSchema.int())), selectedLabels: jsonSchema.opt(strings), outcome: jsonSchema.opt(jsonSchema.obj({ requestId: text, status: text, at: text }, { open: true })), forwarded: jsonSchema.opt(jsonSchema.arr(jsonSchema.obj({ requestId: text, rootRunId: text, holderId: text, holderKind: text, holderLabel: optionalText, hopDeadlineAt: optionalText }, { open: true }))), noops: jsonSchema.opt(jsonSchema.arr(jsonSchema.obj({ requestId: text, rootRunId: text, status: optionalText, holderKind: optionalText, reason: optionalText }, { open: true }))), errors: jsonSchema.opt(jsonSchema.arr(jsonSchema.obj({ requestId: text, rootRunId: text, error: text }, { open: true }))), reason: optionalText }, { open: true });
+const RuntimeResolveEscalationSchemaParts = [RuntimeEscalationMutationFields, jsonSchema.obj({ rootRunId: text, requestId: text, outcome: jsonSchema.obj({ requestId: text, status: text, at: text }, { open: true }) }, { open: true }), jsonSchema.union([
+ jsonSchema.obj({ terminal: typedLiteral(true) }, { open: true }),
+ jsonSchema.obj({ resolved: jsonSchema.bool(), duplicate: jsonSchema.bool(), selected: jsonSchema.arr(jsonSchema.int()), selectedLabels: strings }, { open: true }),
+])] as const;
+export const RuntimeResolveEscalationSchema: Schema<Intersection<typeof RuntimeResolveEscalationSchemaParts>> = { allOf: RuntimeResolveEscalationSchemaParts };
+export const RuntimePassUpSchema: Schema<SchemaValue<typeof RuntimeEscalationMutationFields> & Required<Pick<SchemaValue<typeof RuntimeEscalationMutationFields>, "forwarded" | "noops" | "errors">>> = {
+ allOf: [RuntimeEscalationMutationFields, { type: "object", required: ["forwarded", "noops", "errors"] }],
+};
+export const RuntimeEscalationMutationSchema = jsonSchema.union([RuntimeResolveEscalationSchema, RuntimePassUpSchema]);
+export type DelegateRuntimeEscalationMutation = SchemaValue<typeof RuntimeEscalationMutationSchema>;
 export interface DelegateRuntimeManagementRequest { action: ManagementAction; agent?: string; chainName?: string; agentScope?: "user" | "project" | "both"; config?: ManagementConfig }
-export const RuntimeDefinitionSchema = Type.Object({ kind: Type.Union([Type.Literal("agent"), Type.Literal("chain")]), name: text, description: text, source: text, filePath: text, config: ManagementConfigSchema, envKeys: Type.Optional(strings) });
-export type DelegateRuntimeDefinition = Static<typeof RuntimeDefinitionSchema>;
-export const RuntimeManagementResultSchema = Type.Union([
- Type.Object({ action: Type.Union([Type.Literal("list"), Type.Literal("get")]), definitions: Type.Array(RuntimeDefinitionSchema), warnings: Type.Optional(strings) }),
- Type.Intersect([Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("update"), Type.Literal("delete"), Type.Literal("canonicalize")]), filePath: text, scope: text, warnings: Type.Optional(strings), definitions: Type.Optional(Type.Never()) }), Type.Union([Type.Object({ agent: text }), Type.Object({ chainName: text })])]),
+export const RuntimeDefinitionSchema = jsonSchema.obj({ kind: jsonSchema.union([typedLiteral("agent"), typedLiteral("chain")]), name: text, description: text, source: text, filePath: text, config: ManagementConfigSchema, envKeys: jsonSchema.opt(strings) }, { open: true });
+export type DelegateRuntimeDefinition = SchemaValue<typeof RuntimeDefinitionSchema>;
+const RuntimeManagementMutationParts = [jsonSchema.obj({ action: jsonSchema.union([typedLiteral("create"), typedLiteral("update"), typedLiteral("delete"), typedLiteral("canonicalize")]), filePath: text, scope: text, warnings: jsonSchema.opt(strings), definitions: jsonSchema.opt(({ not: {} } as Schema<never>)) }, { open: true }), jsonSchema.union([jsonSchema.obj({ agent: text }, { open: true }), jsonSchema.obj({ chainName: text }, { open: true })])] as const;
+const RuntimeManagementMutationSchema: Schema<Intersection<typeof RuntimeManagementMutationParts>> = { allOf: RuntimeManagementMutationParts };
+
+export const RuntimeManagementResultSchema = jsonSchema.union([
+ jsonSchema.obj({ action: jsonSchema.union([typedLiteral("list"), typedLiteral("get")]), definitions: jsonSchema.arr(RuntimeDefinitionSchema), warnings: jsonSchema.opt(strings) }, { open: true }),
+ RuntimeManagementMutationSchema,
 ]);
-export type DelegateRuntimeManagementResult = Static<typeof RuntimeManagementResultSchema>;
-export const RuntimeHealthSchema = Type.Object({ activeRuns: Type.Number(), completedRuns: Type.Number(), registryActiveRuns: Type.Number(), registryCompletedRuns: Type.Number(), totalRunsInRegistry: Type.Number(), activeDetachedDrivers: Type.Number(), terminalDetachedDrivers: Type.Number(), detachedStatusDegraded: Type.Boolean(), detachedStatusTruncated: Type.Boolean(), agentSurfaces: Type.Array(Type.Object({ name: text, source: text, filePath: text, status: Type.Union([Type.Literal("OK"), Type.Literal("BROKEN"), Type.Literal("UNKNOWN")]), unresolvedSelectors: strings, uncertainSelectors: strings, missingPackages: strings })), agentSurfaceScanDegraded: Type.Boolean(), agentSurfaceScanTruncated: Type.Boolean(), agentSurfaceFilesRead: Type.Number(), runStateBytes: Type.Number(), driverStorageBytes: Type.Number(), eventBusDirBytes: Type.Number(), pendingWakes: Type.Number(), pendingDriverResults: Type.Number(), staleClaims: Type.Number(), maintenance: Type.Object({ running: Type.Boolean(), ticks: Type.Number(), startedAt: Type.Optional(Type.Number()), lastTickAt: Type.Optional(Type.Number()), lastSweepAt: Type.Optional(Type.Number()), lastError: optionalText }) });
-export type DelegateRuntimeHealth = Static<typeof RuntimeHealthSchema>;
+export type DelegateRuntimeManagementResult = SchemaValue<typeof RuntimeManagementResultSchema>;
+export const RuntimeHealthSchema = jsonSchema.obj({ activeRuns: jsonSchema.num(finiteNumberBounds), completedRuns: jsonSchema.num(finiteNumberBounds), registryActiveRuns: jsonSchema.num(finiteNumberBounds), registryCompletedRuns: jsonSchema.num(finiteNumberBounds), totalRunsInRegistry: jsonSchema.num(finiteNumberBounds), activeDetachedDrivers: jsonSchema.num(finiteNumberBounds), terminalDetachedDrivers: jsonSchema.num(finiteNumberBounds), detachedStatusDegraded: jsonSchema.bool(), detachedStatusTruncated: jsonSchema.bool(), agentSurfaces: jsonSchema.arr(jsonSchema.obj({ name: text, source: text, filePath: text, status: jsonSchema.union([typedLiteral("OK"), typedLiteral("BROKEN"), typedLiteral("UNKNOWN")]), unresolvedSelectors: strings, uncertainSelectors: strings, missingPackages: strings }, { open: true })), agentSurfaceScanDegraded: jsonSchema.bool(), agentSurfaceScanTruncated: jsonSchema.bool(), agentSurfaceFilesRead: jsonSchema.num(finiteNumberBounds), runStateBytes: jsonSchema.num(finiteNumberBounds), driverStorageBytes: jsonSchema.num(finiteNumberBounds), eventBusDirBytes: jsonSchema.num(finiteNumberBounds), pendingWakes: jsonSchema.num(finiteNumberBounds), pendingDriverResults: jsonSchema.num(finiteNumberBounds), staleClaims: jsonSchema.num(finiteNumberBounds), maintenance: jsonSchema.obj({ running: jsonSchema.bool(), ticks: jsonSchema.num(finiteNumberBounds), startedAt: jsonSchema.opt(jsonSchema.num(finiteNumberBounds)), lastTickAt: jsonSchema.opt(jsonSchema.num(finiteNumberBounds)), lastSweepAt: jsonSchema.opt(jsonSchema.num(finiteNumberBounds)), lastError: optionalText }, { open: true }) }, { open: true });
+export type DelegateRuntimeHealth = SchemaValue<typeof RuntimeHealthSchema>;
 export interface DelegateRuntimeLogsRequest { runId: string; tail?: boolean; tailLines?: number }
 export type DelegateRuntimeLogs = { kind: "available"; runId: string; text: string; truncated: boolean } | { kind: "unavailable"; runId: string; reason: "not-found" | "no-log" };
 export interface DelegateRuntimeWaitRequest { runId: string; timeoutMs: number }
@@ -127,7 +143,7 @@ export function assertRuntimeCorrespondence(request: Record<string, unknown>, va
 }
 
 /** Runtime validation narrows data; callers never assert a native payload into a public type. */
-export function decodeRuntimeResult<S extends TSchema>(schema: S, value: unknown): Static<S> {
- if (!Value.Check(schema, value)) throw new RuntimeResultContractError(`Incompatible runtime result: ${firstSchemaIssue(schema, value)?.path ?? "root"}`);
+export function decodeRuntimeResult<S extends Schema>(schema: S, value: unknown): SchemaValue<S> {
+ if (!checkSchema(schema, value)) throw new RuntimeResultContractError(`Incompatible runtime result: ${firstSchemaIssue(schema, value)?.path || "root"}`);
  return value;
 }

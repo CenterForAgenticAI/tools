@@ -31,14 +31,14 @@ type DefaultResourceLoaderOptions = NonNullable<
 	ConstructorParameters<typeof DefaultResourceLoader>[0]
 >;
 
-import { Type } from "typebox";
+import * as s from "@earendil-works/pi-schema";
 import type { AgentConfig, AgentSource, CollapseMode } from "./agents.js";
 import {
 	createActorActivityPublisher,
 	createAgentActivityProjector,
 	type ActorActivityPublisher,
 } from "./actor-activity.js";
-import type { ResolvedRunTimeoutPolicy } from "./fork-timeout.js";
+import { DEFAULT_WIND_DOWN_GRACE_MS, type ResolvedRunTimeoutPolicy } from "./fork-timeout.js";
 import type { WorktreeDiff } from "./worktree.js";
 import {
 	PARENT_TRANSCRIPT_SEARCH_TOOL_NAME,
@@ -83,6 +83,7 @@ import {
 	resolveTextCompletionModel,
 } from "./model-completion.js";
 import { type CancelReason, type RunLiveState, updateRunState, observeWorkerSession } from "./runtime.js";
+import { recordEscalationReceipts } from "./escalation-api.js";
 import { dropTrailingLiveAssistant, isPiSystemMessage, seedLiveContext } from "./live-context.js";
 import { buildSeedMessages, type CloneMode, type DirectFirstTurnExchange } from "./seed.js";
 import { DEFAULT_TASK_DELIVERY_MODE, type TaskDeliveryMode } from "./delegate-runs.js";
@@ -204,6 +205,8 @@ import type { EffectiveEscalationPolicy } from "./escalation-policy.js";
 import type { EnvOverrides } from "./env-overrides.js";
 import { mergeEnvOverrides, withEnvOverrides } from "./env-overrides.js";
 import type { ResolvedEscalationConfig } from "./config.js";
+import { admitLeafWorker, installLiveWorkerSessionGate } from "./live-worker-admission.js";
+import type { LiveWorkerLease } from "./live-worker-cap.js";
 import {
 	appendEscalationSupervisorGuidance,
 	buildSupervisedEscalationParticipants,
@@ -1437,11 +1440,18 @@ export function buildWorkerSessionDir(baseAgentDir: string): string {
 	return `${baseAgentDir}/sessions/forks`;
 }
 
+/** Live leaf-worker slot (#633) for one supervised fork, held across worker restarts. */
+interface ForkLiveWorkerSlot {
+	lease?: LiveWorkerLease;
+	admitted?: boolean;
+}
+
 async function runForkInner(
 	req: ForkRequest,
 	fctx: ForkContext,
 	actorActivity: ActorActivityPublisher | undefined,
 	credentialRetryBudget: CredentialRetryBudget,
+	liveWorkerSlot: ForkLiveWorkerSlot,
 ): Promise<RunResult> {
 	const startMs = Date.now();
 	const startedAt = new Date(startMs).toISOString();
@@ -2197,6 +2207,29 @@ async function runForkInner(
 			if (!currentWorkerModel) {
 				throw new Error("Worker model not initialised");
 			}
+			// #633: the worker (not the supervisor clone) is the leaf. It waits for a
+			// live-worker slot before its runtime is built; the per-fork timeout and
+			// heartbeat start at the first running update, which follows session
+			// creation, so time spent queued counts against neither. A restart keeps
+			// the slot it already holds.
+			if (!liveWorkerSlot.admitted) {
+				liveWorkerSlot.lease = await admitLeafWorker({
+					agentDir: fctx.agentDir,
+					surface: workerSurface,
+					signal: fctx.signal,
+					runId: fctx.runId,
+					forkName: fctx.forkName ?? req.name,
+					label: `supervised fork "${req.name}"`,
+					now: () => credentialRetryBudget.clock.now(),
+					credentialRetryBudget,
+					abortGraceMs: req.timeoutPolicy?.windDownGraceMs ?? DEFAULT_WIND_DOWN_GRACE_MS,
+				});
+				liveWorkerSlot.admitted = true;
+				if (fctx.signal?.aborted) throw new Error("aborted before fork construction");
+			} else {
+				// A restarted worker after an idle release takes its slot back first.
+				await liveWorkerSlot.lease?.reacquire(fctx.signal);
+			}
 			const workerModel = currentWorkerModel;
 			const activityGeneration = nextAttemptGeneration + 1;
 			// Raise tools are built before WorkerChannel. The indirection is the
@@ -2417,6 +2450,9 @@ async function runForkInner(
 				}
 				session = created.session;
 				sessionAcquired = true;
+				// Idle reaper (#633): an idle worker may lose its slot between supervisor
+				// turns; its next prompt re-takes one before it is sent.
+				if (liveWorkerSlot.lease) installLiveWorkerSessionGate(liveWorkerSlot.lease, session, { signal: fctx.signal });
 				attemptOperation("session-create", "acquired");
 				attemptBoundary("acquired", "session");
 			// ── Lineage serialize seam (spec 0003 / REQ-LIN-1) ──────────────
@@ -2571,6 +2607,7 @@ async function runForkInner(
 				},
 			);
 			unsubscribe = observeWorkerSession(session, fctx.ownerSessionId, (ev) => {
+				if (ev.type === "turn_end" && escalationEnabled) recordEscalationReceipts(fctx.agentDir, rootRunId, ev.toolResults);
 				if (workerAttempt?.generation !== activityGeneration) return;
 				try {
 					if (ev.type === "agent_start") {
@@ -3235,9 +3272,9 @@ async function runForkInner(
 			description: taskDelivery === "direct-first-turn"
 				? "Send a follow-up to the subagent you are delegating to. The initial task was already delivered to them and its reply is in your history — do not resend or restate it. They will run their own tools and return a reply. If the worker is slow, you will receive a heartbeat status instead of a reply — call `wait_for_worker` to keep waiting."
 				: "Send a message to the subagent you are delegating to. They will run their own tools and return a reply. Use this for the initial task and for every follow-up question or correction. If the worker is slow, you will receive a heartbeat status instead of a reply — call `wait_for_worker` to keep waiting.",
-			parameters: Type.Object({
-				text: Type.String({ description: "The message to send to the subagent." }),
-			}),
+			parameters: s.obj({
+				text: s.str({ description: "The message to send to the subagent." }),
+			}, { open: true }),
 			execute: async (
 				_toolCallId: string,
 				params: { text: string },
@@ -3405,7 +3442,7 @@ async function runForkInner(
 			label: "Wait for subagent",
 			description:
 				"Keep waiting for the in-flight subagent prompt to produce a reply. Use this after a `message_subagent` or `wait_for_worker` call returned a heartbeat status instead of a reply. Does not count against max_rounds. If the worker has no pending prompt, this returns 'idle' immediately.",
-			parameters: Type.Object({}),
+			parameters: s.obj({}, { open: true }),
 			execute: async (
 				_toolCallId: string,
 				_params: Record<string, never>,
@@ -3452,7 +3489,7 @@ async function runForkInner(
 			label: "Inspect subagent",
 			description:
 				"Read-only snapshot of the subagent's current state — state, silence duration, consecutive heartbeats, active tool call, and a short tail of recent transcript activity. Safe to call at any time (including after a heartbeat or an abort). Does not count against max_rounds. Use it to decide whether to `wait_for_worker`, `cancel_worker`, or `restart_worker`.",
-			parameters: Type.Object({}),
+			parameters: s.obj({}, { open: true }),
 			execute: async (
 				_toolCallId: string,
 				_params: Record<string, never>,
@@ -3481,14 +3518,12 @@ async function runForkInner(
 			label: "Cancel subagent",
 			description:
 				"Terminal. Abort the subagent session immediately. Use when the tail from `inspect_worker` or a heartbeat shows the worker is unrecoverably stuck and you don't want to start over. After this you MUST call `finish_delegation` to collapse the fork; the fork will be reported as aborted regardless of the finish payload.",
-			parameters: Type.Object({
-				reason: Type.Optional(
-					Type.String({
+			parameters: s.obj({
+				reason: s.opt(s.str({
 						description:
 							"Short reason for the cancel (e.g. 'stuck in pytest loop'). Threaded into the fork's error field for post-hoc diagnostics.",
-					}),
-				),
-			}),
+					})),
+			}, { open: true }),
 			execute: async (
 				_toolCallId: string,
 				params: { reason?: string },
@@ -3534,12 +3569,12 @@ async function runForkInner(
 			label: "Restart subagent",
 			description:
 				"Abort the current subagent session and start a fresh one with the same agent/model, then send `newMessage` to the new worker. Use when the worker is stuck but the task is still worth attempting from a clean slate. Counts as one round. The new worker has no memory of prior rounds — re-state anything it needs to know.",
-			parameters: Type.Object({
-				newMessage: Type.String({
+			parameters: s.obj({
+				newMessage: s.str({
 					description:
 						"Initial message for the fresh subagent session. Include any context that the previous session had learned and that the new one needs to re-do the task (or do it differently).",
 				}),
-			}),
+			}, { open: true }),
 			execute: async (
 				_toolCallId: string,
 				params: { newMessage: string },
@@ -4063,20 +4098,16 @@ async function runForkInner(
 			label: "Finish delegation",
 			description:
 				"End this delegation fork. Provide either `final_output` (the concrete answer to return to your main thread) or a concise `summary`. An explicitly configured summary_model may refine the summary from the full transcript; otherwise it is returned verbatim with no provider call. Exactly one field must be provided.",
-			parameters: Type.Object({
-				final_output: Type.Optional(
-					Type.String({
+			parameters: s.obj({
+				final_output: s.opt(s.str({
 						description:
 							"The concrete, self-contained answer to return as the tool result in your main thread. Use when the main thread needs a specific output (code, list, answer).",
-					}),
-				),
-				summary: Type.Optional(
-					Type.String({
+					})),
+				summary: s.opt(s.str({
 						description:
 							"Concise, self-contained note describing what happened. It may be refined by an explicitly configured summary_model; without one, it becomes the final result verbatim.",
-					}),
-				),
-			}),
+					})),
+			}, { open: true }),
 			execute: async (
 				_toolCallId: string,
 				params: { final_output?: string; summary?: string },
@@ -4895,6 +4926,7 @@ export async function runFork(req: ForkRequest, fctx: ForkContext): Promise<RunR
 	// depend on a write-confinement extension being installed. An explicitly
 	// unconfined worker installs none (#362 follow-up).
 	let releaseAllocatedScratchLease: (() => void) | undefined;
+	const liveWorkerSlot: ForkLiveWorkerSlot = {};
 	try {
 		let request: ForkRequest;
 		try {
@@ -4946,7 +4978,7 @@ export async function runFork(req: ForkRequest, fctx: ForkContext): Promise<RunR
 		const result = await runWithDepth(
 			request.agent.name,
 			resolveDelegateOnlyDepth(request.agent.maxSubagentDepth),
-			() => runForkInner(request, fctx, actorActivity, credentialRetryBudget),
+			() => runForkInner(request, fctx, actorActivity, credentialRetryBudget, liveWorkerSlot),
 			undefined,
 			fctx.runId ? { runId: fctx.runId, childIndex: fctx.childIndex } : undefined,
 			{ agentDir: fctx.agentDir },
@@ -5020,6 +5052,9 @@ export async function runFork(req: ForkRequest, fctx: ForkContext): Promise<RunR
 		try {
 			releaseAllocatedScratchLease?.();
 		} finally {
+			// After the worker attempt is disposed on every path, so a queued run
+			// starts only once this worker is gone.
+			liveWorkerSlot.lease?.release();
 			actorActivity?.dispose();
 		}
 	}

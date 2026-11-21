@@ -196,8 +196,9 @@ isolation; the last write wins and neither worker knows. Read-only lanes
 
 ## Seed lane checklists
 
-If a lane has more than one step worth tracking and its worker has a
-`session_tasks` claimant, seed its durable checklist when you cut the dispatch.
+If a lane has more than one step worth tracking and its worker has a task-list
+claimant (`workstream_tasks`, or `session_tasks` from pi-context-aware 0.8.x),
+seed its durable checklist when you cut the dispatch.
 Without a claimant, the handoff becomes a prompt checklist only; it is not durable
 and has no subtree progress to read:
 
@@ -212,8 +213,9 @@ delegate({
 })
 ```
 
-When the worker loads a `session_tasks` claimant, the handoff seeds a durable
-list; read the lane subtree with `session_tasks action=subtree` to see progress
+When the worker loads a task-list claimant, the handoff seeds a durable list; read
+the lane subtree by calling that tool (`workstream_tasks` or `session_tasks`) with
+no arguments to see progress
 rather than asking the worker for a status update. Without a claimant, the worker
 receives a prompt checklist only: it has no durability or subtree progress. A
 `blocked` row includes either its reason or, when the event budget cannot retain the

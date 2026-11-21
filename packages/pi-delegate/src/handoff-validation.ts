@@ -20,7 +20,7 @@
  * dispatch, and the error names what was wrong and what is accepted.
  *
  * The `tasks` contract is pinned here against the same bounds the receiver
- * enforces (`context-aware.tasks.v1`). A payload that would be silently trimmed
+ * enforces (`pi-workstream.tasks.v1`). A payload that would be silently trimmed
  * on arrival is rejected at dispatch instead, where the caller can still act on
  * the message.
  */
@@ -111,7 +111,7 @@ function validateTask(value: unknown, path: string, depth: number): void {
 	}
 
 	if (value.status !== undefined) {
-		const allowed = ["pending", "active", "done", "blocked", "deferred"];
+		const allowed = ["todo", "active", "done", "blocked", "dropped", "pending", "deferred"];
 		if (typeof value.status !== "string" || !allowed.includes(value.status)) {
 			throw new HandoffValidationError(
 				`handoff.${path}.status must be one of ${allowed.join(", ")}, not ${JSON.stringify(value.status)}`,
@@ -120,7 +120,7 @@ function validateTask(value: unknown, path: string, depth: number): void {
 		// The receiver requires a reason for these two; a blocked task with no
 		// stated reason is exactly the kind of thing that gets lost.
 		if (
-			(value.status === "blocked" || value.status === "deferred") &&
+			(value.status === "blocked" || value.status === "dropped" || value.status === "deferred") &&
 			(typeof value.note !== "string" || value.note.trim().length === 0)
 		) {
 			throw new HandoffValidationError(

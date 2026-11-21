@@ -20,7 +20,7 @@
  */
 
 /** The channel a host publishes a seed on, for whichever extension claims it. */
-export const TASKS_SEED_CHANNEL = "context-aware.tasks.v1" as const;
+export const TASKS_SEED_CHANNEL = "pi-workstream.tasks.v1" as const;
 /** Process-local environment transport used only by the detached child bootstrap. */
 export const TASKS_SEED_ENV = "PI_DELEGATE_TASK_SEED_V1" as const;
 /** Trusted recovery-attempt identity paired with the detached seed transport. */
@@ -31,7 +31,12 @@ export const TASK_ATTEMPT_FIELD = "taskAttempt" as const;
 export const MAX_TASK_SEED_TRANSPORT_BYTES = 64 * 1024;
 
 /** The custom entry type a worker session stores its list under. */
-export const TASKS_ENTRY_TYPE = "context-aware.tasks.v1" as const;
+export const TASKS_ENTRY_TYPE = "pi-workstream.tasks.v1" as const;
+/**
+ * The seed channel and entry type pi-context-aware 0.8.x uses for `session_tasks`.
+ * Written only when that tool is the worker's claimant; always read.
+ */
+export const SESSION_TASKS_ENTRY_TYPE = "context-aware.tasks.v1" as const;
 
 /** Versioned separately from the progress payload, so each side can move alone. */
 export const TASKS_SEED_CONTRACT_VERSION = 1 as const;
@@ -48,13 +53,34 @@ export const MAX_SEED_REF_CHARS = 32;
 /** Keep task snapshots comfortably below the event-bus 64 KiB hard cap. */
 export const MAX_TASK_PROGRESS_BYTES = 60 * 1024;
 
-export type SeedTaskStatus = "pending" | "active" | "done" | "blocked" | "deferred";
+/**
+ * The statuses pi-workstream defines, and the canonical names pi-delegate works
+ * with internally. A seed for another claimant is translated on write; see
+ * `TaskSeamClaimant.writtenStatus`.
+ */
+export type TaskStatus = "todo" | "active" | "done" | "blocked" | "dropped";
+/**
+ * The names pi-context-aware 0.8.x uses for `todo` and `dropped`. Always read;
+ * written only into a seed for its `session_tasks` tool.
+ */
+export type LegacyTaskStatus = "pending" | "deferred";
+/** What a reader accepts: the new names plus the old ones. */
+export type SeedTaskStatus = TaskStatus | LegacyTaskStatus;
 
-const SEED_STATUSES: readonly SeedTaskStatus[] = ["pending", "active", "done", "blocked", "deferred"];
+const SEED_STATUSES: readonly SeedTaskStatus[] = ["todo", "active", "done", "blocked", "dropped", "pending", "deferred"];
+
+/** Map an accepted status, old or new, to the name pi-delegate writes. */
+export function normalizeTaskStatus(status: SeedTaskStatus): TaskStatus {
+	return status === "pending" ? "todo" : status === "deferred" ? "dropped" : status;
+}
+
+export function isSeedTaskStatus(value: unknown): value is SeedTaskStatus {
+	return SEED_STATUSES.includes(value as SeedTaskStatus);
+}
 
 /** A status that carries no meaning without a stated reason. */
 function statusNeedsNote(status: SeedTaskStatus): boolean {
-	return status === "blocked" || status === "deferred";
+	return status === "blocked" || status === "dropped" || status === "deferred";
 }
 
 export interface SeedTask {
@@ -146,9 +172,7 @@ function parseSlotTask(value: unknown, depth: number): SeedTask | null {
 	const title = value.title.replaceAll(/[\r\n]+/g, " ").trim();
 	if (title.length === 0) return null;
 
-	const status = SEED_STATUSES.includes(value.status as SeedTaskStatus)
-		? (value.status as SeedTaskStatus)
-		: undefined;
+	const status = isSeedTaskStatus(value.status) ? normalizeTaskStatus(value.status) : undefined;
 	const note = truncateSeedNote(value.note);
 	const ownerTaskId = boundedString(value.ownerTaskId, MAX_SEED_TASK_ID_CHARS)
 		? value.ownerTaskId
@@ -230,13 +254,13 @@ function validateTransportTask(value: unknown, path: string, depth: number): voi
 	if (!boundedString(value.title, MAX_SEED_TITLE_CHARS)) {
 		throw new Error(`${path}.title must be a non-empty string of at most ${MAX_SEED_TITLE_CHARS} characters`);
 	}
-	if (value.status !== undefined && !SEED_STATUSES.includes(value.status as SeedTaskStatus)) {
+	if (value.status !== undefined && !isSeedTaskStatus(value.status)) {
 		throw new Error(`${path}.status is unsupported`);
 	}
 	if (value.note !== undefined && !boundedString(value.note, MAX_SEED_NOTE_CHARS)) {
 		throw new Error(`${path}.note must be a non-empty string of at most ${MAX_SEED_NOTE_CHARS} characters`);
 	}
-	if ((value.status === "blocked" || value.status === "deferred") && value.note === undefined) {
+	if ((value.status === "blocked" || value.status === "dropped" || value.status === "deferred") && value.note === undefined) {
 		throw new Error(`${path}.note is required for ${value.status} tasks`);
 	}
 	if (value.ownerTaskId !== undefined && !boundedString(value.ownerTaskId, MAX_SEED_TASK_ID_CHARS)) {
@@ -297,36 +321,41 @@ export function parseTasksSeedTransport(raw: string): TasksSeed {
 // Downward: building a worker-session payload
 // ---------------------------------------------------------------------------
 
-/** What the worker's session stores. A full snapshot, matching the receiver's schema. */
-export interface SeededSnapshot {
+/** What the worker's session stores. A full snapshot, in the claimant's status names. */
+export interface SeededSnapshot<Status extends SeedTaskStatus = SeedTaskStatus> {
 	readonly schemaVersion: 1;
 	readonly eventId: string;
 	readonly revision: 1;
 	readonly piSessionId: string;
-	readonly tasks: readonly SeededTask[];
+	readonly tasks: readonly SeededTask<Status>[];
 	readonly createdAt: string;
 	readonly updatedAt: string;
 }
 
-interface SeededTask {
+interface SeededTask<Status extends SeedTaskStatus = TaskStatus> {
 	readonly id: string;
 	readonly title: string;
-	readonly status: SeedTaskStatus;
+	readonly status: Status;
 	readonly note?: string;
 	/** Stable id in the owner session; absent for legacy/non-delegated seeds. */
 	readonly ownerTaskId?: string;
 	/** Opaque external correlation metadata; independent of both ids. */
 	readonly ref?: string;
 	readonly origin: "user" | "spec" | "agent";
-	readonly subtasks?: readonly SeededTask[];
+	readonly subtasks?: readonly SeededTask<Status>[];
 }
 
-function seededTask(task: SeedTask, id: string, origin: "user" | "spec" | "agent"): SeededTask {
-	const children = (task.subtasks ?? []).map((child, index) => seededTask(child, `${id}.${index + 1}`, origin));
+function seededTask(
+	task: SeedTask,
+	id: string,
+	origin: "user" | "spec" | "agent",
+	claimant: TaskSeamClaimant,
+): SeededTask<SeedTaskStatus> {
+	const children = (task.subtasks ?? []).map((child, index) => seededTask(child, `${id}.${index + 1}`, origin, claimant));
 	return {
 		id,
 		title: task.title,
-		status: task.status ?? "pending",
+		status: claimant.writtenStatus[normalizeTaskStatus(task.status ?? "todo")],
 		...(task.note === undefined ? {} : { note: task.note }),
 		...(task.ownerTaskId === undefined ? {} : { ownerTaskId: task.ownerTaskId }),
 		...(task.ref === undefined ? {} : { ref: task.ref }),
@@ -335,8 +364,46 @@ function seededTask(task: SeedTask, id: string, origin: "user" | "spec" | "agent
 	};
 }
 
-/** The tool an extension registers when it owns a durable session task list. */
-export const TASKS_TOOL_NAME = "session_tasks" as const;
+/** The tool pi-workstream registers when it owns a durable session task list. */
+export const TASKS_TOOL_NAME = "workstream_tasks" as const;
+/** The tool pi-context-aware 0.8.x registers for the same list. */
+export const SESSION_TASKS_TOOL_NAME = "session_tasks" as const;
+
+/**
+ * One extension that can own a worker's durable task list, and how a seed for
+ * it is written. The claimants disagree on names, not on the snapshot shape.
+ */
+export interface TaskSeamClaimant {
+	readonly toolName: string;
+	readonly seedChannel: string;
+	readonly entryType: string;
+	/** The name the claimant's schema accepts for each canonical status. */
+	readonly writtenStatus: Readonly<Record<TaskStatus, SeedTaskStatus>>;
+}
+
+export const WORKSTREAM_TASKS_CLAIMANT: TaskSeamClaimant = {
+	toolName: TASKS_TOOL_NAME,
+	seedChannel: TASKS_SEED_CHANNEL,
+	entryType: TASKS_ENTRY_TYPE,
+	writtenStatus: { todo: "todo", active: "active", done: "done", blocked: "blocked", dropped: "dropped" },
+};
+
+/** pi-context-aware 0.8.x: `blocked` and `deferred` need a note there too. */
+export const SESSION_TASKS_CLAIMANT: TaskSeamClaimant = {
+	toolName: SESSION_TASKS_TOOL_NAME,
+	seedChannel: SESSION_TASKS_ENTRY_TYPE,
+	entryType: SESSION_TASKS_ENTRY_TYPE,
+	writtenStatus: { todo: "pending", active: "active", done: "done", blocked: "blocked", dropped: "deferred" },
+};
+
+/** Every task-list claimant, in preference order: pi-workstream first. */
+export const TASK_SEAM_CLAIMANTS: readonly TaskSeamClaimant[] = [WORKSTREAM_TASKS_CLAIMANT, SESSION_TASKS_CLAIMANT];
+export const TASK_TOOL_NAMES: readonly string[] = TASK_SEAM_CLAIMANTS.map((claimant) => claimant.toolName);
+
+/** The preferred claimant whose tool passes `isUsable`, or undefined for the Markdown fallback. */
+export function selectTaskSeamClaimant(isUsable: (toolName: string) => boolean): TaskSeamClaimant | undefined {
+	return TASK_SEAM_CLAIMANTS.find((claimant) => isUsable(claimant.toolName));
+}
 
 export interface SeedSessionOptions {
 	readonly piSessionId: string;
@@ -344,8 +411,17 @@ export interface SeedSessionOptions {
 	readonly eventId?: string;
 }
 
-/** Build the exact snapshot stored in a worker session by the seed registry. */
-export function buildSessionTasksSeed(seed: TasksSeed, options: SeedSessionOptions): SeededSnapshot {
+/**
+ * Build the exact snapshot stored in a worker session by the seed registry.
+ * Store it under `claimant.entryType`; its statuses use the claimant's names.
+ */
+export function buildSessionTasksSeed(seed: TasksSeed, options: SeedSessionOptions): SeededSnapshot<TaskStatus>;
+export function buildSessionTasksSeed(seed: TasksSeed, options: SeedSessionOptions, claimant: TaskSeamClaimant): SeededSnapshot;
+export function buildSessionTasksSeed(
+	seed: TasksSeed,
+	options: SeedSessionOptions,
+	claimant: TaskSeamClaimant = WORKSTREAM_TASKS_CLAIMANT,
+): SeededSnapshot {
 	const now = (options.now ?? new Date()).toISOString();
 	const origin = seed.origin ?? "spec";
 	return {
@@ -353,7 +429,7 @@ export function buildSessionTasksSeed(seed: TasksSeed, options: SeedSessionOptio
 		eventId: options.eventId ?? `seed-${options.piSessionId}`,
 		revision: 1,
 		piSessionId: options.piSessionId,
-		tasks: seed.tasks.map((task, index) => seededTask(task, `t${index + 1}`, origin)),
+		tasks: seed.tasks.map((task, index) => seededTask(task, `t${index + 1}`, origin, claimant)),
 		createdAt: now,
 		updatedAt: now,
 	};
@@ -363,16 +439,16 @@ export function buildSessionTasksSeed(seed: TasksSeed, options: SeedSessionOptio
 // The degradation path
 // ---------------------------------------------------------------------------
 
-const STATUS_MARKER: Record<SeedTaskStatus, string> = {
-	pending: " ",
+const STATUS_MARKER: Record<TaskStatus, string> = {
+	todo: " ",
 	active: ">",
 	done: "x",
 	blocked: "!",
-	deferred: "~",
+	dropped: "~",
 };
 
 function markdownLine(task: SeedTask, indent: string): string {
-	const marker = STATUS_MARKER[task.status ?? "pending"];
+	const marker = STATUS_MARKER[normalizeTaskStatus(task.status ?? "todo")];
 	const note = task.note === undefined ? "" : ` — ${task.note}`;
 	return `${indent}- [${marker}] ${task.title}${note}`;
 }
@@ -426,7 +502,7 @@ export interface TaskProgressRow {
 	readonly ref?: string;
 	/** Real bounded title. Absent on legacy progress rows. */
 	readonly title?: string;
-	readonly status: SeedTaskStatus;
+	readonly status: TaskStatus;
 	readonly reason?: string;
 	/** One supported nested level, preserved as an additive v1 field. */
 	readonly subtasks?: readonly TaskProgressRow[];
@@ -465,10 +541,12 @@ export function countSeededTasks(tasks: readonly SeededTask[]): TaskCounts {
 	let deferred = 0;
 	let active: string | null = null;
 	for (const task of tasks) {
-		if (task.status === "done") done += 1;
-		else if (task.status === "blocked") blocked += 1;
-		else if (task.status === "deferred") deferred += 1;
-		else if (task.status === "active") {
+		// Readers accept the old names too: count them the same as the new ones.
+		const status = normalizeTaskStatus(task.status as SeedTaskStatus);
+		if (status === "done") done += 1;
+		else if (status === "blocked") blocked += 1;
+		else if (status === "dropped") deferred += 1;
+		else if (status === "active") {
 			if (active === null) active = task.title;
 		} else pending += 1;
 	}
@@ -747,7 +825,7 @@ export function readTaskProgressFields(busFields: unknown): TaskProgressFields |
 	};
 }
 
-interface TaskProgressRowCounts {
+export interface TaskProgressRowCounts {
 	done: number;
 	blocked: number;
 	pending: number;
@@ -755,14 +833,17 @@ interface TaskProgressRowCounts {
 	deferred: number;
 }
 
-function countTaskProgressRows(rows: readonly TaskProgressRow[]): TaskProgressRowCounts {
+export function countTaskProgressRows(rows: readonly TaskProgressRow[]): TaskProgressRowCounts {
 	const counts: TaskProgressRowCounts = { done: 0, blocked: 0, pending: 0, active: 0, deferred: 0 };
-	for (const row of rows) counts[row.status] += 1;
+	for (const row of rows) {
+		const status = normalizeTaskStatus(row.status);
+		counts[status === "todo" ? "pending" : status === "dropped" ? "deferred" : status] += 1;
+	}
 	return counts;
 }
 
 function parseTaskProgressRow(value: unknown, depth: number, seen: Set<string>): TaskProgressRow | undefined {
-	if (!isRecord(value) || !SEED_STATUSES.includes(value.status as SeedTaskStatus)) return undefined;
+	if (!isRecord(value) || !isSeedTaskStatus(value.status)) return undefined;
 	const idKind = value.idKind === "local" || value.idKind === "owner"
 		? value.idKind
 		: value.idKind === undefined
@@ -775,7 +856,7 @@ function parseTaskProgressRow(value: unknown, depth: number, seen: Set<string>):
 	const logicalId = `${idKind}:${id}`;
 	if (seen.has(logicalId)) return undefined;
 	seen.add(logicalId);
-	const status = value.status as SeedTaskStatus;
+	const status = normalizeTaskStatus(value.status);
 	const ref = isValidSeedRef(value.ref) ? value.ref : undefined;
 	const candidateReason = value.reason;
 	if (candidateReason !== undefined && (status !== "blocked" || !boundedString(candidateReason, MAX_SEED_NOTE_CHARS))) return undefined;
@@ -826,7 +907,7 @@ function parseTaskProgressRows(value: unknown): TaskProgressRow[] | undefined {
 function parseSeededTask(value: unknown, depth: number): SeededTask | null {
 	if (!isRecord(value)) return null;
 	if (!boundedString(value.id, 64) || !boundedString(value.title, MAX_SEED_TITLE_CHARS)) return null;
-	if (!SEED_STATUSES.includes(value.status as SeedTaskStatus)) return null;
+	if (!isSeedTaskStatus(value.status)) return null;
 	const origin = value.origin === "user" || value.origin === "spec" || value.origin === "agent" ? value.origin : "agent";
 	const note = truncateSeedNote(value.note);
 	const ref = isValidSeedRef(value.ref) ? value.ref : undefined;
@@ -841,7 +922,7 @@ function parseSeededTask(value: unknown, depth: number): SeededTask | null {
 	return {
 		id: value.id,
 		title: value.title,
-		status: value.status as SeedTaskStatus,
+		status: normalizeTaskStatus(value.status),
 		...(note === undefined ? {} : { note }),
 		...(boundedString(value.ownerTaskId, MAX_SEED_TASK_ID_CHARS) ? { ownerTaskId: value.ownerTaskId } : {}),
 		...(ref === undefined ? {} : { ref }),
@@ -860,7 +941,7 @@ function parseSeededTask(value: unknown, depth: number): SeededTask | null {
 export function readSeededTasks(entries: readonly unknown[]): readonly SeededTask[] {
 	let best: { revision: number; eventId: string; tasks: SeededTask[] } | undefined;
 	for (const entry of entries) {
-		if (!isRecord(entry) || entry.type !== "custom" || entry.customType !== TASKS_ENTRY_TYPE) continue;
+		if (!isRecord(entry) || entry.type !== "custom" || (entry.customType !== TASKS_ENTRY_TYPE && entry.customType !== SESSION_TASKS_ENTRY_TYPE)) continue;
 		const data = entry.data;
 		if (!isRecord(data) || data.schemaVersion !== 1 || !Array.isArray(data.tasks)) continue;
 		const revision = typeof data.revision === "number" && Number.isSafeInteger(data.revision) ? data.revision : 0;
@@ -967,7 +1048,7 @@ export function reconcileTaskRows(
 	if (rows === undefined) {
 		return tasks.map((task) => {
 			const { delegation: _delegation, ...retryable } = task;
-			return { ...retryable, status: "pending", lastAttempt: attempt };
+			return { ...retryable, status: "todo", lastAttempt: attempt };
 		});
 	}
 	const byOwnerId = new Map(
@@ -990,7 +1071,7 @@ export function reconcileTaskRows(
 export interface TaskLedger {
 	readonly outcome: TaskOutcome;
 	readonly counts: TaskCounts;
-	readonly unfinished: readonly { readonly id: string; readonly title: string; readonly status: SeedTaskStatus; readonly note?: string; readonly ownerTaskId?: string; readonly ref?: string }[];
+	readonly unfinished: readonly { readonly id: string; readonly title: string; readonly status: TaskStatus; readonly note?: string; readonly ownerTaskId?: string; readonly ref?: string }[];
 	/** Owner-addressed rows are also retained in the collapsed result. */
 	readonly rows: readonly TaskProgressRow[];
 }
@@ -1004,7 +1085,7 @@ export function buildTaskLedger(tasks: readonly SeededTask[]): TaskLedger | unde
 		counts,
 		rows: taskProgressRows(tasks),
 		unfinished: tasks
-			.filter((task) => task.status !== "done" && task.status !== "deferred")
+			.filter((task) => task.status !== "done" && task.status !== "dropped")
 			.map((task) => ({
 				id: task.id,
 				title: task.title,
@@ -1090,10 +1171,10 @@ export function parseTaskLedger(value: unknown): TaskLedger | undefined {
 	const unfinished: TaskLedger["unfinished"][number][] = [];
 	for (const item of value.unfinished) {
 		if (!isRecord(item) || !boundedString(item.id, MAX_SEED_TASK_ID_CHARS) || !boundedString(item.title, MAX_SEED_TITLE_CHARS) ||
-			(item.status !== "pending" && item.status !== "active" && item.status !== "blocked")) return undefined;
+			(item.status !== "todo" && item.status !== "pending" && item.status !== "active" && item.status !== "blocked")) return undefined;
 		const id = item.id;
 		const title = item.title;
-		const status = item.status as SeedTaskStatus;
+		const status = normalizeTaskStatus(item.status as SeedTaskStatus);
 		const note = item.note;
 		const ownerTaskId = item.ownerTaskId;
 		const ref = isValidSeedRef(item.ref) ? item.ref : undefined;

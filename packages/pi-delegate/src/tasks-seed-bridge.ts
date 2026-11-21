@@ -1,9 +1,10 @@
 /**
- * Detached-child bootstrap for the bounded `context-aware.tasks.v1` seed.
+ * Detached-child bootstrap for the bounded task-list seed.
  *
  * The runner loads this after consumer extensions and policy bridges. It chooses
- * structured seeding or a one-time Markdown fallback from the final active tool
- * set, then mirrors bounded progress plus the terminal ledger into the event bus.
+ * the claimant from the final active tool set (`workstream_tasks` first, then
+ * pi-context-aware 0.8.x's `session_tasks`) or a one-time Markdown fallback,
+ * then mirrors bounded progress plus the terminal ledger into the event bus.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -14,12 +15,13 @@ import {
 	parseTasksSeedTransport,
 	readSeededTasks,
 	renderTasksMarkdown,
+	selectTaskSeamClaimant,
 	taskProgressFieldsFromEntries,
-	TASKS_ENTRY_TYPE,
 	TASK_ATTEMPT_ENV,
 	TASK_ATTEMPT_FIELD,
 	TASK_LEDGER_FIELD,
 	TASKS_SEED_ENV,
+	type TaskSeamClaimant,
 	type TasksSeed,
 } from "./task-seam.js";
 
@@ -97,10 +99,12 @@ export default function tasksSeedBridge(pi: ExtensionAPI): void {
 	type DeliveryMode = "pending" | "seeded" | "fallback" | "failed";
 	let deliveryMode: DeliveryMode = "pending";
 	let seedAppended = false;
-	const hasUsableClaimant = (): boolean =>
-		pi.getAllTools().some((tool) => tool.name === "session_tasks") &&
-		pi.getActiveTools().includes("session_tasks");
-	const ensureSeed = (ctx: ExtensionContext): void => {
+	const usableClaimant = (): TaskSeamClaimant | undefined => {
+		const registered = new Set(pi.getAllTools().map((tool) => tool.name));
+		const active = pi.getActiveTools();
+		return selectTaskSeamClaimant((toolName) => registered.has(toolName) && active.includes(toolName));
+	};
+	const ensureSeed = (ctx: ExtensionContext, claimant: TaskSeamClaimant): void => {
 		if (deliveryMode === "fallback" || deliveryMode === "failed") return;
 		try {
 			const entries = ctx.sessionManager.getEntries();
@@ -113,8 +117,8 @@ export default function tasksSeedBridge(pi: ExtensionAPI): void {
 				const snapshot = buildSessionTasksSeed(seed, {
 					piSessionId: ctx.sessionManager.getSessionId(),
 					eventId: `seed-${ctx.sessionManager.getSessionId()}`,
-				});
-				pi.appendEntry(TASKS_ENTRY_TYPE, snapshot);
+				}, claimant);
+				pi.appendEntry(claimant.entryType, snapshot);
 				seedAppended = true;
 			} else if (hasSeed) {
 				seedAppended = true;
@@ -133,8 +137,9 @@ export default function tasksSeedBridge(pi: ExtensionAPI): void {
 	// registrations and final scope enforcement have settled the active tool set.
 	pi.on("before_agent_start", (_event, ctx) => {
 		if (deliveryMode !== "pending") return;
-		if (hasUsableClaimant()) {
-			ensureSeed(ctx);
+		const claimant = usableClaimant();
+		if (claimant !== undefined) {
+			ensureSeed(ctx, claimant);
 			return;
 		}
 		deliveryMode = "fallback";
