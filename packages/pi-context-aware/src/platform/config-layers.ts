@@ -583,6 +583,33 @@ export function isKnownConfigPath(path: string): boolean {
 	return LEAF_BY_PATH.has(path);
 }
 
+/**
+ * Settings an untrusted project's own `.pi/context-aware.json` may not change. The agent working in a project can
+ * write that file, so it must not decide what the operator decides:
+ * - who owns compaction (`summarizer.enabled`, `compactionClaim.*`), the same decision one level up for Fabric;
+ * - the guard limits: it must not raise the output cap, empty its skip list, or switch off overflow recovery;
+ * - every fold-engine leaf (pi-context-aware#525): how this package manages context (`folds.*`). A leaf added
+ *   under `folds.` is covered without being listed here.
+ */
+export const UNTRUSTED_OWNERSHIP_PATHS: readonly string[] = [
+	"summarizer.enabled",
+	"compactionClaim.enabled",
+	"compactionClaim.fabricFallback",
+	"toolOutputCap.maxBytes",
+	"toolOutputCap.skipTools",
+	"overflowRecovery.enabled",
+	...CONFIG_LEAVES.map((leaf) => leaf.path).filter((leaf) => leaf.startsWith("folds.")),
+];
+
+/** An untrusted project's layer without `UNTRUSTED_OWNERSHIP_PATHS`: neither their values nor their rejections count. */
+export function withoutUntrustedOwnership(layer: ConfigLayerInput): ConfigLayerInput {
+	return {
+		...layer,
+		values: new Map([...layer.values].filter(([key]) => !UNTRUSTED_OWNERSHIP_PATHS.includes(key))),
+		rejected: layer.rejected.filter((key) => !UNTRUSTED_OWNERSHIP_PATHS.includes(key)),
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Reading a layer
 // ---------------------------------------------------------------------------

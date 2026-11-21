@@ -1015,8 +1015,10 @@ number. It affects only `keep-under-tokens`. A folded opening is replaced by a
 user-role summary, so a user message still precedes the first assistant in the
 rendered request. The original remains in the session file.
 
-Each key resolves independently through global, project, session, and host
-layers. There is no CLI flag or setter command. For session policy entries,
+Each key resolves independently through global, trusted-project, session, and
+host layers. An untrusted project's `.pi/context-aware.json` cannot set any
+`folds` leaf (pi-context-aware#525): the agent working in a project can write
+that file. There is no CLI flag or setter command. For session policy entries,
 use the dotted keys `folds.firstUserMessage`,
 `folds.firstUserMessageMaxTokens` and `folds.condensedSkills`.
 `/context-policy status` shows their effective values and sources. A

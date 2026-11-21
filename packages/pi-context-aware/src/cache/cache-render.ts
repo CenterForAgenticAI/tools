@@ -149,7 +149,8 @@ export function buildCacheSeedPreamble(source: CacheReadSource, config: Config, 
 function notificationComponent(data: CacheNotificationData, expanded: boolean, _theme: Theme): { render: (width: number) => string[]; invalidate: () => void } {
 	return {
 		render(width: number): string[] {
-			return truncateToVisualLines(data.content, expanded ? Number.MAX_SAFE_INTEGER : 8, Math.max(1, width), 0).visualLines;
+			// Copy: Pi 1.6.0 types visualLines as readonly; render returns string[].
+			return [...truncateToVisualLines(data.content, expanded ? Number.MAX_SAFE_INTEGER : 8, Math.max(1, width), 0).visualLines];
 		},
 		invalidate(): void {},
 	};

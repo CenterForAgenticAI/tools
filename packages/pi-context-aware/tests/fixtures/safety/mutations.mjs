@@ -51,7 +51,10 @@ const mutations = [
 	{ name: "G1 tool-output cap threshold", file: "src/guards/tool-guards.js", from: "if (total <= maxBytes)", to: "if (true)", test: "tool-guards", pattern: "cap: 49,999" },
 	{ name: "G1 tool-output cap skipTools", file: "src/guards/tool-guards.js", from: "return !config.skipTools.includes(event.toolName);", to: "return true;", test: "tool-guards", pattern: "skipTools moves" },
 	{ name: "G1 tool-output cap hook", file: "src/index.js", from: "if (shouldCapToolResult(cap, event)) {", to: "if (false) {", test: "index-registration", pattern: "toolOutputCap: default" },
-	{ name: "G1 untrusted project cannot raise the cap", file: "src/index.js", from: '    "toolOutputCap.maxBytes",\n', to: "", test: "index-registration", pattern: "untrusted project cannot raise" },
+	{ name: "G1 untrusted project cannot raise the cap", file: "src/platform/config-layers.js", from: '    "toolOutputCap.maxBytes",\n', to: "", test: "index-registration", pattern: "untrusted project cannot raise" },
+	// An untrusted project's own file sets no fold leaf (pi-context-aware#525).
+	{ name: "G1 untrusted project sets no fold leaf", file: "src/platform/config-layers.js", from: '.filter((leaf) => leaf.startsWith("folds."))', to: ".filter(() => false)", test: "untrusted-fold-config", pattern: "sets no folds" },
+	{ name: "G1 fold engine drops an untrusted project's ownership leaves", file: "src/folds/fold-engine.js", from: "projectTrusted(ctx) ? project : withoutUntrustedOwnership(project)", to: "project", test: "untrusted-fold-config", pattern: "sets no folds" },
 	{ name: "G2 repetition run count", file: "src/guards/tool-guards.js", from: "run = fingerprint === last ? run + 1 : 1;", to: "run = 1;", test: "tool-guards", pattern: "repetition: counts" },
 	{ name: "G2 component: ids are nested", file: "src/skills/skill-registry.js", from: ' || toolCallId.startsWith("component:")', to: "", test: "tool-guards", pattern: "component: is nested" },
 	{ name: "G2 repetition key", file: "src/index.js", from: "if (typeof event.toolCallId !== \"string\" || !getRepetitionGuardConfig(readConfig(ctx)).enabled)\n            return;", to: "", test: "index-registration", pattern: "turns the guard off" },

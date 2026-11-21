@@ -41,7 +41,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
-import { DEFAULT_FOLDS_CONFIG, readConfigLayer, readPolicyEntryLayers, resolveConfigLayers, type FoldsConfig } from "../platform/config-layers.js";
+import { DEFAULT_FOLDS_CONFIG, readConfigLayer, readPolicyEntryLayers, resolveConfigLayers, withoutUntrustedOwnership, type FoldsConfig } from "../platform/config-layers.js";
 import {
 	getAgentDir,
 	SessionManager,
@@ -96,18 +96,29 @@ import { defaultCountTokens, type Config } from "./kernel/index.js";
 /** A fold request, optionally with the id that makes writing it idempotent. */
 export type FoldRequest = Omit<QueuedFoldRequest, "accepted">;
 
+/** A context the fold settings are read for; `isProjectTrusted` decides whether the project file may set them. */
+export type FoldConfigContext = Pick<ExtensionContext, "cwd" | "sessionManager"> & Partial<Pick<ExtensionContext, "isProjectTrusted">>;
+
+/** True only when the host says the project is trusted; a missing or throwing lookup is untrusted. */
+function projectTrusted(ctx: FoldConfigContext): boolean {
+	try { return typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted() === true; } catch { return false; }
+}
+
 /** Resolve the fold-only leaves locally: the extension's root resolver is private.
  * No fold CLI flags exist. Files are re-read; session/host values follow the current branch.
  */
-export function resolveFoldConfig(ctx: Pick<ExtensionContext, "cwd" | "sessionManager">, agentDir = getAgentDir()): FoldsConfig {
+export function resolveFoldConfig(ctx: FoldConfigContext, agentDir = getAgentDir()): FoldsConfig {
 	const read = (file: string) => {
 		try { return JSON.parse(readFileSync(file, "utf8")) as unknown; } catch { return undefined; }
 	};
 	let root = ctx.cwd;
 	try { root = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: ctx.cwd, encoding: "utf8", timeout: 1_000, stdio: ["ignore", "pipe", "ignore"] }).trim() || root; } catch { /* Non-Git projects use cwd. */ }
+	const project = readConfigLayer(read(path.join(root, ".pi", "context-aware.json")), "project");
+	// An untrusted project's checked-in file must not choose how its sessions manage context (pi-context-aware#525):
+	// the same leaves the extension's own layers drop.
 	return resolveConfigLayers([
 		readConfigLayer(read(path.join(agentDir, "context-aware.json")), "global"),
-		readConfigLayer(read(path.join(root, ".pi", "context-aware.json")), "project"),
+		projectTrusted(ctx) ? project : withoutUntrustedOwnership(project),
 		...readPolicyEntryLayers(ctx.sessionManager.getBranch()),
 	]).config.folds ?? DEFAULT_FOLDS_CONFIG;
 }
@@ -124,6 +135,8 @@ export interface EngineReport {
 	readonly engine: ContextEngine;
 	/** The override forces `folds` while billion-context-pi is loaded. */
 	readonly contradictsPresence: boolean;
+	/** The `folds.engine` setting the engine was resolved with; absent or `auto` when billion-context-pi presence decided (pi-context-aware#529). */
+	readonly override?: ContextEngineOverride;
 }
 
 /** A request the engine refused. `code` is set when the refusal is not a planner error. */
@@ -257,7 +270,7 @@ export function registerFoldEngine(pi: ExtensionAPI, options: FoldEngineOptions 
 		const engine = resolveContextEngine({ tools, override });
 		const mode = foldModeForEngine(engine);
 		modes.set(ctx.sessionManager, mode);
-		reports.set(ctx.sessionManager, { engine, contradictsPresence: engineOverrideContradictsPresence({ tools, override }) });
+		reports.set(ctx.sessionManager, { engine, contradictsPresence: engineOverrideContradictsPresence({ tools, override }), override });
 		return mode;
 	};
 	const engineOf = (ctx: ExtensionContext): EngineReport => {

@@ -114,7 +114,9 @@ function skillsView(ctx: ExtensionContext): { text: string; details: Record<stri
 
 function foldsView(ctx: ExtensionContext, host: ContextStatusHost): { text: string; details: Record<string, unknown> } {
 	const mode = host.engine.mode(ctx);
-	const { engine, contradictsPresence } = host.engine.engine(ctx);
+	const { engine, contradictsPresence, override } = host.engine.engine(ctx);
+	// With no override, the native folds are in shadow only while billion-context-pi is loaded (pi-context-aware#529).
+	const shadowReason = override !== undefined && override !== "auto" ? "folds.engine is " + override : "billion-context-pi owns folding";
 	const pending = host.engine.pending(ctx);
 	const dropped = host.engine.dropped(ctx);
 	const records = foldRecordsOnBranch(ctx.sessionManager.getBranch()).map(({ record }) => record);
@@ -124,7 +126,7 @@ function foldsView(ctx: ExtensionContext, host: ContextStatusHost): { text: stri
 	const lines = [
 		"Engine: " + engine + ".",
 		...(contradictsPresence ? ["Warning: folds.engine forces folds while billion-context-pi is loaded; the override wins."] : []),
-		"Fold engine: " + (mode === "live" ? "live (pi-context-aware owns folding)" : "shadow (billion-context-pi owns folding; nothing is written here)") + ".",
+		"Fold engine: " + (mode === "live" ? "live (pi-context-aware owns folding)" : "shadow (" + shadowReason + "; nothing is written here)") + ".",
 		"Pending fold requests: " + pending + ".",
 		"Dropped in the last batch: " + dropped.length + ".",
 		...dropped.slice(0, MAX_LISTED).map((drop) => "- " + drop.startRef + ".." + drop.endRef + ": " + (drop.errors.join(" ") || drop.code || "dropped")),

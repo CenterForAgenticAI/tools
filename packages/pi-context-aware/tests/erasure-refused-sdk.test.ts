@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createAgentSessionFromServices, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createAgentSessionServices, ModelRuntime, SessionManager, SettingsManager, VERSION, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import extension from "../src/index.js";
 import { eraseSession } from "../src/erasure/session-erasure.js";
@@ -72,8 +72,11 @@ test("another extension's custom-message turn is aborted, but SDK still persists
 		const assistants = entries.filter((entry) => entry.type === "message" && entry.message.role === "assistant");
 		assert.equal(assistants.length, 1);
 		const reply = (assistants[0] as { message: { stopReason: string; errorMessage?: string } }).message;
-		// The faux provider represents AbortError as an assistant error event.
-		assert.equal(reply.stopReason, "error", JSON.stringify(assistants));
+		// Pi 1.5.0 records the cancelled request as an error; from 1.5.1 Pi
+		// reports a cancellation as an abort (earendil-works/pi#8635).
+		const [major = 0, minor = 0, patch = 0] = VERSION.split(".").map(Number);
+		const reportsAbort = major * 1_000_000 + minor * 1_000 + patch >= 1_005_001;
+		assert.equal(reply.stopReason, reportsAbort ? "aborted" : "error", JSON.stringify(assistants));
 		assert.equal(reply.errorMessage, "This operation was aborted");
 		assert.equal(entries.some((entry) => entry.type === "custom"), false, "no tasks, naming or fold state");
 		assert.equal(entries.some((entry) => entry.type === "message" && entry.message.role === "toolResult"), false);

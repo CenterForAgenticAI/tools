@@ -24,7 +24,8 @@ function engineFor(root: string, tools: readonly string[]) {
 		getAllTools: () => tools.map((name) => ({ name, sourceInfo: { source: "extension", path: "/ext/billion-context-pi" } })),
 	} as unknown as ExtensionAPI;
 	const engine = registerFoldEngine(pi, {});
-	const ctx = { cwd: root, sessionManager: { getBranch: () => [], getEntries: () => [] } } as unknown as ExtensionContext;
+	// A trusted project: an untrusted project's own file sets no fold leaf (pi-context-aware#525).
+	const ctx = { cwd: root, isProjectTrusted: () => true, sessionManager: { getBranch: () => [], getEntries: () => [] } } as unknown as ExtensionContext;
 	return { engine, ctx };
 }
 

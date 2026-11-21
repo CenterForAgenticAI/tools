@@ -30,7 +30,7 @@ import { ALREADY_COMPACTED_TOOL_MESSAGE, NOTHING_TO_COMPACT_TOOL_MESSAGE } from 
 // minimum (PI_MINIMUM_VERSION in scripts/check-pi-dependencies.mjs), so no
 // compatibility job reinstalls them to recheck the pin. On them the preflight
 // proceeds and Pi's own refusal stays handled by decideCompactionError().
-export const VERIFIED_PI_VERSIONS: ReadonlySet<string> = new Set(["1.4.0", "1.5.0"]);
+export const VERIFIED_PI_VERSIONS: ReadonlySet<string> = new Set(["1.4.0", "1.5.0", "1.5.1", "1.5.2", "1.6.0"]);
 
 /**
  * Estimated tokens for this context_compact call's persisted result and the

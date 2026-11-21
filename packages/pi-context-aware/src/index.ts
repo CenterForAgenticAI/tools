@@ -430,6 +430,7 @@ import {
 	configLayerFromValues,
 	configPolicyEntry,
 	formatLayerAttribution,
+	withoutUntrustedOwnership,
 	normalizeProactiveThreshold,
 	readConfigLayer,
 	readPolicyEntryLayers,
@@ -1589,18 +1590,6 @@ function globalConfigLayer(): ConfigLayerInput {
  * reuses this parser unchanged, and a malformed value here cannot damage the
  * host's own settings.
  */
-/** Settings an untrusted project's own file may not change: they decide who owns compaction. */
-// Guard limits are a host decision too: a checked-in file from an untrusted project must not raise the
-// output cap, empty its skip list, or switch off overflow recovery.
-const UNTRUSTED_OWNERSHIP_PATHS: readonly string[] = [
-	"summarizer.enabled",
-	"compactionClaim.enabled",
-	"compactionClaim.fabricFallback",
-	"toolOutputCap.maxBytes",
-	"toolOutputCap.skipTools",
-	"overflowRecovery.enabled",
-];
-
 function projectConfigLayer(
 	cwd: string | undefined,
 	options: { readonly trusted?: boolean } = {},
@@ -1613,16 +1602,10 @@ function projectConfigLayer(
 	const layer = readConfigLayer(readJsonFile(file), "project", file);
 	if (options.trusted !== false) return layer;
 
-	// Summary ownership is a host-level capability decision. A checked-in file
-	// from an untrusted project must not be able to claim or cede that hook, or
-	// claim compaction from Fabric, which is the same decision one level up.
-	const values = new Map(layer.values);
-	for (const ownership of UNTRUSTED_OWNERSHIP_PATHS) values.delete(ownership);
-	return {
-		...layer,
-		values,
-		rejected: layer.rejected.filter((configPath) => !UNTRUSTED_OWNERSHIP_PATHS.includes(configPath)),
-	};
+	// Summary ownership, the guard limits and the fold settings are host decisions
+	// (UNTRUSTED_OWNERSHIP_PATHS). The fold engine drops the same leaves itself (resolveFoldConfig); here they
+	// also keep `/context-status layers` from showing them in force.
+	return withoutUntrustedOwnership(layer);
 }
 
 /**

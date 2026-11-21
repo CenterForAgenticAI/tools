@@ -63,7 +63,7 @@ interface Setup {
 	tool(name: string): StatusTool;
 }
 
-function setUp(options: { tokens: number | null; mode?: "live" | "shadow"; pending?: number; bcp?: boolean; contradicts?: boolean }): Setup {
+function setUp(options: { tokens: number | null; mode?: "live" | "shadow"; pending?: number; bcp?: boolean; contradicts?: boolean; override?: "auto" | "folds" | "compaction-only" }): Setup {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-context-status-")));
 	const host = createHostPi();
 	const manager = foldedSession();
@@ -74,7 +74,7 @@ function setUp(options: { tokens: number | null; mode?: "live" | "shadow"; pendi
 	}) as ExtensionContext;
 	const engine: ContextStatusHost["engine"] = {
 		mode: () => options.mode ?? "live",
-		engine: () => ({ engine: (options.mode ?? "live") === "live" ? "folds" : "compaction-only", contradictsPresence: options.contradicts ?? false }),
+		engine: () => ({ engine: (options.mode ?? "live") === "live" ? "folds" : "compaction-only", contradictsPresence: options.contradicts ?? false, ...(options.override ? { override: options.override } : {}) }),
 		pending: () => options.pending ?? 0,
 		dropped: () => [{ startRef: "m00090", endRef: "m00091", errors: ["Range is too small to fold."], code: undefined as never }],
 	};
@@ -198,6 +198,16 @@ test("#194: the folds view reports the engine's mode, pending and dropped reques
 	const live = await call(setUp({ tokens: 100_000 }), "context_status", { view: "folds" });
 	assert.equal(live.details.engine, "folds");
 	assert.match(live.content[0]!.text, /^Engine: folds\./mu);
+});
+
+test("#529: the folds view blames billion-context-pi only when no folds.engine setting left the native folds out", async () => {
+	const forced = await call(setUp({ tokens: 100_000, mode: "shadow", override: "compaction-only" }), "context_status", { view: "folds" });
+	assert.match(forced.content[0]!.text, /^Fold engine: shadow \(folds\.engine is compaction-only; nothing is written here\)\.$/mu);
+	assert.doesNotMatch(forced.content[0]!.text, /billion-context-pi/u);
+	for (const override of [undefined, "auto"] as const) {
+		const loaded = await call(setUp({ tokens: 100_000, mode: "shadow", bcp: true, ...(override ? { override } : {}) }), "context_status", { view: "folds" });
+		assert.match(loaded.content[0]!.text, /^Fold engine: shadow \(billion-context-pi owns folding; nothing is written here\)\.$/mu, String(override));
+	}
 });
 
 test("#309: an override that contradicts billion-context-pi presence shows one warning line", async () => {

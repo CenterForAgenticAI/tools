@@ -27,7 +27,8 @@ import { truncateToVisualLines } from "@earendil-works/pi-coding-agent";
  * Wrapping to two short lines is the honest rendering at a narrow width.
  */
 export function wrapPreviewHint(hint: string, width: number): string[] {
-	return truncateToVisualLines(hint, Number.MAX_SAFE_INTEGER, width, 0).visualLines;
+	// Copy: Pi 1.6.0 types visualLines as readonly.
+	return [...truncateToVisualLines(hint, Number.MAX_SAFE_INTEGER, width, 0).visualLines];
 }
 
 /**

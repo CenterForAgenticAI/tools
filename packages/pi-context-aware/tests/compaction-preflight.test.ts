@@ -72,6 +72,9 @@ function sha256(content: string | Buffer): string {
 const PORTED_COMPACTION_SHA256: Readonly<Record<string, string>> = {
 	"1.4.0": "f51e78ef1da66b5803fc91e185f07b968f8f989ab9326b7744958416aad3f6f6",
 	"1.5.0": "f51e78ef1da66b5803fc91e185f07b968f8f989ab9326b7744958416aad3f6f6",
+	"1.5.1": "f51e78ef1da66b5803fc91e185f07b968f8f989ab9326b7744958416aad3f6f6",
+	"1.5.2": "f51e78ef1da66b5803fc91e185f07b968f8f989ab9326b7744958416aad3f6f6",
+	"1.6.0": "f51e78ef1da66b5803fc91e185f07b968f8f989ab9326b7744958416aad3f6f6",
 };
 const COMPACT_REFUSAL_SHA256 = "45cf1517a80f20070a3093814328135d3f25c82d7dda46e82b53f45718f09016";
 const REVERIFY = "Diff it against the copy in src/compaction/compaction-preflight.ts, update the port, then update this pin and VERIFIED_PI_VERSIONS.";
