@@ -7,6 +7,7 @@ import {
 	type DiscoveredSkill,
 	type LoadSkillContext,
 	type LoadSkillParams,
+	type SessionCommand,
 } from "../src/skills/load-skill.js";
 
 /** A system prompt in the exact shape Pi's `formatSkillsForPrompt` emits. */
@@ -56,6 +57,7 @@ function registered(options: {
 	prompt?: string;
 	contents?: Record<string, string>;
 	discover?: (cwd: string, projectTrusted: boolean) => Promise<readonly DiscoveredSkill[]>;
+	commands?: () => readonly SessionCommand[];
 } = {}) {
 	const reads: string[] = [];
 	const contents = options.contents ?? { "/pkg/modules/glab/skills/glab/SKILL.md": "# glab skill body" };
@@ -68,6 +70,7 @@ function registered(options: {
 		{
 			registerTool: (definition) => { tool = definition as unknown as Tool; },
 			on: (_event, handler) => { onBeforeAgentStart = handler as typeof onBeforeAgentStart; },
+			...(options.commands ? { getCommands: options.commands } : {}),
 		},
 		(filePath) => {
 			reads.push(filePath);
@@ -419,4 +422,86 @@ test("a read error other than ENOENT does not trigger rediscovery", async () => 
 	assert.match(result.content[0]!.text, /EACCES/);
 	assert.equal(discoveries, 0);
 	assert.deepEqual(reads, [GLAB_OLD]);
+});
+
+// A skill an extension added through resources_discover (for example
+// pi-caair-dev-tools stack-fallback-skills or skill-groups) is in the live
+// session but not in a loader that runs without extensions.
+const WORKER_START = {
+	systemPrompt: "You are a worker.",
+	systemPromptOptions: {
+		skills: [{ name: "implement", description: "Implement code", filePath: "/pkg/skills/implement/SKILL.md" }],
+	},
+};
+
+test("a skill added at runtime resolves from the session's skill commands when the loader misses it", async () => {
+	const harness = registered({
+		discover: async () => [
+			{ name: "glab", description: "GitLab", filePath: "/pkg/modules/glab/skills/glab/SKILL.md" },
+		],
+		commands: () => [
+			{ name: "ask-me", description: "Ask", source: "extension", sourceInfo: { path: "/pkg/modules/ask-me/index.ts" } },
+			{ name: "skill:grilling", description: "Interview", source: "skill", sourceInfo: { path: "/pkg/skills/grilling/SKILL.md" } },
+		],
+		contents: { "/pkg/skills/grilling/SKILL.md": "# grilling body" },
+	});
+	harness.agentStart(WORKER_START);
+
+	const result = await harness.call("grilling");
+	assert.match(result.content[0]!.text, /# grilling body/);
+	assert.equal(result.details.path, "/pkg/skills/grilling/SKILL.md");
+	assert.deepEqual(harness.reads, ["/pkg/skills/grilling/SKILL.md"]);
+});
+
+test("the loader's copy wins over a session command for the same path, and unknown names list both sources", async () => {
+	const harness = registered({
+		discover: async () => [
+			{ name: "glab", description: "GitLab", filePath: "/pkg/modules/glab/skills/glab/SKILL.md" },
+		],
+		commands: () => [
+			{ name: "skill:glab", description: "GitLab", source: "skill", sourceInfo: { path: "/pkg/modules/glab/skills/glab/SKILL.md" } },
+			{ name: "skill:grilling", description: "Interview", source: "skill", sourceInfo: { path: "/pkg/skills/grilling/SKILL.md" } },
+		],
+	});
+	harness.agentStart(WORKER_START);
+
+	const result = await harness.call("missing");
+	assert.equal(result.details.error, "unknown");
+	assert.deepEqual(result.details.available, ["glab", "grilling"]);
+	const glab = await harness.call("glab");
+	assert.deepEqual(glab.details.shadowed, [], "the same path listed twice is not a shadowed copy");
+});
+
+test("only skill commands with a recorded path count, and a path-shaped name never reaches the reader", async () => {
+	const harness = registered({
+		commands: () => [
+			{ name: "skill:no-path", description: "", source: "skill" },
+			{ name: "skill:empty-path", description: "", source: "skill", sourceInfo: { path: "" } },
+			{ name: "passwd", description: "", source: "prompt", sourceInfo: { path: "/etc/passwd" } },
+			{ name: "skill:grilling", description: "Interview", source: "skill", sourceInfo: { path: "/pkg/skills/grilling/SKILL.md" } },
+		],
+	});
+	harness.agentStart(WORKER_START);
+
+	for (const name of ["no-path", "empty-path", "passwd", "../../etc/passwd", "/etc/passwd", "grilling/../../etc/passwd"]) {
+		const result = await harness.call(name);
+		assert.equal(result.details.error, "unknown", name);
+		assert.deepEqual(result.details.available, ["grilling"], name);
+	}
+	assert.deepEqual(harness.reads, []);
+});
+
+test("a throwing command list leaves the loader fallback working", async () => {
+	const harness = registered({
+		discover: async () => [
+			{ name: "glab", description: "GitLab", filePath: "/pkg/modules/glab/skills/glab/SKILL.md" },
+		],
+		commands: () => {
+			throw new Error("no commands");
+		},
+	});
+	harness.agentStart(WORKER_START);
+
+	const result = await harness.call("glab");
+	assert.equal(result.details.path, "/pkg/modules/glab/skills/glab/SKILL.md");
 });

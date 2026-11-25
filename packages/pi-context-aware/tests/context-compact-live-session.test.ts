@@ -38,8 +38,7 @@ test("#194: a live session declares context_compact and no compact_session, and 
 		assert.ok(declared.includes("context_compact"), "the request declares context_compact: " + declared.join(","));
 		assert.equal(declared.includes("compact_session"), false, "the request does not declare compact_session");
 		const prompt = session.agent.state.systemPrompt;
-		assert.match(prompt, /call context_compact at a clean boundary/u);
-		assert.match(prompt, /URGENT: before nontrivial tool use, call context_compact /u);
+		assert.match(prompt, /- context_compact: end a phase at a clean boundary/u);
 		assert.doesNotMatch(prompt, /compact_session/u, "the system prompt names no old tool");
 	});
 });

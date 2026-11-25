@@ -12,7 +12,7 @@ import { boundCacheDocuments, migrateCachePool, promoteCacheFile, readManifest, 
 import { sessionDatabaseFile } from "../src/erasure/database.js";
 import { MANIFEST_LOCK_FILE_NAME, MANIFEST_LOCK_TAKEOVER_FILE_NAME } from "../src/cache/manifest-lock.js";
 import { createRegistryProjection, createSessionRegistry } from "../src/session/session-registry.js";
-import { asPiSessionId, asWorkstreamId } from "../src/workstream/workstream-schema.js";
+import { asPiSessionId, asWorkstreamId } from "../src/snapshot-contracts/schema.js";
 
 function registry(root: string, state: "active" | "closed" = "closed") {
 	const store = createSessionRegistry({ registryRoot: path.join(root, "session-registry", "v1"), projectKey: "project" });

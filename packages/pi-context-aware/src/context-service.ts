@@ -31,7 +31,8 @@ export type ContextAwareProactiveCompactionStateV1 =
 	| "cooldown"
 	| "failed"
 	| "cancelled";
-export type ContextAwareProactiveCompactionTriggerV1 = "threshold" | "generation-reserve";
+/** `entry-count`: entries on the branch since the last compaction reached their limit (pi-context-aware#441). */
+export type ContextAwareProactiveCompactionTriggerV1 = "threshold" | "generation-reserve" | "entry-count";
 export type ContextAwareProactiveCompactionFailureStageV1 =
 	| "seed-generation"
 	| "seed-rewrite"
@@ -158,8 +159,14 @@ export interface ContextAwareEffectiveModeV1 {
 	proactiveCompaction?: ContextAwareProactiveCompactionConfigV1;
 }
 
-/** Which engine manages context: the native folds, or compaction only (billion-context-pi owns folding). */
+/**
+ * Which engine manages context: the native folds, or compaction only (billion-context-pi owns folding, or the
+ * session's methods leave `fold` out). Derived from the session's methods: `folds` while they include `fold`.
+ */
 export type ContextAwareEngineV1 = "folds" | "compaction-only";
+
+/** A context method a session runs (pi-context-aware#526). Later versions may add methods; read unknown ones as opaque. */
+export type ContextAwareMethodV1 = "fold" | "compact";
 
 export interface ContextAwareSnapshotV1 {
 	protocolVersion: typeof CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION;
@@ -183,6 +190,8 @@ export interface ContextAwareSnapshotV1 {
 	effectiveMode: ContextAwareEffectiveModeV1;
 	/** Added compatibly in protocol v1. The context engine in use; older producers may omit it. */
 	engine?: ContextAwareEngineV1;
+	/** Added compatibly in protocol v1. The context methods the session runs, in order; older producers omit it. */
+	methods?: ContextAwareMethodV1[];
 	provenance: {
 		provider: "context-aware";
 		protocolVersion: typeof CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION;
@@ -224,6 +233,7 @@ export interface ContextAwareSnapshotSourceV1 {
 	/** Telemetry band edges from the session's pressure ladder. Defaults to the default ladder. */
 	pressureBands?: ContextAwarePressureBandEdgesV1;
 	engine?: ContextAwareEngineV1;
+	methods?: ContextAwareMethodV1[];
 }
 
 export interface ContextAwareHandoffBoundsV1 {
@@ -753,6 +763,73 @@ export interface ContextAwareContributorsV1 {
 	endOwner(ownerKey: string): boolean;
 }
 
+/** Why a request's prompt cache lost much more than its new content explains. */
+export type ContextAwareCacheResetKindV1 =
+	/** A compaction on the branch replaced the history before this request. */
+	| "compaction"
+	/** A branch summary (a /tree move) replaced the history before this request. */
+	| "branch-summary"
+	/** The provider or model differs from the previous request's. */
+	| "model-change"
+	/** A fold rewrote part of the history after the previous request. */
+	| "fold"
+	/** The gap since the previous request exceeded the cache lifetime. */
+	| "expired"
+	/** A best-effort cache (no `promptCache`) missed inside its measured survival window; `survivalPct` holds the measured survival. */
+	| "evicted"
+	/** The cache missed from the start for no recorded reason: system prompt, tools or account changed. */
+	| "prefix-start"
+	/** The cache broke partway through for no recorded reason: a message was rewritten. */
+	| "prefix-mid";
+
+/** Client-side evidence for a prefix reset, not a provider diagnosis. Labels are one line, at most 80 code points. */
+export type ContextAwareCacheCauseV1 =
+	| { readonly kind: "message-block"; readonly index: number; readonly count: number; readonly role: string; readonly type: string; readonly tool?: string }
+	| { readonly kind: "system-section" | "tools" | "setting"; readonly names: readonly string[] }
+	| { readonly kind: "unchanged" };
+
+export interface ContextAwareCacheResetV1 {
+	readonly kind: ContextAwareCacheResetKindV1;
+	/** Milliseconds between the previous request's message and this one. */
+	readonly idleMs: number;
+	/** The cache lifetime assumed for the previous request: 300,000 or 3,600,000. */
+	readonly ttlMs: number;
+	/** Tokens of the earlier prompt that had to be sent again uncached. */
+	readonly lostTokens: number;
+	/** With `fold`: the fold's block id, such as `b5`. */
+	readonly blockId?: string;
+	/** With `model-change`: the new `provider/model`, one line, at most 80 characters. */
+	readonly model?: string;
+	/** Only for prefix-start/mid: compared message block, guard names, or an identical pre-wrapper prefix. Absent without a comparison. */
+	readonly cause?: ContextAwareCacheCauseV1;
+	/** Read moved by at most 128 tokens although the previous request wrote more than 128. Absent otherwise. */
+	readonly stalled?: true;
+	/** Only for `evicted`: the measured full-hit survival at this idle gap, in whole percent. */
+	readonly survivalPct?: number;
+}
+
+/** One provider request's prompt-cache result. */
+export interface ContextAwareCacheExplanationV1 {
+	/** Cached share of the prompt, 0-100, rounded. */
+	readonly hitPct: number;
+	/** Whole prompt tokens, cached part included. */
+	readonly inputTokens: number;
+	readonly cachedTokens: number;
+	/** Present only when the loss is a reset: at least 1,024 tokens and 20% of the previous prompt beyond the new content. */
+	readonly reset?: ContextAwareCacheResetV1;
+}
+
+/** Prompt-cache hit rate and reset cause per request. Check with `supportsContextAwareCacheV1`. */
+export interface ContextAwareCacheV1 {
+	readonly v1: true;
+	/**
+	 * Explain the request that produced the assistant message with this `timestamp`, on the
+	 * current branch. Undefined for an unknown timestamp, a message without usage, a session
+	 * whose provider has reported no cache use yet, or after the session ended.
+	 */
+	explain(messageTimestamp: number): ContextAwareCacheExplanationV1 | undefined;
+}
+
 export interface ContextAwareServiceV1 {
 	readonly protocolVersion: typeof CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION;
 	getSnapshot(): ContextAwareSnapshotV1;
@@ -766,6 +843,8 @@ export interface ContextAwareServiceV1 {
 	folds?: ContextAwareFoldsV1;
 	/** Added compatibly in protocol v1. Older producers may omit it. */
 	contributors?: ContextAwareContributorsV1;
+	/** Added compatibly in protocol v1. Older producers may omit it. */
+	cache?: ContextAwareCacheV1;
 	requestHandoff(
 		request: ContextAwareHandoffRequestV1,
 		options?: { signal?: AbortSignal },
@@ -852,6 +931,13 @@ export function supportsContextAwareContributorsV1(
 	return service?.contributors?.v1 === true
 		&& typeof service.contributors.register === "function"
 		&& typeof service.contributors.endOwner === "function";
+}
+
+/** Return true when the producer explains prompt-cache results per request. */
+export function supportsContextAwareCacheV1(
+	service: ContextAwareServiceV1 | undefined,
+): service is ContextAwareServiceV1 & { cache: ContextAwareCacheV1 } {
+	return service?.cache?.v1 === true && typeof service.cache.explain === "function";
 }
 
 /** Return true when a discovered producer implements the additive promotion capability. */
@@ -977,6 +1063,7 @@ export function buildContextAwareSnapshotV1(source: ContextAwareSnapshotSourceV1
 			: {}),
 		effectiveMode: { ...source.effectiveMode },
 		...(source.engine ? { engine: source.engine } : {}),
+		...(source.methods ? { methods: [...source.methods] } : {}),
 		provenance: {
 			provider: "context-aware",
 			protocolVersion: CONTEXT_AWARE_SERVICE_PROTOCOL_VERSION,

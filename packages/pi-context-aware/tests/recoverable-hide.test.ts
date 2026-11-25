@@ -6,7 +6,7 @@ import { SessionManager, type ExtensionAPI, type ExtensionContext, type SessionB
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 
 import { entryToCoreMessages, foldStateFromBranch, planFold } from "../src/folds/fold-adapter.js";
-import { applyFoldDrafts, registerFoldEngine, type FoldEngine } from "../src/folds/fold-engine.js";
+import { applyFoldDrafts, hidePreviewChain, registerFoldEngine, type FoldEngine } from "../src/folds/fold-engine.js";
 import { FOLD_ENTRY_TYPE, foldRecordsOnBranch, readFoldRecord } from "../src/folds/fold-entries.js";
 import { createFoldTurnMemory, prepareFoldTurn, wholeEntryIds, type FoldTurnInput } from "../src/folds/fold-turn.js";
 import { HIDE_ENTRY_TYPE, activeHides, hidePointerLine, hideRecordsOnBranch, planHides, readHideRecord } from "../src/folds/hide-entries.js";
@@ -381,3 +381,60 @@ test("a fold record with a block or run number beyond a safe integer is ignored:
 	assert.equal(state.kernel.nextRunId, 1);
 });
 
+
+// A hide preview on a long session must not walk the whole branch once per edit (reload-scan defect).
+
+test("hidePreviewChain keeps only the edit targets, linked in branch order", () => {
+	const { manager, resultId } = hideSession();
+	for (let i = 0; i < 2_000; i++) manager.appendMessage(fauxAssistantMessage("Filler " + i + "."));
+	const branch = manager.getBranch();
+	const plans = planHides(branch, [resultId]);
+	assert.equal(plans.length, 1, "control: the long tool result is hidden");
+	const chain = hidePreviewChain(branch, plans, []);
+	assert.deepEqual(chain.map((entry) => entry.id), [resultId]);
+	const earlier = branch[0]!.id;
+	const withPending = hidePreviewChain(branch, plans, [{ type: "context_edit", targetId: earlier, replacement: { content: "x" } }]);
+	assert.deepEqual(withPending.map((entry) => entry.id), [earlier, resultId], "a pending edit's target is kept, in branch order");
+	assert.equal(withPending[1]!.parentId, earlier);
+	assert.equal(chain[0]!.parentId, null);
+	assert.equal(branch.find((entry) => entry.id === resultId)!.parentId !== null, true, "the branch entry itself is not changed");
+});
+
+test("a chain preview accepts and refuses the same hides as a full-branch preview", () => {
+	const { manager, resultId } = hideSession();
+	const custom = manager.appendMessage({ role: "custom", customType: "note", content: BIG, display: true, timestamp: 2 } as never);
+	for (let i = 0; i < 500; i++) manager.appendMessage(fauxAssistantMessage("Filler " + i + "."));
+	const branch = manager.getBranch();
+	const header = manager.getHeader()!;
+	const edit = (targetId: string) => ({ targetId, drafts: [{ type: "context_edit", targetId, replacement: { content: "x" } }] as SessionBoundaryDraft[] });
+	const plans: Array<{ targetId: string; drafts: readonly SessionBoundaryDraft[] }> = [...planHides(branch, [resultId]), edit(custom), edit("missing")];
+	const outcome = (entries: readonly unknown[]) => {
+		const preview = SessionManager.inMemory("/tmp", undefined, [header, ...entries] as never);
+		return plans.map((plan) => { try { applyFoldDrafts(preview, plan.drafts); return "ok"; } catch { return "refused"; } });
+	};
+	const full = outcome(branch);
+	assert.deepEqual(full, ["ok", "refused", "refused"], "control: Pi refuses the custom entry and the missing id");
+	assert.deepEqual(outcome(hidePreviewChain(branch, plans, [])), full);
+});
+
+test("the boundary previews a hide on its target alone, not on the whole branch", () => {
+	const { manager, resultId } = hideSession();
+	const harness = boot();
+	harness.request(manager, 191_000);
+	const original = SessionManager.inMemory;
+	const previewSizes: number[] = [];
+	(SessionManager as { inMemory: typeof original }).inMemory = (cwd, options, entries) => {
+		previewSizes.push(entries?.length ?? 0);
+		return original.call(SessionManager, cwd, options, entries);
+	};
+	let drafts: SessionBoundaryDraft[];
+	try {
+		drafts = harness.boundary(manager);
+	} finally {
+		(SessionManager as { inMemory: typeof original }).inMemory = original;
+	}
+	assert.deepEqual(kinds(drafts), [HIDE_ENTRY_TYPE, "context_edit"], "control: the boundary writes the hide");
+	assert.equal(drafts[1]!.type === "context_edit" && drafts[1]!.targetId, resultId);
+	assert.ok(manager.getBranch().length > 5, "control: the branch holds more than the target");
+	assert.deepEqual(previewSizes, [2], "the preview holds the header and the one target");
+});

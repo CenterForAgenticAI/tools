@@ -42,7 +42,7 @@ async function dispatch(handlers: Map<string, Handler[]>, name: string, event: u
 
 interface Session { readonly ctx: ExtensionContext; readonly aborts: () => number; readonly notes: string[]; readonly handlers: Map<string, Handler[]>; readonly commands: ReturnType<typeof fakePi>["commands"]; readonly file: string; readonly end: () => Promise<void> }
 
-async function withAgentDir<T>(config: unknown, run: (session: Session) => Promise<T>, usageFraction = 0.5): Promise<T> {
+async function withAgentDir<T>(config: unknown, run: (session: Session) => Promise<T>, usageFraction = 0.5, branch: readonly unknown[] = []): Promise<T> {
 	const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-ladder-wiring-")));
 	const agentDir = path.join(home, "agent");
 	fs.mkdirSync(agentDir, { recursive: true });
@@ -71,7 +71,7 @@ async function withAgentDir<T>(config: unknown, run: (session: Session) => Promi
 			compact() {},
 			ui: { notify: (message: string) => notes.push(message), setStatus() {}, setWidget() {} },
 			sessionManager: {
-				getEntries: () => [], getBranch: () => [], getSessionDir: () => home, getSessionFile: () => path.join(home, "ladder.jsonl"),
+				getEntries: () => [...branch], getBranch: () => [...branch], getSessionDir: () => home, getSessionFile: () => path.join(home, "ladder.jsonl"),
 				getSessionId: () => "ladder-wiring", getHeader: () => ({}), getLeafId: () => "leaf", appendCustomEntry: () => "id",
 			},
 		} as unknown as ExtensionContext;
@@ -86,14 +86,14 @@ async function withAgentDir<T>(config: unknown, run: (session: Session) => Promi
 }
 
 /** Does the extension's turn_end start proactive compaction at this share of the window? */
-async function firesAt(config: unknown, fraction: number): Promise<boolean> {
+async function firesAt(config: unknown, fraction: number, branch: readonly unknown[] = []): Promise<boolean> {
 	return withAgentDir(config, async (session) => {
 		await dispatch(session.handlers, "session_start", {}, session.ctx);
 		await dispatch(session.handlers, "turn_end", { message: { stopReason: "toolUse" } }, session.ctx);
 		const fired = session.aborts() > 0;
 		await session.end();
 		return fired;
-	}, fraction);
+	}, fraction, branch);
 }
 
 test("proactive compaction defaults to the ladder's seeded-compaction step, not the old 0.78", async () => {
@@ -177,4 +177,54 @@ test("an unrelated config command keeps every value the user set, including a la
 		await session.commands.get("context-aware-seed-rewrite")!.handler("off", session.ctx);
 		assert.deepEqual(JSON.parse(fs.readFileSync(session.file, "utf8")), { ...user, seedRewrite: false });
 	});
+});
+
+// pi-context-aware#441: a fold-heavy session at low token usage still compacts once the branch path
+// since the last compaction holds too many entries for Pi to rebuild.
+const filler = (n: number) => Array.from({ length: n }, (_, index) => ({ type: "custom", customType: "entry-pressure-test", id: `f${index}`, data: {} }));
+const entryLimit = { entryPressure: { maxEntriesSinceCompaction: 1_000 } };
+
+test("#441: the entry count since the last compaction triggers proactive compaction at low token usage", async () => {
+	assert.equal(await firesAt(entryLimit, 0.05, filler(999)), false, "under the entry limit, 5% does not compact");
+	assert.equal(await firesAt(entryLimit, 0.05, filler(1_000)), true, "at the entry limit, 5% compacts");
+	const compacted = [...filler(2_000), { type: "compaction", id: "c" }, ...filler(10)];
+	assert.equal(await firesAt(entryLimit, 0.05, compacted), false, "only entries after the last compaction count");
+	assert.equal(await firesAt({ entryPressure: { enabled: false, maxEntriesSinceCompaction: 1_000 } }, 0.05, filler(5_000)), false, "the check can be turned off");
+});
+
+/** The text of the last message each context handler returns: the request's action line when one is sent. */
+async function requestTail(session: Session): Promise<string[]> {
+	const tails: string[] = [];
+	for (const handler of session.handlers.get("context") ?? []) {
+		const result = await handler({ type: "context", messages: [] }, session.ctx) as { messages?: Array<{ content?: unknown }> } | undefined;
+		const content = result?.messages?.at(-1)?.content;
+		tails.push(Array.isArray(content) ? (content as Array<{ text?: string }>).map((part) => part.text ?? "").join("") : String(content ?? ""));
+	}
+	return tails;
+}
+
+// The request's one pressure value (pi-context-aware#461) carries the entry limit: no envelope, one action line.
+test("#441: past the entry limit the request's pressure is URGENT at low usage and names entry count as the reason", async () => {
+	await withAgentDir(entryLimit, async (session) => {
+		const footer: (string | undefined)[] = [];
+		Object.assign(session.ctx.ui, { setStatus: (key: string, value: string | undefined) => { if (key === "caair.context-aware/context-pressure") footer.push(value); } });
+		await dispatch(session.handlers, "session_start", {}, session.ctx);
+		const line = (await requestTail(session)).find((text) => text.includes("Context pressure"));
+		assert.ok(line, "the request carries an action line");
+		assert.match(line, /Context pressure URGENT \(1200 entries since the last compaction, at the limit of 1000; 5% used, about 190k tokens of headroom\)\./u);
+		await dispatch(session.handlers, "turn_end", { message: { stopReason: "toolUse" } }, session.ctx);
+		assert.equal(footer.at(-1), "🔴 1k entries · 5%", "the footer says why it is red at 5%");
+		// Before Pi measures the size again the band is UNKNOWN and no line is sent, but the footer keeps the count.
+		Object.assign(session.ctx, { getContextUsage: () => ({ tokens: null, contextWindow: 200_000 }) });
+		await requestTail(session);
+		await dispatch(session.handlers, "turn_end", { message: { stopReason: "toolUse" } }, session.ctx);
+		assert.equal(footer.at(-1), "🔴 1k entries", "an unmeasured size shows the entry count, not size unknown");
+		await session.end();
+	}, 0.05, filler(1_200));
+	await withAgentDir(entryLimit, async (session) => {
+		await dispatch(session.handlers, "session_start", {}, session.ctx);
+		const tails = await requestTail(session);
+		assert.equal(tails.some((text) => text.includes("Context pressure")), false, "under the limit, 5% sends no action line");
+		await session.end();
+	}, 0.05, filler(999));
 });

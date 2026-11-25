@@ -1,9 +1,12 @@
 {
-  "version": "0.8.2",
+  "version": "0.9.0",
   "description": "Context-budget and compaction handoff support for pi: pressure markers, seed rewriting, proactive compaction, prior-session search, and context cache.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "pi-context-aware": "dist/cache/cache-profile-cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -24,15 +27,15 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').copyFileSync('src/folds/kernel/PROVENANCE.md', 'dist/folds/kernel/PROVENANCE.md')\" && node scripts/build-extension.mjs",
+    "build": "node node_modules/@typescript/native/bin/tsc -p tsconfig.build.json && node -e \"require('node:fs').copyFileSync('src/folds/kernel/PROVENANCE.md', 'dist/folds/kernel/PROVENANCE.md')\" && node scripts/build-extension.mjs",
     "prepare": "npm run build",
-    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
+    "typecheck": "node node_modules/@typescript/native/bin/tsc -p tsconfig.json --noEmit --pretty false",
     "lint": "eslint .",
-    "test:compile": "rm -rf .test-dist && tsc -p tsconfig.test.json --pretty false",
+    "test:compile": "rm -rf .test-dist && node node_modules/@typescript/native/bin/tsc -p tsconfig.test.json --pretty false",
     "test:run": "node scripts/with-temp-root.mjs node --test .test-dist/tests/*.test.js tests/*.test.mjs",
     "test": "npm run test:compile && npm run test:run",
     "test:unit": "npm test",
-    "coverage": "npm run test:compile && node scripts/with-temp-root.mjs --v8-coverage c8 node --test .test-dist/tests/*.test.js tests/*.test.mjs && npm run coverage:verify",
+    "coverage": "npm run test:compile && node scripts/with-temp-root.mjs --v8-coverage node scripts/run-coverage.mjs .test-dist/tests/*.test.js tests/*.test.mjs && npm run coverage:verify",
     "pi:check": "node scripts/check-pi-dependencies.mjs",
     "extension-imports:check": "node scripts/check-extension-host-imports.mjs",
     "sdk:check": "node scripts/check-sdk-graph.mjs --lockfile --installed",
@@ -48,6 +51,7 @@
     "bench:cache": "npm run test:compile && node tests/bench-cache-plan.mjs",
     "bench:recall": "npm run test:compile && node tests/bench-recall.mjs",
     "bench:replay": "npm run test:compile && node tests/bench-replay.mjs",
+    "bench:strategy": "npm run build && node dist/strategy-runtime/bench/cli.js",
     "coverage:verify": "node scripts/with-temp-root.mjs node scripts/verify-cobertura.mjs",
     "exports:check": "node scripts/check-exports.mjs",
     "pack:check": "node scripts/check-package.mjs",
@@ -76,14 +80,15 @@
     "access": "public"
   },
   "dependencies": {
-    "@earendil-works/pi-schema": "1.5.2"
+    "@earendil-works/pi-schema": "1.6.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "1.5.2",
-    "@earendil-works/pi-coding-agent": "1.5.2",
-    "@earendil-works/pi-tui": "1.5.2",
+    "@earendil-works/pi-ai": "1.6.0",
+    "@earendil-works/pi-coding-agent": "1.6.0",
+    "@earendil-works/pi-tui": "1.6.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.1.1",
+    "@typescript/native": "npm:typescript@7.0.2",
     "c8": "^11.0.0",
     "esbuild": "0.28.2",
     "eslint": "^10.7.0",

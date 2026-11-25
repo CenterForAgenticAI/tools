@@ -36,6 +36,7 @@ import {
 	type PressureLadderConfig,
 } from "../policy/context-policy.js";
 import { DEFAULT_RESTART_NOTICE_MIN_AWAY_MS } from "../session/restart-notice.js";
+import { oneLine } from "../folds/fold-hints.js";
 
 // ---------------------------------------------------------------------------
 // Config shape
@@ -147,28 +148,19 @@ export interface WorkstreamConfig {
 	activityToCmux: boolean;
 }
 
-/**
- * The delegate busy probe that gates automatic task-continuation.
- *
- * `override` steers the verdict against pi-delegate's shared `run-state.json`:
- * `idle` unblocks a session wedged by another session's leaked orphan run but
- * still reports `busy` when this session provably owns a live run (it never masks
- * own-session work), `busy` never auto-continues while any doubt exists, `auto`
- * (the default) keeps the normal fail-closed reading. The environment variable
- * `PI_CONTEXT_AWARE_BUSY_PROBE` overrides this so the escape hatch is reachable
- * without a config edit. `unattributableStaleMs` is how old an *unattributable*
- * live run may get before it stops suppressing.
- */
-export type BusyProbeOverrideSetting = "auto" | "idle" | "busy";
-
-export interface BusyProbeConfig {
-	override: BusyProbeOverrideSetting;
-	unattributableStaleMs: number;
-}
-
 export interface ModesConfig {
 	suggestTool: boolean;
 }
+
+/** Track each message the operator types until the agent answers it (issue #462). */
+export interface OperatorRequestsConfig {
+	enabled: boolean;
+	/** The input sources that open a request (issue #506): typed input only by default. */
+	sources: OperatorRequestSource[];
+}
+
+/** An `input` event source that can open an operator request. */
+export type OperatorRequestSource = "interactive" | "rpc";
 
 /**
  * Drop old images from each provider request (issue #163).
@@ -187,6 +179,18 @@ export interface ToolOutputCapConfig {
 export interface RepetitionGuardConfig {
 	/** Warn (never abort) on the 3rd identical consecutive direct tool call. */
 	enabled: boolean;
+}
+
+/**
+ * Entries on the branch path since the last compaction, counted as pressure
+ * apart from tokens (pi-context-aware#441). Folding keeps token usage low, but
+ * every hidden entry is still on the path Pi walks to rebuild context, and Pi
+ * fails to rebuild a path that is too long.
+ */
+export interface EntryPressureConfig {
+	enabled: boolean;
+	/** At this many entries since the last compaction, compact (or raise the band to URGENT) at any token usage. */
+	maxEntriesSinceCompaction: number;
 }
 
 export interface OverflowRecoveryConfig {
@@ -225,8 +229,43 @@ export interface FoldsConfig {
 }
 export const DEFAULT_FOLDS_CONFIG: FoldsConfig = { firstUserMessage: "keep", firstUserMessageMaxTokens: 8_000, condensedSkills: false, engine: "auto" };
 
+/**
+ * The context methods a session runs (pi-context-aware#526). Names are kept as written: the resolver
+ * (`resolveSessionStrategy` in src/folds/engine-resolver.ts) reports one it does not know, so a typo fails
+ * clearly instead of falling back without a word.
+ */
+export interface StrategyConfig {
+	/**
+	 * `auto` (default): `folds.engine`, then billion-context-pi presence, decide; with neither, both methods run.
+	 * Otherwise the list of methods the session runs together: `fold`, `compact`.
+	 */
+	methods: "auto" | string[];
+	/** Method lists that run beside the session's methods in shadow: their plans are checked and recorded, never applied. */
+	shadow: string[][];
+	/**
+	 * Assign guidance to each new session (pi-context-aware#473, pi-context-aware#526): drawn from `guidance` with
+	 * `seed`, recorded in the session. Empty `guidance` (the default) assigns nothing. It never changes the methods.
+	 */
+	assign?: StrategyAssignConfig;
+}
+export interface StrategyAssignConfig {
+	/** Guidance variant ids (src/strategy/guidance.ts). */
+	guidance: string[];
+	/** Letters, digits and `._:-`, 1 to 64 characters; empty means unset. */
+	seed: string;
+}
+export const DEFAULT_STRATEGY_ASSIGN_CONFIG: StrategyAssignConfig = { guidance: [], seed: "" };
+export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = { methods: "auto", shadow: [], assign: DEFAULT_STRATEGY_ASSIGN_CONFIG };
+/**
+ * Settings removed before they were released (pi-context-aware#526). A layer that sets one records it as rejected,
+ * so `/context-status layers` lists it and the strategy resolver reports it with the setting to use instead.
+ */
+export const REMOVED_CONFIG_PATHS: readonly string[] = ["strategy.recipe", "strategy.assign.recipes"];
+
 export interface Config {
+	cacheGuard?: { enabled?: boolean; askAboveUsd?: number; interactive?: "auto" | "never" | "always"; askTimeoutMs?: number };
 	folds?: FoldsConfig;
+	strategy?: StrategyConfig;
 	seedMode: SeedMode;
 	sessionRole: SessionRole;
 	compactionModel: string | null;
@@ -242,13 +281,14 @@ export interface Config {
 	restartNotice?: RestartNoticeConfig;
 	pressureTelemetry?: PressureTelemetryConfig;
 	workstream?: WorkstreamConfig;
-	busyProbe?: BusyProbeConfig;
 	modes?: ModesConfig;
+	operatorRequests?: OperatorRequestsConfig;
 	imageStripping?: ImageStrippingConfig;
 	contextMetrics?: ContextMetricsConfig;
 	toolOutputCap?: ToolOutputCapConfig;
 	repetitionGuard?: RepetitionGuardConfig;
 	overflowRecovery?: OverflowRecoveryConfig;
+	entryPressure?: EntryPressureConfig;
 	/** How the session keeps its history. Read from the current branch. */
 	contextPolicy?: ContextPolicyValue;
 	/** Pressure thresholds of the context policy; the telemetry bands derive from them. */
@@ -314,19 +354,13 @@ export const DEFAULT_WORKSTREAM_CONFIG: WorkstreamConfig = {
 	activityToCmux: false,
 };
 
-/**
- * One hour. Long enough that a genuinely slow but live worker of this session
- * is never aged out (an owned run is `busy` regardless of age anyway), short
- * enough that a leaked orphan from a dead session clears within a work break.
- * Kept in step with `session-busy-probe.ts`'s `DEFAULT_UNATTRIBUTABLE_STALE_MS`.
- */
-export const DEFAULT_BUSY_PROBE_CONFIG: BusyProbeConfig = {
-	override: "auto",
-	unattributableStaleMs: 60 * 60 * 1000,
-};
-
 export const DEFAULT_MODES_CONFIG: ModesConfig = {
 	suggestTool: true,
+};
+
+export const DEFAULT_OPERATOR_REQUESTS_CONFIG: OperatorRequestsConfig = {
+	enabled: true,
+	sources: ["interactive"],
 };
 
 export const DEFAULT_TOOL_OUTPUT_CAP_CONFIG: ToolOutputCapConfig = {
@@ -338,6 +372,16 @@ export const DEFAULT_TOOL_OUTPUT_CAP_CONFIG: ToolOutputCapConfig = {
 export const DEFAULT_REPETITION_GUARD_CONFIG: RepetitionGuardConfig = { enabled: true };
 
 export const DEFAULT_OVERFLOW_RECOVERY_CONFIG: OverflowRecoveryConfig = { enabled: true };
+
+/** Smallest accepted entry limit: below this, ordinary sessions would compact for entry count alone. */
+export const MIN_ENTRY_PRESSURE_LIMIT = 1_000;
+
+/**
+ * 30,000 entries: Pi 1.5.2 failed to rebuild a path of 65,000 to 80,000 entries
+ * inside an extension handler (pi-context-aware#441), so this leaves at least 2x
+ * margin while staying far above an ordinary session between compactions.
+ */
+export const DEFAULT_ENTRY_PRESSURE_CONFIG: EntryPressureConfig = { enabled: true, maxEntriesSinceCompaction: 30_000 };
 
 export const DEFAULT_IMAGE_STRIPPING_CONFIG: ImageStrippingConfig = {
 	enabled: false,
@@ -374,19 +418,22 @@ export const DEFAULT_CONFIG: Config = {
 	sessionNaming: DEFAULT_SESSION_NAMING_CONFIG,
 	proactiveCompaction: DEFAULT_PROACTIVE_COMPACTION_CONFIG,
 	contextCache: DEFAULT_CONTEXT_CACHE_CONFIG,
+	cacheGuard: { enabled: false, askAboveUsd: 0.01, interactive: "auto", askTimeoutMs: 60_000 },
 	restartNotice: DEFAULT_RESTART_NOTICE_CONFIG,
 	pressureTelemetry: DEFAULT_PRESSURE_TELEMETRY_CONFIG,
 	workstream: DEFAULT_WORKSTREAM_CONFIG,
-	busyProbe: DEFAULT_BUSY_PROBE_CONFIG,
 	modes: DEFAULT_MODES_CONFIG,
+	operatorRequests: DEFAULT_OPERATOR_REQUESTS_CONFIG,
 	imageStripping: DEFAULT_IMAGE_STRIPPING_CONFIG,
 	contextMetrics: DEFAULT_CONTEXT_METRICS_CONFIG,
 	toolOutputCap: DEFAULT_TOOL_OUTPUT_CAP_CONFIG,
 	repetitionGuard: DEFAULT_REPETITION_GUARD_CONFIG,
 	overflowRecovery: DEFAULT_OVERFLOW_RECOVERY_CONFIG,
+	entryPressure: DEFAULT_ENTRY_PRESSURE_CONFIG,
 	contextPolicy: DEFAULT_CONTEXT_POLICY,
 	pressureLadder: DEFAULT_PRESSURE_LADDER,
 	folds: DEFAULT_FOLDS_CONFIG,
+	strategy: DEFAULT_STRATEGY_CONFIG,
 };
 
 // ---------------------------------------------------------------------------
@@ -433,6 +480,47 @@ function oneOf<T extends string>(allowed: readonly T[]): LeafParser {
 	return (value) => (typeof value === "string" && (allowed as readonly string[]).includes(value) ? (value as T) : undefined);
 }
 
+/** A non-empty string, trimmed. Any name is kept; the strategy resolver decides whether it is known. */
+function settingName(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** An array of names; empty is allowed (the resolver reports an empty method list). */
+function nameList(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const names: string[] = [];
+	for (const item of value) {
+		const name = settingName(item);
+		if (name === undefined) return undefined;
+		names.push(name);
+	}
+	return names;
+}
+
+/** `strategy.methods`: `auto`, or a list of method names. */
+function methodsSetting(value: unknown): "auto" | string[] | undefined {
+	return value === "auto" ? "auto" : nameList(value);
+}
+
+/** `strategy.shadow`: a list of method lists, such as `[["compact"]]`; empty is allowed (nothing in shadow). */
+function methodLists(value: unknown): string[][] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const lists: string[][] = [];
+	for (const item of value) {
+		const list = nameList(item);
+		if (list === undefined) return undefined;
+		lists.push(list);
+	}
+	return lists;
+}
+
+/** An assignment seed: letters, digits and `._:-`, 1 to 64 characters, so it shows as written on one line. */
+function assignmentSeed(value: unknown): string | undefined {
+	return typeof value === "string" && /^[A-Za-z0-9._:-]{1,64}$/u.test(value) ? value : undefined;
+}
+
 /** A model reference, or an explicit `null` meaning "use the active model". */
 function nullableString(value: unknown): string | null | undefined {
 	if (value === null) return null;
@@ -462,6 +550,17 @@ function toolNameList(value: unknown): string[] | undefined {
 		names.push(item.trim());
 	}
 	return names;
+}
+
+/** A non-empty list of `"interactive"` and `"rpc"`; any other value rejects the whole list, so the default stays. */
+function operatorRequestSources(value: unknown): OperatorRequestSource[] | undefined {
+	if (!Array.isArray(value) || value.length === 0) return undefined;
+	const sources: OperatorRequestSource[] = [];
+	for (const item of value) {
+		if (item !== "interactive" && item !== "rpc") return undefined;
+		if (!sources.includes(item)) sources.push(item);
+	}
+	return sources;
 }
 
 function nonNegativeInteger(value: unknown): number | undefined {
@@ -494,6 +593,10 @@ export const CONFIG_LEAVES: readonly LeafDescriptor[] = [
 	{ path: "folds.firstUserMessageMaxTokens", parse: positiveInteger(1), fallback: DEFAULT_FOLDS_CONFIG.firstUserMessageMaxTokens },
 	{ path: "folds.condensedSkills", parse: bool, fallback: DEFAULT_FOLDS_CONFIG.condensedSkills },
 	{ path: "folds.engine", parse: oneOf(["auto", "folds", "compaction-only"]), fallback: DEFAULT_FOLDS_CONFIG.engine },
+	{ path: "strategy.methods", parse: methodsSetting, fallback: DEFAULT_STRATEGY_CONFIG.methods },
+	{ path: "strategy.shadow", parse: methodLists, fallback: DEFAULT_STRATEGY_CONFIG.shadow },
+	{ path: "strategy.assign.guidance", parse: nameList, fallback: DEFAULT_STRATEGY_ASSIGN_CONFIG.guidance },
+	{ path: "strategy.assign.seed", parse: assignmentSeed, fallback: DEFAULT_STRATEGY_ASSIGN_CONFIG.seed },
 	{ path: "seedMode", parse: oneOf(["auto-gen", "user-approve"]), fallback: DEFAULT_CONFIG.seedMode },
 	{ path: "sessionRole", parse: oneOf(["foreground", "worker"]), fallback: DEFAULT_CONFIG.sessionRole },
 	{ path: "compactionModel", parse: nullableString, fallback: DEFAULT_CONFIG.compactionModel },
@@ -548,16 +651,22 @@ export const CONFIG_LEAVES: readonly LeafDescriptor[] = [
 	{ path: "workstream.activityEnabled", parse: bool, fallback: DEFAULT_WORKSTREAM_CONFIG.activityEnabled },
 	{ path: "workstream.cmuxEnabled", parse: bool, fallback: DEFAULT_WORKSTREAM_CONFIG.cmuxEnabled },
 	{ path: "workstream.activityToCmux", parse: bool, fallback: DEFAULT_WORKSTREAM_CONFIG.activityToCmux },
-	{ path: "busyProbe.override", parse: oneOf(["auto", "idle", "busy"]), fallback: DEFAULT_BUSY_PROBE_CONFIG.override },
-	{ path: "busyProbe.unattributableStaleMs", parse: positiveInteger(1), fallback: DEFAULT_BUSY_PROBE_CONFIG.unattributableStaleMs },
 	{ path: "modes.suggestTool", parse: bool, fallback: DEFAULT_MODES_CONFIG.suggestTool },
+	{ path: "operatorRequests.enabled", parse: bool, fallback: DEFAULT_OPERATOR_REQUESTS_CONFIG.enabled },
+	{ path: "operatorRequests.sources", parse: operatorRequestSources, fallback: DEFAULT_OPERATOR_REQUESTS_CONFIG.sources },
 	{ path: "toolOutputCap.maxBytes", parse: nonNegativeInteger, fallback: DEFAULT_TOOL_OUTPUT_CAP_CONFIG.maxBytes },
 	{ path: "toolOutputCap.skipTools", parse: toolNameList, fallback: DEFAULT_TOOL_OUTPUT_CAP_CONFIG.skipTools },
 	{ path: "repetitionGuard.enabled", parse: bool, fallback: DEFAULT_REPETITION_GUARD_CONFIG.enabled },
 	{ path: "overflowRecovery.enabled", parse: bool, fallback: DEFAULT_OVERFLOW_RECOVERY_CONFIG.enabled },
+	{ path: "entryPressure.enabled", parse: bool, fallback: DEFAULT_ENTRY_PRESSURE_CONFIG.enabled },
+	{ path: "entryPressure.maxEntriesSinceCompaction", parse: positiveInteger(MIN_ENTRY_PRESSURE_LIMIT), fallback: DEFAULT_ENTRY_PRESSURE_CONFIG.maxEntriesSinceCompaction },
 	{ path: "contextMetrics.enabled", parse: bool, fallback: DEFAULT_CONTEXT_METRICS_CONFIG.enabled },
 	{ path: "contextMetrics.maxBytes", parse: positiveInteger(4096), fallback: DEFAULT_CONTEXT_METRICS_CONFIG.maxBytes },
 	{ path: "contextMetrics.maxDirBytes", parse: positiveInteger(4096), fallback: DEFAULT_CONTEXT_METRICS_CONFIG.maxDirBytes },
+	{ path: "cacheGuard.enabled", parse: bool, fallback: false },
+	{ path: "cacheGuard.askAboveUsd", parse: finiteNumber(0, Number.MAX_SAFE_INTEGER), fallback: 0.01 },
+	{ path: "cacheGuard.interactive", parse: oneOf(["auto", "never", "always"]), fallback: "auto" },
+	{ path: "cacheGuard.askTimeoutMs", parse: positiveInteger(1000), fallback: 60_000 },
 	{ path: "imageStripping.enabled", parse: bool, fallback: DEFAULT_IMAGE_STRIPPING_CONFIG.enabled },
 	// At least 1: with 0 the image the user just attached would be stripped too.
 	{ path: "imageStripping.keepRecent", parse: positiveInteger(1), fallback: DEFAULT_IMAGE_STRIPPING_CONFIG.keepRecent },
@@ -587,9 +696,11 @@ export function isKnownConfigPath(path: string): boolean {
  * Settings an untrusted project's own `.pi/context-aware.json` may not change. The agent working in a project can
  * write that file, so it must not decide what the operator decides:
  * - who owns compaction (`summarizer.enabled`, `compactionClaim.*`), the same decision one level up for Fabric;
- * - the guard limits: it must not raise the output cap, empty its skip list, or switch off overflow recovery;
- * - every fold-engine leaf (pi-context-aware#525): how this package manages context (`folds.*`). A leaf added
- *   under `folds.` is covered without being listed here.
+ * - the guard limits: it must not raise the output cap, empty its skip list, or switch off overflow recovery or the
+ *   entry-count check;
+ * - every fold-engine and strategy leaf (pi-context-aware#525): how this package manages context (`folds.*`,
+ *   `strategy.methods`, `strategy.shadow`) and which sessions get which guidance (`strategy.assign.*`,
+ *   pi-context-aware#473). A leaf added under `folds.` or `strategy.` is covered without being listed here.
  */
 export const UNTRUSTED_OWNERSHIP_PATHS: readonly string[] = [
 	"summarizer.enabled",
@@ -598,7 +709,9 @@ export const UNTRUSTED_OWNERSHIP_PATHS: readonly string[] = [
 	"toolOutputCap.maxBytes",
 	"toolOutputCap.skipTools",
 	"overflowRecovery.enabled",
-	...CONFIG_LEAVES.map((leaf) => leaf.path).filter((leaf) => leaf.startsWith("folds.")),
+	"entryPressure.enabled",
+	"entryPressure.maxEntriesSinceCompaction",
+	...CONFIG_LEAVES.map((leaf) => leaf.path).filter((leaf) => leaf.startsWith("folds.") || leaf.startsWith("strategy.")),
 ];
 
 /** An untrusted project's layer without `UNTRUSTED_OWNERSHIP_PATHS`: neither their values nor their rejections count. */
@@ -631,7 +744,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function readPath(source: Record<string, unknown>, path: string): { present: boolean; value: unknown } {
 	const segments = path.split(".");
 	let cursor: unknown = source;
-	for (const segment of segments) {
+	// Bun AOT currently fails to compile this traversal as a for-of loop.
+	for (let index = 0; index < segments.length; index++) {
+		const segment = segments[index];
 		if (!isRecord(cursor) || !Object.prototype.hasOwnProperty.call(cursor, segment)) return { present: false, value: undefined };
 		cursor = cursor[segment];
 	}
@@ -654,6 +769,7 @@ export function readConfigLayer(raw: unknown, layer: ConfigLayer, origin?: strin
 			if (parsed === undefined) rejected.push(leaf.path);
 			else values.set(leaf.path, parsed);
 		}
+		for (const removed of REMOVED_CONFIG_PATHS) if (readPath(raw, removed).present) rejected.push(removed);
 	}
 	return { layer, ...(origin === undefined ? {} : { origin }), values, rejected };
 }
@@ -888,15 +1004,22 @@ export function resolveConfigLayers(inputs: readonly ConfigLayerInput[]): Resolv
 // Presentation
 // ---------------------------------------------------------------------------
 
+/** The longest value or origin the layers view prints; a longer one ends with `…`. */
+const MAX_SHOWN_LAYER_TEXT = 160;
+
 function describeSource(entry: { layer: ConfigLayer; origin?: string }): string {
 	const label = LAYER_LABELS[entry.layer];
-	return entry.origin ? `${label}: ${entry.origin}` : label;
+	return entry.origin ? `${label}: ${oneLine(entry.origin, MAX_SHOWN_LAYER_TEXT)}` : label;
 }
 
+/**
+ * A value as the layers view prints it. String leaves come from any layer, a project's file included, and reach
+ * the operator's terminal, so every value is one capped line without control or format characters.
+ */
 function renderValue(value: unknown): string {
 	if (value === null) return "(active)";
 	if (typeof value === "boolean") return value ? "on" : "off";
-	return String(value);
+	return oneLine(String(value), MAX_SHOWN_LAYER_TEXT);
 }
 
 /**
@@ -930,8 +1053,6 @@ export function overriddenPaths(resolved: ResolvedConfig): readonly string[] {
 export interface SessionRoleBehaviour {
 	/** Allow a session to initiate a user-requested reconciliation turn. */
 	readonly allowCheckin: boolean;
-	/** Allow a foreground session to initiate an extension-generated task continuation. */
-	readonly allowAutomaticContinuation: boolean;
 	/** Send the expanded seed back into the session as a new user message. */
 	readonly autoSendSeed: boolean;
 	/** Rewrite the task prompt with a model before handing it on. */
@@ -946,7 +1067,6 @@ export interface SessionRoleBehaviour {
 
 const FOREGROUND_BEHAVIOUR: SessionRoleBehaviour = {
 	allowCheckin: true,
-	allowAutomaticContinuation: true,
 	autoSendSeed: true,
 	rewriteSeedWithModel: true,
 	injectCacheListing: true,
@@ -960,10 +1080,8 @@ const FOREGROUND_BEHAVIOUR: SessionRoleBehaviour = {
  * that line is the one piece unambiguously useful to a worker session.
  */
 const WORKER_BEHAVIOUR: SessionRoleBehaviour = {
-	// A worker reports through its supervisor; it must not initiate a check-in or
-	// an extension-generated continuation.
+	// A worker reports through its supervisor; it must not initiate a check-in.
 	allowCheckin: false,
-	allowAutomaticContinuation: false,
 	// The next prompt belongs to the supervisor. Auto-sending starts a second
 	// agent run it never requested.
 	autoSendSeed: false,

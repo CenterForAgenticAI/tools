@@ -6,7 +6,10 @@
  * - one `context_edit` entry that replaces the first covered entry (the
  *   carrier) with the fold summary;
  * - one `context_edit` entry per other covered entry, with a null replacement,
- *   so Pi omits it from model context;
+ *   so Pi omits it from model context. An entry whose newest edit on the branch
+ *   already omits it gets no second one: a nested fold that absorbs an earlier
+ *   fold writes null edits only for entries still visible (pi-context-aware#441);
+ *   the absorbed fold's carrier still gets one, since it shows a summary;
  * - one custom entry of type {@link FOLD_ENTRY_TYPE} with the fold metadata.
  *
  * The original entries stay in the session file. Pi applies context edits along
@@ -135,24 +138,54 @@ export function renderFoldSummary(summary: string, topic?: string): string {
 	return body.length === 0 ? heading : `${heading}\n${body}`;
 }
 
+/**
+ * The summary in a carrier's replacement text without the heading line `renderFoldSummary` adds.
+ * The engine counts this text, not the rendered one, when a higher-tier fold absorbs the fold.
+ */
+export function foldSummaryBody(text: string): string {
+	if (!text.startsWith(SUMMARY_HEADER)) return text;
+	const newline = text.indexOf("\n");
+	return newline < 0 ? "" : text.slice(newline + 1);
+}
+
 /** Every covered entry of a fold, carrier first. */
 export function coveredEntryIds(record: FoldRecord): string[] {
 	return [record.carrierId, ...record.hiddenIds];
 }
 
 /**
+ * Entries whose newest `context_edit` on the branch has a null replacement, so
+ * Pi already omits them from model context. Pi projects the newest edit of each
+ * target, so another null edit for one of these changes nothing.
+ */
+export function omittedEntryIds(branch: readonly SessionEntry[]): Set<string> {
+	const omitted = new Set<string>();
+	for (const entry of branch) {
+		if (entry.type !== "context_edit") continue;
+		if (entry.replacement === null) omitted.add(entry.targetId);
+		else omitted.delete(entry.targetId);
+	}
+	return omitted;
+}
+
+/**
  * Boundary drafts that store one fold: the carrier edit, the hide edits, then
  * the metadata entry. Pi accepts them only from `turn_end` or
  * `agent_before_settle`.
+ *
+ * `omitted` holds the entries the branch already omits (see
+ * {@link omittedEntryIds}); they get no hide edit. The record still lists them,
+ * so the fold's coverage is unchanged. When several folds are planned before
+ * any is written, add each fold's hidden ids to the set before the next.
  */
-export function foldDrafts(record: FoldRecord, summaryText: string): SessionBoundaryDraft[] {
+export function foldDrafts(record: FoldRecord, summaryText: string, omitted: ReadonlySet<string> = new Set()): SessionBoundaryDraft[] {
 	const carrier: ContextEditEntryDraft = {
 		type: "context_edit",
 		targetId: record.carrierId,
 		replacement: { content: summaryText },
 	};
-	const hidden = record.hiddenIds.map(
-		(targetId): ContextEditEntryDraft => ({ type: "context_edit", targetId, replacement: null }),
+	const hidden = record.hiddenIds.flatMap(
+		(targetId): ContextEditEntryDraft[] => omitted.has(targetId) ? [] : [{ type: "context_edit", targetId, replacement: null }],
 	);
 	const metadata: CustomEntryDraft = { type: "custom", customType: FOLD_ENTRY_TYPE, data: record };
 	return [carrier, ...hidden, metadata];

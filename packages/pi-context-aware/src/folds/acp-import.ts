@@ -10,7 +10,7 @@
 import type { SessionBoundaryDraft, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { erasedSessionIds } from "../erasure/database.js";
 
-import { FOLD_ENTRY_TYPE, cleanRequestId, foldDrafts, isEditableEntry, renderFoldSummary, type FoldRecord } from "./fold-entries.js";
+import { FOLD_ENTRY_TYPE, cleanRequestId, foldDrafts, isEditableEntry, omittedEntryIds, renderFoldSummary, type FoldRecord } from "./fold-entries.js";
 import { baseIdOf } from "./kernel/prune.js";
 import { entryToCoreMessages } from "./fold-adapter.js";
 import { widenFoldCoverage } from "./fold-coverage.js";
@@ -48,7 +48,9 @@ export const MAX_IMPORT_BLOCKS = 1000;
  * only entries on this branch, so the total is bounded by the session itself. Folds nest (tier 1 to 3),
  * so a nested block can cover an entry that its child also covers; ENTRY_COVER_FACTOR allows that
  * overlap (one cover per tier plus one spare). Over the budget, which no honest sidecar reaches, the
- * whole import is refused. The budget is 4 x branch entries + 2 x kept blocks.
+ * whole import is refused. The budget is 4 x branch entries + 2 x kept blocks. It counts each block's
+ * covered entries, which its metadata lists, not the drafts written: a block skips the hide edit of an
+ * entry an earlier block already omits (pi-context-aware#441).
  */
 export const ENTRY_COVER_FACTOR = 4;
 export function importDraftBudget(branchEntries: number, keptBlocks: number): number {
@@ -146,7 +148,12 @@ export function importAcpSideFile(input: AcpImportInput): AcpImportResult {
 	const records: FoldRecord[] = [];
 	const drafts: SessionBoundaryDraft[] = [];
 	const draftBudget = importDraftBudget(input.branch.length, keep.size);
+	// Counted as if each block wrote one edit per covered entry: a skipped redundant edit still costs its
+	// id in the block's metadata, so blocks that re-cover the branch stay refused (pi-context-aware#441).
+	let coverCost = 0;
 	const imported = new Set<string>();
+	// A parent block absorbs its children: their entries are already omitted when it is written (pi-context-aware#441).
+	const omitted = omittedEntryIds(input.branch);
 	for (const block of blocks) {
 		if (!keep.has(block.blockId)) continue;
 		const messageIds = widenFoldCoverage(messages, block.effectiveMessageIds);
@@ -185,8 +192,10 @@ export function importAcpSideFile(input: AcpImportInput): AcpImportResult {
 		};
 		imported.add(block.blockId);
 		records.push(record);
-		drafts.push(...foldDrafts(record, renderFoldSummary(block.summary, block.topic)));
-		if (drafts.length > draftBudget) return { status: "unsupported", reason: `too many entries (limit ${draftBudget})` };
+		drafts.push(...foldDrafts(record, renderFoldSummary(block.summary, block.topic), omitted));
+		for (const id of hiddenIds) omitted.add(id);
+		coverCost += hiddenIds.length + 2;
+		if (coverCost > draftBudget) return { status: "unsupported", reason: `too many entries (limit ${draftBudget})` };
 	}
 	if (records.length === 0 && skippedBlocks.length === 0) return { status: "skipped", reason: "no-blocks" };
 	return { status: "imported", records, drafts, skippedBlocks };

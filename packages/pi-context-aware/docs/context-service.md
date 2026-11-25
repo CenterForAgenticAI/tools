@@ -75,7 +75,8 @@ const snapshot = service.getSnapshot();
 - the current compaction coordinator state (`idle`, `queued`, or `running`);
 - optional proactive lifecycle state (`idle`, `pending`, `generating`, `queued`, `compacting`, `cooldown`, `failed`, or `cancelled`), including a run ID, trigger count, cancellation stage, cooldown deadline, and last failure when known;
 - effective seed rewrite, ambiguity, compaction-model, and proactive-compaction modes. The proactive configuration includes a steady-state stall threshold and a first-output grace period for reasoning models: thinking/tool-call stream events reset liveness without becoming seed text, text output starts the steady-state threshold, and an absolute five-minute ceiling remains in force. Current producers also include `commitDrainTimeoutMs`, how long a prepared compaction waits for an in-flight agent run to end before the commit is abandoned and queued again; this additive protocol-v1 leaf may be absent from older producers.
-- the context engine in use, `engine`: `folds` or `compaction-only` (billion-context-pi owns folding). It was added compatibly to protocol v1, so older producers omit it;
+- the context engine in use, `engine`: `folds` while the session's methods include `fold`, otherwise `compaction-only` (billion-context-pi owns folding, or the methods leave folding out). It was added compatibly to protocol v1, so older producers omit it;
+- the context methods the session runs, `methods`, in order: `fold`, `compact`, or both (pi-context-aware#526; see [configuration.md](configuration.md#strategy)). Later versions may add methods, so read an unknown one as opaque. It was added compatibly to protocol v1, so older producers omit it;
 - provider/protocol/session provenance.
 
 The proactive-compaction snapshot is the same resolved representation used by runtime checks and status commands:
@@ -124,7 +125,7 @@ The top-level proactive lifecycle is separate from effective configuration. It r
 }
 ```
 
-This top-level field is also an additive protocol-v1 field and may be absent from older producers. A failure remains visible while a static safety handoff is queued or compacting. Consumers should treat it as a point-in-time diagnostic, not as a second handoff coordinator.
+`trigger` is `threshold`, `generation-reserve`, or `entry-count`. `entry-count` means the branch held `entryPressure.maxEntriesSinceCompaction` entries since the last compaction, whatever the token usage; consumers that know only the first two values should treat an unknown trigger as a reason string. This top-level field is also an additive protocol-v1 field and may be absent from older producers. A failure remains visible while a static safety handoff is queued or compacting. Consumers should treat it as a point-in-time diagnostic, not as a second handoff coordinator.
 
 `session.lineage` continues to mean parent and prior-session references. A compaction path that differs from the current session file is retained as a genuine prior-session lineage reference; a path equal to the current session file remains only in `session.compactions`.
 
@@ -267,6 +268,7 @@ Events are ephemeral and process-local. Correlate them by `requestId` and `runId
 ## Bounds, interaction, errors, and cancellation
 
 - `purpose`, `requestId`, and `nextPhaseSeed` are required.
+- `nextPhaseSeed` is another extension's text, not the user's, so a line of it may not present itself as a conversation turn: a bracketed role label such as `[User]: `, a role tag such as `<user>`, a chat-template token, or a role name alone on its line. Such a request fails at `validation` with `INVALID_REQUEST`, and the message names the line number, role and form, never the line's text. Start a quoted line with `(quoted) ` or report it in prose. When the seed is rewritten, a rewrite that adds such a line is refused and the request's own seed is used.
 - Default bounds are 12,000 seed characters and 8,000 summary-focus characters. Hard protocol limits are 50,000 and 20,000 respectively. The bound is checked both before and after seed expansion.
 - Protocol v1 accepts only `interactionMode: "non-interactive"`.
 - The service never opens an editor, approval prompt, or clarification message. If effective `user-approve` or ambiguity policy needs user input, the operation returns `INTERACTION_REQUIRED`.
@@ -621,7 +623,7 @@ pi.on("session_start", () => {
 
 Use one path or the other, never both: when the guard is true, do not also inject the same text through Pi's hooks.
 
-**When a text is shown.** Before each agent run, context-aware calls each owner's `render`, in registration order, and places the texts that are due in its own per-turn message, in the order `render` returned them. That message is the one that carries the task list and the brief; contributed texts come after those and before the restart notice and the context telemetry. A text is due when:
+**When a text is shown.** Before each agent run, context-aware calls each owner's `render`, in registration order, and places the texts that are due in its own per-turn message, in the order `render` returned them. Contributed texts come first in that message, before the restart notice and the context telemetry. A text is due when:
 
 - it has not been shown on the current branch;
 - its text changed since it was last shown (compared by SHA-256 digest); or
@@ -654,9 +656,102 @@ Rules:
 - `hints` are [fold hints](#fold-hints) without an `ownerKey`. They are registered under the contributor's `ownerKey`, all or none: when one is refused, `register` is refused with `hints: <reason>` and nothing is registered. A hint's own `ownerKey` field is ignored. `endOwner` leaves the hints in place, as `folds.endOwner` does for hints.
 - Contributors are held in memory for the session. Register again after every `session_start`. The last-shown records are in the session and survive.
 
+## Prompt cache
+
+An extension can ask how well the prompt cache served each provider request, and why it reset. Check the capability with `supportsContextAwareCacheV1`; producers without it remain valid.
+
+```ts
+import { discoverContextAwareServiceV1, supportsContextAwareCacheV1 } from "@centerforagenticai/pi-context-aware/context-service";
+
+const service = discoverContextAwareServiceV1(pi.events, "my-extension");
+if (supportsContextAwareCacheV1(service)) {
+	const result = service.cache.explain(assistantMessage.timestamp);
+	// { hitPct: 0, inputTokens: 10600, cachedTokens: 0,
+	//   reset: { kind: "expired", idleMs: 420000, ttlMs: 300000, lostTokens: 10100 } }
+}
+```
+
+`explain(messageTimestamp)` takes the `timestamp` of an assistant message on the current branch. Each assistant message is one request, and its `usage` is the provider's report. It returns `undefined` for an unknown timestamp, a message without usage, a session whose provider has reported no cache use yet, and after the session has ended.
+
+- `hitPct` is `cachedTokens` over `inputTokens`, 0-100, rounded. `inputTokens` is the whole prompt, cached part included.
+- `reset` is present only when the request lost at least 1,024 tokens and 20% of the previous prompt beyond its new content. The split comes from the fold kernel's `decomposeSample`, the same accounting as its cache report.
+- `reset.kind` is the likely cause, checked in this order: `compaction` or `branch-summary` (one sits between the two requests), `model-change` (provider or model differs; `model` holds the new one), `expired` (the cache missed from the start and the idle gap passed the lifetime), `fold` (a fold sits between them; `blockId` names it), `expired` (the gap passed the lifetime), `evicted` (see [Measured cache profile](#measured-cache-profile-v1); checked before both `expired` cases), `prefix-start` (missed from the start for no recorded reason: system prompt, tools or account changed) and `prefix-mid` (broke partway through for no recorded reason).
+- `ttlMs` is 3,600,000 when the previous request wrote a one-hour cache entry or `PI_CACHE_RETENTION=long` is set, and 300,000 otherwise.
+- For `prefix-start` and `prefix-mid` only, optional `reset.cause` carries client-side evidence:
+  - `{ kind: "message-block", index, count, role, type, tool? }` names the first changed message block up to the previous request's cache breakpoint. `index` is zero-based among message blocks, excluding tools and the top-level system prompt; `count` is the current message-block count. Blocks come from Anthropic and Chat Completions `messages`, Responses `input` and Google `contents` parts. `role` is the wire role (Google uses `model`); a Responses tool call has `assistant` and its output `tool`. `type` is the block or item type; a Google part takes its payload key (`functionResponse`), and a Chat Completions assistant message with tool calls is `tool_calls`. `tool` names the called tool: from the block's own name, or from the matching call by `tool_use_id`, `call_id` or `tool_call_id`.
+  - `{ kind: "system-section" | "tools" | "setting", names }` carries names from the guard entry.
+  - `{ kind: "unchanged" }` means the compared prefix was identical. Without a comparison (guard off, first request after restart or a tree move, continuation transport), `cause` is absent, not `unchanged`.
+- Optional `reset.stalled: true` means the read moved by at most 128 tokens (`STALLED_READ_TOLERANCE`) while the previous request wrote more than 128 tokens. It is absent otherwise, including a normally growing read.
+
+A reply that reports no usage (a failed or aborted attempt) does not make its request the comparison baseline. The next request is compared with the last request that reported usage, the same request its usage is measured against, so a retry of a rewritten body still names the changed block.
+
+The guard observes the payload at the end of `before_provider_request`. A provider wrapper that reshapes it later is outside this comparison. An unchanged prefix is therefore not proof that the provider saw identical bytes.
+
+With the guard enabled, each compared request stores one compact `context-aware.cache-verdict.v1` entry before its assistant message, paired in branch order. Each entry is roughly 60–150 bytes of verdict data, plus session-entry overhead (long labels can cost more). This adds one entry per compared request for the session's lifetime; there is no live-only map or fixed session-size cap. No block text or content hashes are written by these entries. Existing guard entries also carry sanitized `names` (at most 32). Role, type, tool and other names are single-line labels capped at 80 code points. All fields are additive and optional under protocol v1.
+
+The cause is a best guess. The provider does not say why it missed, and an eviction inside the lifetime looks the same as a change to the prompt. The branch is read once per leaf, so calling `explain` for every message on each frame is cheap.
+
+## Measured cache profile (v1)
+
+Some providers' prompt caches have no fixed lifetime. Rows without `promptCache` (Gemini through Antigravity, for example) are best-effort: a hit can survive a 20-minute gap, and a 3-minute gap can miss. The measured cache profile records how long each model's cache survived on this machine, so `cache.explain()` and the cache guard can tell an early eviction from an expiry.
+
+Build it with `pi-context-aware cache-profile build` (the package's `bin`). It reads every `*.jsonl` file under `<agent dir>/sessions` one line at a time and writes `<agent dir>/cache-profile.json` through a temporary file and a rename. The agent directory is `$PI_CODING_AGENT_DIR`, else `~/.pi/agent`. Each run rescans every file; it keeps no cursor. `/context-status cache profile` prints the table: one row per model and retention with the full-hit rate in each gap bucket (`?` below the minimum sample count), the short-gap (under one minute) rate, flagged `unreliable cache` below 70%, and the first known gap where survival drops below 50%.
+
+### What is measured
+
+- A pair is two consecutive requests on one branch of a session file. The idle gap runs from the end of the previous response (the entry's timestamp), or from a later `cache_warm` usage entry on the same model, to the start of the next request (`message.timestamp`). A pair whose gap starts at a warming entry goes into `postWarmGaps`, apart from `gaps`.
+- A pair with an intentional prefix change between its requests is dropped and counted by reason: `compaction` (a compaction or branch summary), `fold` (a context-aware fold landed), `modelSwitch` (a model change entry, or a different model or retention), `systemPrompt` (the cache guard recorded a system-prompt section change) and `other` (an unreadable line, a negative gap, or a move to another branch of the session tree, such as `/tree` or a reset to the root: an entry whose parent is not the entry before it). Only recorded evidence can drop a pair.
+- `cache.explain()` and the cache guard look the profile up on the same clock: from the end of the previous response to the start of the next request. The reported `idleMs` and the fixed lifetime still run from start to start.
+- A request counts once, deduped by its entry id and timestamps, so a forked or copied session does not count twice.
+- A full hit reads more than 8,192 tokens (the shared system prefix) and at least half of the smaller of the two prompts. A partial hit reads less, but more than zero. A zero read reads nothing.
+- Only requests that started within the window (30 days by default) count.
+
+### Shape
+
+```ts
+interface CacheProfileV1 {
+	version: 1;
+	generatedAt: string; // ISO-8601
+	windowDays: number; // 30
+	minSamples: number; // 20
+	bucketEdgesMs: [0, 60000, 300000, 600000, 900000, 1200000, 1800000, 3600000];
+	// "provider/model" as recorded, then "short" | "long" | "none"
+	models: Record<string, Partial<Record<"short" | "long" | "none", {
+		gaps: Bucket[]; // one per edge, in edge order
+		postWarmGaps: Bucket[];
+		returnTime: { all: ReturnTime; main?: ReturnTime };
+		dropped: { compaction: number; fold: number; modelSwitch: number; systemPrompt: number; other: number };
+	}>>>;
+}
+interface Bucket {
+	fromMs: number; // inclusive
+	toMs: number | null; // exclusive; null for the last, open bucket
+	samples: number; fullHits: number; partialHits: number; zeroReads: number;
+	hitRate: number; // fullHits / samples
+	ciLow: number; ciHigh: number; // 95% Wilson interval of hitRate
+	known: boolean; // samples >= minSamples
+}
+interface ReturnTime {
+	samples: number;
+	cdf: { withinMs: number; fraction: number }[]; // share of idle gaps that ended within withinMs, at each edge
+}
+```
+
+The retention is `long` when the request recorded a one-hour cache write or long retention, `none` when it recorded none, and `short` otherwise. `returnTime.all` counts the gaps of both series. The builder cannot yet tell a main session from a child, so it never writes `returnTime.main`.
+
+The file holds aggregates only: counts, rates and the `provider/model` keys. The builder copies named numeric fields from each entry and never prompt text, tool output, entry, request or session ids, or project paths.
+
+### Reading it
+
+Readers accept only `version: 1` with the edges above, ignore unknown fields, and treat a corrupt, other-version or malformed file as no profile. A missing model, retention or bucket, and a bucket that is not `known`, is no data.
+
+For a row without `promptCache`, a request that missed from the start inside the measured survival window, with no recorded prefix change before it, is reported as `reset.kind: "evicted"`. The window is every known bucket whose full-hit rate is at least 50%; `reset.survivalPct` holds that rate in whole percent at the request's idle gap. The cache guard likewise treats such a cache as still alive past the fixed lifetime, so a prompt change there is reported with its lost prefix. With no profile, too few samples or a lower rate, both keep their fixed-lifetime answer. The kind is additive: a consumer must treat a kind it does not know as unknown.
+
+The typed service does not expose the profile. Read the file, or ask for a service field when a consumer needs it live.
+
 ## What is not an integration API
 
-Model-facing `<context-telemetry>` envelopes, historical `[ctx ...]` markers, status-bar text, `<context-cache>` prompt blocks, and `Prior transcript:` summary lines are presentation/recovery guidance. Their text and formatting may change. **Do not parse them.** Use this typed service for cross-extension integration.
+The model-facing pressure action line, historical `[ctx ...]` markers, status-bar text, `<context-cache>` prompt blocks, and `Prior transcript:` summary lines are presentation/recovery guidance. Their text and formatting may change. **Do not parse them.** Use this typed service for cross-extension integration.
 
 ## Versioning
 

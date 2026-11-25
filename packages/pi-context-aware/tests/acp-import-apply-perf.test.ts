@@ -57,14 +57,6 @@ async function startImport(root: string, manager: SessionManager): Promise<strin
 	return warnings;
 }
 
-// Bound: 15 s for a 24,000-entry session with a three-tier fold (72,003 appended entries). The linear
-// apply takes under 1 s on the development host; the quadratic one took 189 s there. 15 s leaves 15x
-// headroom for a slow shared CI runner, and is still more than 10x under the smallest quadratic
-// measurement, so a slow runner does not fail it and a regression to a per-append branch walk does.
-// A regressed run is synchronous, so it cannot be cut short: it fails on the bound after it ends.
-// The next test is the fast, deterministic guard for the same regression.
-const BOUND_MS = 15_000;
-
 test("#254 import of a 24,000-entry session with a three-tier fold is fast and complete", async () => {
 	const root = tempDir();
 	try {
@@ -74,13 +66,19 @@ test("#254 import of a 24,000-entry session with a three-tier fold is fast and c
 		assert.ok(file);
 		fs.writeFileSync(`${file}.acp.json`, threeTierSideFile(ids));
 		const before = manager.getEntries().length;
-		const started = performance.now();
-		const warnings = await startImport(root, manager);
-		const elapsed = performance.now() - started;
+		const proto = SessionManager.prototype as unknown as { getBranch(this: SessionManager, fromId?: string): unknown[] };
+		const original = proto.getBranch;
+		let visited = 0;
+		proto.getBranch = function (this: SessionManager, fromId?: string) { const branch = original.call(this, fromId); visited += branch.length; return branch; };
+		let warnings: string[];
+		try {
+			warnings = await startImport(root, manager);
+		} finally { proto.getBranch = original; }
 		assert.deepEqual(warnings, []);
-		// Per block: one carrier edit, 23,999 hide edits, one metadata entry; three blocks.
-		assert.equal(manager.getEntries().length - before, 3 * 24_001);
-		assert.ok(elapsed < BOUND_MS, `import took ${Math.round(elapsed)} ms, bound ${BOUND_MS} ms`);
+		// b1: one carrier edit, 23,999 hide edits, one metadata entry. b2 and b3 cover the same entries,
+		// which b1 already hid, so each writes only its carrier edit and metadata entry (pi-context-aware#441).
+		assert.equal(manager.getEntries().length - before, 24_001 + 2 + 2);
+		assert.ok(visited < 24_000 * 20, `getBranch visited ${visited} entries during the real import`);
 	} finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

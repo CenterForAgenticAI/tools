@@ -8,10 +8,9 @@ import {
 	type WorkstreamGoal,
 	type WorkstreamRef,
 	type WorkstreamSnapshot,
-} from "./workstream-schema.js";
-import { replayWorkstreamEntries } from "./workstream-replay.js";
-import { WORKSTREAM_ENTRY_TYPE } from "./workstream-state.js";
-import { redactText, sanitizeActivityEvent, sanitizeSnapshot } from "./workstream-safety.js";
+} from "../snapshot-contracts/schema.js";
+import { LEGACY_WORKSTREAM_ENTRY_TYPE, WORKSTREAM_ENTRY_TYPE, replayWorkstreamEntries } from "../snapshot-contracts/transcript.js";
+import { redactText, sanitizeActivityEvent, sanitizeSnapshot } from "../snapshot-contracts/safety.js";
 
 export const WORKSTREAM_CONTEXT_ELEMENT = "session-workstream" as const;
 export const WORKSTREAM_CONTEXT_SOURCE = "pi-extension:context-aware" as const;
@@ -358,7 +357,7 @@ function compactionGuidance(details: WorkstreamCompactionDetails): string {
 		`- References: ${refs}`,
 		`- Boundaries and constraints: ${boundaries}`,
 		`- Latest three relevant recent-activity entries: ${activity}`,
-		"Preserve transcript custom-entry authority: summaries and compaction details are projections only. Omitting or paraphrasing this guidance must not change the authoritative snapshot; replay context-aware.workstream.v1 custom entries when exact state is needed.",
+		`Preserve transcript custom-entry authority: summaries and compaction details are projections only. Omitting or paraphrasing this guidance must not change the authoritative snapshot; replay the ${WORKSTREAM_ENTRY_TYPE} and older ${LEGACY_WORKSTREAM_ENTRY_TYPE} custom entries, in transcript order, when exact state is needed.`,
 	].join("\n");
 }
 

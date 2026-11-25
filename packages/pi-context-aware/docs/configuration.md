@@ -25,6 +25,53 @@ declares how that session must behave. Host policy beats a command-line flag on
 purpose: a worker must not be knocked off its declared behaviour by a flag it
 inherited from its parent process.
 
+### Prompt-cache guard
+
+The guard is off by default. Enable it in a config layer:
+
+```json
+{ "cacheGuard": { "enabled": true, "askAboveUsd": 0.01, "interactive": "auto", "askTimeoutMs": 60000 } }
+```
+
+`askAboveUsd` is a non-negative dollar amount, default `0.01`. At the first request
+of a user turn, a session where a person is at the terminal asks before a predicted
+break above this amount. Continue sends the request unchanged. Decline stops the
+turn; it never restores old rules or tools. Headless sessions, Fabric child
+sessions and tool-loop requests only log a record. The last log-only report is
+also shown in the UI status line.
+
+The guard never holds an unattended session:
+
+- `interactive` decides where it asks. `"auto"` (default) asks only when Pi
+  reports the `tui` run mode. Pi's RPC mode reports a UI, but its dialogs go to a
+  host (a web UI, for example) that may have nobody watching and sets no timeout,
+  so under RPC the guard only logs. A Pi that reports no run mode keeps the old
+  rule: ask whenever it has a UI. `"never"` always logs only. `"always"` asks in
+  every session that has a UI, including RPC; Fabric child sessions still only log.
+- `askTimeoutMs` (integer, at least `1000`, default `60000`) bounds every ask.
+  When nobody answers in time, the guard dismisses the dialog and sends the
+  request as is, as if the user had chosen Continue. A timeout is not a decline.
+  A dialog that fails the same way sends the request.
+
+The session record's `timedOut` field says an ask ran out of time.
+
+On models without mid-conversation system messages, date, cwd, mode-line and
+skill-listing sections retain their first-sent system text. Updates arrive as
+conversation-tail data instead. When compaction or pruning drops the message an
+update followed, the current value is sent again after the newest message. Rules, unrecognized sections and tool permissions
+are not frozen. Turning the guard off leaves requests unchanged.
+
+Each prediction records `context-aware.cache-guard.v1` in the session, including
+the cause, changed sections, estimated lost tokens, extra write cost and whether
+the user was asked. Names in reports are bounded one-line data. Whole-prompt
+replacements have no extension attribution when Pi does not expose it.
+
+The estimate compares request blocks and uses registry pricing: lost prefix
+tokens × (cache write price − cache read price). Tokens are estimated from text,
+not billed usage. Provider eviction is invisible. Continuation requests report
+unknown when the transport exposes a previous response or thread identifier;
+transport changes made after the hook cannot be observed.
+
 ### Host-owned skill loading
 
 Hosts that already own skill reads can prevent this extension from registering
@@ -213,7 +260,7 @@ Default shape:
 
 Configuration can be changed persistently with the slash commands below or by editing the JSON file. Existing configuration files may omit `workstream`; omitted fields use the defaults above, so sessions without prior workstream entries migrate without a rewrite.
 
-The durable workstream switches are intentionally conservative: authority, registry, and activity integration are enabled by default; cmux is capability-gated and activity logging to cmux remains opt-in. Registry files are private projections under `~/.pi/agent/session-registry/v1/`; transcript custom entries remain authoritative. This package validates launcher metadata and delegates optional jumps, but does not route intercom messages, create/select/clean up worktrees, launch terminals, or construct terminal commands.
+The durable workstream switches are intentionally conservative: authority, registry, and activity integration are enabled by default; cmux is capability-gated and activity logging to cmux remains opt-in. Registry files are private projections under `~/.pi/agent/session-registry/v1/`; transcript custom entries remain authoritative. This package hands an optional `/sessions jump` to a launcher, but does not route intercom messages, create/select/clean up worktrees, launch terminals, or construct terminal commands.
 
 You can also provide one-off runtime overrides through extension CLI flags. CLI overrides are **ephemeral**: they affect the current Pi process but do not rewrite `~/.pi/agent/context-aware.json`.
 
@@ -298,9 +345,9 @@ same arguments. It stays until a later major release.
 
 ## `seedAuthorityGuard`
 
-Controls what a refused compaction handoff or automatic task continuation costs.
+Controls what a refused compaction handoff costs.
 
-Before a generated handoff or task-continuation reminder is used, a
+Before a generated handoff is used, a
 deterministic check—a fixed-rule check rather than another model
 judgement—compares it with the authority already in the session.
 
@@ -341,10 +388,12 @@ fallback:
 | --- | --- |
 | `cache-origin` | Blocking. The candidate declares cache reference material as its origin. Normal generated and explicit-seed flows do not use this origin, but the guard rejects it defensively. |
 | `cache-material-originated-term` | Advisory. A whole cache artifact filename is retained as a passive reference and excluded from authority-bearing objective, project, deliverable, constraint, and permission data. |
-| `project-switch` | Blocking for generated handoffs when a canonical GitLab reference or repository-root path names an ungrounded project. Advisory for explicit seeds, whose exact seed text, or command invocation text, remains operative. |
-| `objective-switch` | Blocking. The candidate both introduces new objective terms and explicitly says to switch, replace, abandon, or start a different task, objective, project, repository, deliverable, or focus. |
-| `side-effect-authority-change` | Blocking for generated handoffs. An explicit generated claim added, removed, strengthened, weakened, or misattributed local-edit, local-commit, remote-Git-write, provider-metadata-write, or named-target authority. |
+| `project-switch` | Blocking for generated handoffs when a canonical GitLab reference or repository-root path names an ungrounded project. Advisory for explicit seeds, whose exact seed text, or command invocation text, remains operative. Also advisory, outside `enforce`, for the seed the agent itself passes to `context_compact`: a coordinator's handoff names other projects it read about in tool output, which the user's own messages rarely repeat. |
+| `objective-switch` | Blocking. The candidate both introduces new objective terms and explicitly says to switch, replace, abandon, or start a different task, objective, project, repository, deliverable, or focus. A negated switch (`do not switch repository`), a switch back (`switch back to layout`), and text inside inline code spans do not count. |
+| `side-effect-authority-change` | Blocking for generated handoffs. An explicit generated claim added, removed, weakened, or misattributed local-edit, local-commit, remote-Git-write, provider-metadata-write, or named-target authority, in a direction that permits more than the grounded surface. |
+| `side-effect-restriction` | Advisory. An explicit generated claim forbids something the grounded surface left unstated or allowed. A restriction cannot widen what the agent may do, so it does not refuse the handoff, and it never becomes grounded authority for a later compaction. |
 | `mutation-authority-escalation` | Advisory. The legacy lexical permission snapshot remains telemetry only; it does not refuse a handoff. |
+| `forged-role-turn` | Blocking for generated handoffs. A line of the candidate presents itself as a turn: a bracketed role name as Pi prints a conversation (`[User]: `, `[System]: `, `[Assistant]: `, `[Tool result]: `, with any bracket, decoration, lookalike letters or colon), a role tag such as `<user>`, a chat-template token such as `<|im_start|>`, or a turn name alone on its line. Such a line would reach the next phase as if someone had said it. A line that starts with `(quoted)`, prose about the user, and a bare `User: ...` line that reports what the user said do not count. The finding names the line number, role and form, never the line's text. Only the user's own typing is exempt: a line of a seed typed into `/compact-then`, or of the text approved in the seed approval editor. When `seedRewrite` rewrites a typed seed, every line the rewrite adds is checked, and a line it copies verbatim from the typed seed is not. A refused rewrite falls back to the typed seed. In `warn`, a `context_compact` seed with this finding is not kept with a note: it is replaced by the fallback, as for `cache-origin`. A protocol handoff request whose `nextPhaseSeed` carries such a line is refused with `INVALID_REQUEST` (caair/pi/pi-context-aware#474). |
 
 A delivery marker records a hash of the message it announces, so a prompt the user types between the marker and that message still counts as user authority. Markers from older sessions have no hash and keep first-in-first-out pairing. A refusal's `authorityGuardGroundingMessages` lists, for each user message, its position, where its authority came from (`typed`, `delivery-marker-authoritative`, `delivery-marker-generated` or `generated-seed-echo`) and a hash of its text, never the text.
 
@@ -362,8 +411,14 @@ request cannot silently become authority for another.
 
 A generated candidate inherits every dimension it does not state. Repeating a
 grounded claim also retains the grounded source rather than relabelling the
-claim as generated. Any explicit generated delta—an addition, removal,
-strengthening, weakening, target change, or source misattribution—is refused.
+claim as generated. An explicit generated delta that permits more—an added
+permission, a removed or weakened restriction, a target change, or a source
+misattribution—is refused. A delta that only forbids more is reported as
+`side-effect-restriction` and does not refuse the handoff. A `do not`, `don't`,
+`never`, `without` or `nor` that leads a list applies to every item in it, so
+"do not kill terminals, close workspaces, change files or Git state" forbids
+changing files; the list ends at a sentence break or a turn word such as `but`,
+`then`, `instead` or `until`.
 A literal user instruction or explicit raw seed remains authority and may state
 or change a claim. Ordinary sequencing such as "finish tests, then update the
 documentation" is continuity, not side-effect authority, and inherits the
@@ -448,21 +503,25 @@ Values:
 
 ### `warn` — default
 
-For compaction, a generated refusal is reported and replaced with current
-durable workstream state plus the current task snapshot when available. The
+For a seed the agent passes to `context_compact`, a refusal is reported and
+the agent's handoff is kept. The delivered handoff starts with a note that
+lists the findings and tells the agent to follow the user where the handoff
+differs from what the user asked. The kept handoff is not recorded as accepted
+provenance, so nothing in it becomes authority for a later compaction. When
+`seedRewrite` is on and the rewritten seed is refused, the agent's own seed is
+checked and used instead, with the same note if it has findings of its own. A
+`cache-origin` or `forged-role-turn` finding in the kept seed still uses the
+fallback below; a `forged-role-turn` finding only in the rewrite falls back to
+the agent's own seed, which is checked on its own.
+
+For other generated compaction handoffs, such as proactive preparation, a
+refusal is reported and replaced with current
+durable workstream state when available. The
 rejected generated side-effect claim is never copied into the operative fallback.
 Without that state, a fixed neutral prompt resumes only from the current
 compaction summary and asks for clarification if no authorized next step is
 clear. Earlier onboarding prompts, earlier compaction prompts, and unrelated
 workflows are never fallback sources. The compaction still happens.
-
-For automatic task continuation, a refusal is reported but the turn still
-happens. The rejected reminder is replaced with a fixed reconciliation prompt.
-That prompt carries no rejected task title. It tells the agent that the task
-list is extension state, not new user authority, and to continue only work
-grounded in literal user instructions.
-The bounded corrective turn keeps the same substitution while that task-list
-revision remains unchanged.
 
 ### `enforce`
 
@@ -473,14 +532,10 @@ proactive preparation cannot ask; it uses the same current-durable-state or
 neutral summary fallback described under `warn` so the session does not cross
 its context safety boundary.
 
-A refused automatic task continuation is suppressed. No replacement turn is
-sent.
-
 ### `off`
 
 The check does not run. No refusal reason is produced. Compaction uses its
-ordinary prompt, and automatic task continuation sends its ordinary reminder
-without substitution.
+ordinary prompt.
 
 As an interim mitigation for an older loaded runtime, set
 `"seedAuthorityGuard": "off"` in `~/.pi/agent/context-aware.json`, preserving
@@ -496,8 +551,7 @@ separate grounded and candidate snapshots, exact redacted trigger values, and an
 grounded and candidate states, change kind, and original source attribution.
 Metadata also records the fallback source and SHA-256 hash, delivery ID, and
 loaded guard implementation version. `/context-status` reports the loaded
-implementation version. Automatic task continuation records the same decision
-identity and evidence in `details.authorityGuard`. Accepted generated-delivery
+implementation version. Accepted generated-delivery
 provenance retains the legacy `authority` snapshot and additively records the
 grounded and candidate snapshots, authority changes, delivery ID, and guard
 implementation version. Version-1 records that omit the additive fields remain
@@ -705,9 +759,9 @@ Controls whether context-aware claims Pi's `session_before_compact` hook and ret
 }
 ```
 
-`enabled` defaults to `true`, preserving the existing summary, context-cache, transcript-reference, and workstream augmentation behavior. Set it to `false` when another extension owns summarization. In that mode context-aware does not claim unrelated threshold or manual compactions and never supplies a summary. If ownership changes after context-aware already initiated a proactive compaction, it may return `{ "cancel": true }` only to cancel that stale context-aware attempt and its generated handoff. Tasks, durable focus, telemetry, recall, and the other non-summary features remain available.
+`enabled` defaults to `true`, preserving the existing summary, context-cache, transcript-reference, and workstream augmentation behavior. Set it to `false` when another extension owns summarization. In that mode context-aware does not claim unrelated threshold or manual compactions and never supplies a summary. If ownership changes after context-aware already initiated a proactive compaction, it may return `{ "cancel": true }` only to cancel that stale context-aware attempt and its generated handoff. Telemetry, recall, the focus projections, and the other non-summary features remain available. The task list and the focus belong to pi-workstream and do not depend on this switch.
 
-Context-aware's explicit handoff flows depend on its summary contract, so while summarization is deferred, neither `context_compact` nor `/compact-then` is registered. Registration normally happens at extension load. When the current project's `.pi/context-aware.json` sets `summarizer.enabled`, it waits for `session_start`, because only a session can tell whether that project is trusted. The context-awareness guidance, telemetry actions, and check-in prompt stop telling the agent to compact. Tasks, focus, telemetry, and `context_recall` stay available. A `summarizer.enabled: false` set by a session policy entry after load cannot unregister the tool, so it still fails before starting compaction and tells you to set `summarizer.enabled` to `true`. Use the other compactor's own handoff command while this switch is off.
+Context-aware's explicit handoff flows depend on its summary contract, so while summarization is deferred, neither `context_compact` nor `/compact-then` is registered. Registration normally happens at extension load. When the current project's `.pi/context-aware.json` sets `summarizer.enabled`, it waits for `session_start`, because only a session can tell whether that project is trusted. The context-awareness guidance, telemetry actions, and check-in prompt stop telling the agent to compact. Telemetry, `context_recall` and the focus projections stay available. A `summarizer.enabled: false` set by a session policy entry after load cannot unregister the tool, so it still fails before starting compaction and tells you to set `summarizer.enabled` to `true`. Use the other compactor's own handoff command while this switch is off.
 
 An extension that cancels every compaction, such as `billion-context-pi`, has the same effect on these surfaces without any setting. Context-aware detects it at session start and hides `context_compact` instead of unregistering it. See [compaction blocked by another extension](commands-and-concepts.md#compaction-blocked-by-another-extension).
 
@@ -743,7 +797,15 @@ While the claim is held:
 
 After each committed compaction, context-aware reads the newest compaction entry on the active branch, the same source used by `/context-status`. Only a live held claim creates an expectation that context-aware writes: no-Fabric, refused, faulted, released, and other non-held states leave Fabric or Pi in charge and do not warn. While the claim is held, a summary written by Fabric's engine or another extension produces one warning per session. A named extension is shown only when its bounded metadata name contains no control, format, line/paragraph separator, surrogate, or private-use characters; otherwise it is reported as `another extension`. A `fromHook: true` entry with missing or non-object details is also a valid unnamed extension commit and warns. Context-aware's own summaries, Fabric fallbacks carrying `claimOwner: "pi-context-aware"`, Pi's intentional last-resort summary, and truly malformed metadata do not warn. `/context-status`, the typed context snapshot and the `context_status` tool report the newest committed writer. The tool's `compactions` view (also part of a call with no view) prints `Last committed compaction writer: <name>`, or `none` when the branch has no compaction, from the same observation as `/context-status`. Its `details` carry the same value as `writer: { kind, name }`, and each listed boundary carries the writer of that compaction.
 
-The claim is withdrawn, and pi-fabric's compactor compacts again, when `enabled` becomes `false` (at the next turn or settled boundary), when the session shuts down, when the extension unloads, and when an action fails for a reason other than its input, returns a result pi-fabric would reject, or runs past pi-fabric's 30-second bound. A call that the calling program cancels keeps the claim. After such a failure context-aware does not claim again until the next session. Another extension that already holds the claim keeps it; context-aware does not take it over and does not ask again until the next session.
+The claim is withdrawn, and pi-fabric's compactor compacts again, when `enabled` becomes `false` (at the next turn or settled boundary), when the session shuts down, when the extension unloads, and when an action fails for a reason other than its input, returns a result pi-fabric would reject, or runs past pi-fabric's 30-second bound. A call that the calling program cancels keeps the claim. After such a failure context-aware does not claim again until the next session. Another extension that already holds the claim keeps it; context-aware does not take it over and does not ask again until the next session. Only a refusal that names that holder counts as another owner. pi-fabric also refuses without naming one, for example when the claim's signal was already aborted, pi-fabric is shutting down, or its owner code failed to load; such a refusal is treated as no claim, as when pi-fabric is not loaded, and context-aware keeps folding and writing its own summary.
+
+While another owner holds the claim, context-aware leaves compaction to it (the one-writer rule of the context strategy contract, limited to compaction):
+
+- `session_before_compact` returns no result, so that owner writes the summary.
+- `context_compact` is refused with one line that tells the model to continue the task, because that owner compacts when the context fills.
+- The fold nudge and the pressure note do not offer `context_compact`, so the model is not told to compact and then refused.
+
+Folds are not affected: `context_fold`, replayed and queued folds, and the emergency hides of the last ladder step work as they do without the claim.
 
 ## `proactiveCompaction`
 
@@ -836,6 +898,30 @@ Controls the model-facing `suggest_mode` tool. The default is `true`. Set
 layered resolver applies the same default → global → project → CLI → session →
 host precedence as the other leaves.
 
+## `operatorRequests`
+
+Tracks each message you type until the agent answers it, so a reply is not lost among event turns from callbacks, herdr panes or Fabric workers. On by default.
+
+```json
+{
+  "operatorRequests": { "enabled": true, "sources": ["interactive"] }
+}
+```
+
+- `sources` lists the Pi input sources that open a request: `"interactive"` (typed in the TUI) and `"rpc"` (sent by an RPC client). The default is `["interactive"]`. An RPC client is often a program, such as an orchestrator or a test harness, so its prompts open no request, get no reminder and get no extra turn unless you add `"rpc"`, for example when the RPC client is a person's front end. A list with any other value is rejected and the default applies. Messages other extensions send with `pi.sendUserMessage()` are never requests.
+- Herdr: an overseer agent that prompts this session through its Herdr pane types into the TUI, so its input arrives as `interactive` and cannot be told apart from you typing. Such a prompt opens a request like yours, and the agent answers whoever typed.
+- An input is matched to the message Pi saves for it by its text. A typed skill (`/skill:name args`) is matched to Pi's expansion of that skill with those args. A typed prompt template is not tracked: its expanded text comes from the template file, so it cannot be shown to come from what you typed.
+- A request is answered by the first assistant reply after it that has text and ends the turn. A reply that ends on a tool call does not answer it.
+- A reply that ends on a tool call and has at least 160 characters of text (after trimming) marks the request *in progress*: the model reported where the work stands and is still working. A one-line preamble such as "Let me check the code." stays below that floor and leaves the request open. The latest such reply is kept as the request's progress update. An in-progress request is still unanswered: a later reply that ends the turn answers it, as above.
+- While a request is open and an event turn came after it, each model call carries a hidden reminder naming it. For an in-progress request it reads `Operator request in progress (14 min, last update 2 min ago). The operator wrote: "..." Keep working on it and report back to the operator when it is done; do not switch to unrelated work.`, so it never tells the agent to stop the requested work; an open request keeps `Answer it before continuing other work`. One reminder can list both kinds. Up to three open requests are listed, newest first; when more are open, a last line says how many older ones were left out (`2 older open requests not shown; /requests lists them.`). The reminder quotes each request on one line, with control characters and every Unicode format character (`\p{Cf}`: bidi controls, zero-width characters, the soft hyphen and the tag characters U+E0000-E007F, which can carry hidden text) removed, cut at 300 characters. It is not saved to the session, and the provider's cache breakpoint is moved to the block before it, as for the pressure line, so the reminder never stops the prompt cache from being reused.
+- When the model ends a run with a request still open, the agent gets one more turn to reply; its note lists requests the same way as the reminder, including the left-out line. An in-progress request counts as unanswered here too: a run the model ends without a final reply still gets this one turn. A run that a tool ended, such as `context_compact` queuing a compaction, gets none, and the request stays open for the next run. An aborted run gets none either, and the request stays open. Pi reports every abort the same way, whether you pressed Esc or code stopped the run (this extension stops runs to compact), so an abort never closes a request.
+- A line below the editor shows `your request is open (4m)`, `working on your request (14m) · update 2m ago` while it is in progress, or `last reply to you 12m ago · 7 event turns since · /requests` once event turns follow the answer.
+- `/requests` opens an overlay listing every request on the branch, newest first. Each row shows its state (`open`, `in progress` or `answered`), its age, its first line, and for an answered request the event turns since the answer. Up and Down select, Enter opens the full request and its full answer (or its latest progress update while it is in progress), scrollable with Up, Down, Page Up and Page Down. Esc goes back to the list, and Esc on the list closes it. `/requests 2` opens with the second-newest selected. Opening, browsing and closing add nothing to the session. `/requests` replaced `/reply`, which no longer exists.
+- Without a TUI, for example in RPC mode, `/requests [n]` shows the n-th newest request and its answer as a notice instead, at most 60 lines and 4,000 characters of an answer and 2,000 characters of a request, with a line saying what was cut.
+- Both views remove control characters and every Unicode format character from the text they show.
+
+The ledger is rebuilt from the session branch, so it survives a restart and follows `/tree`. Sessions without a UI, such as Fabric workers, do not track requests.
+
 ## `contextMetrics`
 
 Records one line of numbers per model request, so the cut-over step 5 and pilot sessions can be compared afterwards. On by default. It records only while this extension runs the folds; while billion-context-pi manages context, nothing is written.
@@ -852,17 +938,21 @@ Shape:
 }
 ```
 
-The file is `<agent dir>/context-aware/metrics/v1/<session-id>.jsonl`, mode 0600 in a directory only you can use; a symlinked or foreign-owned path is refused. Each line is a record with `v: 1` holding: time, session id, branch leaf id, model id, window; tokens before and after the per-turn pass, pressure fraction and ladder band (`ok`, `warn`, `urgent`); the kind of nudge sent; emergency truncation and hide counts; folds requested, accepted, refused and dropped during that request (counts by reason code; `refused` and `dropped` are breakdowns, not request counts, so a refusal with several reasons counts once under each, and a refusal with no code and no error text counts as `unknown`); a compaction that committed during that request (writer, tokens before and after); and the previous turn's provider usage (input, output, cache read, cache write). The writer is `context-aware`, `fabric`, `extension`, `pi`, `malformed` or `none`; older records may also say `other` or `unknown`. Pi reports no token count until an assistant replies after a compaction, so the record waits for the first measured count and holds it as `tokensAfter`. It is never estimated. After three records with no measured count it is written with `tokensAfter: null`. Each field is copied by name and checked. No message text, summary, tool argument or error text is written.
+The file is `<agent dir>/context-aware/metrics/v1/<session-id>.jsonl`, mode 0600 in a directory only you can use; a symlinked or foreign-owned path is refused. Each line is a record with `v: 4` holding: time, session id, branch leaf id, model id, window; tokens before and after the per-turn pass, pressure fraction and ladder band (`ok`, `warn`, `urgent`); the kind of nudge sent; emergency truncation and hide counts; folds requested, accepted, refused and dropped during that request (counts by reason code; `refused` and `dropped` are breakdowns, not request counts, so a refusal with several reasons counts once under each, and a refusal with no code and no error text counts as `unknown`); a compaction that committed during that request (writer; `trigger`: `tool` for the model's `context_compact`, or for a `compact.request` a code-mode program sends through Fabric while this package holds the compaction claim, `proactive` for a threshold, this package's or Pi's, `overflow` for Pi's overflow recovery, `operator` for a person's `/compact`, or `other`, such as another extension's handoff; tokens before and after); `folds.freedTokens`, the tokens the folds written for that request freed (each fold's hidden tokens less its summary's, never below 0 per fold); `steer`, the wording that request's fold nudge and `context_fold` guideline were chosen in (`default`, `compact-boundary` or `fold-first`, see `by-model-v1` under [assign](#assign)), or null when nothing reported it; the previous turn's provider usage (input, output, cache read, cache write); the session's strategy (`strategy`: the methods, where they came from (`strategy.methods`, `folds.engine` or `auto`), the shadow method lists and the guidance); each stage that acted on the request, or on a compaction asked for during it (`stages`: trigger `request` or `compaction`, `recipe`, the method set the stage ran for, such as `fold+compact`, role `active` or `shadow`, stage, outcome `applied`, `shadowed`, `refused`, `deferred`, `unapplied` or `failed`, and the refusal codes), at most 32, with `stagesOmitted` counting the rest; and `recalls`, the `context_recall` calls by reference during the request that returned a fold's or a hide's entries. A shadow list's plan is never applied: its stages carry role `shadow` and outcome `shadowed` or `refused`, so they never count as the session's own. Every method, method set, stage, outcome and code is copied from a closed list; any other value is written as `other`. Version 3 records (pi-context-aware#526) have no `steer`, `compaction.trigger` or `folds.freedTokens`. Version 2 records (pi-context-aware#473) name a recipe instead of methods: `folds-v1` ran fold and compact, `compaction-only-v1` ran compact. Version 1 records, written before pi-context-aware#473, have no strategy, stages or recalls. The writer is `context-aware`, `fabric`, `extension`, `pi`, `malformed` or `none`; older records may also say `other` or `unknown`. Pi reports no token count until an assistant replies after a compaction, so the record waits for the first measured count and holds it as `tokensAfter`. It is never estimated. After three records with no measured count it is written with `tokensAfter: null`. Each field is copied by name and checked. No message text, summary, tool argument or error text is written.
 
 When a file would pass `maxBytes`, the oldest records are dropped first. When the directory would pass `maxDirBytes`, the oldest other session files are removed. `/session-erase` removes the session's file.
 
 The default is on for every profile. Profile-specific defaults are not implemented; set `contextMetrics.enabled` to `false` to switch it off.
 
-Summarise a set of sessions with `node <package dir>/scripts/context-metrics-summary.mjs <metrics-dir | file.jsonl>...` (`<package dir>` is the installed package, `node_modules/<package name>`; in a source checkout the path is `scripts/context-metrics-summary.mjs`; add `--json` for machine output): folds per session, refusal reasons, pressure at each fold, compactions and cache-read share. A torn last line and records of another version are skipped.
+Summarise a set of sessions with `node <package dir>/scripts/context-metrics-summary.mjs [--json] [--source <source>]... <metrics-dir | file.jsonl>...` (`<package dir>` is the installed package, `node_modules/<package name>`; in a source checkout the path is `scripts/context-metrics-summary.mjs`; add `--json` for machine output). Per session it reports folds, refusal reasons, pressure at each fold, compactions and cache-read share, listing at most 100 sessions. Then, per strategy (pi-context-aware#473), which is the set of methods the sessions ran (pi-context-aware#526), such as `fold+compact`, it reports sessions by source and by guidance, turns (a turn is one model request), cost per turn, tokens per turn, the cache hit ratio `cacheRead / (cacheRead + cacheWrite + input)`, folds, compactions, emergency truncations, refusals by code (folds, the session's own plans, and shadow plans apart), stage outcomes, and recall after hide (fold recalls per accepted fold, and hide recalls). Cost is priced per request from the model registry Pi installs, `@earendil-works/pi-ai`, through the strategy bench's price book; a turn whose model the registry does not price is counted as unpriced and left out of the average, and when the registry cannot be loaded nothing is priced. Version 1 records count as `fold+compact` from the source `legacy`; version 2 records count `folds-v1` as `fold+compact` and `compaction-only-v1` as `compact`, so records of every version that ran the same methods share a row. `--source` keeps only the sources it names (`strategy.methods`, `folds.engine`, `auto`, `legacy` or `other`, and `strategy.recipe` or `strategy.assign` for version 2 records; repeat it for several), so `--source strategy.methods` compares sessions whose methods were set explicitly. A torn last line, records of another version and records whose session id is malformed are skipped. An id or code read from a record is shown only when it is a plain lower-case name, otherwise as `other`, and long lists end with a count of what was left out. The first 64 method sets get a row each and later sets count under `other`; the printed summary shows the 8 strategies with the most turns and counts the rest, and it is cut at 131072 characters with a marker. `--json` holds every row.
+
+The summary then compares guidance arms (pi-context-aware#459). Give each store with `--store <host>=<metrics-dir | file.jsonl>`, repeated for several hosts; the host label is 1 to 32 lower-case letters, digits, `.`, `_` or `-`, and a path given without `--store` is labelled `local`. A session is one unit per host, so the same session id on two hosts counts twice, and it joins the arm of its majority guidance and majority model (ties go to the first name in sort order). The 8 models with the most sessions get arms of their own; the rest share `other`. Per arm it reports sessions per host; the primary, which is the session-mean cost per priced turn from the session's first exposure (a fold nudge, an accepted fold or a compaction), counting only exposed sessions with at least `--min-turns` priced turns (default 10); intention to treat, the same over every priced turn of every session with that many priced turns; the modelled compaction summary cost, which both include; the shares of freed tokens shed by folds (`folds.freedTokens`), by the model's own `context_compact` and by other compactions (tokens before less tokens after); the `steer` counts; and the guardrails: fold recalls per accepted fold, emergency truncations and plan refusals per 100 turns, and the share of sessions with enough priced turns that were exposed. A compaction summary is modelled at the request's model price from the `@earendil-works/pi-ai` registry: `tokensBefore` at the list input price, uncached, and `tokensAfter` at the list output price, an upper bound of the summary. Records before version 4 carry no trigger, so their compactions count as other compactions, and no freed fold tokens. For each model with sessions in both `default` and `by-model-v1`, it prints the ratio of the arms' primary means, `by-model-v1` over `default`, with a 95% bootstrap interval that resamples sessions within each host (`--iterations`, default 2000, at most 10000; `--seed`, default 459; no interval while an arm has fewer than 2 analysed sessions), the intention-to-treat ratio, and the guardrail checks: a breach is recalls per fold above 1.5 times `default`'s, emergency truncations or plan refusals per 100 turns above 2 times `default`'s and at least 1 per 100 turns (so a single event over a `default` of 0 is no breach), or exposure shares more than 10 points apart. It then prints the design's decision for that model: `below minimum sample` while either arm has fewer analysed sessions than the minimum (150 for a model whose id's last `/` segment starts with `claude-opus-`, 50 for `gpt-`, 150 for any other; set one with `--min-sessions <opus|gpt|other>=<n>`, repeated per family); `reject` at a ratio of 1.15 or more with the interval's lower bound above 1.0; `win` at a ratio of 0.85 or less with the interval's upper bound below 1.0, an intention-to-treat ratio below 1.0 and no guardrail breach; otherwise `no change`. At most 18 arms are printed, and the text is cut at 131072 characters with a marker.
+
+`--guardrails-only` prints only the arms' session counts, `steer` counts and guardrails, with the guardrail checks, and leaves out every other arm difference: costs, ratios, intervals, freed-token shares and the decision. Use it for the weekly check while the sample is below its minimum. With `--json` it writes only `hosts`, `arms` and `comparisons` with those fields.
 
 A record is written once its request is over, so a fold asked for after request N is counted in record N, with the pressure of that request, and the last request of a session is written when the session ends. Files written before this change count each fold one record late, so a summary over old and new files mixes the two.
 
-In a record, `folds.tiers` is `null` when the recorder did not learn the tier of each fold (the fold engine does not report it today), and a list of tiers (1 to 3) when it did; `[]` means the source reported that no fold was made. Records written before this distinction carry `[]` where the tiers were unknown, so read an empty list in an older file as unknown. Readers accept both forms; the record version stays 1.
+In a record, `folds.tiers` is `null` when the recorder did not learn the tier of each fold (the fold engine does not report it today), and a list of tiers (1 to 3) when it did; `[]` means the source reported that no fold was made. Records written before this distinction carry `[]` where the tiers were unknown, so read an empty list in an older file as unknown. Readers accept both forms; that change kept the record version at 1.
 
 ## `imageStripping`
 
@@ -932,6 +1022,22 @@ After a real main-turn context overflow, requests one compaction at the next idl
 - It runs once. If the next reply also overflows, the error is shown and no second compaction starts. A reply that succeeds ends the episode.
 - It learns no context window and reserves no headroom: `proactiveCompaction.outputReserveTokens` already does the second.
 - An untrusted project's `.pi/context-aware.json` cannot switch it off.
+
+## `entryPressure`
+
+Counts the entries on the branch path since the last compaction and treats too many as pressure, whatever the token usage. Default on, with a limit of 30,000 entries.
+
+```json
+{
+  "entryPressure": { "enabled": true, "maxEntriesSinceCompaction": 30000 }
+}
+```
+
+- Folds keep token usage low, but every hidden entry stays on the path Pi walks to rebuild the context, and only a compaction starts that path again. A session that folds for hours and never compacts can grow past what Pi can rebuild: one session crashed at 65,000 to 80,000 entries after its last compaction (pi-context-aware#441).
+- At the limit, proactive compaction starts at the next checkpoint with the trigger `entry-count`, even at 5% usage. It follows the same rules as the threshold trigger: `proactiveCompaction.enabled`, the cooldown, and a measured size.
+- At the limit, the request's pressure is `URGENT` and its action line names the entry count as the reason: in `full` mode it gives the count and the limit, as `URGENT (31000 entries since the last compaction, at the limit of 30000; 5% used, …)`, and in `band` mode it says `URGENT (entry count at its limit)`. The line asks for `context_compact`; a fold adds entries, so when `context_compact` cannot be called the line names no fold. The footer shows the entry count, and `context_status` reports `entriesSinceCompaction` and `entryLimit` in its pressure view.
+- `maxEntriesSinceCompaction` must be a whole number of at least 1,000. The default leaves about half the entry count of the crash above.
+- An untrusted project's `.pi/context-aware.json` cannot change either leaf.
 
 ## `contextPolicy`
 
@@ -1005,7 +1111,9 @@ rules after the swap. See [skills.md](skills.md#condensed-skills).
 `engine` defaults to `auto`: the native folds run unless billion-context-pi is
 loaded, and then compaction alone runs with the native folds in shadow. `folds`
 and `compaction-only` force one engine. It is a debugging and rollback switch,
-not a context policy. When `folds` is forced while billion-context-pi is loaded,
+not a context policy. It is read only while `strategy.methods` is `auto`: `folds`
+gives both methods and `compaction-only` gives `compact` alone (see
+[`strategy`](#strategy)). When `folds` is forced while billion-context-pi is loaded,
 the setting wins and `context_status` shows a warning. The engine is chosen once
 per session, so a change applies at the next session start or reload.
 `context_status` and the service snapshot report it as `engine`.
@@ -1028,20 +1136,200 @@ parity fingerprint, so changing either starts a new 500-call window.
 `condensedSkills` joins the fingerprint only when it is `true`, so turning it
 on starts a new window and leaving it off keeps existing fingerprints.
 
+## `strategy`
+
+Both methods are on by default: a session folds and compacts, as it always
+has. The exception is a session with billion-context-pi loaded: it runs
+`compact` alone, because billion-context-pi does the folding.
+`strategy.methods` lists the context methods a session runs, so you can turn
+one off (pi-context-aware#526). Leave it out and nothing changes.
+
+To compare methods, give different profiles or projects different `methods`
+lists, or add other lists to `shadow`, which checks and records their plans
+without applying them. `assign` never changes a session's methods.
+
+```json
+{
+  "strategy": {
+    "methods": "auto",
+    "shadow": [],
+    "assign": { "guidance": [], "seed": "" }
+  }
+}
+```
+
+There are two methods today:
+
+- `fold`: the model folds finished parts of the conversation into short
+  summaries with `context_fold`, and the growth nudge reminds it to.
+- `compact`: the model can end a phase with `context_compact` and a seed prompt
+  for the next one, and this package writes the compaction summary, carrying
+  that seed.
+
+Compaction at the threshold and on overflow happens with or without `compact`.
+Without it, Pi writes its own summary.
+
+The pressure note, which tells the model how full the context is at `WARN` and
+`URGENT`, belongs to no method. It runs in every session.
+
+### `methods`
+
+- `auto` (the default) runs `fold` and `compact`. While billion-context-pi is
+  loaded it runs `compact` alone, because billion-context-pi does the folding.
+  The released `folds.engine` setting still works while `methods` is `auto`:
+  `folds` gives both methods, and `compaction-only` gives `compact` alone.
+- A list, such as `["fold", "compact"]` or `["compact"]`, runs exactly those
+  methods, together. Any list of known methods works, as long as it names at
+  least one and none twice. A list wins over `folds.engine` and over
+  billion-context-pi presence. When the list includes `fold` while
+  billion-context-pi is loaded, the list wins and `context_status` shows a
+  warning.
+
+Leaving a method out removes what it brings. Without `fold`, `context_fold` is
+not offered and the native folds write nothing. Without `compact`,
+`context_compact` stays registered but hidden, and a call to it is refused with
+one line. No text this package sends the model names it: not the nudges, the
+pressure note, the context tools section of the system prompt, the check-in,
+the `context_fold` guidelines or a `context_fold` refusal. This holds in a Fabric
+code-mode session too, where the model can still reach the hidden tool through
+`fabric_exec`.
+
+The methods run together as one recipe, composed from the list: first each
+method's nudge, then the pressure note, then each method's tool. One stage loop
+runs that recipe, and one plan checker settles every plan, whichever method made
+it (ADR 0002). The list order sets the order of the methods within each of those
+groups; with today's two methods it changes nothing a session sends.
+
+A mistake is reported, never guessed at. Session start shows an error notice,
+and `context_status` shows the same lines. Each problem gets one line that names
+the setting and the known methods; after three, the rest are counted on one
+line.
+
+- An unknown method, a method listed twice, or an empty list: the list is
+  ignored, a last line says which methods the session runs instead, and the
+  session runs what `auto` would choose.
+- A value that is not a list of names, such as `"fold"`: that one file's or
+  policy entry's value is skipped, and another layer's valid list applies.
+  With no valid list in any layer, the session runs what `auto` would choose.
+
+Names used by the strategy bench, such as `folds-v1` or an `external/`
+strategy, are not methods.
+
+A project's own `.pi/context-aware.json` sets `methods` and `shadow` only
+while the project is trusted (pi-context-aware#525). An untrusted project's file
+is ignored for every `strategy` leaf, and a value it sets is not reported as an
+error either. Set them for an untrusted project in the global file or a
+session or host policy entry.
+
+`strategy.recipe` and `strategy.assign.recipes` no longer exist. A file that
+still sets either gets an error notice that names the setting to use instead, and
+the value is ignored.
+
+### `shadow`
+
+`shadow` lists method lists that run beside the session's methods, such as
+`[["compact"]]`. They see the same view of each request. Their plans are checked
+and recorded, never applied, so the session file and every request are the same
+as without them. A list equal to the session's own, or a repeated one, is
+skipped. A list with an unknown or repeated method, or an empty list, is
+reported like a mistake in `methods` and does not run. A value that is not a
+list of method lists is reported and skipped, and another layer's valid value
+applies.
+
+### `assign`
+
+`assign` never changes a session's methods: every session keeps every method its
+settings list. It draws what an experiment varies between new sessions: the
+guidance, meaning how the methods word what they tell the model. There are two
+guidance variants:
+
+- `default`: today's wording.
+- `by-model-v1` (pi-context-aware#459): the request's model chooses the wording,
+  against each model's lean. A model id whose last `/` segment starts with
+  `claude-opus-` (case-insensitive) is told to compact at a finished phase: the
+  fold nudge's rule for choosing between the tools says to compact with
+  `context_compact` when a phase of the work is finished and to fold within a
+  running phase, and the `context_fold` guideline that names `context_compact`
+  reads "If context_compact is available and a phase is finished, compact rather
+  than fold that phase range by range. Fold within a running phase." A model id
+  whose last segment starts with `gpt-` is told to fold first: the rule says to
+  fold each finished range and to compact only when the work moves to a new phase
+  and most of the context is already fold summaries, and the guideline reads
+  "Prefer folding. If context_compact is available, use it only at a phase
+  boundary, when most of the context is already fold summaries and folding again
+  frees too little." Every
+  other model, and a request with no model, gets the `default` wording, so its
+  sessions are an A/A check.
+
+`by-model-v1` changes only those two texts, and only while the session runs both
+methods: with `strategy.methods` `["fold"]` or `["compact"]` the nudge and the
+guidelines name only the method's own tool, as under `default`. A session that
+cannot call `context_compact`, such as a Fabric child whose allowlist leaves it
+out, gets the `default` nudge and guideline, so it is never told to use a tool it
+cannot reach. The `context_compact` tool description and every other text stay as they are. The
+guideline is part of the tool guidance, so it stays the same between requests of
+one session. When the model changes mid-session, the guideline and the next
+nudge follow the new model; a model switch already starts a new prompt cache, so
+the change adds no cache write of its own. The metrics record names, in `steer`,
+the wording the guidance chose for the request's model and the session's
+methods; a session that could not reach `context_compact` still records that
+choice, though its texts were the `default` ones.
+
+`assign.guidance` lists the guidance ids to draw from (default empty: nothing is
+drawn). `assign.seed` is 1 to 64 letters, digits and `._:-`, and is required. A
+list of one is a fixed assignment, and a repeated id weighs its variant. The list
+holds at most 16 ids, repeats included; a longer list is an error at session
+start and in `context_status`, and draws nothing. The draw takes the first four
+bytes of `sha256(<seed> + "\n" + <session id>)` as an unsigned big-endian
+integer, modulo the length of the list, as the index into the list. The same seed
+and session list always give the same assignment; check one with
+`printf '%s\n%s' <seed> <session id> | shasum -a 256`.
+
+Only a new session is drawn: one whose branch holds no message yet. The draw is
+written into the session as a `context-aware.strategy-assignment.v2` entry, which
+the model never sees, so a resumed session, and a fork, keep their guidance when
+the seed or the list changes later. A `context-aware.strategy-assignment.v1`
+entry, which recorded a recipe before this change, is ignored, and the debug log
+notes it once per session start. A project's own `.pi/context-aware.json` sets
+`assign` only while the project is trusted. An unknown guidance id is reported
+and is not drawn; `assign.guidance` without a seed is reported and draws nothing.
+
+### What `context_status` shows
+
+The methods are chosen once per session, so a change applies at the next session
+start or reload. The folds view of `context_status` reports them on one line,
+with where they came from: `Methods: fold, compact (the default).`,
+`Methods: compact (billion-context-pi is loaded).`,
+`Methods: compact (from strategy.methods).` or `(from folds.engine)`. Beside it
+are `Guidance: default.`, `Shadow:` with the shadow lists or `none`, any error
+lines, and an `Assignment:` line when one was drawn, naming the seed, the list,
+the session the draw was made for, and whether the session records it. The
+context service snapshot reports `methods`, and `engine`, which is `folds` while
+`fold` is among the methods and `compaction-only` otherwise.
+
+The stages read a view of each request. If that view cannot be built, the
+failure is counted in `context_status` as the stage `view` with the outcome
+`failed`, and the debug log records the error. The request still carries the
+fold nudge and the pressure note, checked against the tools the session can
+call, as it did before recipes existed. A compaction goes ahead as Pi asked,
+unless another extension holds the compaction claim.
+
 ## `pressureTelemetry`
 
-`pressureTelemetry.mode` controls how much context-pressure telemetry the model sees. It exists so pilot runs can compare a band-only envelope with no telemetry. The default is `"full"`.
+`pressureTelemetry.mode` sets what the pressure action line shows at `WARN` and `URGENT` (pi-context-aware#461). The default is `"full"`. No value adds anything at `OK`, and no value adds rules to the system prompt or persists a message.
 
-- `"full"` keeps the existing envelope with the pressure band, rounded usage percentage, approximate headroom, and action.
-- `"band"` keeps only the pressure band and action.
-- `"off"` removes the pressure envelope and its pressure rules from the model-visible prompt. Task state, the session brief, restart notices, recall guidance, and footer status are unchanged. With no envelope, the turn's hidden message is the task-state or restart-notice message rather than the usage marker, so it carries no usage details.
+- `"full"`: the band, the rounded usage percentage and the approximate headroom, then the action.
+- `"band"`: the band and the action.
+- `"off"`: no action line. The fold nudge is unchanged. Contributed texts (pi-workstream places its focus and task list this way), restart notices, recall guidance and the footer are unchanged.
+
+The setting keeps its three values so existing configuration still loads. Its default is open in pi-context-aware#460, which the pilot's `"off"` result informs.
 
 The leaf participates in global, trusted-project, session-policy, and host-policy precedence. Invalid values are ignored and the next lower layer supplies the value.
 
 ## `pressureLadder`
 
 The pressure ladder is one set of context-usage thresholds. It belongs to the
-context policy, and the telemetry bands are derived from it.
+context policy, and the pressure bands are derived from it.
 
 ```json
 {
@@ -1056,31 +1344,31 @@ context policy, and the telemetry bands are derived from it.
 
 These are starting defaults and may change after pilot runs.
 
-| Ladder step | Setting | Default | Telemetry band | Telemetry action |
+| Ladder step | Setting | Default | Band | Action line |
 | --- | --- | --- | --- | --- |
-| Below the ladder | — | under 45% | `OK` | none |
-| Fold nudges | `foldNudgeStartFraction` to `foldNudgeEndFraction` | 45% to 75% | `WARN`, from `foldNudgeStartFraction` | `gate-broad-work` |
-| Between the last fold nudge and compaction | — | 75% to 90% | `WARN` | `gate-broad-work` |
-| Seeded compaction | `seededCompactionFraction` | 90% | `URGENT`, from `seededCompactionFraction` | `compact-before-tool` when `context_compact` is reachable; otherwise `finish-atomic-work` |
-| Last step: recoverable hide (shorten with a `context_recall` pointer, saved at the next boundary) | `recoverableHideFraction` | 95% | `URGENT` | `compress-before-tool` when the replacement is reachable; otherwise `finish-atomic-work` |
+| Below the ladder | — | under 45% | `OK` | none: nothing is injected |
+| Fold nudges, first-sight and growth (see the note below the table) | `foldNudgeStartFraction` to `foldNudgeEndFraction` | 45% to 75% | `WARN`, from `foldNudgeStartFraction` | keep the next action small, fold or compact, or delegate |
+| Between the last fold nudge and compaction | — | 75% to 90% | `WARN` | keep the next action small, fold or compact, or delegate |
+| Seeded compaction | `seededCompactionFraction` | 90% | `URGENT`, from `seededCompactionFraction` | call `context_compact` before the next tool call when it is reachable; else fold with `context_fold`; else finish the atomic work |
+| Last step: recoverable hide (shorten with a `context_recall` pointer, saved at the next boundary) | `recoverableHideFraction` | 95% | `URGENT` | as above; with neither context tool, billion-context-pi's `compress` when it is reachable |
+
+The fold-nudge row gives the band, not every nudge. The fold pass also sends a growth nudge at any usage, below 45% too: once at least 50,000 tokens of foldable content are waiting and the context has grown by 22,500 tokens since the last nudge (the engine's `nudge.growthFloor` and `nudge.minGrowthRatio`). A nudge is sent only when the session can call `context_fold` or `context_compact`, and it names only the tools it can call.
 
 So the band edges are:
 
 - `WARN` begins at `foldNudgeStartFraction`.
 - `URGENT` begins at `seededCompactionFraction`.
 
-When Pi has not measured the context size, for example right after a
-compaction or an overflow, the band is `UNKNOWN` and maps to no ladder step.
-The envelope then reports `band="UNKNOWN"` with no action. With
-`pressureTelemetry.mode` set to `"full"` it also reports
-`usage-percent="unknown"` and `approximate-headroom="unknown"`; with `"off"`
-there is no envelope. The footer shows `size unknown`. The ladder applies
-again once a measured size arrives.
+When nothing counted the request, the band is `UNKNOWN` and maps to no
+ladder step: Pi has not measured the size, for example right after a
+compaction or an overflow, and the fold pass did not run. Nothing is
+injected. When the fold pass runs, it counts the request it builds, so the band
+comes from that count even before Pi measures the size; proactive compaction
+still waits for a measured size. The footer shows `size unknown` until then.
 
-The same edges drive the `<context-telemetry>` envelope, the `Bands:` line in
-the context-awareness guidance, the footer icon, and the `band` field of the
-typed service snapshot. Before the ladder, these bands were fixed at 60% and
-80%.
+The same edges drive the action line, the footer icon, the per-request
+metrics record and the `band` field of the typed service snapshot. Before the
+ladder, these bands were fixed at 60% and 80%.
 
 The snapshot's `pressure.phaseBoundary` compaction advice also follows these
 edges: it is `not-advised` below WARN, `advised` in WARN, and `required` in
@@ -1095,8 +1383,8 @@ window**, the same denominator for all of them:
 
 | Ladder value | Drives |
 | --- | --- |
-| `foldNudgeStartFraction` | The fold pass starts nudging the model to fold (the kernel's `nudge.minContextLimitPct`), and the `WARN` band. |
-| `foldNudgeEndFraction` | The nudge becomes the forced over-limit nudge (`nudge.maxContextLimitPct`). |
+| `foldNudgeStartFraction` | The `WARN` band, and the first-sight nudge (the kernel's `nudge.minContextLimitPct`): from here, a session that already holds 50,000 foldable tokens and has had no nudge is nudged at once instead of waiting for growth. It does not gate the growth nudge, which can fire below it (see the note under the ladder table). |
+| `foldNudgeEndFraction` | The over-limit nudge (`nudge.maxContextLimitPct`): from here the nudge skips the growth wait and is sent whenever a fold would reclaim enough to matter. |
 | `seededCompactionFraction` | Proactive compaction, unless `proactiveCompaction.thresholdFraction` is set (below), and the `URGENT` band. |
 | `recoverableHideFraction` | The emergency nudge (`nudge.emergencyThresholdPct`) and the emergency truncation (`truncate.threshold`). |
 

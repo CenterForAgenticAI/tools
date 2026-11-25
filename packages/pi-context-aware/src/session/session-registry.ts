@@ -9,7 +9,7 @@ import {
 	parseRegistryProjection,
 	type RegistryProjection,
 	type WorkstreamStatus,
-} from "../workstream/workstream-schema.js";
+} from "../snapshot-contracts/schema.js";
 
 export const SESSION_REGISTRY_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 export const SESSION_REGISTRY_STALE_AFTER_MS = 5 * 60 * 1_000;

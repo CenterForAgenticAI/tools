@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,6 +32,33 @@ test("a test run gets an empty home inside its own temp root, not the operator's
 	assert.notEqual(printed.home, operatorHome);
 	assert.equal(path.dirname(printed.home), printed.tmp);
 	assert.deepEqual(printed.entries, []);
+});
+
+/**
+ * macOS makes /var and /tmp symlinks to /private/var and /private/tmp, and
+ * TMPDIR there sits under /var/folders. Code that refuses a path with a
+ * symlink component (the session registry, the pilot workspace) then refused
+ * every directory a test made, so these suites failed on a Mac and passed on
+ * Linux (caair/pi/pi-context-aware#480). The run root must be a real path even
+ * when the configured TMPDIR reaches it through a symlink.
+ */
+test("a test run's temp root is a real path even when TMPDIR goes through a symlink", () => {
+	const outer = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "with-temp-root-symlink-")));
+	try {
+		const real = path.join(outer, "real");
+		const link = path.join(outer, "link");
+		fs.mkdirSync(real);
+		fs.symlinkSync(real, link, "dir");
+		const printed = JSON.parse(runUnderWrapper(
+			{ TMPDIR: link },
+			"const fs = require('node:fs'); process.stdout.write(JSON.stringify({ tmp: process.env.TMPDIR, home: process.env.HOME, realTmp: fs.realpathSync(process.env.TMPDIR) }))",
+		));
+		assert.equal(path.dirname(printed.tmp), real, "the run root was not created under the symlink's target");
+		assert.equal(printed.tmp, printed.realTmp);
+		assert.equal(printed.home, path.join(printed.realTmp, "home"));
+	} finally {
+		fs.rmSync(outer, { recursive: true, force: true });
+	}
 });
 
 /**
@@ -105,7 +133,7 @@ function envNamesReadBySrc() {
 test("no environment variable src/ reads reaches a test run unchanged from the host session", () => {
 	const names = envNamesReadBySrc();
 	// The scan must see the reads it was written for, or it passes by finding nothing.
-	for (const known of ["PI_FABRIC_TOOL_ALLOWLIST", "PI_DELEGATE_LINEAGE_RUN_ID", "PI_CODING_AGENT_DIR", "HOME"]) {
+	for (const known of ["PI_FABRIC_TOOL_ALLOWLIST", "PI_CONTEXT_AWARE_DISABLE_LOAD_SKILL", "PI_CODING_AGENT_DIR", "CMUX_BIN"]) {
 		assert.ok(names.includes(known), `scan of src/ did not find ${known}`);
 	}
 	const sentinel = "host-session-value-must-not-reach-tests";
@@ -127,9 +155,9 @@ test("--v8-coverage puts V8 coverage data inside the run root and removes it aft
 	assert.equal(fs.existsSync(tmp), false, "run root outlived the run");
 });
 
-test("the coverage script keeps c8's raw data out of the checkout", () => {
+test("the coverage script keeps the raw V8 data out of the checkout", () => {
 	const pkg = JSON.parse(fs.readFileSync(path.join(path.dirname(wrapper), "..", "package.json"), "utf8"));
 	// The public-release export keeps only allowlisted package.json keys, so c8 can be absent there.
 	assert.equal(pkg.c8?.["temp-directory"], undefined, "a configured temp-directory overrides NODE_V8_COVERAGE");
-	assert.match(pkg.scripts.coverage, /with-temp-root\.mjs --v8-coverage c8 /);
+	assert.match(pkg.scripts.coverage, /with-temp-root\.mjs --v8-coverage node scripts\/run-coverage\.mjs /);
 });

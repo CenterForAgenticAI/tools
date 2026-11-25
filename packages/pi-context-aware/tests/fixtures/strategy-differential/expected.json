@@ -1,0 +1,2702 @@
+{
+	"parity-direct": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "archive",
+					"carrierId": "#3",
+					"hiddenIds": [
+						"#4",
+						"#5",
+						"#6"
+					],
+					"range": {
+						"startId": "#3",
+						"endId": "#6"
+					},
+					"refs": {
+						"start": "m00003",
+						"end": "m00006"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 162028,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": {
+						"content": "[Compressed conversation section] — archive\nThe synthetic archive review settled items three through six. Retain the numbered decisions and continue with the later review."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#6",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "archive",
+						"carrierId": "#3",
+						"hiddenIds": [
+							"#4",
+							"#5",
+							"#6"
+						],
+						"range": {
+							"startId": "#3",
+							"endId": "#6"
+						},
+						"refs": {
+							"start": "m00003",
+							"end": "m00006"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 162028,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"parity-fabric-nested": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "archive",
+					"carrierId": "#3",
+					"hiddenIds": [
+						"#4",
+						"#5",
+						"#6"
+					],
+					"range": {
+						"startId": "#3",
+						"endId": "#6"
+					},
+					"refs": {
+						"start": "m00003",
+						"end": "m00006"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 162028,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": {
+						"content": "[Compressed conversation section] — archive\nThe nested synthetic review settled items three through six. Retain the numbered decisions and continue with the later review."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#6",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "archive",
+						"carrierId": "#3",
+						"hiddenIds": [
+							"#4",
+							"#5",
+							"#6"
+						],
+						"range": {
+							"startId": "#3",
+							"endId": "#6"
+						},
+						"refs": {
+							"start": "m00003",
+							"end": "m00006"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 162028,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"parity-several-ranges": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "archive",
+					"carrierId": "#3",
+					"hiddenIds": [
+						"#4",
+						"#5",
+						"#6"
+					],
+					"range": {
+						"startId": "#3",
+						"endId": "#6"
+					},
+					"refs": {
+						"start": "m00003",
+						"end": "m00006"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 162028,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": {
+						"content": "[Compressed conversation section] — archive\nThe first synthetic range settled items three through six. Retain the numbered decisions and continue with the later review."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#6",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "archive",
+						"carrierId": "#3",
+						"hiddenIds": [
+							"#4",
+							"#5",
+							"#6"
+						],
+						"range": {
+							"startId": "#3",
+							"endId": "#6"
+						},
+						"refs": {
+							"start": "m00003",
+							"end": "m00006"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 162028,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		},
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b2",
+					"runId": "r2",
+					"tier": 1,
+					"topic": "middle",
+					"carrierId": "#7",
+					"hiddenIds": [
+						"#8",
+						"#9",
+						"#10"
+					],
+					"range": {
+						"startId": "#7",
+						"endId": "#10"
+					},
+					"refs": {
+						"start": "m00007",
+						"end": "m00010"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 162028,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#7",
+					"replacement": {
+						"content": "[Compressed conversation section] — middle\nThe second synthetic range settled items seven through ten. Retain the numbered decisions and continue with the later review."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#8",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#9",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#10",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b2",
+						"runId": "r2",
+						"tier": 1,
+						"topic": "middle",
+						"carrierId": "#7",
+						"hiddenIds": [
+							"#8",
+							"#9",
+							"#10"
+						],
+						"range": {
+							"startId": "#7",
+							"endId": "#10"
+						},
+						"refs": {
+							"start": "m00007",
+							"end": "m00010"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 162028,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"parity-tier-two": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "archive",
+					"carrierId": "#3",
+					"hiddenIds": [
+						"#4",
+						"#5",
+						"#6"
+					],
+					"range": {
+						"startId": "#3",
+						"endId": "#6"
+					},
+					"refs": {
+						"start": "m00003",
+						"end": "m00006"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 162028,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": {
+						"content": "[Compressed conversation section] — archive\nThe first synthetic range settled items three through six. Retain the numbered decisions and continue with the later review."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#6",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "archive",
+						"carrierId": "#3",
+						"hiddenIds": [
+							"#4",
+							"#5",
+							"#6"
+						],
+						"range": {
+							"startId": "#3",
+							"endId": "#6"
+						},
+						"refs": {
+							"start": "m00003",
+							"end": "m00006"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 162028,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		},
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b2",
+					"runId": "r2",
+					"tier": 1,
+					"topic": "middle",
+					"carrierId": "#7",
+					"hiddenIds": [
+						"#8",
+						"#9",
+						"#10"
+					],
+					"range": {
+						"startId": "#7",
+						"endId": "#10"
+					},
+					"refs": {
+						"start": "m00007",
+						"end": "m00010"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 162028,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#7",
+					"replacement": {
+						"content": "[Compressed conversation section] — middle\nThe second synthetic range settled items seven through ten. Retain the numbered decisions and continue with the later review."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#8",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#9",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#10",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b2",
+						"runId": "r2",
+						"tier": 1,
+						"topic": "middle",
+						"carrierId": "#7",
+						"hiddenIds": [
+							"#8",
+							"#9",
+							"#10"
+						],
+						"range": {
+							"startId": "#7",
+							"endId": "#10"
+						},
+						"refs": {
+							"start": "m00007",
+							"end": "m00010"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 162028,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		},
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b3",
+					"runId": "r3",
+					"tier": 2,
+					"topic": "combined",
+					"carrierId": "#3",
+					"hiddenIds": [
+						"#4",
+						"#5",
+						"#6",
+						"#7",
+						"#8",
+						"#9",
+						"#10"
+					],
+					"range": {
+						"startId": "#3",
+						"endId": "#10"
+					},
+					"refs": {
+						"start": "b1",
+						"end": "b2"
+					},
+					"directBlockIds": [
+						"b1",
+						"b2"
+					],
+					"compressedTokens": 84,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": {
+						"content": "[Compressed conversation section] — combined\nBoth synthetic archive reviews are complete. Items three through ten are settled; keep both numbered decisions and proceed to the later review."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#7",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b3",
+						"runId": "r3",
+						"tier": 2,
+						"topic": "combined",
+						"carrierId": "#3",
+						"hiddenIds": [
+							"#4",
+							"#5",
+							"#6",
+							"#7",
+							"#8",
+							"#9",
+							"#10"
+						],
+						"range": {
+							"startId": "#3",
+							"endId": "#10"
+						},
+						"refs": {
+							"start": "b1",
+							"end": "b2"
+						},
+						"directBlockIds": [
+							"b1",
+							"b2"
+						],
+						"compressedTokens": 84,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"parity-invalid-range": [
+		{
+			"ok": false,
+			"errors": [
+				"startId=\"m99998\" does not exist in this session (typo or wrong session) — use a ref from the current context."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014",
+				"m00015",
+				"m00016",
+				"m00017",
+				"m00018",
+				"m00019",
+				"m00020",
+				"m00021",
+				"m00022",
+				"m00023",
+				"m00024"
+			]
+		}
+	],
+	"parity-first-user": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "opening",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#4"
+					},
+					"refs": {
+						"start": "m00001",
+						"end": "m00004"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 121521,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — opening\nThe synthetic opening request and its review are settled. Retain the first numbered decision and continue with the later review."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "opening",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#4"
+						},
+						"refs": {
+							"start": "m00001",
+							"end": "m00004"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 121521,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"parity-long-summary": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "archive",
+					"carrierId": "#3",
+					"hiddenIds": [
+						"#4",
+						"#5",
+						"#6"
+					],
+					"range": {
+						"startId": "#3",
+						"endId": "#6"
+					},
+					"refs": {
+						"start": "m00003",
+						"end": "m00006"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 162028,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": {
+						"content": "[Compressed conversation section] — archive\nThe synthetic archive review settled items three through six. The first decision is to retain the numbered archive ordering. The second decision is to keep the review reversible. The third decision is to continue with later items without repeating settled work. Open objectives: review the remaining synthetic items after this archive fold."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#6",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "archive",
+						"carrierId": "#3",
+						"hiddenIds": [
+							"#4",
+							"#5",
+							"#6"
+						],
+						"range": {
+							"startId": "#3",
+							"endId": "#6"
+						},
+						"refs": {
+							"start": "m00003",
+							"end": "m00006"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 162028,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"parity-tool-pair-edges": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "edge pairs",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4",
+						"#5",
+						"#6"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#6"
+					},
+					"refs": {
+						"start": "m00003",
+						"end": "m00005"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 121527,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — edge pairs\nThe two synthetic archive tool checks are complete. Retain both results and their numbered decisions, then continue with the later review."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#6",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "edge pairs",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4",
+							"#5",
+							"#6"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#6"
+						},
+						"refs": {
+							"start": "m00003",
+							"end": "m00005"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 121527,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"accept-archive": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "archive",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4",
+						"#5"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#5"
+					},
+					"refs": {
+						"start": "m00002",
+						"end": "m00005"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 3268,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — archive\nThe synthetic archive review settled items two to five. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "archive",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4",
+							"#5"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#5"
+						},
+						"refs": {
+							"start": "m00002",
+							"end": "m00005"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 3268,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"already-compressed": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "archive",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4",
+						"#5"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#5"
+					},
+					"refs": {
+						"start": "m00002",
+						"end": "m00005"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 3268,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — archive\nThe synthetic archive review settled items two to five. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "archive",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4",
+							"#5"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#5"
+						},
+						"refs": {
+							"start": "m00002",
+							"end": "m00005"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 3268,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		},
+		{
+			"ok": false,
+			"errors": [
+				"Requested range(s) already compressed (e.g. m00003..m00005) — its content is already summarized in active block(s) b1 — context_recall({ ref: \"b1\" }) returns its original entries Refold blocked: blocked by b1 (not restored). Nothing new to compress in that window. [diagnostics: session highest ref=m00014, unknown ranges in request=0/1, session history=0 compression(s), 1 block(s)] Continue the task, or fold a range that is offered for folding; context_status({ view: \"folds\" }) lists the active folds. To fold them again, merge them by fold id: context_fold({ content: [{ startId: \"b1\", endId: \"b1\", summary: \"...\" }] }). When folding frees too little context, call context_compact at a clean boundary."
+			],
+			"validRefs": [
+				"m00001",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014",
+				"b1"
+			]
+		}
+	],
+	"already-compressed-overlap": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "archive",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4",
+						"#5"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#5"
+					},
+					"refs": {
+						"start": "m00002",
+						"end": "m00005"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 3268,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — archive\nThe synthetic archive review settled items two to five. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "archive",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4",
+							"#5"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#5"
+						},
+						"refs": {
+							"start": "m00002",
+							"end": "m00005"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 3268,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		},
+		{
+			"ok": false,
+			"errors": [
+				"Requested range(s) already compressed (e.g. m00004..m00008) — its content is already summarized in active block(s) b1 — context_recall({ ref: \"b1\" }) returns its original entries Refold blocked: blocked by b1 (not restored). Nothing new to compress in that window. [diagnostics: session highest ref=m00014, unknown ranges in request=0/1, session history=0 compression(s), 1 block(s)] Continue the task, or fold a range that is offered for folding; context_status({ view: \"folds\" }) lists the active folds. To fold them again, merge them by fold id: context_fold({ content: [{ startId: \"b1\", endId: \"b1\", summary: \"...\" }] }). When folding frees too little context, call context_compact at a clean boundary."
+			],
+			"validRefs": [
+				"m00001",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014",
+				"b1"
+			]
+		}
+	],
+	"same-step-overlap": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "first",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4",
+						"#5"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#5"
+					},
+					"refs": {
+						"start": "m00002",
+						"end": "m00005"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 3268,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — first\nThe synthetic archive review settled items two to five. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "first",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4",
+							"#5"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#5"
+						},
+						"refs": {
+							"start": "m00002",
+							"end": "m00005"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 3268,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		},
+		{
+			"ok": false,
+			"errors": [
+				"Requested range(s) already compressed (e.g. m00002..m00005) — its content is already summarized in active block(s) b1 — context_recall({ ref: \"b1\" }) returns its original entries Refold blocked: blocked by b1 (not restored). Nothing new to compress in that window. [diagnostics: session highest ref=m00014, unknown ranges in request=0/1, session history=0 compression(s), 1 block(s)] Continue the task, or fold a range that is offered for folding; context_status({ view: \"folds\" }) lists the active folds. To fold them again, merge them by fold id: context_fold({ content: [{ startId: \"b1\", endId: \"b1\", summary: \"...\" }] }). When folding frees too little context, call context_compact at a clean boundary."
+			],
+			"validRefs": [
+				"m00001",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014",
+				"b1"
+			]
+		}
+	],
+	"kept-verbatim": [
+		{
+			"ok": false,
+			"errors": [
+				"Every entry in this range is kept word for word by a fold hint; there is nothing to fold."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014"
+			]
+		}
+	],
+	"verbatim-partial": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "hinted",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#4",
+						"#5"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#5"
+					},
+					"refs": {
+						"start": "m00002",
+						"end": "m00005"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 2451,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — hinted\nThe synthetic archive review settled items two to five. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "hinted",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#4",
+							"#5"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#5"
+						},
+						"refs": {
+							"start": "m00002",
+							"end": "m00005"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 2451,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"condensed-all": [
+		{
+			"ok": false,
+			"errors": [
+				"Every other entry in this range carries skill text that condenses instead of folding; there is nothing to fold."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014"
+			]
+		}
+	],
+	"one-line-hint": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "lines",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4",
+						"#5"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#5"
+					},
+					"refs": {
+						"start": "m00002",
+						"end": "m00005"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 3268,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — lines\nThe synthetic archive review settled items two to five. Retain the numbered decisions and continue with the later review of the invented archive.\n\nExtension messages in this fold (one line each; not user intent):\n- Synthetic item 3 was read."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "lines",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4",
+							"#5"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#5"
+						},
+						"refs": {
+							"start": "m00002",
+							"end": "m00005"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 3268,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"too-small": [
+		{
+			"ok": false,
+			"errors": [
+				"Total compressible content too small (298 chars across 1 range(s), min 5000). Combine more messages into your range(s) to meet the threshold."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014"
+			]
+		}
+	],
+	"stub-summary": [
+		{
+			"ok": false,
+			"errors": [
+				"[stub-summary] This summary is 127 characters and ends in \"…\", so it looks cut off, like a shortened copy of an earlier summary. Folding with it would replace the range with this one line. Write the complete summary for this range: decisions, file paths, errors and open work."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014"
+			]
+		}
+	],
+	"summary-too-long": [
+		{
+			"ok": false,
+			"errors": [
+				"range m00002..m00005: Summary too long (301 chars, max 100). Strip noise — keep critical paths, decisions, errors, and code references. Or pass summaryMaxChars to increase the limit — don't lose critical info just to fit."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014"
+			]
+		}
+	],
+	"summary-too-short": [
+		{
+			"ok": false,
+			"errors": [
+				"range m00002..m00005: Summary too short (14 chars, min 50). The summary must capture the compressed range's key information."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014"
+			]
+		}
+	],
+	"summary-empty": [
+		{
+			"ok": false,
+			"errors": [
+				"range m00002..m00005: Summary is empty — provide a meaningful summary of the compressed range."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014"
+			]
+		}
+	],
+	"protected-zone": [
+		{
+			"ok": false,
+			"errors": [
+				"range m00012..m00013: Range is entirely within the protected zone (the last 5 messages and/or the most recent user message): m00012, m00013. Adjust startId/endId to older messages."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014"
+			]
+		}
+	],
+	"protected-brush": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "brush",
+					"carrierId": "#6",
+					"hiddenIds": [
+						"#7"
+					],
+					"range": {
+						"startId": "#6",
+						"endId": "#7"
+					},
+					"refs": {
+						"start": "m00006",
+						"end": "m00012"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 1634,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#6",
+					"replacement": {
+						"content": "[Compressed conversation section] — brush\nThe synthetic archive review settled items six to twelve. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#7",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "brush",
+						"carrierId": "#6",
+						"hiddenIds": [
+							"#7"
+						],
+						"range": {
+							"startId": "#6",
+							"endId": "#7"
+						},
+						"refs": {
+							"start": "m00006",
+							"end": "m00012"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 1634,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": [
+				"Excluded 5 protected message(s) m00008, m00009, m00010, m00011, m00012 from compression range (recent/last-user zone) — they stay visible for now and can be folded in a later call once newer messages push them out of the protected zone."
+			]
+		}
+	],
+	"first-user-only": [
+		{
+			"ok": false,
+			"errors": [
+				"Keeping the first user message leaves nothing else to fold (covers no session entry)."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014"
+			]
+		}
+	],
+	"first-user-and-folded": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "archive",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#4"
+					},
+					"refs": {
+						"start": "m00002",
+						"end": "m00004"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 4881,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — archive\nThe synthetic archive review settled items two to four. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "archive",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#4"
+						},
+						"refs": {
+							"start": "m00002",
+							"end": "m00004"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 4881,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		},
+		{
+			"ok": false,
+			"errors": [
+				"Requested range(s) already compressed (e.g. m00001..m00004) — its content is already summarized in active block(s) b1 — context_recall({ ref: \"b1\" }) returns its original entries Refold blocked: blocked by b1 (not restored). Nothing new to compress in that window. [diagnostics: session highest ref=m00014, unknown ranges in request=0/1, session history=0 compression(s), 1 block(s)] Continue the task, or fold a range that is offered for folding; context_status({ view: \"folds\" }) lists the active folds. To fold them again, merge them by fold id: context_fold({ content: [{ startId: \"b1\", endId: \"b1\", summary: \"...\" }] }). When folding frees too little context, call context_compact at a clean boundary."
+			],
+			"validRefs": [
+				"m00001",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014",
+				"b1"
+			]
+		}
+	],
+	"unknown-ref": [
+		{
+			"ok": false,
+			"errors": [
+				"startId=\"m99998\" does not exist in this session (typo or wrong session) — use a ref from the current context."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014"
+			]
+		}
+	],
+	"invalid-ref": [
+		{
+			"ok": false,
+			"errors": [
+				"Invalid boundary ref(s): startId=\"x1\", endId=\"m00003\". Use mNNNNN or bN."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014"
+			]
+		}
+	],
+	"reversed-range": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "reversed",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4",
+						"#5"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#5"
+					},
+					"refs": {
+						"start": "m00005",
+						"end": "m00002"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 3268,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — reversed\nThe synthetic archive review settled items five back to two. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "reversed",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4",
+							"#5"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#5"
+						},
+						"refs": {
+							"start": "m00005",
+							"end": "m00002"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 3268,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"tier-two": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "first",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#4"
+					},
+					"refs": {
+						"start": "m00002",
+						"end": "m00004"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 2451,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — first\nThe synthetic archive review settled items two to four. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "first",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#4"
+						},
+						"refs": {
+							"start": "m00002",
+							"end": "m00004"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 2451,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		},
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b2",
+					"runId": "r2",
+					"tier": 1,
+					"topic": "second",
+					"carrierId": "#5",
+					"hiddenIds": [
+						"#6",
+						"#7"
+					],
+					"range": {
+						"startId": "#5",
+						"endId": "#7"
+					},
+					"refs": {
+						"start": "m00005",
+						"end": "m00007"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 2451,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": {
+						"content": "[Compressed conversation section] — second\nThe synthetic archive review settled items five to seven. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#6",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#7",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b2",
+						"runId": "r2",
+						"tier": 1,
+						"topic": "second",
+						"carrierId": "#5",
+						"hiddenIds": [
+							"#6",
+							"#7"
+						],
+						"range": {
+							"startId": "#5",
+							"endId": "#7"
+						},
+						"refs": {
+							"start": "m00005",
+							"end": "m00007"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 2451,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		},
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b3",
+					"runId": "r3",
+					"tier": 2,
+					"topic": "merged",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4",
+						"#5",
+						"#6",
+						"#7"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#7"
+					},
+					"refs": {
+						"start": "b1",
+						"end": "b2"
+					},
+					"directBlockIds": [
+						"b1",
+						"b2"
+					],
+					"compressedTokens": 95,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — merged\nThe synthetic archive review settled items two to seven, merged. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b3",
+						"runId": "r3",
+						"tier": 2,
+						"topic": "merged",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4",
+							"#5",
+							"#6",
+							"#7"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#7"
+						},
+						"refs": {
+							"start": "b1",
+							"end": "b2"
+						},
+						"directBlockIds": [
+							"b1",
+							"b2"
+						],
+						"compressedTokens": 95,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"block-and-message": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "first",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#4"
+					},
+					"refs": {
+						"start": "m00002",
+						"end": "m00004"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 2451,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — first\nThe synthetic archive review settled items two to four. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "first",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#4"
+						},
+						"refs": {
+							"start": "m00002",
+							"end": "m00004"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 2451,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		},
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b2",
+					"runId": "r2",
+					"tier": 2,
+					"topic": "extended",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4",
+						"#5",
+						"#6",
+						"#7"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#7"
+					},
+					"refs": {
+						"start": "b1",
+						"end": "m00007"
+					},
+					"directBlockIds": [
+						"b1"
+					],
+					"compressedTokens": 2498,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — extended\nThe synthetic archive review settled items two to seven. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#6",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#7",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b2",
+						"runId": "r2",
+						"tier": 2,
+						"topic": "extended",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4",
+							"#5",
+							"#6",
+							"#7"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#7"
+						},
+						"refs": {
+							"start": "b1",
+							"end": "m00007"
+						},
+						"directBlockIds": [
+							"b1"
+						],
+						"compressedTokens": 2498,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"pair-at-zone": [
+		{
+			"ok": false,
+			"errors": [
+				"Total compressible content too small (3379 chars across 1 range(s), min 5000). Combine more messages into your range(s) to meet the threshold."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012",
+				"m00013",
+				"m00014"
+			]
+		}
+	],
+	"pair-range": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "pair end",
+					"carrierId": "#2",
+					"hiddenIds": [
+						"#3",
+						"#4",
+						"#5"
+					],
+					"range": {
+						"startId": "#2",
+						"endId": "#5"
+					},
+					"refs": {
+						"start": "m00002",
+						"end": "m00004"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 2454,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#2",
+					"replacement": {
+						"content": "[Compressed conversation section] — pair end\nThe synthetic archive review settled items two to four. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#3",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "pair end",
+						"carrierId": "#2",
+						"hiddenIds": [
+							"#3",
+							"#4",
+							"#5"
+						],
+						"range": {
+							"startId": "#2",
+							"endId": "#5"
+						},
+						"refs": {
+							"start": "m00002",
+							"end": "m00004"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 2454,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	],
+	"pair-tail-split": [
+		{
+			"ok": false,
+			"errors": [
+				"range m00006..m00009: Range is entirely within the protected zone (the last 5 messages and/or the most recent user message): m00006, m00007, m00008, m00009. Adjust startId/endId to older messages."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012"
+			]
+		}
+	],
+	"pair-zone-split": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "pair zone",
+					"carrierId": "#4",
+					"hiddenIds": [
+						"#5",
+						"#6"
+					],
+					"range": {
+						"startId": "#4",
+						"endId": "#6"
+					},
+					"refs": {
+						"start": "m00004",
+						"end": "m00008"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 4881,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": {
+						"content": "[Compressed conversation section] — pair zone\nThe synthetic archive review settled items four to eight. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#6",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "pair zone",
+						"carrierId": "#4",
+						"hiddenIds": [
+							"#5",
+							"#6"
+						],
+						"range": {
+							"startId": "#4",
+							"endId": "#6"
+						},
+						"refs": {
+							"start": "m00004",
+							"end": "m00008"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 4881,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": [
+				"Excluded 1 protected message(s) m00008 from compression range (recent/last-user zone) — they stay visible for now and can be folded in a later call once newer messages push them out of the protected zone.",
+				"Withdrawn 1 message(s) from compression range to keep 1 tool call/result pair(s) intact (visible tool-call would lose its reasoning run or its results)."
+			]
+		}
+	],
+	"pair-zone-only": [
+		{
+			"ok": false,
+			"errors": [
+				"range m00007..m00008: Range would split 1 tool call/result pair(s) at the protected-zone boundary: a visible tool-call must keep its reasoning run and its results (strict providers reject a rebuilt request that lost either). Shrink the range to end before the turn starts, or wait until the whole turn ages out of the protected zone."
+			],
+			"validRefs": [
+				"m00001",
+				"m00002",
+				"m00003",
+				"m00004",
+				"m00005",
+				"m00006",
+				"m00007",
+				"m00008",
+				"m00009",
+				"m00010",
+				"m00011",
+				"m00012"
+			]
+		}
+	],
+	"pair-call-only": [
+		{
+			"ok": true,
+			"records": [
+				{
+					"version": 1,
+					"blockId": "b1",
+					"runId": "r1",
+					"tier": 1,
+					"topic": "call",
+					"carrierId": "#4",
+					"hiddenIds": [
+						"#5"
+					],
+					"range": {
+						"startId": "#4",
+						"endId": "#5"
+					},
+					"refs": {
+						"start": "m00004",
+						"end": "m00004"
+					},
+					"directBlockIds": [],
+					"compressedTokens": 1630,
+					"createdAt": 0,
+					"origin": "fold"
+				}
+			],
+			"drafts": [
+				{
+					"type": "context_edit",
+					"targetId": "#4",
+					"replacement": {
+						"content": "[Compressed conversation section] — call\nThe synthetic archive review settled items four. Retain the numbered decisions and continue with the later review of the invented archive."
+					}
+				},
+				{
+					"type": "context_edit",
+					"targetId": "#5",
+					"replacement": null
+				},
+				{
+					"type": "custom",
+					"customType": "context-aware.fold.v1",
+					"data": {
+						"version": 1,
+						"blockId": "b1",
+						"runId": "r1",
+						"tier": 1,
+						"topic": "call",
+						"carrierId": "#4",
+						"hiddenIds": [
+							"#5"
+						],
+						"range": {
+							"startId": "#4",
+							"endId": "#5"
+						},
+						"refs": {
+							"start": "m00004",
+							"end": "m00004"
+						},
+						"directBlockIds": [],
+						"compressedTokens": 1630,
+						"createdAt": 0,
+						"origin": "fold"
+					}
+				}
+			],
+			"warnings": []
+		}
+	]
+}

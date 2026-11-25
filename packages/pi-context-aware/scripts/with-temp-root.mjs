@@ -23,7 +23,7 @@ import { resolveTempRoot } from "./temp-root.mjs";
  * Set PI_KEEP_TEST_TMP=1 to keep the directory for inspection after a failure.
  *
  * `--v8-coverage` before the command points NODE_V8_COVERAGE at a directory
- * inside the run root. c8 takes that as its default temp directory, so the raw
+ * inside the run root. run-coverage.mjs reads that directory, so the raw
  * V8 data (about 900 MB per full run) is deleted with the run root instead of
  * staying in the checkout. The reports c8 writes to `coverage/` are unaffected.
  */
@@ -76,8 +76,15 @@ function platformTempDir() {
 // Created inside resolveTempRoot() so an operator pointing TMPDIR at
 // disk-backed storage still gets that, per scripts/temp-root.mjs -- but only
 // when that answer is actually usable.
+//
+// The run root is handed out as its real path. On macOS TMPDIR sits under
+// /var/folders, and /var is a symlink to /private/var. Code that refuses a path
+// with a symlink component, such as the session registry and the pilot
+// workspace, then refused every directory a test made, and those suites failed
+// only on a Mac (caair/pi/pi-context-aware#480). Resolving here changes the
+// harness only: the refusals themselves still apply to real roots.
 const configuredRoot = resolveTempRoot();
-const runRoot = fs.mkdtempSync(path.join(usableDir(configuredRoot) ? configuredRoot : platformTempDir(), "pi-ctx-test-"));
+const runRoot = fs.realpathSync(fs.mkdtempSync(path.join(usableDir(configuredRoot) ? configuredRoot : platformTempDir(), "pi-ctx-test-")));
 const keep = process.env.PI_KEEP_TEST_TMP === "1";
 
 let cleaned = false;
@@ -152,8 +159,8 @@ function raiseTestSignal() {
  * - PI_FABRIC_* is what a Fabric worker hands every child. With
  *   PI_FABRIC_TOOL_ALLOWLIST inherited, the extension hid the task tool and one
  *   session-tasks test failed only inside a Fabric reviewer.
- * - PI_DELEGATE_* carries a delegated run's lineage, which the task tool uses
- *   to find the run's subtree.
+ * - PI_DELEGATE_* carries a delegated run's lineage. No source here reads it now,
+ *   but a test must never see a host run's lineage.
  * - PI_CONTEXT_AWARE_* are this extension's own overrides, such as the busy
  *   probe and the autobuild switch.
  * - BILLION_CONTEXT_* makes compaction stand down for billion-context-pi.
@@ -164,7 +171,7 @@ function raiseTestSignal() {
  * environment variable that still reaches the run unchanged.
  */
 const HOST_SESSION_ENV_PREFIXES = ["PI_FABRIC_", "PI_DELEGATE_", "PI_CONTEXT_AWARE_", "BILLION_CONTEXT_"];
-const HOST_SESSION_ENV_NAMES = new Set(["PI_CODING_AGENT_DIR", "CMUX_BIN"]);
+const HOST_SESSION_ENV_NAMES = new Set(["PI_CODING_AGENT_DIR", "CMUX_BIN", "PI_CACHE_RETENTION"]);
 
 function fromHostSession(name) {
 	return HOST_SESSION_ENV_NAMES.has(name) || HOST_SESSION_ENV_PREFIXES.some((prefix) => name.startsWith(prefix));

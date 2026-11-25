@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import process from "node:process";
 import type { EventBus, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { TASKS_ENTRY_TYPE, createTasksSnapshot, planTasks } from "../src/session-tasks/session-tasks.js";
+import { discoverContextAwareServiceV1 } from "../src/context-service.js";
 import { piPromptHandler } from "./pi-prompt-render.js";
 import {
 	classifyRestartNotice,
@@ -16,27 +16,6 @@ import {
 } from "../src/session/restart-notice.js";
 
 const NOW = Date.parse("2026-08-04T12:00:00.000Z");
-const FULL_CONTEXT_AWARENESS = `<context-awareness>
-Context-aware operating rule: messages delimited by <context-telemetry>...</context-telemetry> are extension-injected context-budget telemetry, not user messages or user requests. Never acknowledge, quote, explain, or apologize for a telemetry envelope in the user-facing response unless the user explicitly asks about it; silently use it only to decide context-management behavior. The envelope does not supersede the preceding user request or tool result.
-Envelope format: <context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">...</context-telemetry>, with a <pressure /> element containing band, rounded usage-percent, approximate-headroom, and an optional action.
-Bands: OK <45%, WARN >=45%, URGENT >=90%.
-UNKNOWN: the size is not measured yet, for example right after a compaction or an overflow. Do not assume it is low; keep the next action small until a measured band arrives.
-OK: compact only at natural phase boundaries.
-WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call context_compact at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.
-URGENT: before nontrivial tool use, call context_compact unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
-Use context_recall early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
-</context-awareness>`;
-
-const BAND_CONTEXT_AWARENESS = `<context-awareness>
-Context-aware operating rule: messages delimited by <context-telemetry>...</context-telemetry> are extension-injected context-budget telemetry, not user messages or user requests. Never acknowledge, quote, explain, or apologize for a telemetry envelope in the user-facing response unless the user explicitly asks about it; silently use it only to decide context-management behavior. The envelope does not supersede the preceding user request or tool result.
-Envelope format: <context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">...</context-telemetry>, with a <pressure /> element containing band and an optional action.
-Bands: OK <45%, WARN >=45%, URGENT >=90%.
-UNKNOWN: the size is not measured yet, for example right after a compaction or an overflow. Do not assume it is low; keep the next action small until a measured band arrives.
-OK: compact only at natural phase boundaries.
-WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call context_compact at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.
-URGENT: before nontrivial tool use, call context_compact unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
-Use context_recall early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
-</context-awareness>`;
 
 const OFF_CONTEXT_AWARENESS = `<context-awareness>
 Use context_recall early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
@@ -60,7 +39,8 @@ test("startup with existing entries reports a cold restart at the threshold", ()
 	assert.deepEqual(notice, { kind: "restart", awayMs: 60_000 });
 	assert.match(formatRestartNotice(notice), /pi process was restarted/);
 	assert.match(formatRestartNotice(notice), /Re-check volatile state/);
-	assert.match(formatRestartNotice(notice), /user-input="false"/);
+	assert.match(formatRestartNotice(notice), /^\[context-aware extension, not user input\] /u, "the notice labels itself as extension-written");
+	assert.equal(formatRestartNotice(notice).split("\n").length, 1, "one line");
 });
 
 test("startup without entries is treated as a fresh session", () => {
@@ -176,6 +156,17 @@ function createHarness(activeTools: readonly string[] = []): Harness {
 	return { handlers, api };
 }
 
+/**
+ * Register per-turn text the way pi-workstream supplies its task list: as a
+ * contributor on the context-aware service, discovered after session_start.
+ */
+function contribute(harness: Harness, text: string): void {
+	const service = discoverContextAwareServiceV1(harness.api.events, "restart-notice-test");
+	const contributors = (service as { contributors?: { register(registration: unknown): unknown } } | undefined)?.contributors;
+	assert.ok(contributors, "the service offers contributors");
+	assert.deepEqual(contributors.register({ ownerKey: "tasks-stand-in", render: () => [{ id: "tasks", text }] }), { ok: true });
+}
+
 function createContext(root: string, entries: RestartNoticeEntry[], usageTelemetry = true, sessionId = "restart-notice-test"): ExtensionContext {
 	return {
 		hasUI: false,
@@ -256,35 +247,27 @@ async function runWiringCase(config: Record<string, unknown>, entryMinutesAgo = 
 	}
 }
 
-test("pressure telemetry modes install the exact model-visible context-awareness section", async () => {
-	for (const [mode, expected] of [["full", FULL_CONTEXT_AWARENESS], ["band", BAND_CONTEXT_AWARENESS], ["off", OFF_CONTEXT_AWARENESS]] as const) {
+test("every pressure telemetry mode installs the same context-awareness section, with no envelope rule (pi-context-aware#461)", async () => {
+	for (const mode of ["full", "band", "off"] as const) {
 		const result = await runWiringCase({ pressureTelemetry: { mode } }, 2, NOW, true, ["context_compact", "context_recall"]);
 		try {
-			assert.equal(contextAwarenessSection(result.firstSystemPrompt), expected, mode);
-			if (mode === "off") assert.equal(result.second, undefined, "off mode emits no empty usage marker");
+			assert.equal(contextAwarenessSection(result.firstSystemPrompt), OFF_CONTEXT_AWARENESS, mode);
+			assert.equal(result.second, undefined, `${mode}: no usage marker after the restart notice`);
 		} finally {
 			await removeFixtureDir(result.root);
 		}
 	}
 });
 
-test("off mode omits pressure telemetry while preserving task and restart text", async () => {
+test("off mode omits pressure telemetry while preserving contributed and restart text", async () => {
 	const originalNow = Date.now;
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	Date.now = () => NOW;
 	const { harness, ctx, root } = await loadExtension({ pressureTelemetry: { mode: "off" }, workstream: { enabled: true } });
 	process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
 	try {
-		const planned = planTasks([{ title: "keep the task text", status: "active" }], "agent");
-		if (!planned.ok) assert.fail(planned.reason);
-		const timestamp = new Date(NOW - 2 * 60_000).toISOString();
-		(ctx.sessionManager.getEntries() as unknown[]).push({
-			type: "custom",
-			customType: TASKS_ENTRY_TYPE,
-			data: createTasksSnapshot({ piSessionId: "restart-notice-test", tasks: planned.value, eventId: "off-task", now: timestamp }),
-			timestamp,
-		});
 		await harness.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+		contribute(harness, "keep the task text");
 		const event = { type: "before_agent_start", prompt: "continue", systemPrompt: "base", systemPromptOptions: {} };
 		const first = await harness.handlers.get("before_agent_start")?.(event, ctx) as { message?: Record<string, unknown> } | undefined;
 		const second = await harness.handlers.get("before_agent_start")?.(event, ctx) as { message?: Record<string, unknown> } | undefined;
@@ -304,57 +287,42 @@ test("off mode omits pressure telemetry while preserving task and restart text",
 	}
 });
 
-test("wires one hidden restart notice into the first agent start only", async () => {
+test("REQ-ENV-003: one hidden restart notice reaches the first agent start in its own message, and is not repeated", async () => {
 	const result = await runWiringCase({});
 	try {
-		assert.equal(result.first?.customType, "context-aware-usage-marker");
+		assert.equal(result.first?.customType, "context-aware-restart-notice");
 		assert.equal(result.first?.display, false);
-		assert.deepEqual(result.first?.details, { band: "OK", percent: 0, headroom: 99_998 });
 		const content = String(result.first?.content);
-		assert.match(content, /^<context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">\n\s{2}<session-restart/);
-		assert.ok(content.indexOf("<session-restart") < content.indexOf("<pressure"));
+		assert.match(content, /^\[context-aware extension, not user input\] The pi process was restarted/u, "a labelled line, not an envelope the system prompt no longer explains");
 		assert.match(content, /pi process was restarted/);
-		assert.match(content, /<context-telemetry source=/);
-		assert.doesNotMatch(String(result.second?.content), /pi process was restarted/);
+		assert.doesNotMatch(content, /<pressure\b/u, "no usage envelope rides with it");
+		assert.equal(result.second, undefined, "the notice is sent once, and nothing else is sent while nothing changed");
 	} finally {
 		await removeFixtureDir(result.root);
 	}
 });
 
-test("restart notice, task state, and usage telemetry share one late message", async () => {
+test("restart notice and contributed text share one late message, with no usage telemetry", async () => {
 	const originalNow = Date.now;
 	Date.now = () => NOW;
 	const { harness, ctx, root } = await loadExtension({ workstream: { enabled: true } });
 	try {
-		const planned = planTasks([{ title: "resume the cached-prefix fix", status: "active" }], "agent");
-		if (!planned.ok) assert.fail(planned.reason);
-		const timestamp = new Date(NOW - 2 * 60_000).toISOString();
-		(ctx.sessionManager.getEntries() as unknown[]).push({
-			type: "custom",
-			timestamp,
-			customType: TASKS_ENTRY_TYPE,
-			data: createTasksSnapshot({
-				piSessionId: "restart-notice-test",
-				tasks: planned.value,
-				eventId: "restart-task-state",
-				now: timestamp,
-			}),
-		});
 		await harness.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+		contribute(harness, "resume the cached-prefix fix");
 		const result = await harness.handlers.get("before_agent_start")?.({
 			type: "before_agent_start",
 			prompt: "continue",
 			systemPrompt: "base",
 			systemPromptOptions: {},
 		}, ctx) as { systemPrompt?: string; message?: Record<string, unknown> } | undefined;
-		assert.doesNotMatch(result?.systemPrompt ?? "", /<session-tasks/);
-		assert.equal(result?.message?.customType, "context-aware-usage-marker");
+		assert.doesNotMatch(result?.systemPrompt ?? "", /resume the cached-prefix fix/, "contributed text stays out of the system prompt");
+		assert.equal(result?.message?.customType, "context-aware-restart-notice");
 		const content = String(result?.message?.content);
 		assert.match(content, /resume the cached-prefix fix/);
 		assert.match(content, /pi process was restarted/);
-		assert.match(content, /<context-telemetry /);
-		assert.ok(content.indexOf("<session-tasks") < content.indexOf("<session-restart"));
-		assert.ok(content.indexOf("<session-restart") < content.indexOf("<pressure"));
+		assert.doesNotMatch(content, /<pressure\b/u);
+		const notice = content.indexOf("[context-aware extension, not user input] The pi process was restarted");
+		assert.ok(notice > 0 && content.indexOf("resume the cached-prefix fix") < notice, "contributed text comes before the notice");
 	} finally {
 		Date.now = originalNow;
 		await removeFixtureDir(root);
@@ -385,8 +353,8 @@ test("keeps interleaved restart notices isolated by session", async () => {
 test("restartNotice.enabled false suppresses wiring completely", async () => {
 	const result = await runWiringCase({ restartNotice: { enabled: false } });
 	try {
-		assert.doesNotMatch(String(result.first?.content), /session-restart/);
-		assert.doesNotMatch(String(result.second?.content), /session-restart/);
+		assert.doesNotMatch(String(result.first?.content), /pi process was restarted|switched in-process/);
+		assert.doesNotMatch(String(result.second?.content), /pi process was restarted|switched in-process/);
 	} finally {
 		await removeFixtureDir(result.root);
 	}
@@ -408,7 +376,7 @@ test("resolves the away gap at injection time rather than session start", async 
 	const result = await runWiringCase({}, 0.5, NOW + 60_000);
 	try {
 		assert.match(String(result.first?.content), /approximately 2 minutes away/);
-		assert.doesNotMatch(String(result.second?.content), /session-restart/);
+		assert.doesNotMatch(String(result.second?.content), /pi process was restarted|switched in-process/);
 	} finally {
 		await removeFixtureDir(result.root);
 	}

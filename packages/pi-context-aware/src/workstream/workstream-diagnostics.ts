@@ -2,13 +2,13 @@
 
 import {
 	createRateLimitedDiagnostics,
-	redactText,
 	scrubDiagnosticDetail,
 	type AdapterHealth,
 	type RateLimitedDiagnostics,
 	type RateLimitedDiagnosticsOptions,
-} from "./workstream-safety.js";
-import type { CapabilityName, CapabilityGate } from "./workstream-schema.js";
+} from "../snapshot-contracts/diagnostics-sink.js";
+import { redactText } from "../snapshot-contracts/safety.js";
+import type { CapabilityName, CapabilityGate } from "../snapshot-contracts/schema.js";
 
 export interface CapabilityHealth extends CapabilityGate {
 	readonly status: "healthy" | "degraded" | "unavailable" | "disabled";

@@ -9,15 +9,10 @@
  * parsing, duplicate resolution, candidate ordering and lineage selection.
  */
 
-import type { ReplayCandidate } from "../src/workstream/workstream-replay.js";
-import type { WorkstreamMutation, WorkstreamProvenance } from "../src/workstream/workstream-schema.js";
+import { WORKSTREAM_ENTRY_TYPE, parseTranscriptWorkstreamEntryDetails, type ReplayCandidate } from "../src/snapshot-contracts/transcript.js";
+import type { WorkstreamMutation, WorkstreamProvenance } from "../src/snapshot-contracts/schema.js";
 import { focusEntry, historyTime } from "./replay-history.js";
-import {
-	WORKSTREAM_ENTRY_TYPE,
-	createWorkstreamSnapshot,
-	parseTranscriptWorkstreamEntryDetails,
-	workstreamEntry,
-} from "../src/workstream/workstream-state.js";
+import { createWorkstreamSnapshot, workstreamEntry } from "./workstream-fixture.js";
 
 function canonical(value: unknown): string {
 	if (value === null || typeof value !== "object") return JSON.stringify(value);

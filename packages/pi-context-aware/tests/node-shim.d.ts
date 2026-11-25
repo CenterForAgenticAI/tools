@@ -6,7 +6,7 @@ declare module "node:fs" {
 	export function existsSync(path: string): boolean;
 	export function readdirSync(path: string): string[];
 	export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
-	export function statSync(path: string): { size: number; mtimeMs: number };
+	export function statSync(path: string): { size: number; mtimeMs: number; mode: number };
 }
 
 declare module "node:path" {

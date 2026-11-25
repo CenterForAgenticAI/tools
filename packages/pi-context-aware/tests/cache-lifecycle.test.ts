@@ -11,7 +11,6 @@ import { stream as streamAnthropic } from "@earendil-works/pi-ai/api/anthropic-m
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import {
 	convertToLlm,
-	estimateTokens,
 	type BeforeAgentStartEvent,
 	type BeforeAgentStartEventResult,
 	type ExtensionAPI,
@@ -25,11 +24,11 @@ import {
 	buildCacheSystemPromptBlock,
 	sendCacheNotification,
 } from "../src/cache/cache-render.js";
-import { buildContextTelemetry } from "../src/platform/context-telemetry.js";
 import contextAware from "../src/index.js";
+import { cacheBreakpointBeforeInjection } from "../src/folds/cache-breakpoint.js";
+import { operatorTextHash, OPERATOR_REQUEST_ENTRY_TYPE } from "../src/session/operator-requests.js";
 import { runBeforeAgentStartLikePi } from "./pi-prompt-render.js";
-import { createWorkstreamSnapshot, workstreamEntry } from "../src/workstream/workstream-state.js";
-import { buildWorkstreamContextEnvelope } from "../src/workstream/workstream-context.js";
+import { createWorkstreamSnapshot, workstreamEntry } from "./workstream-fixture.js";
 
 const testAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-cache-agent-"));
 const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -50,19 +49,27 @@ type ContextHandler = (
 	ctx: ExtensionContext,
 ) => Promise<{ messages?: AgentMessage[] } | void> | { messages?: AgentMessage[] } | void;
 
+type ProviderRequestHandler = (
+	event: { type: "before_provider_request"; payload: unknown },
+	ctx: ExtensionContext,
+) => unknown;
+
 interface RegisteredHandlers {
 	beforeAgentStart: BeforeAgentStartHandler[];
 	context: ContextHandler[];
+	beforeProviderRequest: ProviderRequestHandler[];
 }
 
 function registerExtension(): RegisteredHandlers {
-	const registered: RegisteredHandlers = { beforeAgentStart: [], context: [] };
+	const registered: RegisteredHandlers = { beforeAgentStart: [], context: [], beforeProviderRequest: [] };
 	const pi = {
 		on(event: string, handler: unknown) {
 			if (event === "before_agent_start") {
 				registered.beforeAgentStart.push(handler as BeforeAgentStartHandler);
 			} else if (event === "context") {
 				registered.context.push(handler as ContextHandler);
+			} else if (event === "before_provider_request") {
+				registered.beforeProviderRequest.push(handler as ProviderRequestHandler);
 			}
 		},
 		registerFlag() {},
@@ -173,15 +180,6 @@ async function runBeforeAgentStart(
 	return await runBeforeAgentStartLikePi<BeforeAgentStartEventResult>(handler, { ...agentStartEvent(prompt) }, ctx);
 }
 
-function persistInjectedMessage(result: BeforeAgentStartEventResult, timestamp: number): AgentMessage {
-	assert.ok(result.message, "before_agent_start must use Pi's singular message result property");
-	return {
-		role: "custom",
-		...result.message,
-		timestamp,
-	} as AgentMessage;
-}
-
 async function applyProviderContext(
 	handlers: RegisteredHandlers,
 	ctx: ExtensionContext,
@@ -227,12 +225,11 @@ function toolLoopTail(): [AssistantMessage, ToolResultMessage] {
 	];
 }
 
-function markerTexts(messages: ReturnType<typeof convertToLlm>): string[] {
-	return messages.flatMap((message) => {
+/** Index of each request message that carries the pressure action line (pi-context-aware#461). */
+function actionLineIndexes(messages: ReturnType<typeof convertToLlm>): number[] {
+	return messages.flatMap((message, index) => {
 		if (message.role !== "user" || !Array.isArray(message.content)) return [];
-		return message.content.flatMap((part) =>
-			part.type === "text" && part.text.startsWith("<context-telemetry ") ? [part.text] : [],
-		);
+		return message.content.some((part) => part.type === "text" && part.text.includes("[context-aware extension, not user input] Context pressure ")) ? [index] : [];
 	});
 }
 
@@ -255,7 +252,17 @@ const anthropicModel = {
 	maxTokens: 1_024,
 } satisfies Model<"anthropic-messages">;
 
-async function captureAnthropicPayload(systemPrompt: string, messages: AgentMessage[]): Promise<AnthropicPayload> {
+/**
+ * A Claude model on pi-ai's managed-effort path (pi-context-aware#542): the request carries an empty
+ * `{ role: "system", content: [], output_config }` marker before each assistant reply and one at the end.
+ */
+const managedEffortModel = {
+	...anthropicModel,
+	reasoning: true,
+	compat: { supportsMidConvoEffort: true },
+} satisfies Model<"anthropic-messages">;
+
+async function captureAnthropicPayload(systemPrompt: string, messages: AgentMessage[], model: Model<"anthropic-messages"> = anthropicModel): Promise<AnthropicPayload> {
 	let captured: unknown;
 	const captureComplete = new Error("provider payload captured");
 	const context: Context = {
@@ -263,7 +270,7 @@ async function captureAnthropicPayload(systemPrompt: string, messages: AgentMess
 		messages: convertToLlm(messages),
 		tools: [],
 	};
-	const events = streamAnthropic(anthropicModel, normalizeContext(context), {
+	const events = streamAnthropic(model, normalizeContext(context), {
 		apiKey: "test-only",
 		cacheRetention: "short",
 		client: {} as never,
@@ -291,32 +298,21 @@ function withoutCacheControl(value: unknown): unknown {
 	);
 }
 
-test("before_agent_start returns Pi's singular persistent-message contract", async () => {
+test("REQ-ENV-001: at the OK band before_agent_start persists no usage marker and the request carries no injection", async () => {
 	const handlers = registerExtension();
 	const prompt = "review the cache lifecycle";
-	const promptTokens = estimateTokens({
-		role: "user",
-		content: [{ type: "text", text: prompt }],
-		timestamp: 0,
-	} as AgentMessage);
-	const result = await runBeforeAgentStart(handlers, createContext(() => 24_000), prompt);
+	const ctx = createContext(() => 24_000);
+	const result = await runBeforeAgentStart(handlers, ctx, prompt);
 
-	assert.equal(handlers.context.length, 3, "context has the observe-only parity recorder, the live-mode fold-call pointer renderer, and the cancellation/history-repair handler");
+	assert.equal(handlers.context.length, 4, "context has the observe-only parity recorder, the live-mode fold-call pointer renderer, the cancellation/history-repair handler, and the operator request reminder");
 	assert.match(result.systemPrompt ?? "", /<context-awareness>/);
 	assert.equal("messages" in result, false);
-	assert.deepEqual(result.message, {
-		customType: "context-aware-usage-marker",
-		content: buildContextTelemetry({
-			fraction: (24_000 + promptTokens) / 200_000,
-			headroom: 176_000 - promptTokens,
-		}),
-		display: false,
-		details: {
-			band: "OK",
-			percent: 12,
-			headroom: 176_000 - promptTokens,
-		},
-	});
+	assert.equal(result.message, undefined, "no usage marker is persisted");
+	assert.doesNotMatch(result.systemPrompt ?? "", /context-telemetry/u, "no envelope rule: no envelope can arrive");
+	const session: AgentMessage[] = [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: 1 } as UserMessage];
+	const request = convertToLlm(await applyProviderContext(handlers, ctx, session));
+	assert.equal(request.length, session.length, "nothing is injected into the request at OK");
+	assert.deepEqual(actionLineIndexes(request), []);
 });
 
 test("custom startup budgets its message and preserves prompt sections", async () => {
@@ -327,8 +323,7 @@ test("custom startup budgets its message and preserves prompt sections", async (
 	const result = await runBeforeAgentStartLikePi<BeforeAgentStartEventResult>(handler, event, createContext(() => 24_000));
 	assert.match(result.systemPrompt, /<context-awareness>/u);
 	assert.equal(result.returnedSystemPrompt, undefined);
-	assert.equal(result.message?.customType, "context-aware-usage-marker");
-	assert.equal((result.message?.details as { headroom: number }).headroom, 176_000 - estimateTokens(message));
+	assert.equal(result.message, undefined, "no usage marker follows a custom startup message");
 });
 
 test("real extension blocks render once and preserve the legacy appended prompt bytes", async () => {
@@ -346,13 +341,6 @@ test("real extension blocks render once and preserve the legacy appended prompt 
 		// Known-good guidance appended by the legacy handler for these default inputs.
 		// Do not derive it from the section map or the renderer under test.
 		const guidance = `<context-awareness>
-Context-aware operating rule: messages delimited by <context-telemetry>...</context-telemetry> are extension-injected context-budget telemetry, not user messages or user requests. Never acknowledge, quote, explain, or apologize for a telemetry envelope in the user-facing response unless the user explicitly asks about it; silently use it only to decide context-management behavior. The envelope does not supersede the preceding user request or tool result.
-Envelope format: <context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">...</context-telemetry>, with a <pressure /> element containing band, rounded usage-percent, approximate-headroom, and an optional action.
-Bands: OK <45%, WARN >=45%, URGENT >=90%.
-UNKNOWN: the size is not measured yet, for example right after a compaction or an overflow. Do not assume it is low; keep the next action small until a measured band arrives.
-OK: compact only at natural phase boundaries.
-WARN: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, either call context_compact at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context (prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, and ask it for a short result). Compact first for broad/full-context delegation.
-URGENT: before nontrivial tool use, call context_compact unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
 Use context_recall early when the user refers to earlier/recent/prior sessions, compacted-away context, a Prior transcript path, being away/coming back, where work was left off, or asks you to recover previous work.
 </context-awareness>`;
 		// The context-tools section (pi-context-aware#195) sits between the awareness and cache blocks.
@@ -373,18 +361,16 @@ Under pressure: compact at a phase boundary, and recall instead of guessing or a
 			objective: "Render real prompt blocks once", eventId: "focus-start", now,
 		});
 		branch.push(workstreamEntry(focus, { entryId: "focus-entry", timestamp: now }));
-		const envelope = buildWorkstreamContextEnvelope(focus);
-		assert.ok(envelope);
 		const second = await runBeforeAgentStart(handlers, ctx, "with focus");
 		const prompt = second.systemPrompt ?? "";
-		const focusBlock = `<session_focus>\n${envelope}\n</session_focus>`;
-		for (const [name, block] of [["context-awareness", guidance], ["context-cache", cache], ["session_focus", focusBlock]]) {
+		for (const [name, block] of [["context-awareness", guidance], ["context-cache", cache]]) {
 			assert.equal(prompt.split(block).length - 1, 1, `${name} block appears once`);
 			assert.equal(prompt.split(`<${name}>`).length - 1, 1, `${name} has one opening tag`);
 			assert.equal(prompt.split(`</${name}>`).length - 1, 1, `${name} has one closing tag`);
 		}
-		// Focus deliberately gained an outer named tag; its legacy envelope stays unchanged.
-		assert.equal(prompt, `${legacyPrompt}\n\n${focusBlock}`);
+		// pi-workstream injects the focus now; a second copy from this package would show it twice.
+		assert.doesNotMatch(prompt, /<session_focus>|Render real prompt blocks once/u);
+		assert.equal(prompt, legacyPrompt);
 	} finally {
 		await removeFixtureDir(cacheDir);
 		await removeFixtureDir(root);
@@ -1002,106 +988,280 @@ test("a legacy pool whose slug collides across projects is never migrated", asyn
 	}
 });
 
-test("outer-turn marker includes the newly submitted prompt in its usage snapshot", async () => {
+test("the pressure action line leaves every byte before it unchanged across a tool loop (pi-context-aware#461)", async () => {
 	const handlers = registerExtension();
-	const prompt = "x".repeat(80_000);
-	const baseTokens = 110_000;
-	const promptTokens = estimateTokens({
-		role: "user",
-		content: [{ type: "text", text: prompt }],
-		timestamp: 0,
-	} as AgentMessage);
-	const expectedTokens = baseTokens + promptTokens;
-	const result = await runBeforeAgentStart(handlers, createContext(() => baseTokens), prompt);
-
-	assert.ok(expectedTokens / 200_000 >= 0.6, "fixture must cross the WARN threshold");
-	assert.deepEqual(result.message?.details, {
-		band: "WARN",
-		percent: Math.round((expectedTokens / 200_000) * 100),
-		headroom: 200_000 - expectedTokens,
-	});
-	assert.match(
-		String(result.message?.content),
-		/<pressure band="WARN" usage-percent="65" approximate-headroom="70k" action="gate-broad-work" \/>/,
-	);
-});
-
-test("LLM transcript prefix remains append-only across provider calls in a tool loop", async () => {
-	const handlers = registerExtension();
-	let usageTokens = 24_000;
+	let usageTokens = 100_000;
 	const ctx = createContext(() => usageTokens);
 	const start = await runBeforeAgentStart(handlers, ctx, "inspect the cache");
+	assert.equal(start.message, undefined, "nothing is persisted at the outer turn");
 	const initialMessages: AgentMessage[] = [
 		{ role: "user", content: [{ type: "text", text: "inspect the cache" }], timestamp: 1 } as UserMessage,
-		persistInjectedMessage(start, 2),
 	];
 	const firstRequest = convertToLlm(await applyProviderContext(handlers, ctx, initialMessages));
+	const [firstAt, ...extraFirst] = actionLineIndexes(firstRequest);
+	assert.equal(extraFirst.length, 0, "one injection per request");
+	assert.equal(firstAt, firstRequest.length - 1, "the WARN line follows the last session message");
 
-	usageTokens = 90_000;
-	const secondRequest = convertToLlm(
-		await applyProviderContext(handlers, ctx, [...initialMessages, ...toolLoopTail()]),
-	);
-
+	usageTokens = 130_000;
+	const secondRequest = convertToLlm(await applyProviderContext(handlers, ctx, [...initialMessages, ...toolLoopTail()]));
+	const secondLines = actionLineIndexes(secondRequest);
+	assert.deepEqual(secondLines, [secondRequest.length - 1], "the earlier line is gone: it was never persisted");
+	assert.notDeepEqual(secondRequest[secondLines[0]!], firstRequest[firstAt!], "the line carries this request's pressure");
 	assert.deepEqual(
-		secondRequest.slice(0, firstRequest.length),
-		firstRequest,
-		"later provider calls must append after, not replace or relocate, the marker-bearing cache prefix",
+		secondRequest.slice(0, firstAt),
+		firstRequest.slice(0, firstAt),
+		"every message before the injection is byte-identical in the next request",
 	);
-	assert.deepEqual(markerTexts(firstRequest), [String(start.message?.content)]);
-	assert.deepEqual(markerTexts(secondRequest), [String(start.message?.content)]);
 });
 
-test("Anthropic provider payload preserves the marker-bearing cache prefix across a tool loop", async () => {
+test("the Anthropic payload before the pressure action line is byte-identical across two consecutive requests (pi-context-aware#461)", async () => {
 	const handlers = registerExtension();
-	const ctx = createContext(() => 24_000);
-	const start = await runBeforeAgentStart(handlers, ctx, "inspect the provider cache");
+	let usageTokens = 100_000;
+	const ctx = createContext(() => usageTokens);
+	const first = await runBeforeAgentStart(handlers, ctx, "inspect the provider cache");
 	const initialMessages: AgentMessage[] = [
 		{ role: "user", content: [{ type: "text", text: "inspect the provider cache" }], timestamp: 1 } as UserMessage,
-		persistInjectedMessage(start, 2),
 	];
-	const systemPrompt = start.systemPrompt ?? "";
-	const firstPayload = await captureAnthropicPayload(systemPrompt, initialMessages);
-	const secondPayload = await captureAnthropicPayload(systemPrompt, [...initialMessages, ...toolLoopTail()]);
+	const firstSent = await applyProviderContext(handlers, ctx, initialMessages);
+	usageTokens = 130_000;
+	const second = await runBeforeAgentStart(handlers, ctx, "inspect the provider cache");
+	const secondSent = await applyProviderContext(handlers, ctx, [...initialMessages, ...toolLoopTail()]);
+	const firstPayload = await captureAnthropicPayload(first.systemPrompt ?? "", firstSent);
+	const secondPayload = await captureAnthropicPayload(second.systemPrompt ?? "", secondSent);
 	const firstMessages = withoutCacheControl(firstPayload.messages) as unknown[];
 	const secondMessages = withoutCacheControl(secondPayload.messages) as unknown[];
 
-	assert.deepEqual(withoutCacheControl(secondPayload.system), withoutCacheControl(firstPayload.system));
+	assert.equal(JSON.stringify(withoutCacheControl(secondPayload.system)), JSON.stringify(withoutCacheControl(firstPayload.system)), "the system prompt carries no per-request pressure");
 	assert.deepEqual(withoutCacheControl(secondPayload.tools), withoutCacheControl(firstPayload.tools));
-	assert.deepEqual(
-		secondMessages.slice(0, firstMessages.length),
-		firstMessages,
-		"provider-managed cache breakpoints may move forward, but prior prompt content must remain unchanged",
+	const firstBytes = JSON.stringify(firstMessages);
+	const at = firstBytes.indexOf("[context-aware extension, not user input] Context pressure WARN");
+	assert.ok(at >= 0, "the first request carries the WARN line");
+	const sessionEnd = firstBytes.lastIndexOf("inspect the provider cache") + "inspect the provider cache".length;
+	assert.ok(at > sessionEnd, "the line follows every session message");
+	assert.equal(
+		JSON.stringify(secondMessages).slice(0, sessionEnd),
+		firstBytes.slice(0, sessionEnd),
+		"every byte of the session's messages before the injection is identical in the next request",
 	);
-	assert.match(JSON.stringify(firstPayload.messages), /<context-telemetry source=/);
+	assert.doesNotMatch(JSON.stringify(firstPayload), /context-telemetry/u);
+	// pi-ai marks the last block, the injection; the extension moves that breakpoint to the session's last block.
+	const line = (firstPayload.messages.at(-1) as { content: Array<{ text?: string }> }).content.at(-1)?.text ?? "";
+	const moved = cacheBreakpointBeforeInjection(firstPayload, line) as AnthropicPayload | undefined;
+	assert.ok(moved, "the payload's last block is the injection");
+	const marked = JSON.stringify(moved.messages).split("cache_control").length - 1;
+	assert.equal(marked, 1, "one conversation breakpoint");
+	assert.ok(JSON.stringify(moved.messages).indexOf("cache_control") < JSON.stringify(moved.messages).indexOf("[context-aware extension, not user input] Context pressure"), "before the injection");
 });
 
-test("the next outer user turn appends a new marker without rewriting the previous prompt prefix", async () => {
+test("with an operator request open, the pressure line and the reminder both follow the one conversation breakpoint (pi-context-aware#462)", async () => {
+	const handlers = registerExtension();
+	const prompt = "inspect the provider cache";
+	const [toolCall, toolOutput] = toolLoopTail();
+	const at = (ms: number) => new Date(ms).toISOString();
+	const branch = [
+		{ type: "custom", id: "m1", parentId: null, timestamp: at(1), customType: OPERATOR_REQUEST_ENTRY_TYPE, data: { schemaVersion: 1, hash: operatorTextHash(prompt), at: 1, idle: true } },
+		{ type: "message", id: "u1", parentId: "m1", timestamp: at(2), message: { role: "user", content: [{ type: "text", text: prompt }], timestamp: 2 } },
+		{ type: "message", id: "a1", parentId: "u1", timestamp: at(3), message: toolCall },
+		{ type: "message", id: "t1", parentId: "a1", timestamp: at(4), message: toolOutput },
+		{ type: "custom_message", id: "e1", parentId: "t1", timestamp: at(5), customType: "pi-callbacks", content: "job finished", display: false },
+	];
+	const ctx = { ...createContext(() => 130_000, 200_000, undefined, undefined, branch), hasUI: true, ui: { setWidget() {}, notify() {} } } as unknown as ExtensionContext;
+	const start = await runBeforeAgentStart(handlers, ctx, prompt);
+	const sent = await applyProviderContext(handlers, ctx, [
+		{ role: "user", content: [{ type: "text", text: prompt }], timestamp: 2 } as UserMessage,
+		toolCall,
+		toolOutput,
+		{ role: "custom", customType: "pi-callbacks", content: "job finished", display: false, timestamp: 5 } as AgentMessage,
+	]);
+	assert.equal((sent.at(-1) as { customType?: string }).customType, "context-aware.operator-request-reminder", "the reminder is the request's last message");
+	let payload: unknown = await captureAnthropicPayload(start.systemPrompt ?? "", sent);
+	for (const handler of handlers.beforeProviderRequest) {
+		const replaced = await handler({ type: "before_provider_request", payload }, ctx);
+		if (replaced !== undefined) payload = replaced;
+	}
+	const bytes = JSON.stringify((payload as AnthropicPayload).messages);
+	assert.equal(bytes.split("cache_control").length - 1, 1, "one conversation breakpoint");
+	const breakpoint = bytes.indexOf("cache_control");
+	const line = bytes.indexOf("[context-aware extension, not user input] Context pressure");
+	const reminder = bytes.indexOf("Open operator request");
+	assert.ok(line > 0 && reminder > line, "the pressure line, then the reminder, end the request");
+	assert.ok(breakpoint < line, "the breakpoint is on the session's own last block, before both injections");
+	assert.ok(breakpoint > bytes.lastIndexOf("job finished"), "and after every session message");
+});
+
+/** Where each `cache_control` sits in an Anthropic payload, as [message, block] pairs. */
+function breakpointPositions(payload: AnthropicPayload): Array<[number, number]> {
+	return payload.messages.flatMap((message, index) => {
+		const content = (message as { content?: unknown }).content;
+		if (!Array.isArray(content)) return [];
+		return content.flatMap((block, at) => (block && typeof block === "object" && "cache_control" in block ? [[index, at] as [number, number]] : []));
+	});
+}
+
+const isEffortMarker = (message: unknown): boolean => {
+	const value = message as { role?: unknown; content?: unknown; output_config?: unknown };
+	return value.role === "system" && Array.isArray(value.content) && value.content.length === 0 && value.output_config !== undefined;
+};
+
+const EFFORT_REMINDER = "[context-aware extension, not user input] Open operator request (2 min ago). The operator wrote: \"inspect the provider cache\"";
+
+/** A real pi-ai managed-effort body: prompt, effort marker, tool call, tool result, reminder, trailing marker. */
+async function managedEffortReminderPayload(): Promise<AnthropicPayload> {
+	const [toolCall, toolOutput] = toolLoopTail();
+	return captureAnthropicPayload("base system prompt", [
+		{ role: "user", content: [{ type: "text", text: "inspect the provider cache" }], timestamp: 1 } as UserMessage,
+		{ ...toolCall, providerThinkingLevel: "high" },
+		toolOutput,
+		{ role: "custom", customType: "context-aware.operator-request-reminder", content: EFFORT_REMINDER, display: false, timestamp: 5 } as AgentMessage,
+	], managedEffortModel);
+}
+
+test("S1: a managed-effort body that ends with an effort marker gets its breakpoint moved off the operator reminder", async () => {
+	const payload = await managedEffortReminderPayload();
+	assert.ok(isEffortMarker(payload.messages.at(-1)), "pi-ai ends the request with an empty effort marker");
+	assert.ok(isEffortMarker(payload.messages[1]), "and puts one before the assistant reply");
+	const reminderAt = payload.messages.length - 2;
+	assert.deepEqual(breakpointPositions(payload), [[reminderAt, 0]], "pi-ai marks the reminder");
+
+	const moved = cacheBreakpointBeforeInjection(payload, EFFORT_REMINDER) as AnthropicPayload | undefined;
+	assert.ok(moved, "the breakpoint moves");
+	assert.deepEqual(breakpointPositions(moved), [[3, 0]], "onto the tool result, the session's own last block");
+	assert.equal((moved.messages[3] as { content: Array<{ type: string }> }).content[0]!.type, "tool_result");
+	assert.deepEqual(moved.messages.at(-1), payload.messages.at(-1), "the trailing marker is unchanged");
+	assert.equal(moved.messages.length, payload.messages.length, "no message is removed");
+	assert.deepEqual(withoutCacheControl(moved.messages), withoutCacheControl(payload.messages), "only cache_control moves");
+	assert.deepEqual(breakpointPositions(payload), [[reminderAt, 0]], "the input is not changed");
+});
+
+test("S2: a historical effort marker between the session's last block and the reminder does not stop the move", async () => {
+	const payload = await managedEffortReminderPayload();
+	const reminderAt = payload.messages.length - 2;
+	const historical = { role: "system", content: [], output_config: { effort: "medium" } };
+	payload.messages.splice(reminderAt, 0, historical);
+	assert.ok(isEffortMarker(payload.messages.at(-1)) && isEffortMarker(payload.messages[reminderAt]));
+
+	const moved = cacheBreakpointBeforeInjection(payload, EFFORT_REMINDER) as AnthropicPayload | undefined;
+	assert.ok(moved, "the breakpoint moves across the historical marker");
+	assert.deepEqual(breakpointPositions(moved), [[3, 0]], "onto the tool result before the historical marker");
+	assert.deepEqual(moved.messages[reminderAt], historical, "the historical marker is unchanged");
+	assert.deepEqual(withoutCacheControl(moved.messages), withoutCacheControl(payload.messages), "only cache_control moves");
+});
+
+test("with a trailing effort marker every refusal still holds, and a non-empty system message is not skipped", async () => {
+	const cc = { type: "ephemeral" };
+	const marker = { role: "system", content: [], output_config: { effort: "high" } };
+	const reminder = { role: "user", content: [{ type: "text", text: EFFORT_REMINDER, cache_control: cc }] };
+	const refused = (previous: unknown, why: string, tail: unknown[] = [reminder, marker]) =>
+		assert.equal(cacheBreakpointBeforeInjection({ messages: [previous, ...tail] }, EFFORT_REMINDER), undefined, why);
+	refused({ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } }] }, "an image is not a move target");
+	refused({ role: "assistant", content: [{ type: "thinking", thinking: "x", signature: "s" }] }, "a thinking block is not a move target");
+	refused({ role: "user", content: "plain string" }, "a string message is left alone");
+	refused({ role: "user", content: [{ type: "text", text: "own", cache_control: cc }] }, "a block that already has a breakpoint is left alone");
+	refused({ role: "user", content: [{ type: "text", text: "own" }] }, "a last user block that is not the injection is left alone", [{ role: "user", content: [{ type: "text", text: "session text", cache_control: cc }] }, marker]);
+	refused({ role: "user", content: [{ type: "text", text: "own" }] }, "a non-empty system message is not an effort marker", [reminder, { role: "system", content: [{ type: "text", text: "system update" }] }]);
+	refused({ role: "user", content: [{ type: "text", text: "own" }] }, "a system message with string content is not an effort marker", [reminder, { role: "system", content: "" }]);
+	assert.equal(cacheBreakpointBeforeInjection({ messages: [reminder, marker] }, EFFORT_REMINDER), undefined, "nothing before the injection: left alone");
+	assert.equal(cacheBreakpointBeforeInjection({ messages: [marker, reminder, marker] }, EFFORT_REMINDER), undefined, "only markers before the injection: left alone");
+});
+
+test("S3: two consecutive managed-effort requests built by the real hook share a breakpoint on the same block", async () => {
+	// The operator ledger reads its clock through the Date.now it saw at registration, so the clock moves under it.
+	const realNow = Date.now;
+	let clock = 0;
+	Date.now = () => clock;
+	let handlers: RegisteredHandlers;
+	try {
+		handlers = registerExtension();
+	} finally {
+		Date.now = realNow;
+	}
+	const prompt = "inspect the provider cache";
+	const [toolCall, toolOutput] = toolLoopTail();
+	const at = (ms: number) => new Date(ms).toISOString();
+	const assistant = { ...toolCall, providerThinkingLevel: "high" };
+	const branch = [
+		{ type: "custom", id: "m1", parentId: null, timestamp: at(1), customType: OPERATOR_REQUEST_ENTRY_TYPE, data: { schemaVersion: 1, hash: operatorTextHash(prompt), at: 1, idle: true } },
+		{ type: "message", id: "u1", parentId: "m1", timestamp: at(2), message: { role: "user", content: [{ type: "text", text: prompt }], timestamp: 2 } },
+		{ type: "message", id: "a1", parentId: "u1", timestamp: at(3), message: assistant },
+		{ type: "message", id: "t1", parentId: "a1", timestamp: at(4), message: toolOutput },
+		{ type: "custom_message", id: "e1", parentId: "t1", timestamp: at(5), customType: "pi-callbacks", content: "job finished", display: false },
+	];
+	const session: AgentMessage[] = [
+		{ role: "user", content: [{ type: "text", text: prompt }], timestamp: 2 } as UserMessage,
+		assistant,
+		toolOutput,
+		{ role: "custom", customType: "pi-callbacks", content: "job finished", display: false, timestamp: 5 } as AgentMessage,
+	];
+	const ctx = { ...createContext(() => 130_000, 200_000, undefined, undefined, branch), hasUI: true, ui: { setWidget() {}, notify() {} } } as unknown as ExtensionContext;
+	const request = async (nowMs: number): Promise<AnthropicPayload> => {
+		clock = nowMs;
+		Date.now = () => clock;
+		try {
+			return await sendRequest();
+		} finally {
+			Date.now = realNow;
+		}
+	};
+	const sendRequest = async (): Promise<AnthropicPayload> => {
+		const start = await runBeforeAgentStart(handlers, ctx, prompt);
+		const sent = await applyProviderContext(handlers, ctx, session);
+		let payload: unknown = await captureAnthropicPayload(start.systemPrompt ?? "", sent, managedEffortModel);
+		for (const handler of handlers.beforeProviderRequest) {
+			const replaced = await handler({ type: "before_provider_request", payload }, ctx);
+			if (replaced !== undefined) payload = replaced;
+		}
+		return payload as AnthropicPayload;
+	};
+	const first = await request(2 * 60_000 + 5);
+	const second = await request(3 * 60_000 + 5);
+	const firstBytes = JSON.stringify(first.messages);
+	const secondBytes = JSON.stringify(second.messages);
+	assert.ok(isEffortMarker(first.messages.at(-1)) && isEffortMarker(second.messages.at(-1)), "both requests end with an effort marker");
+	assert.match(firstBytes, /Open operator request \(2 min ago\)/u);
+	assert.match(secondBytes, /Open operator request \(3 min ago\)/u, "the reminder is rebuilt with new text");
+
+	const [firstBreakpoint, ...extraFirst] = breakpointPositions(first);
+	const [secondBreakpoint, ...extraSecond] = breakpointPositions(second);
+	assert.deepEqual([extraFirst, extraSecond], [[], []], "one conversation breakpoint per request");
+	assert.ok(firstBreakpoint && secondBreakpoint);
+	assert.deepEqual(secondBreakpoint, firstBreakpoint, "both breakpoints sit at the same position");
+	const [message, block] = firstBreakpoint;
+	const blockOf = (payload: AnthropicPayload) => (payload.messages[message] as { content: unknown[] }).content[block];
+	assert.deepEqual(blockOf(second), blockOf(first), "on the same block");
+	assert.doesNotMatch(JSON.stringify(blockOf(first)), /Open operator request|Context pressure/u, "which is the session's own block, not an injection");
+	assert.match(JSON.stringify(blockOf(first)), /job finished/u, "the session's last block");
+	assert.deepEqual(
+		withoutCacheControl(second.messages.slice(0, message + 1)),
+		withoutCacheControl(first.messages.slice(0, message + 1)),
+		"the next request repeats the prefix that ends at the breakpoint",
+	);
+});
+
+test("at OK the next outer user turn appends only the session's own messages (pi-context-aware#461)", async () => {
 	const handlers = registerExtension();
 	let usageTokens = 24_000;
 	const ctx = createContext(() => usageTokens);
 	const firstStart = await runBeforeAgentStart(handlers, ctx, "first outer turn");
 	const firstTurnMessages: AgentMessage[] = [
 		{ role: "user", content: [{ type: "text", text: "first outer turn" }], timestamp: 1 } as UserMessage,
-		persistInjectedMessage(firstStart, 2),
 		...toolLoopTail(),
 	];
 	const previousRequest = convertToLlm(await applyProviderContext(handlers, ctx, firstTurnMessages));
 
-	usageTokens = 130_000;
+	usageTokens = 60_000;
 	const secondStart = await runBeforeAgentStart(handlers, ctx, "second outer turn");
 	const nextTurnMessages: AgentMessage[] = [
 		...firstTurnMessages,
 		{ role: "user", content: [{ type: "text", text: "second outer turn" }], timestamp: 5 } as UserMessage,
-		persistInjectedMessage(secondStart, 6),
 	];
 	const nextRequest = convertToLlm(await applyProviderContext(handlers, ctx, nextTurnMessages));
 
 	assert.equal(firstStart.systemPrompt, secondStart.systemPrompt, "stable inputs must produce an identical system prompt");
+	assert.equal(firstStart.message, undefined);
+	assert.equal(secondStart.message, undefined);
 	assert.deepEqual(nextRequest.slice(0, previousRequest.length), previousRequest);
-	assert.deepEqual(markerTexts(nextRequest), [
-		String(firstStart.message?.content),
-		String(secondStart.message?.content),
-	]);
+	assert.equal(nextRequest.length, convertToLlm(nextTurnMessages).length, "nothing is injected at OK");
+	assert.deepEqual(actionLineIndexes(nextRequest), []);
 });
 
 // The always-on block points the user at /context-cache-list to view the counted

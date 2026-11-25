@@ -1,11 +1,11 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { DroppedFold, FoldEngineMetrics, FoldRequestResult } from "../folds/fold-engine.js";
 import type { FoldTurnResult } from "../folds/fold-turn.js";
+import type { RequestPressure } from "../folds/request-pressure.js";
 import { rejectReasons } from "../parity/outcome.js";
-import type { PressureLadderConfig } from "../policy/context-policy.js";
 import {
 	appendMetricsRecord, buildMetricsRecord, lastMetricsSeq, DEFAULT_METRICS_MAX_BYTES, DEFAULT_METRICS_MAX_DIR_BYTES,
-	type FoldReasonCode, type MetricsBand, type MetricsInput,
+	type FoldReasonCode, type MetricsBand, type MetricsInput, type MetricsStageInput,
 } from "./records.js";
 
 export interface MetricsSettings {
@@ -18,7 +18,6 @@ export const DEFAULT_METRICS_SETTINGS: MetricsSettings = { enabled: true, maxByt
 export interface MetricsRecorderOptions {
 	readonly agentDir: () => string;
 	readonly settings: (ctx: ExtensionContext) => MetricsSettings;
-	readonly ladder: (ctx: ExtensionContext) => PressureLadderConfig;
 	readonly now?: () => Date;
 	readonly log?: (message: string) => void;
 	/** The record writer; tests delay it to prove nothing deletes the directory under a pending write. */
@@ -27,6 +26,8 @@ export interface MetricsRecorderOptions {
 
 export interface CompactionNote {
 	readonly writer: string;
+	/** What asked for the compaction (pi-context-aware#459, `compactionTriggerOf`). */
+	readonly trigger: string;
 	readonly tokensBefore: number | null;
 	readonly tokensAfter: number | null;
 }
@@ -39,6 +40,11 @@ export interface MetricsRecorder {
 	 * written with that request's record (the open record, or the next one when none is open).
 	 */
 	noteCompaction(ctx: ExtensionContext, note: CompactionNote): void;
+	/**
+	 * A `context_recall` by reference returned the entries behind a fold or a hide (pi-context-aware#473). Counted in
+	 * the request in flight, like a fold.
+	 */
+	noteRecall(ctx: ExtensionContext, kind: "fold" | "hide"): void;
 	/** The session ends: write its open record now, so the last request is not lost. */
 	close(ctx: ExtensionContext): void;
 	/** Writes every open record, then resolves when every queued write has finished. */
@@ -50,10 +56,17 @@ interface Pending {
 	accepted: number;
 	refused: Record<string, number>;
 	dropped: Record<string, number>;
+	/** Tokens the folds written at this request's boundaries freed (pi-context-aware#459). */
+	freedTokens: number;
 	compaction: CompactionNote | null;
 	/** Records written while the compaction waited for a measured token count. */
 	compactionWaited: number;
+	/** Stage outcomes reported after the request was parked: a compaction's (pi-context-aware#473). */
+	stages: MetricsStageInput[];
+	recalls: { folds: number; hides: number };
 }
+
+const emptyPending = (): Pending => ({ requested: 0, accepted: 0, refused: {}, dropped: {}, freedTokens: 0, compaction: null, compactionWaited: 0, stages: [], recalls: { folds: 0, hides: 0 } });
 
 /** Most records a compaction waits for a measured `tokensAfter` before it is written with null. */
 export const MAX_COMPACTION_WAIT_RECORDS = 3;
@@ -69,9 +82,9 @@ type SessionKey = ExtensionContext["sessionManager"];
 
 const bump = (into: Record<string, number>, code: string): void => { into[code] = (into[code] ?? 0) + 1; };
 
-function bandOf(fraction: number, ladder: PressureLadderConfig): MetricsBand {
-	if (fraction >= ladder.seededCompactionFraction) return "urgent";
-	return fraction >= ladder.foldNudgeStartFraction ? "warn" : "ok";
+/** The request's band in the record's spelling; null when nothing counted the request. */
+function bandOf(pressure: RequestPressure): MetricsBand | null {
+	return pressure.band === "UNKNOWN" ? null : pressure.band === "URGENT" ? "urgent" : pressure.band === "WARN" ? "warn" : "ok";
 }
 
 /**
@@ -132,7 +145,10 @@ export function overrideMetricsWriter(write: typeof appendMetricsRecord): () => 
 	return () => { writerOverride = undefined; };
 }
 
-/** Writes one metrics record per live model request. Reads only; a failure here never changes a request. */
+/**
+ * Writes one metrics record per model request: in live mode with the fold pass's result, in shadow mode with Pi's
+ * usage and no pass. Reads only; a failure here never changes a request.
+ */
 export function registerMetricsRecorder(options: MetricsRecorderOptions): MetricsRecorder {
 	const pending = new WeakMap<SessionKey, Pending>();
 	const open = new WeakMap<SessionKey, OpenRecord>();
@@ -144,7 +160,7 @@ export function registerMetricsRecorder(options: MetricsRecorderOptions): Metric
 
 	const state = (ctx: ExtensionContext): Pending => {
 		let found = pending.get(ctx.sessionManager);
-		if (!found) pending.set(ctx.sessionManager, found = { requested: 0, accepted: 0, refused: {}, dropped: {}, compaction: null, compactionWaited: 0 });
+		if (!found) pending.set(ctx.sessionManager, found = emptyPending());
 		return found;
 	};
 	/** Queue the write of one record. */
@@ -152,8 +168,10 @@ export function registerMetricsRecorder(options: MetricsRecorderOptions): Metric
 		const base: Omit<MetricsInput, "seq"> = {
 			...record.input,
 			// No tiers: the fold engine does not report them, so the record writes null (unknown), not [] (none made).
-			folds: { requested: current.requested, accepted: current.accepted, refused: current.refused, dropped: current.dropped },
+			folds: { requested: current.requested, accepted: current.accepted, refused: current.refused, dropped: current.dropped, freedTokens: current.freedTokens },
 			compaction: current.compaction,
+			stages: [...(record.input.stages ?? []), ...current.stages],
+			recalls: current.recalls,
 		};
 		const sessionId = base.sessionId;
 		const task = chain.then(async () => {
@@ -178,7 +196,7 @@ export function registerMetricsRecorder(options: MetricsRecorderOptions): Metric
 		if (!record) return;
 		open.delete(key);
 		openKeys.delete(key);
-		const current = pending.get(key) ?? { requested: 0, accepted: 0, refused: {}, dropped: {}, compaction: null, compactionWaited: 0 };
+		const current = pending.get(key) ?? emptyPending();
 		pending.delete(key);
 		// Pi reports no token count until an assistant replies after the compaction, so a compaction
 		// waits for the first measured count (never an estimate) and falls back to null after a few records.
@@ -189,7 +207,7 @@ export function registerMetricsRecorder(options: MetricsRecorderOptions): Metric
 			if (measured !== null) compaction = { ...compaction, tokensAfter: measured };
 			else if (current.compactionWaited < MAX_COMPACTION_WAIT_RECORDS) carry = true;
 		}
-		if (carry) pending.set(key, { requested: 0, accepted: 0, refused: {}, dropped: {}, compaction: current.compaction, compactionWaited: current.compactionWaited + 1 });
+		if (carry) pending.set(key, { ...emptyPending(), compaction: current.compaction, compactionWaited: current.compactionWaited + 1 });
 		enqueue(record, { ...current, compaction: carry ? null : compaction });
 	};
 	openSources.add({ count: () => openKeys.size, flush: () => { for (const key of [...openKeys]) finalize(key); } });
@@ -205,22 +223,30 @@ export function registerMetricsRecorder(options: MetricsRecorderOptions): Metric
 			if (result.ok) current.accepted += 1;
 			else for (const code of refusalCodes(result)) bump(current.refused, code);
 		},
-		onDrain(ctx, dropped: readonly DroppedFold[]) {
+		onDrain(ctx, dropped: readonly DroppedFold[], written) {
 			if (!settingsOf(ctx).enabled) return;
 			const current = state(ctx);
+			const freed = written?.freedTokens;
+			if (typeof freed === "number" && Number.isFinite(freed) && freed > 0) current.freedTokens += freed;
 			for (const item of dropped) {
 				for (const code of item.code ? [item.code] : classifiedReasons(item.errors)) bump(current.dropped, code);
 			}
 		},
-		onTurn(ctx, turn: FoldTurnResult | undefined) {
+		onStages(ctx, stages) {
+			if (!settingsOf(ctx).enabled) return;
+			state(ctx).stages.push(...stages);
+		},
+		onTurn(ctx, turn: FoldTurnResult | undefined, requestPressure: RequestPressure | null, passFailed: boolean, strategy) {
 			const settings = settingsOf(ctx);
 			if (!settings.enabled) return;
 			// The previous request is over: its folds, drops and compaction are all counted now.
 			finalize(ctx.sessionManager, ctx);
 			const sessionId = ctx.sessionManager.getSessionId();
-			const window = ctx.model?.contextWindow;
+			const window = requestPressure?.window ?? ctx.model?.contextWindow;
 			const before = turn?.tokens?.before;
-			const pressure = typeof before === "number" && window && window > 0 ? before / window : null;
+			// The request's one pressure value (pi-context-aware#461), the one its nudge and proactive compaction read.
+			// Null when nothing counted the request: no fold pass and no measured size.
+			const pressure = requestPressure && requestPressure.band !== "UNKNOWN" ? requestPressure.fraction : null;
 			const emergency = turn?.emergency;
 			const input: Omit<MetricsInput, "seq"> = {
 				at: now(),
@@ -231,13 +257,18 @@ export function registerMetricsRecorder(options: MetricsRecorderOptions): Metric
 				tokensBefore: before,
 				tokensAfter: turn?.tokens?.after,
 				pressure,
-				band: pressure === null ? null : bandOf(pressure, options.ladder(ctx)),
+				band: requestPressure ? bandOf(requestPressure) : null,
 				nudge: turn?.nudgeKind,
 				emergency: emergency ? { truncated: emergency.truncated, hides: emergency.hideCandidates.length, skipped: emergency.skipped !== undefined, terminal: emergency.terminalEscape !== undefined } : null,
-				passFailed: turn === undefined,
+				// A shadow-mode request runs no fold pass; only a pass that failed or did not line up is a failed pass.
+				passFailed,
 				folds: { requested: 0, accepted: 0, refused: {}, dropped: {} },
 				compaction: null,
 				usage: previousUsage(ctx),
+				// The session's methods and what their stages did on this request (pi-context-aware#473, pi-context-aware#526).
+				strategy: strategy ? { methods: [...strategy.strategy.methods], source: strategy.strategy.source, shadow: strategy.strategy.shadow.map((methods) => [...methods]), guidance: strategy.strategy.guidance } : null,
+				stages: strategy ? [...strategy.stages] : [],
+				steer: strategy ? strategy.steer : null,
 			};
 			// Park the record: the folds this request asks for arrive after it, and are added in `finalize`.
 			open.set(ctx.sessionManager, { input, agentDir: options.agentDir(), settings });
@@ -251,6 +282,12 @@ export function registerMetricsRecorder(options: MetricsRecorderOptions): Metric
 			const current = state(ctx);
 			current.compaction = note;
 			current.compactionWaited = 0;
+		},
+		noteRecall(ctx, kind) {
+			if (!settingsOf(ctx).enabled) return;
+			const current = state(ctx);
+			if (kind === "fold") current.recalls.folds += 1;
+			else if (kind === "hide") current.recalls.hides += 1;
 		},
 		close(ctx) { finalize(ctx.sessionManager); },
 		flush: () => { for (const key of [...openKeys]) finalize(key); return chain; },

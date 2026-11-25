@@ -1,5 +1,12 @@
-import type { Task, TasksSnapshot } from "../session-tasks/session-tasks.js";
-import type { WorkstreamSnapshot } from "../workstream/workstream-schema.js";
+/**
+ * The /checkin reconciliation prompt.
+ *
+ * The focus comes from the snapshot this package reads. The task list belongs to pi-workstream, so
+ * the prompt does not carry it: when the session can reach pi-workstream's task tool, the prompt asks
+ * the agent to read the list with it, and otherwise it leaves the list out.
+ */
+
+import type { WorkstreamSnapshot } from "../snapshot-contracts/schema.js";
 
 export interface CheckinPressureSnapshot {
 	readonly tokens: number;
@@ -10,15 +17,14 @@ export interface CheckinPressureSnapshot {
 
 export interface CheckinSnapshot {
 	readonly focus: WorkstreamSnapshot | null;
-	readonly tasks: TasksSnapshot | null;
 	readonly pressure: CheckinPressureSnapshot | null;
 }
 
-function taskLines(tasks: readonly Task[], indent = ""): string[] {
-	return tasks.flatMap((task) => [
-		`${indent}- ${task.id} [${task.status}] ${task.title}${task.note === undefined ? "" : ` — ${task.note}`}`,
-		...taskLines(task.subtasks ?? [], `${indent}  `),
-	]);
+export interface CheckinOptions {
+	readonly compactionAvailable?: boolean;
+	readonly compactionInvocation?: string;
+	/** The exact call that reads pi-workstream's task list; absent when this session cannot reach it. */
+	readonly tasksCall?: string;
 }
 
 function focusSection(focus: WorkstreamSnapshot | null): string[] {
@@ -33,12 +39,9 @@ function focusSection(focus: WorkstreamSnapshot | null): string[] {
 	return lines;
 }
 
-function tasksSection(tasks: TasksSnapshot | null): string[] {
-	if (tasks === null || tasks.tasks.length === 0) return ["Durable task list: none recorded."];
-	return [
-		`Durable task list (revision ${tasks.revision}):`,
-		...taskLines(tasks.tasks),
-	];
+function tasksSection(tasksCall: string | undefined): string[] {
+	if (tasksCall === undefined) return [];
+	return [`Task list: read it with ${tasksCall} before you answer. Reading it changes nothing.`];
 }
 
 function pressureSection(pressure: CheckinPressureSnapshot | null): string {
@@ -46,26 +49,29 @@ function pressureSection(pressure: CheckinPressureSnapshot | null): string {
 	return `Context pressure: ${Math.round(pressure.fraction * 100)}% used (${pressure.tokens}/${pressure.window} tokens), ${pressure.headroom} tokens headroom.`;
 }
 
+function absentRecordLine(snapshot: CheckinSnapshot, tasksCall: string | undefined): string[] {
+	if (snapshot.focus !== null) return [];
+	if (tasksCall === undefined) return ["No durable focus or task list exists. Say that plainly, then still report progress from the current session conversation."];
+	return ["No durable focus exists. If the task list is empty too, say that plainly, then still report progress from the current session conversation."];
+}
+
 /** Build the read-only reconciliation request from one invocation-time snapshot. */
-export function buildCheckinPrompt(
-	snapshot: CheckinSnapshot,
-	options: { compactionAvailable?: boolean; compactionInvocation?: string } = {},
-): string {
+export function buildCheckinPrompt(snapshot: CheckinSnapshot, options: CheckinOptions = {}): string {
 	const compact = options.compactionAvailable !== false;
 	const compactionInvocation = options.compactionInvocation ?? "context_compact";
-	const hasDurableRecord = snapshot.focus !== null || (snapshot.tasks?.tasks.length ?? 0) > 0;
+	const tasksCall = options.tasksCall;
 	return [
-		`Perform a read-only session check-in using the invocation-time snapshot below. ${compact ? `Do not call ${compactionInvocation} and do not mutate` : "Do not mutate"} session_focus or session_tasks unless proposing the exact corrective calls in the Record corrections section.`,
+		`Perform a read-only session check-in using the invocation-time snapshot below. ${compact ? `Do not call ${compactionInvocation} and do not change` : "Do not change"} the focus or the task list; propose the exact corrective calls in the Record corrections section instead.`,
 		"",
 		...focusSection(snapshot.focus),
-		...tasksSection(snapshot.tasks),
+		...tasksSection(tasksCall),
 		pressureSection(snapshot.pressure),
-		...(hasDurableRecord ? [] : ["No durable focus or task list exists. Say that plainly, then still report progress from the current session conversation."]),
+		...absentRecordLine(snapshot, tasksCall),
 		"",
 		"Answer with exactly these four sections:",
 		"Done — report what this session completed, tied to the focus objective or goal ids and task ids where available.",
 		"Left — report what remains, including blocked or deferred work and the reason for each.",
-		"Record corrections — identify stale focus or task records and show the session_focus / session_tasks calls that would fix them. Do not execute those calls merely because this is a check-in.",
+		"Record corrections — identify stale focus or task records and show the calls that would fix them. Do not execute those calls merely because this is a check-in.",
 		compact
 			? `Continue or compact — say whether this is a clean phase boundary, whether to continue, and what a ${compactionInvocation} seed would carry forward if compaction is appropriate. Do not compact from this request.`
 			: "Continue — say whether this is a clean phase boundary and whether to continue. Compaction is not available in this session.",

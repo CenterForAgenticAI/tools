@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { registerMetricsRecorder, DEFAULT_METRICS_SETTINGS, pendingMetricsWrites, overrideMetricsWriter } from "../src/metrics/recorder.js";
-import { focusFixture } from "./session-focus-harness.js";
+import { requestPressure } from "../src/folds/request-pressure.js";
+import { focusFixture } from "./extension-harness.js";
 
 // pi-context-aware#360: session_shutdown must wait for queued metrics writes.
 // The focus fixture's real extension flushes its recorder at shutdown, so a
@@ -46,11 +47,10 @@ test("a recorder's flush resolves only after a delayed write has landed", async 
 	const recorder = registerMetricsRecorder({
 		agentDir: () => root,
 		settings: () => DEFAULT_METRICS_SETTINGS,
-		ladder: () => ({ foldNudgeStartFraction: 0.45, foldNudgeEndFraction: 0.75, seededCompactionFraction: 0.9, recoverableHideFraction: 0.95 }),
 		write: async () => { await gate; fs.writeFileSync(file, "x"); },
 	});
 	const ctx = { sessionManager: { getSessionId: () => "s", getLeafId: () => "l", getBranch: () => [] }, model: { id: "m", contextWindow: 1000 } } as never;
-	recorder.observers.onTurn?.(ctx, undefined);
+	recorder.observers.onTurn?.(ctx, undefined, requestPressure({ tokens: 0, window: 1000, measured: false, source: "host" }), true);
 	let flushed = false;
 	const flushing = recorder.flush().then(() => { flushed = true; });
 	await new Promise((resolve) => setImmediate(resolve));

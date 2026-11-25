@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { erasedSessionIds, SessionDatabase, SessionErasedError } from "../erasure/database.js";
+import { descriptorPathCandidates } from "../erasure/files.js";
 import { appendFile, mkdir, open, readdir, stat, type FileHandle } from "node:fs/promises";
 import * as path from "node:path";
 
@@ -222,32 +223,25 @@ const errorCode = (error: unknown) => (error as NodeJS.ErrnoException).code;
 
 /*
  * Race-safe traversal. Node has no openat(2), so each verified directory is held open and the
- * next name is resolved through its descriptor's magic link (`/proc/self/fd/<fd>/<name>`). That
- * path reaches the directory the descriptor holds even if its pathname has since been renamed
- * or replaced by a symlink, and the final name is opened with O_NOFOLLOW. Nothing is resolved
- * by pathname after it has been checked, so there is no window between check and open.
+ * next name is resolved through a path that names the held directory by identity: its
+ * descriptor's magic link on Linux (`/proc/self/fd/<fd>/<name>`), or its volume file system path
+ * on macOS (`/.vol/<dev>/<ino>/<name>`; see descriptorPathCandidates for why its IDs are not reused
+ * while held). That path reaches the directory the descriptor holds even
+ * if its pathname has since been renamed or replaced by a symlink, and the final name is opened
+ * with O_NOFOLLOW. Nothing is resolved by pathname after it has been checked, so there is no
+ * window between check and open.
  */
-const DESCRIPTOR_ROOTS = ["/proc/self/fd", "/dev/fd"] as const;
-let descriptorRoot: Promise<string | undefined> | undefined;
-/** The first root through which `<root>/<fd>/.` is the directory the descriptor holds, if any. */
-function findDescriptorRoot(dir: FileHandle): Promise<string | undefined> {
-	if (descriptorRoot) return descriptorRoot;
-	const probe = (async () => {
-		const held = await dir.stat();
-		for (const root of DESCRIPTOR_ROOTS) {
-			try {
-				const reached = await stat(`${root}/${dir.fd}/.`);
-				if (reached.dev === held.dev && reached.ino === held.ino) return root;
-			} catch { /* Try the next root. */ }
-		}
-		return undefined;
-	})();
-	descriptorRoot = probe;
-	// A probe that failed outright, rather than finding no root, is retried on the next open.
-	void probe.catch(() => { if (descriptorRoot === probe) descriptorRoot = undefined; });
-	return probe;
+async function heldPath(dir: FileHandle): Promise<string> {
+	const held = await dir.stat({ bigint: true });
+	for (const candidate of descriptorPathCandidates(dir.fd, held)) {
+		try {
+			const reached = await stat(`${candidate}/.`, { bigint: true });
+			if (reached.dev === held.dev && reached.ino === held.ino) return candidate;
+		} catch { /* Try the next candidate. */ }
+	}
+	throw new ParityStoreError("this platform cannot open files relative to a verified directory");
 }
-/** A directory held open and verified; names below it are resolved through `path`, its descriptor's magic link. */
+/** A directory held open and verified; names below it are resolved through `path`, its identity path. */
 export interface HeldDir { readonly handle: FileHandle; readonly path: string }
 const DIR_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY;
 /** Open `name` below a held directory without following a symlink, and check that it is a private real directory. */
@@ -289,15 +283,13 @@ export async function openStoreDir(agentDir: string, create: boolean, dirs: read
 		throw error;
 	}
 	try {
-		const root = await findDescriptorRoot(current);
-		if (!root) throw new ParityStoreError("this platform cannot open files relative to a verified directory");
 		for (const part of dirs) {
 			const parent: FileHandle = current;
 			current = undefined;
-			try { current = await openChildDir(`${root}/${parent.fd}`, part, create); } finally { await parent.close(); }
+			try { current = await openChildDir(await heldPath(parent), part, create); } finally { await parent.close(); }
 			if (!current) return undefined;
 		}
-		const held: HeldDir = { handle: current, path: `${root}/${current.fd}` };
+		const held: HeldDir = { handle: current, path: await heldPath(current) };
 		current = undefined;
 		return held;
 	} finally { await current?.close(); }

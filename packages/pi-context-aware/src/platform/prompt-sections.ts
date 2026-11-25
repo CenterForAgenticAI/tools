@@ -3,11 +3,11 @@
  *
  * Pi 1.0 builds the system prompt from named sections and sends a changed
  * section as an update instead of rewriting the whole prompt. Each block this
- * extension injects gets its own section, so a change to one input (a focus
- * edit, a new cache document, a compaction) touches only that section and the
- * others stay byte-identical across turns.
+ * extension injects gets its own section, so a change to one input (a new
+ * cache document, a compaction) touches only that section and the others stay
+ * byte-identical across turns.
  *
- * Per-turn state (pressure telemetry and the task list) is not a section. A
+ * Per-turn state (pressure telemetry and contributed text) is not a section. A
  * model that cannot take system messages mid-conversation has every section
  * update folded back into the leading system prompt, so per-turn text there
  * would rewrite the cached prefix on every turn. That state stays in the
@@ -18,14 +18,10 @@
 export const PROMPT_SECTION = {
 	/** Telemetry-reading and pressure-band guidance. Changes only with compaction availability. */
 	contextAwareness: "context-awareness",
-	/** Durable-focus tool guidance. Changes only with session role and tool reachability. */
-	focusGuidance: "durable-focus-guidance",
 	/** One section for the context tools. Changes only with which of them are reachable. */
 	contextTools: "context-tools",
 	/** Count of cached reference documents. Changes when the document count changes. */
 	contextCache: "context-cache",
-	/** Current durable focus. Changes when the focus changes. */
-	sessionFocus: "session_focus",
 	/** Compaction count of the current branch. Changes after a compaction. */
 	compactionHistory: "compaction_history",
 } as const;

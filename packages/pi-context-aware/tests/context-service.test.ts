@@ -183,6 +183,29 @@ test("snapshot pressure changes produce typed phase-boundary guidance", () => {
 	assert.equal(ok.proactiveCompaction, undefined, "the additive lifecycle field remains optional for older producers");
 });
 
+// pi-context-aware#441: a compaction started by the entry count reports that trigger to service consumers.
+test("an entry-count proactive lifecycle round-trips through the service snapshot", () => {
+	const lifecycle = {
+		state: "pending" as const,
+		trigger: "entry-count" as const,
+		updatedAt: "2026-11-14T00:00:01.000Z",
+		coalescedTriggers: 1,
+	};
+	const snapshot = buildContextAwareSnapshotV1({
+		pressure: { tokens: 10_000, contextWindow: 200_000 },
+		session: { id: "entry-count", cwd: "/workspace", sessionFile: "/state/entry-count.jsonl" },
+		lineageSessionFiles: [],
+		compactions: [],
+		artifacts: [],
+		compaction: { state: "idle" },
+		effectiveMode: { seedMode: "auto-gen", seedRewrite: true, ambiguityMode: "inherit", effectiveAmbiguityMode: "cautious-proceed", compactionModel: null },
+		proactiveCompaction: lifecycle,
+	});
+	assert.equal(snapshot.proactiveCompaction?.trigger, "entry-count");
+	assert.deepEqual(snapshot.proactiveCompaction, lifecycle);
+	assert.notEqual(snapshot.proactiveCompaction, lifecycle, "the snapshot holds its own copy of the lifecycle");
+});
+
 test("session compaction boundaries are additive and legacy projections remain unchanged", () => {
 	const source = {
 		pressure: null,

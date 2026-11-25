@@ -7,7 +7,7 @@ import type {
 import { obj, opt, str } from "@earendil-works/pi-schema";
 import type { ContextAwareModesV1 } from "../context-service.js";
 import { schemaTool } from "../schema-tool.js";
-import { stringEnum } from "../tool-arguments.js";
+import { stringEnum } from "../string-enum.js";
 import { createContextAwareModesV1, type ContextAwareModesRuntime } from "./modes-runtime.js";
 import { createModeIndicatorWidget, MODES_WIDGET_KEY } from "./mode-indicator.js";
 import { MAX_MODE_ID_LENGTH, MAX_MODE_LAYER_LENGTH, MAX_MODE_REASON_LENGTH, MODE_DEFAULT_LAYER, modeDisplayText } from "./modes-state.js";

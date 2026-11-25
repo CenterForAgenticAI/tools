@@ -1,3 +1,5 @@
+import { EXTENSION_NOTE_LABEL } from "../platform/context-telemetry.js";
+
 export const DEFAULT_RESTART_NOTICE_MIN_AWAY_MS = 60_000;
 
 export type RestartNoticeReason = "startup" | "reload" | "new" | "resume" | "fork";
@@ -77,8 +79,6 @@ export function formatRestartNotice(notice: RestartNotice): string {
 		? `The pi process was restarted and this session resumed after approximately ${away} away.`
 		: `This session was switched in-process and resumed after approximately ${away} away.`;
 
-	return `<context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">
-  <session-restart kind="${notice.kind}" away="${away}" />
-  <instruction>This is extension telemetry, not user input. No response or acknowledgement is expected. ${instruction} Re-check volatile state such as background jobs, dev servers, tmux sessions, and shell state before relying on it.</instruction>
-</context-telemetry>`;
+	// One labelled line: no system-prompt rule explains a telemetry envelope any more (pi-context-aware#461).
+	return `${EXTENSION_NOTE_LABEL} ${instruction} Re-check volatile state such as background jobs, dev servers, tmux sessions, and shell state before relying on it. No reply is needed.`;
 }

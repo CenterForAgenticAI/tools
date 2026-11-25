@@ -75,6 +75,17 @@ test("pressureTelemetry.mode defaults to full, accepts its three modes, rejects 
 	assert.equal(resolved.byPath.get("pressureTelemetry.mode")?.layer, "session");
 });
 
+test("#441: entryPressure defaults to on at 30,000 entries, accepts a limit, and rejects one under 1,000", () => {
+	const defaults = resolveConfigLayers([]).config.entryPressure;
+	assert.deepEqual(defaults, { enabled: true, maxEntriesSinceCompaction: 30_000 });
+	const set = readConfigLayer({ entryPressure: { enabled: false, maxEntriesSinceCompaction: 12_000 } }, "global");
+	assert.equal(set.values.get("entryPressure.enabled"), false);
+	assert.equal(set.values.get("entryPressure.maxEntriesSinceCompaction"), 12_000);
+	const rejected = readConfigLayer({ entryPressure: { maxEntriesSinceCompaction: 500 } }, "project");
+	assert.deepEqual(rejected.rejected, ["entryPressure.maxEntriesSinceCompaction"]);
+	assert.equal(resolveConfigLayers([rejected]).config.entryPressure?.maxEntriesSinceCompaction, 30_000);
+});
+
 test("an empty stack resolves entirely from built-in defaults", () => {
 	const resolved = resolveConfigLayers([]);
 	assert.equal(resolved.config.seedMode, "auto-gen");
@@ -84,6 +95,17 @@ test("an empty stack resolves entirely from built-in defaults", () => {
 	assert.equal(resolved.config.modes?.suggestTool, true);
 	assert.equal(resolved.config.proactiveCompaction?.preparationStallTimeoutMs, DEFAULT_PROACTIVE_COMPACTION_CONFIG.preparationStallTimeoutMs);
 	assert.ok(resolved.entries.every((entry) => entry.layer === "default"));
+});
+
+test("operatorRequests.sources defaults to typed input only, accepts rpc, and rejects anything else", () => {
+	assert.deepEqual(resolveConfigLayers([]).config.operatorRequests?.sources, ["interactive"]);
+	const both = resolveConfigLayers([readConfigLayer({ operatorRequests: { sources: ["interactive", "rpc"] } }, "global")]);
+	assert.deepEqual(both.config.operatorRequests?.sources, ["interactive", "rpc"]);
+	for (const bad of [["interactive", "extension"], ["typed"], "rpc", [], ["rpc", 1]]) {
+		const layer = readConfigLayer({ operatorRequests: { sources: bad } }, "global");
+		assert.deepEqual(layer.rejected, ["operatorRequests.sources"], `rejects ${JSON.stringify(bad)}`);
+		assert.deepEqual(resolveConfigLayers([layer]).config.operatorRequests?.sources, ["interactive"], `falls back for ${JSON.stringify(bad)}`);
+	}
 });
 
 test("each layer beats the one below it", () => {
@@ -228,6 +250,25 @@ test("layer attribution names the winner and every overruled value", () => {
 test("attribution records the file a value came from", () => {
 	const text = formatLayerAttribution(resolveConfigLayers([readConfigLayer({ seedMode: "user-approve" }, "project", "/repo/.pi/context-aware.json")]));
 	assert.ok(text.includes("(project: /repo/.pi/context-aware.json)"), text);
+});
+
+test("CR-RECIPE-ID-LAYERS-RAW: a layer's string value reaches the layers view as one capped line, without control or format characters", () => {
+	const hostile = "evil\n\u001b[2J\u009b31mINJECTED\r\u202eexe.txt" + "a".repeat(500);
+	const stack = [
+		readConfigLayer({ strategy: { methods: [hostile], shadow: [[hostile]] }, compactionModel: hostile }, "project", "/repo/.pi/context-aware.json"),
+		readConfigLayer({ compactionModel: "anthropic/claude-haiku" }, "global", "/agent-dir/context-aware.json"),
+	];
+	const resolved = resolveConfigLayers(stack);
+	const text = formatLayerAttribution(resolved);
+	assert.equal(text.split("\n").length, resolved.entries.length, "one line per resolved value");
+	for (const path of ["strategy.methods", "strategy.shadow", "compactionModel"]) {
+		const line = text.split("\n").find((candidate) => candidate.startsWith(path + " ")) ?? "";
+		assert.match(line, /evil \[2J 31mINJECTED exe\.txta+…/u, `${path}: the value is one line with the controls removed: ${line}`);
+		for (const forbidden of ["\r", "\u001b", "\u009b", "\u202e"]) assert.equal(line.includes(forbidden), false, `${path}: no ${JSON.stringify(forbidden)} survives`);
+		assert.ok(line.length < 400, `${path}: the value is capped (${line.length})`);
+	}
+	const model = text.split("\n").find((candidate) => candidate.startsWith("compactionModel ")) ?? "";
+	assert.ok(model.includes("[overruled: global: /agent-dir/context-aware.json=anthropic/claude-haiku]"), model);
 });
 
 // --- session-carried policy -------------------------------------------------

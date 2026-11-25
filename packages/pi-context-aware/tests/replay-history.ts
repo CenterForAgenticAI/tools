@@ -2,15 +2,14 @@
  * Generated session branches for long-history replay tests and
  * `npm run bench:replay`.
  *
- * Entries have the shape Pi persists on a branch: focus and task snapshots are
- * `custom` entries, and everything else is an ordinary message. Entry
+ * Entries have the shape Pi persists on a branch: focus snapshots are `custom`
+ * entries, and everything else is an ordinary message. Entry
  * timestamps advance one second per position, so transcript chronology follows
  * array order unless a caller supplies its own timestamp.
  */
 
-import { createWorkstreamSnapshot, workstreamEntry } from "../src/workstream/workstream-state.js";
-import type { WorkstreamProvenance } from "../src/workstream/workstream-schema.js";
-import { TASKS_ENTRY_TYPE, createTasksSnapshot, type Task } from "../src/session-tasks/session-tasks.js";
+import { createWorkstreamSnapshot, workstreamEntry } from "./workstream-fixture.js";
+import type { WorkstreamProvenance } from "../src/snapshot-contracts/schema.js";
 
 /** Earlier than any wall clock a test runs under, so live mutations stay later. */
 export const HISTORY_EPOCH_MS = Date.parse("2025-01-01T00:00:00.000Z");
@@ -78,38 +77,6 @@ export function focusChain(length: number, options: FocusChainOptions = {}): unk
 	return entries;
 }
 
-export interface TasksEntryOptions {
-	readonly piSessionId?: string;
-	readonly entryId: string;
-	readonly timestamp: string;
-}
-
-/** One task snapshot entry holding a complete list. */
-export function tasksEntry(revision: number, tasks: readonly Task[], options: TasksEntryOptions): unknown {
-	const snapshot = createTasksSnapshot({
-		piSessionId: options.piSessionId ?? "pi-history",
-		tasks,
-		revision,
-		eventId: `${options.entryId}-event`,
-		createdAt: historyTime(0),
-		now: options.timestamp,
-	});
-	return { type: "custom", id: options.entryId, parentId: null, timestamp: options.timestamp, customType: TASKS_ENTRY_TYPE, data: snapshot };
-}
-
-/** A task list history of `length` revisions, each a complete list. */
-export function tasksHistory(length: number, tasksAt: (revision: number) => readonly Task[], piSessionId?: string): unknown[] {
-	const entries: unknown[] = [];
-	for (let revision = 1; revision <= length; revision += 1) {
-		entries.push(tasksEntry(revision, tasksAt(revision), {
-			...(piSessionId === undefined ? {} : { piSessionId }),
-			entryId: `tasks-entry-${revision}`,
-			timestamp: historyTime(revision),
-		}));
-	}
-	return entries;
-}
-
 export function ordinaryMessage(position: number): unknown {
 	return {
 		type: "message",
@@ -120,14 +87,10 @@ export function ordinaryMessage(position: number): unknown {
 	};
 }
 
-/**
- * Mostly ordinary messages with state entries spread through them: one focus
- * revision every `stateEvery` positions and one task revision offset from it.
- */
-export function sparseHistory(total: number, stateEvery: number, tasks: readonly Task[]): unknown[] {
+/** Mostly ordinary messages with one focus revision every `stateEvery` positions. */
+export function sparseHistory(total: number, stateEvery: number): unknown[] {
 	const entries: unknown[] = [];
 	let focusRevision = 0;
-	let tasksRevision = 0;
 	for (let position = 1; position <= total; position += 1) {
 		if (position % stateEvery === 0) {
 			focusRevision += 1;
@@ -140,9 +103,6 @@ export function sparseHistory(total: number, stateEvery: number, tasks: readonly
 				createdAt: historyTime(position),
 				...(focusRevision === 1 ? {} : { previousEventId: `sparse-focus-${focusRevision - 1}` }),
 			}));
-		} else if (position % stateEvery === Math.floor(stateEvery / 2)) {
-			tasksRevision += 1;
-			entries.push(tasksEntry(tasksRevision, tasks, { entryId: `sparse-tasks-entry-${tasksRevision}`, timestamp: historyTime(position) }));
 		} else {
 			entries.push(ordinaryMessage(position));
 		}

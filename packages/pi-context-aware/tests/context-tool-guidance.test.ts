@@ -9,16 +9,20 @@ import { defaultCountTokens } from "../src/folds/kernel/tokenize.js";
 import { buildContextToolsSection } from "../src/platform/prompt-sections.js";
 import { createHostPi, createSession } from "./compaction-owner-harness.js";
 
-// pi-context-aware#195 (REQ-TOOLS-001): the guidance for the six context tools measures at or under 1,500 tokens.
+// pi-context-aware#195 (REQ-TOOLS-001): the guidance for the context tools measures at or under 1,500 tokens.
 // The count covers the prompt section plus each tool's promptSnippet and promptGuidelines; descriptions are not counted.
 
 const LIMIT = 1500;
-const SIX = ["context_fold", "context_recall", "context_status", "context_compact", "session_focus", "session_tasks"] as const;
+// session_focus and session_tasks moved to pi-workstream, which measures its own guidance.
+const TOOLS = ["context_fold", "context_recall", "context_status", "context_compact"] as const;
 const OLD_NAMES = /\b(compress|decompress|search_context|acp_status|compact_session|search_prior_sessions|session_recall|session_compaction_history)\b/u;
 
 interface RegisteredTool { promptSnippet?: string; promptGuidelines?: string[]; exposure?: string }
 
-async function loadTools(): Promise<Map<string, RegisteredTool>> {
+/** A branch that records a draw of by-model-v1 (pi-context-aware#459), and the model the session runs. */
+interface Steered { readonly modelId: string }
+
+async function loadTools(steered?: Steered): Promise<Map<string, RegisteredTool>> {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-tool-guidance-")));
 	const agentDir = path.join(root, "agent");
 	fs.mkdirSync(agentDir, { recursive: true });
@@ -29,9 +33,12 @@ async function loadTools(): Promise<Map<string, RegisteredTool>> {
 	try {
 		fs.writeFileSync(path.join(agentDir, "context-aware.json"), JSON.stringify({ contextCache: { enabled: false }, sessionNaming: { scope: "off" }, workstream: { enabled: false } }));
 		const host = createHostPi();
+		// Pi activates a tool registered with direct exposure; the steered line needs context_compact reachable.
+		if (steered) host.api.setActiveTools(["read", "context_status", "context_recall", "context_fold", "context_compact"]);
 		const extension = await import(`../src/index.js?tool-guidance=${Date.now()}`);
 		extension.default(host.api);
-		const session = createSession(root, "tool-guidance-session");
+		const branch = steered ? [{ type: "custom", id: "a1", parentId: null, timestamp: "2026-11-20T00:00:00.000Z", customType: "context-aware.strategy-assignment.v2", data: { schemaVersion: 2, guidance: "by-model-v1", seed: "459-test", variants: ["by-model-v1"], drawnFor: "tool-guidance-session" } }] : undefined;
+		const session = createSession(root, "tool-guidance-session", steered ? { branch, model: { id: steered.modelId, contextWindow: 200_000 } } : {});
 		await host.handler("session_start")({ reason: "startup" }, session.ctx);
 		await host.handler("session_shutdown")({}, session.ctx).catch(() => {});
 		return host.tools as unknown as Map<string, RegisteredTool>;
@@ -52,7 +59,7 @@ function worstCase(tools: Map<string, RegisteredTool>): { total: number; parts: 
 	const section = buildContextToolsSection(ALL) ?? "";
 	const parts: Record<string, number> = { "context-tools section": defaultCountTokens(section) };
 	const texts = [section];
-	for (const name of SIX) {
+	for (const name of TOOLS) {
 		// context_fold registers only while billion-context-pi is absent; a stub with the same text stands in if it did not.
 		const tool = tools.get(name);
 		assert.ok(tool, `${name} is registered`);
@@ -61,15 +68,25 @@ function worstCase(tools: Map<string, RegisteredTool>): { total: number; parts: 
 		texts.push(text);
 	}
 	const text = texts.join("\n");
-	return { total: defaultCountTokens(section) + SIX.reduce((sum, name) => sum + parts[name]!, 0), parts, text };
+	return { total: defaultCountTokens(section) + TOOLS.reduce((sum, name) => sum + parts[name]!, 0), parts, text };
 }
 
-test("REQ-TOOLS-001: section, snippets and guidelines of the six tools measure at or under 1,500 tokens", async () => {
+test("REQ-TOOLS-001: section, snippets and guidelines of the context tools measure at or under 1,500 tokens", async () => {
 	const tools = await loadTools();
 	const { total, parts } = worstCase(tools);
 	console.log(`context tool guidance: ${total} tokens ${JSON.stringify(parts)}`);
 	assert.ok(total <= LIMIT, `guidance is ${total} tokens, over ${LIMIT}: ${JSON.stringify(parts)}`);
 	assert.ok(total > 300, "the count includes real guidance, not an empty render");
+});
+
+test("#459: under by-model-v1 the guidance for Opus and for GPT also measures at or under 1,500 tokens, with its steered line", async () => {
+	for (const [modelId, line] of [["claude-opus-5-5", /compact rather than fold that phase range by range/u], ["gpt-6.1-sol", /Prefer folding\. If context_compact is available, use it only at a phase boundary/u]] as const) {
+		const tools = await loadTools({ modelId });
+		const { total, parts, text } = worstCase(tools);
+		console.log(`context tool guidance, by-model-v1 on ${modelId}: ${total} tokens ${JSON.stringify(parts)}`);
+		assert.match(text, line, `${modelId} gets its steered line`);
+		assert.ok(total <= LIMIT, `${modelId}: guidance is ${total} tokens, over ${LIMIT}`);
+	}
 });
 
 test("the budget check goes red when a tool's guidance grows", async () => {

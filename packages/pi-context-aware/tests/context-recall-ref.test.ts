@@ -70,7 +70,7 @@ function contextText(manager: SessionManager): string {
 
 const entriesOfType = (manager: SessionManager, type: string) => JSON.stringify(manager.getBranch().filter((entry) => entry.type === type || (entry.type === "custom" && type === "fold" && entry.customType === "context-aware.fold.v1")));
 
-async function started(manager: SessionManager, options: { billionContextPi?: boolean; refused?: () => boolean } = {}) {
+async function started(manager: SessionManager, options: { billionContextPi?: boolean; refused?: () => boolean; onRefRecall?: (ctx: ExtensionContext, kind: "fold" | "hide") => void } = {}) {
 	const host: FakeHostPi = createHostPi();
 	if (options.billionContextPi) for (const name of ["compress", "acp_status"]) host.tools.set(name, { name });
 	const pi: ExtensionAPI = options.refused ? guardErasureWrites(host.api, options.refused) : host.api;
@@ -79,6 +79,7 @@ async function started(manager: SessionManager, options: { billionContextPi?: bo
 		erasedSessionIds: () => new Set(),
 		cachePools: () => [],
 		home: () => os.homedir(),
+		...(options.onRefRecall ? { onRefRecall: options.onRefRecall } : {}),
 	});
 	const tools = [...host.tools.values()] as Array<{ name: string }>;
 	surface.apply(decideContextToolSurface(tools, undefined), options.billionContextPi === true);
@@ -263,4 +264,25 @@ test("268: a fold ref b1 does not resolve a hide, and an unknown h-ref names the
 	assert.match(body(unknown), /No fold or hide "h9" on this branch\. This branch has no folds\. Hides on this branch: h1\./u);
 	const schema = JSON.stringify((host.tools.get("context_recall") as unknown as { parameters: unknown }).parameters);
 	assert.match(schema, /recoverable hide id such as \\"h1\\"/u, "the ref schema names the hide id");
+});
+test("#473: a recall by reference that returns a fold's or a hide's entries is reported once with its kind; a refused one is not", async () => {
+	const seen: string[] = [];
+	const onRefRecall = (_ctx: ExtensionContext, kind: "fold" | "hide") => { seen.push(kind); };
+	const folded = await started(foldedSession().manager, { onRefRecall });
+	await folded.call("context_recall", { ref: "b1" });
+	await folded.call("context_recall", { ref: "b9" });
+	await folded.call("context_recall", { ref: "b1", query: "deploy" });
+	const hidden = await started(hiddenSession().manager, { onRefRecall });
+	await hidden.call("context_recall", { ref: "h1" });
+	await hidden.call("context_recall", { ref: "h9" });
+	const owned = await started(foldedSession().manager, { onRefRecall, billionContextPi: true });
+	await owned.call("context_recall", { ref: "b1" });
+	assert.deepEqual(seen, ["fold", "hide"]);
+});
+
+test("#473: a report that throws does not change the recall", async () => {
+	const { call } = await started(foldedSession().manager, { onRefRecall: () => { throw new Error("metrics down"); } });
+	const result = await call("context_recall", { ref: "b1" });
+	assert.equal(result?.isError, undefined);
+	assert.match(body(result), /Fold b1/u);
 });

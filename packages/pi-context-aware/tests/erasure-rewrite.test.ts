@@ -7,7 +7,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { SessionDatabase, sessionDatabaseFile } from "../src/erasure/database.js";
 import { rewriteSession, type RewriteOptions } from "../src/erasure/session-rewrite.js";
 import { createRegistryProjection, createSessionRegistry } from "../src/session/session-registry.js";
-import { asPiSessionId, asWorkstreamId } from "../src/workstream/workstream-schema.js";
+import { asPiSessionId, asWorkstreamId } from "../src/snapshot-contracts/schema.js";
 
 const NEEDLE = "hunter2-NEEDLE";
 const NOW = () => new Date("2026-11-08T12:00:00Z");

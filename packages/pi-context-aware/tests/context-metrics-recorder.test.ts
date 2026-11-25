@@ -9,6 +9,7 @@ import { buildMetricsRecord, COMPACTION_WRITERS, lastMetricsSeq, metricsSessionF
 import type { CompactionWriterKind } from "../src/compaction/compaction-writer.js";
 import type { FoldTurnResult } from "../src/folds/fold-turn.js";
 import type { FoldRequestResult } from "../src/folds/fold-engine.js";
+import { requestPressure, type RequestPressure } from "../src/folds/request-pressure.js";
 
 const CANARY = "CANARY-PLAN-xyz-9981";
 const ladder = { foldNudgeStartFraction: 0.45, foldNudgeEndFraction: 0.75, seededCompactionFraction: 0.9, recoverableHideFraction: 0.95 };
@@ -24,9 +25,14 @@ function context(sessionId = "sess-1") {
 	return { sessionManager: manager, model: { id: "claude-test", contextWindow: 1000 } } as unknown as ExtensionContext;
 }
 const turn = (before: number, extra: Partial<FoldTurnResult> = {}): FoldTurnResult => ({ messages: [], sources: [], dropped: [], tokens: { before, after: before - 100 }, ...extra }) as FoldTurnResult;
+/** A pass result and the request pressure the fold engine reports with it: the pass's count over the window. */
+const turnAt = (before: number, extra: Partial<FoldTurnResult> = {}): [FoldTurnResult, RequestPressure, boolean] =>
+	[turn(before, extra), requestPressure({ tokens: before, window: 1000, measured: true, source: "fold-pass" }, ladder), false];
+/** No pass and no measured size. */
+const UNKNOWN = requestPressure({ tokens: 0, window: 1000, measured: false, source: "host" }, ladder);
 function setup(settings: MetricsSettings = DEFAULT_METRICS_SETTINGS) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "metrics-rec-"));
-	const recorder = registerMetricsRecorder({ agentDir: () => root, settings: () => settings, ladder: () => ladder, now: () => new Date("2026-01-01T00:00:00Z") });
+	const recorder = registerMetricsRecorder({ agentDir: () => root, settings: () => settings, now: () => new Date("2026-01-01T00:00:00Z") });
 	const read = () => fs.readFileSync(metricsSessionFile(root, "sess-1"), "utf8");
 	return { root, recorder, read, done: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
@@ -36,12 +42,12 @@ test("one record per request, with every listed field, and no message text", asy
 	try {
 		const ctx = context();
 		const refused = { ok: false, errors: [`Ref ${CANARY} does not exist in this session`], validRefs: [] } as unknown as FoldRequestResult;
-		t.recorder.observers.onTurn?.(ctx, turn(500, { nudge: CANARY, nudgeKind: "tier2", emergency: { usage: 1, threshold: 0.95, tokenCount: 1, limit: 1, truncated: 3, hideCandidates: ["e1", "e2"], announce: [] } }));
+		t.recorder.observers.onTurn?.(ctx, ...turnAt(500, { nudge: CANARY, nudgeKind: "tier2", emergency: { usage: 1, threshold: 0.95, tokenCount: 1, limit: 1, truncated: 3, hideCandidates: ["e1", "e2"], announce: [] } }));
 		t.recorder.observers.onRequest?.(ctx, { ok: true, mode: "live", queued: true, blockIds: ["b1"], warnings: [CANARY] });
 		t.recorder.observers.onRequest?.(ctx, refused);
 		t.recorder.observers.onDrain?.(ctx, [{ startRef: "m1", endRef: "m2", errors: [CANARY], code: "branch-changed" }]);
-		t.recorder.noteCompaction(ctx, { writer: "context-aware", tokensBefore: 900, tokensAfter: 300 });
-		t.recorder.observers.onTurn?.(ctx, undefined);
+		t.recorder.noteCompaction(ctx, { writer: "context-aware", trigger: "tool", tokensBefore: 900, tokensAfter: 300 });
+		t.recorder.observers.onTurn?.(ctx, undefined, UNKNOWN, true);
 		await t.recorder.flush();
 		const raw = t.read();
 		assert.ok(!raw.includes(CANARY), "no message, summary, tool argument or error text in the file");
@@ -49,16 +55,18 @@ test("one record per request, with every listed field, and no message text", asy
 		assert.equal(records.length, 2, "one record per request");
 		const first = records[0];
 		assert.deepEqual(first, {
-			v: 1, seq: 1, at: "2026-01-01T00:00:00.000Z", sessionId: "sess-1", leafId: "leaf-7", modelId: "claude-test", window: 1000,
+			v: 4, seq: 1, at: "2026-01-01T00:00:00.000Z", sessionId: "sess-1", leafId: "leaf-7", modelId: "claude-test", window: 1000,
 			tokensBefore: 500, tokensAfter: 400, pressure: 0.5, band: "warn", nudge: "tier2",
 			emergency: { truncated: 3, hides: 2, skipped: false, terminal: false }, passFailed: false,
-			folds: { requested: 2, accepted: 1, refused: { "unknown-ref": 1 }, dropped: { "branch-changed": 1 }, tiers: null },
-			compaction: { writer: "context-aware", tokensBefore: 900, tokensAfter: 300 },
+			folds: { requested: 2, accepted: 1, refused: { "unknown-ref": 1 }, dropped: { "branch-changed": 1 }, tiers: null, freedTokens: 0 },
+			compaction: { writer: "context-aware", trigger: "tool", tokensBefore: 900, tokensAfter: 300 },
+			steer: null,
 			usage: { input: 10, output: 20, cacheRead: 30, cacheWrite: 40 },
+			strategy: null, stages: [], stagesOmitted: 0, recalls: { folds: 0, hides: 0 },
 		});
 		assert.equal(records[1].seq, 2);
 		assert.equal(records[1].passFailed, true);
-		assert.deepEqual(records[1].folds, { requested: 0, accepted: 0, refused: {}, dropped: {}, tiers: null }, "counts reset after each record");
+		assert.deepEqual(records[1].folds, { requested: 0, accepted: 0, refused: {}, dropped: {}, tiers: null, freedTokens: 0 }, "counts reset after each record");
 		assert.equal(records[1].compaction, null);
 	} finally { t.done(); }
 });
@@ -70,9 +78,9 @@ test("a fold requested after request N is counted in record N, not N+1", async (
 	const t = setup();
 	try {
 		const ctx = context();
-		t.recorder.observers.onTurn?.(ctx, turn(100));
+		t.recorder.observers.onTurn?.(ctx, ...turnAt(100));
 		t.recorder.observers.onRequest?.(ctx, okResult);
-		t.recorder.observers.onTurn?.(ctx, turn(900));
+		t.recorder.observers.onTurn?.(ctx, ...turnAt(900));
 		await t.recorder.flush();
 		const records = lines(t.read());
 		assert.equal(records.length, 2);
@@ -86,7 +94,7 @@ test("a fold in the last request of a session is written when the session closes
 	const t = setup();
 	try {
 		const ctx = context();
-		t.recorder.observers.onTurn?.(ctx, turn(100));
+		t.recorder.observers.onTurn?.(ctx, ...turnAt(100));
 		t.recorder.observers.onRequest?.(ctx, okResult);
 		t.recorder.close(ctx);
 		await t.recorder.flush();
@@ -100,7 +108,7 @@ test("flush alone writes the open record of a session that never closed, once", 
 	const t = setup();
 	try {
 		const ctx = context();
-		t.recorder.observers.onTurn?.(ctx, turn(100));
+		t.recorder.observers.onTurn?.(ctx, ...turnAt(100));
 		t.recorder.observers.onDrain?.(ctx, [{ startRef: "m1", endRef: "m2", errors: [], code: "branch-changed" }]);
 		await t.recorder.flush();
 		const records = lines(t.read());
@@ -115,12 +123,12 @@ test("a compaction after a request lands in that request's record", async () => 
 	const t = setup();
 	try {
 		const ctx = context();
-		t.recorder.observers.onTurn?.(ctx, turn(100));
-		t.recorder.noteCompaction(ctx, { writer: "context-aware", tokensBefore: 5, tokensAfter: 1 });
-		t.recorder.observers.onTurn?.(ctx, turn(200));
+		t.recorder.observers.onTurn?.(ctx, ...turnAt(100));
+		t.recorder.noteCompaction(ctx, { writer: "context-aware", trigger: "proactive", tokensBefore: 5, tokensAfter: 1 });
+		t.recorder.observers.onTurn?.(ctx, ...turnAt(200));
 		await t.recorder.flush();
 		const records = lines(t.read());
-		assert.deepEqual(records[0].compaction, { writer: "context-aware", tokensBefore: 5, tokensAfter: 1 });
+		assert.deepEqual(records[0].compaction, { writer: "context-aware", trigger: "proactive", tokensBefore: 5, tokensAfter: 1 });
 		assert.equal(records[1].compaction, null);
 	} finally { t.done(); }
 });
@@ -130,8 +138,8 @@ test("an open record stays with its own session", async () => {
 	try {
 		const a = context("sess-1");
 		const b = context("sess-2");
-		t.recorder.observers.onTurn?.(a, turn(100));
-		t.recorder.observers.onTurn?.(b, turn(100));
+		t.recorder.observers.onTurn?.(a, ...turnAt(100));
+		t.recorder.observers.onTurn?.(b, ...turnAt(100));
 		t.recorder.observers.onRequest?.(a, okResult);
 		t.recorder.close(b);
 		t.recorder.close(a);
@@ -147,7 +155,7 @@ test("a refusal with no code and no error text counts as unknown; several reason
 	const t = setup();
 	try {
 		const ctx = context();
-		t.recorder.observers.onTurn?.(ctx, turn(500));
+		t.recorder.observers.onTurn?.(ctx, ...turnAt(500));
 		const refuse = (errors: string[]) => t.recorder.observers.onRequest?.(ctx, { ok: false, errors, validRefs: [] } as unknown as FoldRequestResult);
 		refuse([]);
 		refuse(["  "]);
@@ -163,7 +171,7 @@ test("a dropped fold with no code and no error text counts as unknown", async ()
 	const t = setup();
 	try {
 		const ctx = context();
-		t.recorder.observers.onTurn?.(ctx, turn(500));
+		t.recorder.observers.onTurn?.(ctx, ...turnAt(500));
 		t.recorder.observers.onDrain?.(ctx, [
 			{ startRef: "m1", endRef: "m2", errors: [] },
 			{ startRef: "m3", endRef: "m4", errors: ["  "] },
@@ -179,7 +187,7 @@ test("bands follow the ladder: ok below the nudge start, urgent from the seeded 
 	const t = setup();
 	try {
 		const ctx = context();
-		for (const before of [100, 460, 900]) t.recorder.observers.onTurn?.(ctx, turn(before));
+		for (const before of [100, 460, 900]) t.recorder.observers.onTurn?.(ctx, ...turnAt(before));
 		await t.recorder.flush();
 		const bands = t.read().split("\n").filter(Boolean).map((line) => JSON.parse(line).band);
 		assert.deepEqual(bands, ["ok", "warn", "urgent"]);
@@ -189,7 +197,7 @@ test("bands follow the ladder: ok below the nudge start, urgent from the seeded 
 test("with the switch off nothing is written", async () => {
 	const t = setup({ ...DEFAULT_METRICS_SETTINGS, enabled: false });
 	try {
-		t.recorder.observers.onTurn?.(context(), turn(500));
+		t.recorder.observers.onTurn?.(context(), ...turnAt(500));
 		await t.recorder.flush();
 		assert.equal(fs.existsSync(metricsSessionFile(t.root, "sess-1")), false);
 	} finally { t.done(); }
@@ -201,10 +209,10 @@ test("a failed write is swallowed and the next request still records", async () 
 		const bad = context("sess-1");
 		fs.mkdirSync(path.join(t.root, "context-aware"), { recursive: true });
 		fs.writeFileSync(path.join(t.root, "context-aware", "metrics"), "not a directory");
-		t.recorder.observers.onTurn?.(bad, turn(500));
+		t.recorder.observers.onTurn?.(bad, ...turnAt(500));
 		await t.recorder.flush();
 		fs.rmSync(path.join(t.root, "context-aware", "metrics"));
-		t.recorder.observers.onTurn?.(bad, turn(500));
+		t.recorder.observers.onTurn?.(bad, ...turnAt(500));
 		await t.recorder.flush();
 		assert.equal(t.read().split("\n").filter(Boolean).length, 1);
 	} finally { t.done(); }
@@ -212,16 +220,16 @@ test("a failed write is swallowed and the next request still records", async () 
 
 const seqs = (read: () => string) => read().split("\n").filter(Boolean).map((line) => JSON.parse(line).seq as number);
 const again = (root: string, extra: Partial<Parameters<typeof registerMetricsRecorder>[0]> = {}, settings: MetricsSettings = DEFAULT_METRICS_SETTINGS) =>
-	registerMetricsRecorder({ agentDir: () => root, settings: () => settings, ladder: () => ladder, now: () => new Date("2026-01-01T00:00:00Z"), ...extra });
+	registerMetricsRecorder({ agentDir: () => root, settings: () => settings, now: () => new Date("2026-01-01T00:00:00Z"), ...extra });
 
 test("a new recorder over an existing session file continues from its last seq", async () => {
 	const t = setup();
 	try {
-		t.recorder.observers.onTurn?.(context(), turn(500));
-		t.recorder.observers.onTurn?.(context(), turn(500));
+		t.recorder.observers.onTurn?.(context(), ...turnAt(500));
+		t.recorder.observers.onTurn?.(context(), ...turnAt(500));
 		await t.recorder.flush();
 		const resumed = again(t.root);
-		resumed.observers.onTurn?.(context(), turn(500));
+		resumed.observers.onTurn?.(context(), ...turnAt(500));
 		await resumed.flush();
 		assert.deepEqual(seqs(t.read), [1, 2, 3]);
 	} finally { t.done(); }
@@ -242,7 +250,7 @@ test("lastMetricsSeq is 0 for a missing store, a missing or empty file, and a tr
 		assert.equal(await lastMetricsSeq(t.root, "sess-1"), 7);
 		const fresh = again(t.root);
 		fs.writeFileSync(file, "garbage\n");
-		fresh.observers.onTurn?.(context(), turn(500));
+		fresh.observers.onTurn?.(context(), ...turnAt(500));
 		await fresh.flush();
 		assert.equal(seqs(() => fs.readFileSync(file, "utf8").split("\n").slice(1).join("\n")).at(-1), 1);
 	} finally { t.done(); }
@@ -254,7 +262,7 @@ test("seq keeps increasing across a size trim and a restart", async () => {
 	try {
 		let recorder = t.recorder;
 		for (let round = 0; round < 4; round++) {
-			for (let i = 0; i < 3; i++) recorder.observers.onTurn?.(context(), turn(500));
+			for (let i = 0; i < 3; i++) recorder.observers.onTurn?.(context(), ...turnAt(500));
 			await recorder.flush();
 			recorder = again(t.root, {}, settings);
 		}
@@ -268,7 +276,7 @@ test("seq keeps increasing across a size trim and a restart", async () => {
 test("two turns before a flush get distinct, increasing seq in write order", async () => {
 	const t = setup();
 	try {
-		for (let i = 0; i < 5; i++) t.recorder.observers.onTurn?.(context(), turn(500));
+		for (let i = 0; i < 5; i++) t.recorder.observers.onTurn?.(context(), ...turnAt(500));
 		await t.recorder.flush();
 		assert.deepEqual(seqs(t.read), [1, 2, 3, 4, 5]);
 	} finally { t.done(); }
@@ -282,7 +290,7 @@ test("a failed seed read is logged, the write is still attempted and flush resol
 		const logs: string[] = [];
 		let writes = 0;
 		const recorder = again(t.root, { log: (m) => logs.push(m), write: async () => { writes++; } });
-		recorder.observers.onTurn?.(context(), turn(500));
+		recorder.observers.onTurn?.(context(), ...turnAt(500));
 		await recorder.flush();
 		assert.ok(logs.some((m) => m.includes("seq seed failed")), logs.join("|"));
 		assert.equal(writes, 1);
@@ -300,16 +308,16 @@ test("a compaction record waits for the first measured token count and never est
 	try {
 		let measured: number | null = null;
 		const ctx = usageContext(() => measured);
-		t.recorder.noteCompaction(ctx, { writer: "pi", tokensBefore: 900, tokensAfter: null });
-		t.recorder.observers.onTurn?.(ctx, turn(500));
+		t.recorder.noteCompaction(ctx, { writer: "pi", trigger: "overflow", tokensBefore: 900, tokensAfter: null });
+		t.recorder.observers.onTurn?.(ctx, ...turnAt(500));
 		measured = 321;
-		t.recorder.observers.onTurn?.(ctx, turn(500));
-		t.recorder.observers.onTurn?.(ctx, turn(500));
+		t.recorder.observers.onTurn?.(ctx, ...turnAt(500));
+		t.recorder.observers.onTurn?.(ctx, ...turnAt(500));
 		await t.recorder.flush();
 		const records = t.read().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 		assert.equal(records.length, 3);
 		// A record is parked until the next turn, so the measured count that arrives before then is the one it gets.
-		assert.deepEqual(records[0].compaction, { writer: "pi", tokensBefore: 900, tokensAfter: 321 });
+		assert.deepEqual(records[0].compaction, { writer: "pi", trigger: "overflow", tokensBefore: 900, tokensAfter: 321 });
 		assert.equal(records[1].compaction, null, "written once");
 		assert.equal(records[2].compaction, null, "written once");
 	} finally { t.done(); }
@@ -319,11 +327,11 @@ test("a compaction that never gets a measured count is written with null after t
 	const t = setup();
 	try {
 		const ctx = usageContext(() => null);
-		t.recorder.noteCompaction(ctx, { writer: "extension", tokensBefore: 900, tokensAfter: null });
-		for (let i = 0; i < MAX_COMPACTION_WAIT_RECORDS + 1; i++) t.recorder.observers.onTurn?.(ctx, turn(500));
+		t.recorder.noteCompaction(ctx, { writer: "extension", trigger: "other", tokensBefore: 900, tokensAfter: null });
+		for (let i = 0; i < MAX_COMPACTION_WAIT_RECORDS + 1; i++) t.recorder.observers.onTurn?.(ctx, ...turnAt(500));
 		await t.recorder.flush();
 		const records = t.read().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-		assert.deepEqual(records.map((r) => r.compaction), [null, null, null, { writer: "extension", tokensBefore: 900, tokensAfter: null }]);
+		assert.deepEqual(records.map((r) => r.compaction), [null, null, null, { writer: "extension", trigger: "other", tokensBefore: 900, tokensAfter: null }]);
 	} finally { t.done(); }
 });
 
@@ -331,15 +339,15 @@ test("a second compaction gets its own full wait, not the first one's remaining 
 	const t = setup();
 	try {
 		const ctx = usageContext(() => null);
-		t.recorder.noteCompaction(ctx, { writer: "pi", tokensBefore: 900, tokensAfter: null });
-		for (let i = 0; i < MAX_COMPACTION_WAIT_RECORDS - 1; i++) t.recorder.observers.onTurn?.(ctx, turn(500));
-		t.recorder.noteCompaction(ctx, { writer: "extension", tokensBefore: 800, tokensAfter: null });
-		for (let i = 0; i < MAX_COMPACTION_WAIT_RECORDS - 1; i++) t.recorder.observers.onTurn?.(ctx, turn(500));
+		t.recorder.noteCompaction(ctx, { writer: "pi", trigger: "operator", tokensBefore: 900, tokensAfter: null });
+		for (let i = 0; i < MAX_COMPACTION_WAIT_RECORDS - 1; i++) t.recorder.observers.onTurn?.(ctx, ...turnAt(500));
+		t.recorder.noteCompaction(ctx, { writer: "extension", trigger: "tool", tokensBefore: 800, tokensAfter: null });
+		for (let i = 0; i < MAX_COMPACTION_WAIT_RECORDS - 1; i++) t.recorder.observers.onTurn?.(ctx, ...turnAt(500));
 		await t.recorder.flush();
 		const records = t.read().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 		assert.equal(records.length, 2 * (MAX_COMPACTION_WAIT_RECORDS - 1));
 		assert.ok(records.slice(0, -1).every((r) => r.compaction === null), "the second compaction is still waiting");
-		assert.deepEqual(records.at(-1)?.compaction, { writer: "extension", tokensBefore: 800, tokensAfter: null }, "the flush writes the last parked record with the compaction still unmeasured");
+		assert.deepEqual(records.at(-1)?.compaction, { writer: "extension", trigger: "tool", tokensBefore: 800, tokensAfter: null }, "the flush writes the last parked record with the compaction still unmeasured");
 	} finally { t.done(); }
 });
 
@@ -359,4 +367,18 @@ test("every compaction writer kind keeps its own value, and the old values still
 test("structural guard: every CompactionWriterKind is a metrics writer value", () => {
 	const all: Record<CompactionWriterKind, true> = { "context-aware": true, fabric: true, extension: true, pi: true, malformed: true, none: true };
 	for (const kind of Object.keys(all)) assert.ok((COMPACTION_WRITERS as readonly string[]).includes(kind), kind);
+});
+
+test("REQ-ENV-002: the record carries the request's pressure as reported, not a recount of the pass's tokens", async () => {
+	// An in-memory writer: the record is what the recorder builds, whatever the platform's store allows.
+	const written: Array<{ pressure: number | null; band: string | null; tokensBefore: number | null }> = [];
+	const recorder = registerMetricsRecorder({ agentDir: () => "/unused", settings: () => DEFAULT_METRICS_SETTINGS, write: async (_dir, record) => { written.push(record); } });
+	// The engine reports one value per request; the record must not derive its own from turn.tokens.
+	const reported = requestPressure({ tokens: 950, window: 1000, measured: true, source: "fold-pass" }, ladder);
+	recorder.observers.onTurn?.(context(), turn(500), reported, false);
+	await recorder.flush();
+	assert.equal(written.length, 1);
+	assert.equal(written[0]!.pressure, 0.95);
+	assert.equal(written[0]!.band, "urgent", "500 of 1000 would be warn");
+	assert.equal(written[0]!.tokensBefore, 500, "the pass's own count is still recorded as tokensBefore");
 });

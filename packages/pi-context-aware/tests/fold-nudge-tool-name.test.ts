@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 
-import { createFoldTurnMemory, nudgeText, prepareFoldTurn, renameFoldTool, type FoldTurnInput } from "../src/folds/fold-turn.js";
+import { createFoldTurnMemory, kernelNudgeText, nudgeText, prepareFoldTurn, renameFoldTool, type FoldTurnInput } from "../src/folds/fold-turn.js";
 import { renderNudgeText, type NudgeDecision } from "../src/folds/kernel/index.js";
 import type { Config } from "../src/folds/kernel/index.js";
 
@@ -47,13 +47,13 @@ test("#257: the nudge a native-fold session sends names context_fold, never comp
 	const manager = nudgeSession();
 	const sent = prepareFoldTurn(turnInput(manager, createFoldTurnMemory(), 90_000));
 	assert.ok(sent?.nudge, "the session is over the nudge threshold");
-	assert.match(sent.nudge, /When you call `context_fold`, the summary you write/u);
+	assert.match(sent.nudge, /Fold with `context_fold` a finished range/u);
 	assert.doesNotMatch(sent.nudge, COMPRESS_TOOL_NAME);
 	assert.doesNotMatch(sent.nudge, COMPRESS_CALL);
 });
 
 test("#257: the tier nudge's call example names context_fold", () => {
-	const text = nudgeText(TIER_2, []);
+	const text = nudgeText(TIER_2, []) ?? "";
 	assert.match(text, /Example: context_fold\(\{ content: \[\{ startId: "b1", endId: "b2", summary: "\.\.\." \}\] \}\)/u);
 	assert.doesNotMatch(text, COMPRESS_CALL);
 	assert.doesNotMatch(text, COMPRESS_TOOL_NAME);
@@ -61,7 +61,7 @@ test("#257: the tier nudge's call example names context_fold", () => {
 
 test("#257: the emergency and tier nudges, with active blocks, name no compress call either", () => {
 	for (const decision of [BASE, TIER_2, EMERGENCY]) {
-		const text = nudgeText(decision, []);
+		const text = nudgeText(decision, []) ?? "";
 		assert.doesNotMatch(text, COMPRESS_CALL, JSON.stringify(decision));
 		assert.doesNotMatch(text, COMPRESS_TOOL_NAME, JSON.stringify(decision));
 		assert.match(text, /`context_fold`/u, JSON.stringify(decision));
@@ -72,13 +72,14 @@ test("#257: while billion-context-pi is loaded the nudge keeps naming compress, 
 	const kernel = renderNudgeText(TIER_2).text;
 	assert.match(kernel, COMPRESS_CALL, "the kernel's own text names compress; this is what a native-fold session must not send");
 	assert.equal(renameFoldTool(kernel, "compress"), kernel, "naming compress changes nothing");
-	assert.equal(nudgeText(TIER_2, [], "compress"), nudgeText(TIER_2, []).replaceAll("context_fold", "compress"));
+	assert.equal(kernelNudgeText(TIER_2, [], "compress"), kernelNudgeText(TIER_2, []).replaceAll("context_fold", "compress"));
 });
 
-test("#257: only the tool name changes; the rest of the kernel's nudge is byte for byte the same", () => {
+// The parity preview compares decisions in this form (FP-257); the text sent is nudge-tools.ts's (pi-context-aware#458).
+test("#257: in the kernel's form only the tool name changes; the rest of the kernel's nudge is byte for byte the same", () => {
 	for (const decision of [BASE, TIER_2, EMERGENCY]) {
 		const kernel = renderNudgeText(decision).text;
-		const renamed = nudgeText(decision, []);
+		const renamed = kernelNudgeText(decision, []);
 		assert.equal(renamed.replaceAll("context_fold", "compress"), kernel, JSON.stringify(decision));
 	}
 	// Words that merely contain "compress" are left alone.

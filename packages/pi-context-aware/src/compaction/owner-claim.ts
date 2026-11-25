@@ -127,8 +127,20 @@ export type ClaimAttempt =
 	| { readonly kind: "pending" }
 	/** Nobody answered within the reply timeout: Fabric is not loaded. */
 	| { readonly kind: "no-fabric" }
-	/** Fabric answered that another owner holds the claim. */
-	| { readonly kind: "refused"; readonly error: string };
+	/**
+	 * Fabric refused the claim. `rival` is true only when the refusal names the owner that holds the claim
+	 * (Fabric's `holder`). Fabric also refuses with no holder: the claim's signal was already aborted, Fabric is
+	 * shutting down, or its owner code failed to load. Such a refusal is no claim, not another owner.
+	 */
+	| { readonly kind: "refused"; readonly error: string; readonly rival: boolean };
+
+/** True when a refusal names the owner that holds the claim: a `holder` object with a non-empty name. */
+function namesHolder(result: { readonly holder?: unknown }): boolean {
+	const holder: unknown = result.holder;
+	if (typeof holder !== "object" || holder === null) return false;
+	const name: unknown = (holder as { name?: unknown }).name;
+	return typeof name === "string" && name.trim().length > 0;
+}
 
 export interface CompactionOwnerClaimOptions {
 	readonly events: { emit(channel: string, data: unknown): void };
@@ -414,7 +426,7 @@ export function createCompactionOwnerClaim(options: CompactionOwnerClaimOptions)
 					outcome = { kind: "claimed", ...(result.carry === undefined ? {} : { carry: result.carry }) };
 				} else {
 					controller.abort();
-					outcome = { kind: "refused", error: result.error };
+					outcome = { kind: "refused", error: result.error, rival: namesHolder(result) };
 				}
 				if (emitting) early = outcome;
 				else options.onSettled?.(outcome);
@@ -476,6 +488,12 @@ export interface ClaimController {
 	readonly active: boolean;
 	/** True while a claim was sent and Fabric has not answered; it counts as not held. */
 	readonly pending: boolean;
+	/**
+	 * Who holds the compaction-owner claim, as the strategy view names it (pi-context-aware#472): `self` while
+	 * this claim is held, `other` once Fabric refused it naming another owner that holds it, `none` otherwise:
+	 * a refusal that names no holder (an aborted signal, Fabric shutting down) is no claim.
+	 */
+	readonly owner: "self" | "other" | "none";
 	/** A new session: give up a pending claim, forget earlier answers, then make the claim if it is wanted. */
 	start(ctx: ExtensionContext): void;
 	/**
@@ -493,14 +511,15 @@ export function createClaimController(options: ClaimControllerOptions): ClaimCon
 	// within a session, so ask again only after the next start. After a handler failure the
 	// claim was withdrawn; Fabric's engine keeps compaction for the rest of the session.
 	// While a claim waits for Fabric's reply it is pending: not held, and not asked again.
-	let settled: "no-fabric" | "refused" | "faulted" | undefined;
+	let settled: "no-fabric" | "refused" | "rival" | "faulted" | undefined;
 	const report = (attempt: ClaimAttempt): void => {
 		if (attempt.kind === "claimed") options.debug("compaction owner claim held");
 		else if (attempt.kind === "no-fabric") {
 			settled = "no-fabric";
 			options.debug("compaction owner claim not sent to anyone: Fabric is not loaded");
 		} else if (attempt.kind === "refused") {
-			settled = "refused";
+			// Only a refusal that names the holder makes another owner (CR-CLAIM-REFUSAL-NOT-RIVAL); any other is no claim.
+			settled = attempt.rival ? "rival" : "refused";
 			options.debug(`compaction owner claim refused: ${attempt.error}`);
 		}
 	};
@@ -534,6 +553,9 @@ export function createClaimController(options: ClaimControllerOptions): ClaimCon
 		},
 		get pending() {
 			return claim.pending;
+		},
+		get owner() {
+			return claim.active ? "self" : settled === "rival" ? "other" : "none";
 		},
 		start(ctx) {
 			// A claim still waiting belongs to the session that sent it: Fabric refuses or withdraws it.

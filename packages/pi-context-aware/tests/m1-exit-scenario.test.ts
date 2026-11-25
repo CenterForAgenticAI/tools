@@ -6,7 +6,8 @@
  * written at turn_end by the real engine. Cases: compress and locate, exact recovery, restart and branch,
  * a multi-level source chain, a distractor, a poisoned original, and a missing or deleted source.
  * Mutation controls for each case are the "REQ-FOLD-004" rows of tests/fixtures/safety/mutations.mjs.
- * Out of scope (decision G1a on #130): savings in context_status.
+ * The savings case (pi-context-aware#414, split from #130 by decision G1a) checks that context_status reports
+ * measured fold savings apart from the summary-writing and recall costs.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -272,6 +273,42 @@ test("REQ-FOLD-004 missing source: recall names a covered entry the branch no lo
 		assert.deepEqual(result.details.entry_ids, [s.ids[2], s.ids[3]]);
 		assert.ok(!result.content[0]!.text.includes(TEXTS[1]!) && !result.content[0]!.text.includes("--- " + gone + " ("), "no stand-in for the missing entry");
 		assert.ok(result.content[0]!.text.includes(rendered(s.ids[2]!, "user", TEXTS[2]!)), "the entries it found are intact");
+	} finally { await s.close(); }
+});
+
+/** Output tokens Pi recorded on the assistant turn that made a tool call, read from the saved session. */
+function outputOfCall(manager: SessionManager, id: string): number {
+	for (const entry of manager.getBranch()) {
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		if (entry.message.content.some((part) => part.type === "toolCall" && part.id === id)) return entry.message.usage.output;
+	}
+	throw new Error("no assistant turn made " + id);
+}
+
+test("REQ-FOLD-004 savings: status reports the fold's measured savings on one line and the summary-writing and recall costs on their own", async () => {
+	const s = await scenario();
+	try {
+		await foldOpening(s);
+		await recall(s, "recall-savings", "b1");
+		await s.prompt("STATUS", [call("context_status", { view: "folds" }, "status-savings"), done()]);
+		const status = resultOf(s.manager, "status-savings");
+		assert.ok(!status.isError, status.text);
+		const folded = blocks(s.manager)[0]!.record.compressedTokens;
+		const written = outputOfCall(s.manager, "fold-1");
+		assert.ok(folded > 1000 && written > 0, "the session recorded both numbers: " + folded + " folded, " + written + " written");
+		const savings = status.details.savings as { tokens: number; originalTokens: number; summaryTokens: number; activeFolds: number };
+		assert.equal(savings.originalTokens, folded, "the folded total is the record's compressedTokens");
+		assert.ok(savings.summaryTokens > 0 && savings.summaryTokens < 100, "the summary is a few dozen tokens, not the originals");
+		assert.equal(savings.tokens, folded - savings.summaryTokens, "savings subtract only the summary, never a cost");
+		assert.deepEqual(status.details.preprocessing, { outputTokens: written, calls: 1, callsWithoutUsage: 0 }, "the fold call's recorded output tokens");
+		const recovery = status.details.recovery as { recalls: number; tokens: number };
+		assert.equal(recovery.recalls, 1);
+		assert.ok(recovery.tokens > folded / 2, "the recall returned the originals, about as large as what was folded");
+		const lines = status.text.split("\n");
+		const line = lines.filter((text) => text.startsWith("Fold savings: "));
+		assert.deepEqual(line, ["Fold savings: " + savings.tokens + " tokens per request from 1 active fold (" + folded + " tokens folded, " + savings.summaryTokens + " tokens of summary)."]);
+		assert.ok(lines.includes("Preprocessing cost: " + written + " output tokens on 1 assistant turn that called context_fold."), status.text);
+		assert.ok(lines.includes("Recovery cost: " + recovery.tokens + " tokens returned by 1 context_recall of folded content."), status.text);
 	} finally { await s.close(); }
 });
 

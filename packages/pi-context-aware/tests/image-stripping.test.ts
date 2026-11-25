@@ -113,7 +113,10 @@ test("a removed Anthropic image hands its cache breakpoint to the placeholder", 
 
 test("shapes the stripper cannot read are reported, not silently passed", () => {
 	const cases: Array<[string, unknown, RegExp]> = [
-		["Google contents", { contents: [{ role: "user", parts: [{ inlineData: { mimeType: "image/png", data: "AAAA" } }] }] }, /Google-style contents/u],
+		["Google contents beside messages", { messages: [{ role: "user", content: "hi" }], contents: [{ role: "user", parts: [{ inlineData: { mimeType: "image/png", data: "AAAA" } }] }] }, /both messages and contents/u],
+		["Google contents beside input", { input: "hi", contents: [{ role: "user", parts: [{ text: "hi" }] }] }, /both input and contents/u],
+		["Cloud Code envelope with no request", { project: "p", model: "gemini-4-neon", requestType: "agent" }, /no messages, input, or contents list/u],
+		["Cloud Code envelope whose request is not an object", { project: "p", model: "gemini-4-neon", request: "contents" }, /no messages, input, or contents list/u],
 		["Bedrock Converse", { messages: [{ role: "user", content: [{ image: { format: "png", source: { bytes: "AAAA" } } }] }] }, /unrecognized/u],
 		["not an object", "raw text body", /not a JSON object/u],
 		[
@@ -185,4 +188,174 @@ test("an unrecognized part is described in at most 64 printable characters (#166
 test("a text-only messages body has nothing to strip and is not a failure", () => {
 	const payload = { messages: [{ role: "user", content: "hello" }, { role: "assistant", content: [{ type: "text", text: "hi" }] }] };
 	assert.deepEqual(stripHistoricalImages(payload, { keepRecent: 0 }), { kind: "unchanged", protocol: null });
+});
+
+// issue #543. Antigravity sends Gemini bodies: a Cloud Code envelope with the
+// conversation in request.contents, or (enterprise) a top-level contents list.
+// Images are inlineData parts; an old one becomes a text part in place.
+
+const GEMINI_IMAGE_CHARS = 400;
+
+function geminiPlaceholder(): { text: string } {
+	return { text: "[image (image/png, ~300 B) omitted from this request; the session file keeps the original]" };
+}
+
+function geminiImage(index: number): { inlineData: { mimeType: string; data: string } } {
+	return { inlineData: { mimeType: "image/png", data: screenshotData(index, GEMINI_IMAGE_CHARS) } };
+}
+
+/** Three image-bearing user turns, each answered by a text-only model turn. */
+function geminiContents(): Array<{ role: string; parts: unknown[] }> {
+	return [1, 2, 3].flatMap((index) => [
+		{ role: "user", parts: [{ text: screenshotText(index) }, geminiImage(index)] },
+		{ role: "model", parts: [{ text: `seen screenshot ${index}` }] },
+	]);
+}
+
+function cloudCodeEnvelope(contents: unknown[]) {
+	return {
+		project: "projects/example-123",
+		model: "gemini-4-neon",
+		request: {
+			contents,
+			systemInstruction: { role: "user", parts: [{ text: "You are a coding agent." }] },
+			tools: [{ functionDeclarations: [{ name: "read", parameters: { type: "object" } }] }],
+			generationConfig: { maxOutputTokens: 8192, thinkingConfig: { includeThoughts: true } },
+			sessionId: "s-1",
+		},
+		requestType: "agent",
+		userAgent: "antigravity",
+		requestId: "agent-0001",
+	};
+}
+
+/** The parts of each contents item, so a test can read them without casts at every use. */
+function partsOf(contents: unknown): unknown[][] {
+	assert.ok(Array.isArray(contents), "contents must stay a list");
+	return contents.map((item) => {
+		assert.ok(item !== null && typeof item === "object" && Array.isArray((item as { parts?: unknown }).parts), "each item keeps a parts list");
+		return (item as { parts: unknown[] }).parts;
+	});
+}
+
+test("S1: a Cloud Code envelope strips the two older request.contents images and keeps the newest", () => {
+	const payload = cloudCodeEnvelope(geminiContents());
+	const before = JSON.stringify(payload);
+	const outcome = stripHistoricalImages(payload, { keepRecent: 1 });
+	assert.equal(outcome.kind, "stripped");
+	if (outcome.kind !== "stripped") return;
+	// Widened so the check does not narrow `outcome` before the protocol exists in the union.
+	assert.equal(outcome.protocol as string, "google-generative");
+	assert.equal(outcome.removedImages, 2);
+	assert.equal(outcome.strippedMessages, 2);
+	const sent = outcome.payload as ReturnType<typeof cloudCodeEnvelope>;
+	const parts = partsOf(sent.request.contents);
+	assert.deepEqual(parts[0], [{ text: screenshotText(1) }, geminiPlaceholder()]);
+	assert.deepEqual(parts[2], [{ text: screenshotText(2) }, geminiPlaceholder()]);
+	assert.deepEqual(parts[4], [{ text: screenshotText(3) }, geminiImage(3)]);
+	// Every envelope field other than request.contents is unchanged.
+	for (const key of ["project", "model", "requestType", "userAgent", "requestId"] as const) {
+		assert.deepEqual(sent[key], payload[key], key);
+	}
+	for (const key of ["systemInstruction", "tools", "generationConfig", "sessionId"] as const) {
+		assert.deepEqual(sent.request[key], payload.request[key], `request.${key}`);
+	}
+	assert.deepEqual(Object.keys(sent).sort(), Object.keys(payload).sort());
+	assert.deepEqual(Object.keys(sent.request).sort(), Object.keys(payload.request).sort());
+	// Turns without a stripped image keep their identity; the input is not modified.
+	assert.equal(sent.request.contents[1], payload.request.contents[1]);
+	assert.equal(sent.request.contents[4], payload.request.contents[4]);
+	assert.equal(JSON.stringify(payload), before);
+});
+
+test("S2: a top-level Gemini contents body strips the two older images and keeps the newest", () => {
+	const payload = { contents: geminiContents(), generationConfig: { temperature: 0 } };
+	const before = JSON.stringify(payload);
+	const outcome = stripHistoricalImages(payload, { keepRecent: 1 });
+	assert.equal(outcome.kind, "stripped");
+	if (outcome.kind !== "stripped") return;
+	// Widened so the check does not narrow `outcome` before the protocol exists in the union.
+	assert.equal(outcome.protocol as string, "google-generative");
+	assert.equal(outcome.removedImages, 2);
+	assert.equal(outcome.strippedMessages, 2);
+	const sent = JSON.stringify(outcome.payload);
+	assert.ok(!sent.includes(screenshotMarker(1)), "image 1 is stripped");
+	assert.ok(!sent.includes(screenshotMarker(2)), "image 2 is stripped");
+	assert.ok(sent.includes(screenshotMarker(3)), "image 3 stays");
+	const parts = partsOf(outcome.payload.contents);
+	assert.deepEqual(parts[0], [{ text: screenshotText(1) }, geminiPlaceholder()]);
+	assert.deepEqual(parts[2], [{ text: screenshotText(2) }, geminiPlaceholder()]);
+	assert.deepEqual(parts[4], [{ text: screenshotText(3) }, geminiImage(3)]);
+	assert.deepEqual(outcome.payload.generationConfig, payload.generationConfig);
+	assert.equal(JSON.stringify(payload), before);
+});
+
+test("S3: a stripped image after a functionResponse keeps the functionResponse first", () => {
+	const functionResponse = { functionResponse: { name: "screenshot", id: "call-1", response: { output: "captured" } } };
+	const payload = cloudCodeEnvelope([
+		{ role: "model", parts: [{ functionCall: { name: "screenshot", id: "call-1", args: {} } }] },
+		{ role: "user", parts: [functionResponse, geminiImage(1)] },
+		{ role: "user", parts: [{ text: screenshotText(2) }, geminiImage(2)] },
+	]);
+	const outcome = stripHistoricalImages(payload, { keepRecent: 1 });
+	assert.equal(outcome.kind, "stripped");
+	if (outcome.kind !== "stripped") return;
+	const parts = partsOf((outcome.payload as ReturnType<typeof cloudCodeEnvelope>).request.contents);
+	assert.deepEqual(parts[1], [functionResponse, geminiPlaceholder()]);
+	assert.deepEqual(parts[2], [{ text: screenshotText(2) }, geminiImage(2)]);
+});
+
+test("Gemini bodies are detected as google-generative, at the top level and inside a Cloud Code envelope", () => {
+	assert.deepEqual(detectPayloadProtocol({ contents: geminiContents() }), { ok: true, protocol: "google-generative" });
+	assert.deepEqual(detectPayloadProtocol(cloudCodeEnvelope(geminiContents())), { ok: true, protocol: "google-generative" });
+	// Nothing to strip is not a failure for either shape.
+	const textOnly = [{ role: "user", parts: [{ text: "hello" }] }, { role: "model", parts: [{ text: "hi" }] }];
+	assert.deepEqual(stripHistoricalImages({ contents: textOnly }, { keepRecent: 0 }), { kind: "unchanged", protocol: "google-generative" });
+	assert.deepEqual(stripHistoricalImages(cloudCodeEnvelope(textOnly), { keepRecent: 0 }), { kind: "unchanged", protocol: "google-generative" });
+	assert.deepEqual(stripHistoricalImages(cloudCodeEnvelope(geminiContents()), { keepRecent: 3 }), { kind: "unchanged", protocol: "google-generative" });
+});
+
+test("Gemini fileData, functionCall, functionResponse and thought parts are left as they are", () => {
+	const fileData = { fileData: { mimeType: "image/png", fileUri: "gs://bucket/shot.png" } };
+	const thought = { text: "I should look at the screen.", thought: true, thoughtSignature: "c2lnbmF0dXJl" };
+	const functionCall = { functionCall: { name: "screenshot", id: "call-1", args: { full: true } }, thoughtSignature: "c2lnLTI=" };
+	const functionResponse = { functionResponse: { name: "screenshot", id: "call-1", response: { output: "captured" } } };
+	const payload = cloudCodeEnvelope([
+		{ role: "user", parts: [fileData, geminiImage(1)] },
+		{ role: "model", parts: [thought, functionCall] },
+		{ role: "user", parts: [functionResponse, geminiImage(2), fileData] },
+	]);
+	const outcome = stripHistoricalImages(payload, { keepRecent: 0 });
+	assert.equal(outcome.kind, "stripped");
+	if (outcome.kind !== "stripped") return;
+	assert.equal(outcome.removedImages, 2);
+	const parts = partsOf((outcome.payload as ReturnType<typeof cloudCodeEnvelope>).request.contents);
+	assert.deepEqual(parts[0], [fileData, geminiPlaceholder()]);
+	assert.deepEqual(parts[1], [thought, functionCall]);
+	assert.deepEqual(parts[2], [functionResponse, geminiPlaceholder(), fileData]);
+});
+
+test("odd Gemini items and parts do not break stripping", () => {
+	const payload = {
+		contents: [
+			{ role: "user" },
+			"not an object",
+			{ role: "user", parts: [42, null, { inlineData: { mimeType: "image/jpeg" } }] },
+			{ role: "user", parts: [geminiImage(2)] },
+		],
+	};
+	const outcome = stripHistoricalImages(payload, { keepRecent: 1 });
+	assert.equal(outcome.kind, "stripped");
+	if (outcome.kind !== "stripped") return;
+	assert.equal(outcome.removedImages, 1);
+	const contents = outcome.payload.contents as unknown[];
+	assert.equal(contents[0], payload.contents[0]);
+	assert.equal(contents[1], payload.contents[1]);
+	// An inlineData part with no data still gets a placeholder, without a size.
+	assert.deepEqual((contents[2] as { parts: unknown[] }).parts, [
+		42,
+		null,
+		{ text: "[image (image/jpeg) omitted from this request; the session file keeps the original]" },
+	]);
+	assert.equal(contents[3], payload.contents[3]);
 });
