@@ -17,24 +17,20 @@
 
 import type { ContextEditableContent, ContextEditEntryDraft, SessionBoundaryDraft, SessionEntry } from "@earendil-works/pi-coding-agent";
 
-import { assignRefs, baseIdOf, countMessageTokens, createCore, createInitialState, defaultConfig, defaultCountTokens, emptyRefMap, parseBoundary, resolveBlockSpan, SUMMARY_HEADER } from "./kernel/index.js";
+import { assignRefs, baseIdOf, countMessageTokens, createCore, createInitialState, defaultConfig, defaultCountTokens, emptyRefMap } from "./kernel/index.js";
 import type { CompressionBlock, CompressionState, Config, CoreMessage } from "./kernel/index.js";
-import { resolveBoundaries } from "./kernel/boundaries.js";
-import { buildCompressibleRanges, computeProtectedRefs, mergeRangesToThreshold } from "./kernel/recommend.js";
-import type { CompressibleRange, ContextRanges, ProcessTurnResult } from "./kernel/types.js";
-import { viableRanges } from "./kernel/viable.js";
+import { BoundaryNotFoundError, resolveBoundaries } from "./kernel/boundaries.js";
+import { computeProtectedRefs } from "./kernel/recommend.js";
 import { contentLength, MAX_VERBATIM_CHARS, renderOneLineSection, type FoldHintView, type ResolvedFoldHint } from "./fold-hints.js";
 import { widenFoldCoverage } from "./fold-coverage.js";
-import { nativeRefusal } from "./fold-refusal.js";
+import { stubSummaryError } from "./stub-summary.js";
 import { sanitizeSummary } from "./summary-sanitize.js";
-import { foldRules, refusal, type Refusal, type SummarizeEngine } from "../strategy-runtime/check-plan.js";
 import { DEFAULT_FOLDS_CONFIG, type FoldsConfig } from "../platform/config-layers.js";
 import {
 	coveredEntryIds,
 	foldDrafts,
 	foldRecordsOnBranch,
 	isEditableEntry,
-	omittedEntryIds,
 	renderFoldSummary,
 	type FoldRecord,
 	type FoldTier,
@@ -313,24 +309,11 @@ export interface FoldPlanInput extends FoldRequest {
 	 * does; the parity preview sets it so both engines are compared on the same rule.
 	 */
 	readonly protectedZone?: "typed" | "all-user-role";
-	/** False when the session's methods leave out compact (pi-context-aware#526): a refusal then advises no context_compact. */
-	readonly compactOffered?: boolean;
 }
 
 export type FoldPlan =
 	| { readonly ok: true; readonly records: FoldRecord[]; readonly drafts: SessionBoundaryDraft[]; readonly warnings: string[] }
 	| { readonly ok: false; readonly errors: string[]; readonly validRefs: string[] };
-
-/** A fold plan whose refusals carry their rule and stable code, from the plan checker (src/strategy-runtime/check-plan.ts). */
-export type CodedFoldPlan =
-	| Extract<FoldPlan, { ok: true }>
-	| { readonly ok: false; readonly refusals: Refusal[]; readonly validRefs: string[] };
-
-/** `planFoldCoded` with each refusal as its message, the form the fold tool and its callers read. */
-export function planFold(input: FoldPlanInput): FoldPlan {
-	const plan = planFoldCoded(input);
-	return plan.ok ? plan : { ok: false, errors: plan.refusals.map((one) => one.message), validRefs: plan.validRefs };
-}
 
 /** Opening user entry protected by the effective policy, using the kernel's CJK-aware estimate. */
 export function keptFirstUserId(branch: readonly SessionEntry[], folds: FoldsConfig = DEFAULT_FOLDS_CONFIG): string | undefined {
@@ -372,65 +355,25 @@ function withdrawSplitEntries(messages: readonly CoreMessage[], ids: readonly st
 	}
 }
 
-/** The protected zone `planFold` enforces on a branch as it stands. */
-export interface ProtectedZone {
-	/** The turn `planFold` plans on, prepared at the token count `planFold` uses (`sentTokens`). */
-	readonly turn: ProcessTurnResult;
-	/** What `planFold` passes to the engine's `applyCompression`. */
-	readonly field: { protectedMessageIds?: Set<string> };
-	/**
-	 * Session entries no fold can take now: entries with a message in the zone, and the entries and
-	 * tool pairs `planFold` withdraws with them so that no entry or call/result pair is split.
-	 */
-	readonly entryIds: ReadonlySet<string>;
-}
-
-/**
- * The protected zone of recent messages kept word for word (pi-context-aware#284), as `planFold`
- * computes it: the engine prepares the turn at `sentTokens`, then counts the recent messages it keeps,
- * with an extension-injected message not counted as the user's in `typed` mode. `planFold` and the
- * strategy view (pi-context-aware#467) both call this, so the zone a view reports is the zone a fold
- * is refused for.
- */
-export function protectedZone(state: BranchFoldState, config: Config, branch: readonly SessionEntry[], mode: "typed" | "all-user-role"): ProtectedZone {
-	const turn = createCore().processTurn({ messages: state.messages, state: state.kernel, config, tokenCount: sentTokens(state) });
-	const field = protectedField(turn.messages, turn.state, config, branch, mode);
-	const refs = field.protectedMessageIds ?? computeProtectedRefs(turn.messages, turn.state, config, defaultCountTokens);
-	const zone = new Set(turn.messages.flatMap((message) => {
-		const ref = turn.state.messageRefs.byRaw[message.id];
-		return ref !== undefined && refs.has(ref) ? [message.id] : [];
-	}));
-	const foldable = withdrawSplitEntries(state.messages, state.messages.map((message) => message.id).filter((id) => !zone.has(id)));
-	const entryIds = new Set(state.messages.filter((message) => !foldable.has(message.id)).map((message) => baseIdOf(message.id)));
-	return { turn, field, entryIds };
-}
-
 /**
  * Prepare the turn as billion-context-pi does, widen message ranges to whole Pi
  * entries and tool pairs, then run the engine's validation (protected recent
- * messages, tool pairs, summary limits). Entries the protected tail would split
- * are withdrawn from the fold. Every refusal comes from the plan checker's
- * `foldRules` (pi-context-aware#468), with its rule and stable code. Nothing is
- * written: the drafts go to Pi from a boundary handler.
+ * messages, tool pairs, summary limits). Refuse a cut-off summary. Entries the
+ * protected tail would split are withdrawn from the fold. Nothing is written:
+ * the drafts go to Pi from a boundary handler.
  */
-export function planFoldCoded(input: FoldPlanInput): CodedFoldPlan {
+export function planFold(input: FoldPlanInput): FoldPlan {
 	const state = foldStateFromBranch(input.branch, input.contextEntries);
 	const config: Config = defaultConfig(input.modelContextLimit, input.config ?? {});
-	const refused = (refusals: Refusal[]): CodedFoldPlan => ({ ok: false, refusals, validRefs: validFoldRefs(state) });
 	// Double-escaped \uXXXX runs are decoded before anything reads or stores the summary (bcp issue 309).
 	const summary = sanitizeSummary(input.summary).text;
-	const badSummary = foldRules.summary(summary);
-	if (badSummary.length > 0) return refused(badSummary);
-	const forgedTurn = foldRules.provenance(summary);
-	if (forgedTurn.length > 0) return refused(forgedTurn);
+	const stub = stubSummaryError(summary);
+	if (stub) return { ok: false, errors: [stub], validRefs: validFoldRefs(state) };
 	const core = createCore();
 	// billion-context-pi plans on the prepared turn (pi-context-aware#186): folded messages pruned
 	// and replaced by their summaries, tool calls without a result stripped (except compress),
 	// earlier compress calls cut to stubs, ref tags rendered. The protected tail is counted there.
-	const zone = protectedZone(state, config, input.branch, input.protectedZone ?? "typed");
-	const turn = zone.turn;
-	// The engine's refusals name billion-context-pi's tools; the model gets this package's (pi-context-aware#434).
-	const native = (error: string) => nativeRefusal(error, { overlapping: () => overlappingFolds(turn.state, input.startRef, input.endRef), compact: input.compactOffered !== false });
+	const turn = core.processTurn({ messages: state.messages, state: state.kernel, config, tokenCount: sentTokens(state) });
 	let startRef = input.startRef;
 	let endRef = input.endRef;
 	let boundaryKind: string = input.startRef.startsWith("b") || input.endRef.startsWith("b") ? "block" : "message";
@@ -443,17 +386,19 @@ export function planFoldCoded(input: FoldPlanInput): CodedFoldPlan {
 		if (resolved.boundaryKind === "block") {
 			// Replacing a bN endpoint with mNNNNN changes the engine's tier semantics. In the pruned
 			// view a range of whole folds holds only their summaries, and nothing can split.
-			const split = foldRules.blockSplit({ first, last, startIndex: resolved.startIndex, endIndex: resolved.endIndex });
-			if (split.length > 0) return refused(split);
+			if (first >= 0 && (first < resolved.startIndex || last > resolved.endIndex)) {
+				return { ok: false, errors: ["Block range would split an entry or tool pair; include the adjacent entries explicitly."], validRefs: validFoldRefs(state) };
+			}
 		} else if (first >= 0 && last >= 0) {
 			startRef = turn.state.messageRefs.byRaw[turn.messages[first]!.id]!;
 			endRef = turn.state.messageRefs.byRaw[turn.messages[last]!.id]!;
 		}
 	} catch (error) {
 		// A ref inside an active fold is consumed: the engine refuses the range with
-		// billion-context-pi's wording, so the rule lets it decide (pi-context-aware#184).
-		const unresolved = foldRules.boundary(error, native);
-		if (unresolved.length > 0) return refused(unresolved);
+		// billion-context-pi's wording, so let it decide (pi-context-aware#184).
+		if (!(error instanceof BoundaryNotFoundError) || error.kind !== "consumed") {
+			return { ok: false, errors: [error instanceof Error ? error.message : String(error)], validRefs: validFoldRefs(state) };
+		}
 	}
 	const before = new Set(turn.state.blocks.map((block) => block.blockId));
 	const hintsById = hintsOnBranch(input.branch, input.hints);
@@ -471,19 +416,23 @@ export function planFoldCoded(input: FoldPlanInput): CodedFoldPlan {
 		messages: turn.messages,
 		state: turn.state,
 		config,
-		...zone.field,
+		...protectedField(turn.messages, turn.state, config, input.branch, input.protectedZone ?? "typed"),
 	});
 	const created = result.state.blocks.filter((block) => !before.has(block.blockId));
 	const kernelWarnings = result.result.warnings.map(adaptKernelWarning);
-	// A consumed range below the size gate is skipped with a warning, not an error; that warning is the reason.
-	const engineRefusals = foldRules.engine({ errors: result.result.errors, warnings: kernelWarnings, created: created.length }, native);
-	if (engineRefusals.length > 0) return refused(engineRefusals);
+	if (result.result.errors.length > 0 || created.length === 0) {
+		// A consumed range below the size gate is skipped with a warning, not an error; that warning is the reason.
+		const errors = result.result.errors.length > 0 ? result.result.errors
+			: kernelWarnings.length > 0 ? kernelWarnings : ["The engine created no fold for this range."];
+		return { ok: false, errors, validRefs: validFoldRefs(state) };
+	}
 	const keptFirst = keptFirstUserId(input.branch, input.folds);
 	const indexById = new Map(input.branch.map((entry, index) => [entry.id, index]));
 	const entryById = new Map(input.branch.map((entry) => [entry.id, entry]));
-	{
+	if (keptFirst && boundaryKind !== "block") {
 		// The engine counts the kept opening message as unfolded, so a message range over
-		// folded entries plus that message would refold them and hide nothing new.
+		// folded entries plus that message would refold them and hide nothing new. Refuse it
+		// as the engine refuses any message range with no new compressible message.
 		const folded = new Set(state.active.flatMap(coveredEntryIds));
 		const touched = new Set(created.flatMap((block) => block.effectiveMessageIds.map(baseIdOf)));
 		const fresh = [...touched].filter((id) => {
@@ -491,15 +440,9 @@ export function planFoldCoded(input: FoldPlanInput): CodedFoldPlan {
 			return id !== keptFirst && entry !== undefined && isEditableEntry(entry) && !folded.has(id);
 		});
 		const absorbed = [...new Set(created.flatMap((block) => block.directBlockIds))];
-		const nothingNew = foldRules.keptFirstOnly({
-			startRef: input.startRef,
-			endRef: input.endRef,
-			blockRange: boundaryKind === "block",
-			touchesKeptFirst: keptFirst !== undefined && touched.has(keptFirst),
-			fresh: fresh.length,
-			absorbed,
-		});
-		if (nothingNew.length > 0) return refused(nothingNew);
+		if (touched.has(keptFirst) && fresh.length === 0 && absorbed.length > 0) {
+			return { ok: false, errors: [`Range ${input.startRef}..${input.endRef} contains no new compressible messages: the first user message is kept visible and every other message in it is already covered by active block(s) ${absorbed.join(", ")}. Nothing was compressed.`], validRefs: validFoldRefs(state) };
+		}
 	}
 	const records: FoldRecord[] = [];
 	const drafts: SessionBoundaryDraft[] = [];
@@ -509,8 +452,6 @@ export function planFoldCoded(input: FoldPlanInput): CodedFoldPlan {
 	const swaps = new Map<string, ContextEditableContent>();
 	const messageById = new Map(state.messages.map((message) => [message.id, message]));
 	const summaryById = new Map(turn.state.blocks.map((block) => [block.blockId, block.summary]));
-	// Entries the branch already omits get no second null edit (pi-context-aware#441).
-	const omitted = omittedEntryIds(input.branch);
 	for (const block of created) {
 		const selected = withdrawSplitEntries(state.messages, block.effectiveMessageIds);
 		// A verbatim entry an earlier fold already hides stays hidden: taking it out would change that fold's coverage.
@@ -545,15 +486,18 @@ export function planFoldCoded(input: FoldPlanInput): CodedFoldPlan {
 			})
 			.sort((a, b) => (indexById.get(a) ?? 0) - (indexById.get(b) ?? 0));
 		const [carrierId, ...hiddenIds] = covered;
-		const uncovered = foldRules.coverage({
-			blockId: block.blockId,
-			carrierId,
-			verbatim: kept.length,
-			condensed: swaps.size,
-			keptFirstInRange: keptFirst !== undefined && block.effectiveMessageIds.includes(keptFirst),
-			withdrawn: withdrawn.length,
-		});
-		if (uncovered.length > 0 || carrierId === undefined) return refused(uncovered);
+		if (!carrierId) {
+			const error = kept.length > 0
+				? "Every entry in this range is kept word for word by a fold hint; there is nothing to fold."
+				: swaps.size > 0
+				? "Every other entry in this range carries skill text that condenses instead of folding; there is nothing to fold."
+				: keptFirst && block.effectiveMessageIds.includes(keptFirst)
+				? "Keeping the first user message leaves nothing else to fold (covers no session entry)."
+				: withdrawn.length > 0
+					? "Range would split a session entry or tool pair at the protected-zone boundary; wait until the whole entry ages out of the protected zone."
+					: `Fold ${block.blockId} covers no session entry.`;
+			return { ok: false, errors: [error], validRefs: validFoldRefs(state) };
+		}
 		const record: FoldRecord = {
 			version: 1,
 			blockId: block.blockId,
@@ -578,143 +522,14 @@ export function planFoldCoded(input: FoldPlanInput): CodedFoldPlan {
 		});
 		const section = renderOneLineSection(oneLines);
 		const rendered = renderFoldSummary(block.summary, block.topic);
-		drafts.push(...foldDrafts(record, section ? `${rendered}\n\n${section}` : rendered, omitted));
-		for (const id of hiddenIds) omitted.add(id);
+		drafts.push(...foldDrafts(record, section ? `${rendered}\n\n${section}` : rendered));
 	}
 	drafts.push(...swapDrafts(input.branch, swaps));
 	return { ok: true, records, drafts, warnings };
 }
 
-/**
- * Plans a strategy's written `summarize` operations with `planFold` on one session as it stands: the
- * engine `checkPlan` (src/strategy-runtime/check-plan.ts) takes. An operation names entries; the range
- * runs from the first ref of `startId` to the last ref of `endId`. An active fold's id names the fold,
- * as in a `context_fold` request.
- */
-export function summarizeEngine(input: Omit<FoldPlanInput, keyof FoldRequest>): SummarizeEngine {
-	const state = foldStateFromBranch(input.branch, input.contextEntries);
-	const refsOf = new Map<string, string[]>();
-	for (const message of state.messages) {
-		const ref = state.kernel.messageRefs.byRaw[message.id];
-		if (ref === undefined || ref === "BLOCKED") continue;
-		const base = baseIdOf(message.id);
-		refsOf.set(base, [...(refsOf.get(base) ?? []), ref]);
-	}
-	const folds = new Set(state.active.map((record) => record.blockId));
-	const refOf = (id: string, end: boolean): string | undefined => {
-		if (folds.has(id)) return id;
-		const refs = refsOf.get(id);
-		return end ? refs?.[refs.length - 1] : refs?.[0];
-	};
-	return (op) => {
-		const startRef = refOf(op.startId, false);
-		const endRef = refOf(op.endId, true);
-		if (startRef === undefined || endRef === undefined) {
-			const missing = startRef === undefined ? op.startId : op.endId;
-			return { ok: false, refusals: [refusal("unknown-ref", `Entry ${missing.slice(0, 64)} is not in the request.`)] };
-		}
-		const plan = planFoldCoded({ ...input, startRef, endRef, summary: op.summary, ...(op.topic ? { topic: op.topic } : {}) });
-		return plan.ok ? plan : { ok: false, refusals: plan.refusals };
-	};
-}
-
-/** Entries a `verbatim` fold hint keeps visible: no fold can take them, so no range is offered over them. */
-export function verbatimEntryIds(branch: readonly SessionEntry[], hints: FoldHintView | undefined): string[] {
-	return [...hintsOnBranch(branch, hints)].filter(([, hint]) => hint.policy === "verbatim").map(([id]) => id);
-}
-
-/**
- * The engine's range recommendation, with entries no fold may take left out (pi-context-aware#457).
- * The engine offers every unfolded message outside the protected zone, so it offered entries a
- * `verbatim` hint keeps and entries a fold queued earlier this turn already takes; a fold of either
- * was refused. `excludedEntryIds` are treated as the protected zone is: a gap no range spans, so
- * every offered range still clears the size minimum without them.
- *
- * A fold's summary is a gap too. The engine skips a message without a ref, and a summary has none,
- * so it offered one range across several folds, `m00001..m00026` over b1..b12; a fold of that
- * range was refused as already compressed. Mapping each summary to a placeholder ref makes the
- * engine see it as folded content, which it treats as a gap; the placeholder is never offered.
- */
-export function foldableRanges(
-	messages: CoreMessage[],
-	state: CompressionState,
-	config: Config,
-	branch: readonly SessionEntry[],
-	zone: "typed" | "all-user-role",
-	excludedEntryIds: ReadonlySet<string>,
-	countTokens: (text: string) => number = defaultCountTokens,
-): { contextRanges: ContextRanges; recommendedRanges: CompressibleRange[] } {
-	const zoneRefs = new Set(protectedField(messages, state, config, branch, zone).protectedMessageIds
-		?? computeProtectedRefs(messages, state, config, countTokens));
-	const byRaw = { ...state.messageRefs.byRaw };
-	for (const message of messages) {
-		const ref = byRaw[message.id];
-		if (ref && excludedEntryIds.has(baseIdOf(message.id))) zoneRefs.add(ref);
-		if (!ref && message.text?.startsWith(SUMMARY_HEADER)) byRaw[message.id] = SUMMARY_PLACEHOLDER_REF;
-	}
-	const view = { ...state, messageRefs: { ...state.messageRefs, byRaw } };
-	const contextRanges = buildCompressibleRanges(messages, view, config, zoneRefs, countTokens);
-	return { contextRanges, recommendedRanges: mergeRangesToThreshold(contextRanges.compressible, config.compress.minCompressRange) };
-}
-
-/** Ref a fold summary gets only while ranges are offered: it marks a gap and is never offered. */
-const SUMMARY_PLACEHOLDER_REF = "fold-summary";
-
-/** A range a fold request can name now, as a refusal lists it. */
-export interface OfferedRange {
-	readonly startRef: string;
-	readonly endRef: string;
-	readonly tokens: number;
-}
-
-export interface OfferedRangesInput {
-	readonly branch: readonly SessionEntry[];
-	readonly contextEntries?: readonly SessionEntry[];
-	readonly modelContextLimit: number;
-	readonly config?: Partial<Config>;
-	/** Entries a pending fold or a `verbatim` hint already takes. */
-	readonly excludedEntryIds?: readonly string[];
-	readonly protectedZone?: "typed" | "all-user-role";
-}
-
-/**
- * The ranges a fold of the branch as it is now would accept, on the view `planFold` plans on, as
- * the fold nudge offers them. A refusal lists these instead of single refs, which models read as
- * a menu and folded one or two at a time, below the size minimum (pi-context-aware#457).
- */
-export function offeredFoldRanges(input: OfferedRangesInput): OfferedRange[] {
-	const state = foldStateFromBranch(input.branch, input.contextEntries);
-	const config: Config = defaultConfig(input.modelContextLimit, input.config ?? {});
-	const turn = createCore().processTurn({ messages: state.messages, state: state.kernel, config, tokenCount: sentTokens(state) });
-	const { recommendedRanges } = foldableRanges(turn.messages, turn.state, config, input.branch, input.protectedZone ?? "typed", new Set(input.excludedEntryIds ?? []));
-	return viableRanges(recommendedRanges).map((range) => ({ startRef: range.startRef, endRef: range.endRef, tokens: range.tokens }));
-}
-
-/** Active folds whose span overlaps the requested range, in id order. A range named by fold ids overlaps the folds between them. */
-function overlappingFolds(state: CompressionState, startRef: string, endRef: string): string[] {
-	const start = parseBoundary(startRef);
-	const end = parseBoundary(endRef);
-	if (!start || !end) return [];
-	const lo = Math.min(start.numericId, end.numericId);
-	const hi = Math.max(start.numericId, end.numericId);
-	const ids: string[] = [];
-	for (const block of state.blocks) {
-		if (!block.active) continue;
-		if (start.kind === "block" && end.kind === "block") {
-			const id = Number(block.blockId.slice(1));
-			if (id >= lo && id <= hi) ids.push(block.blockId);
-			continue;
-		}
-		const span = resolveBlockSpan(block, state.messageRefs.byRaw);
-		const from = span ? parseBoundary(span.startRef) : null;
-		const to = span ? parseBoundary(span.endRef) : null;
-		if (from && to && from.numericId <= hi && to.numericId >= lo) ids.push(block.blockId);
-	}
-	return ids.sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
-}
-
-/** The hint each entry on the branch resolves to, after `dropOversizedPairs`. Empty without hints. */
-export function hintsOnBranch(branch: readonly SessionEntry[], hints: FoldHintView | undefined): Map<string, ResolvedFoldHint> {
+/** The hint each entry on the branch resolves to. Empty without hints. */
+function hintsOnBranch(branch: readonly SessionEntry[], hints: FoldHintView | undefined): Map<string, ResolvedFoldHint> {
 	const found = new Map<string, ResolvedFoldHint>();
 	if (!hints) return found;
 	for (const entry of branch) {

@@ -40,9 +40,9 @@
 import type { ContextEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import { elideImageParts, planNativeMediaElision, type MediaElisionPlan, type ProjectedEntryView } from "../media/media-fold.js";
-import { foldableRanges, foldStateFromBranch, latestReplacementText } from "./fold-adapter.js";
+import { foldStateFromBranch, latestReplacementText, protectedField } from "./fold-adapter.js";
 import { renderEarlierFoldCalls } from "./fold-call-render.js";
-import { foldRecordsOnBranch, foldSummaryBody, type FoldRecord } from "./fold-entries.js";
+import { foldRecordsOnBranch, type FoldRecord } from "./fold-entries.js";
 import { activeHides, planHides, withPointer } from "./hide-entries.js";
 import {
 	baseIdOf,
@@ -68,9 +68,8 @@ import {
 	type NudgeDecision,
 	type NudgeState,
 } from "./kernel/index.js";
-import { isSummaryMessageId } from "./kernel/prune.js";
-import { FOLD_ONLY, reachableNudgeText, renameFoldTool, type NudgeTools } from "./nudge-tools.js";
-import type { Steer } from "../strategy/guidance.js";
+import { isSummaryMessageId, SUMMARY_HEADER } from "./kernel/prune.js";
+import { buildCompressibleRanges, computeProtectedRefs, mergeRangesToThreshold } from "./kernel/recommend.js";
 import { DEFAULT_PRESSURE_LADDER, type PressureLadderConfig } from "../policy/context-policy.js";
 import { countMessageTokens, renderVisibleRefs } from "./kernel/index.js";
 
@@ -171,40 +170,8 @@ export interface FoldTurnInput {
 	readonly protectedZone?: "typed" | "all-user-role";
 	/** The pressure ladder in force; the nudge, emergency and truncation thresholds come from it. Defaults to the starting ladder. */
 	readonly ladder?: PressureLadderConfig;
-	/**
-	 * Entries the nudge must not offer (pi-context-aware#457): those a fold queued this turn already
-	 * takes, and those a `verbatim` fold hint keeps. A fold of either is refused.
-	 */
-	readonly offerExclusions?: readonly string[];
-	/**
-	 * The session recipe's stages for this request (pi-context-aware#472). Asked once per pass with the count
-	 * the pass sends and the kernel's growth nudge, when one is due; returns the texts to inject, in order, and
-	 * the pass injects nothing else. The kernel's nudge counts as shown (its once-per-turn gate closes) only when
-	 * one of those texts is the growth nudge rendered for some tools. Defaults to `growthNudgeOnly()`, the
-	 * growth nudge naming the fold tool alone: what a preview without a view (the parity comparison) sends.
-	 */
-	readonly stages?: (request: FoldPassRequest) => readonly string[];
-	/**
-	 * The wording of the nudge's rule for choosing between the tools (pi-context-aware#459): the session's guidance for
-	 * the request's model. Defaults to `default`, today's text, which a parity preview always sends.
-	 */
-	readonly steer?: Steer;
-}
-
-/** Stages that say only the kernel's growth nudge, naming `tools`: a preview's stand-in for a recipe, with no view. */
-export function growthNudgeOnly(tools: NudgeTools = FOLD_ONLY): (request: FoldPassRequest) => readonly string[] {
-	return (request) => {
-		const text = request.growthNudge?.render(tools);
-		return text === undefined ? [] : [text];
-	};
-}
-
-/** What the pass hands the recipe's stages on one request (pi-context-aware#472). */
-export interface FoldPassRequest {
-	/** The count the pass sends: `FoldTurnResult.tokens.before`. */
-	readonly tokenCount: number;
-	/** The kernel's growth nudge after its once-per-turn gate and emergency deferral, rendered for the tools a stage names; absent when none is due. */
-	readonly growthNudge?: { render(tools: NudgeTools): string | undefined };
+	/** The live fold tool name. Null suppresses tool guidance without changing the fold pass. */
+	readonly nudgeTool?: string | null;
 }
 
 /**
@@ -237,8 +204,7 @@ export interface FoldEmergency {
 export interface NudgeFix {
 	/**
 	 * `denominator`: billion-context-pi takes the ladder as a share of the window less the output reserve, the native pass as a share of the window (pi-context-aware#244).
-	 * `tool-name`: the native nudge is billion-context-pi's decision in this package's text: the fold tool renamed (pi-context-aware#257),
-	 * only reachable tools named, and the rules moved to the fold tool's guidance (pi-context-aware#458, pi-context-aware#456; see nudge-tools.ts).
+	 * `tool-name`: the native nudge is billion-context-pi's with the fold tool renamed and nothing else changed (pi-context-aware#257).
 	 */
 	readonly cause: "tier-trigger" | "emergency-defer" | "denominator" | "tool-name";
 	/** The nudge sent; absent when none was. */
@@ -263,8 +229,6 @@ export interface FoldTurnResult {
 	readonly hidePointerBefore?: readonly { readonly entryId: string; readonly message: Message }[];
 	/** Text of the nudge appended to the request, if any. */
 	readonly nudge?: string;
-	/** Every text injected into this request, in order: the stages' says, or the nudge and the action line. */
-	readonly says?: readonly string[];
 	/** Set while usage is at or above the last ladder step. */
 	readonly emergency?: FoldEmergency;
 	readonly nudgeFix?: NudgeFix;
@@ -344,7 +308,6 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 	const config = turnConfig(input.model.contextWindow, input.config, input.ladder);
 	const core = createCore();
 	const zone = input.protectedZone ?? "typed";
-	const excluded = new Set(input.offerExclusions ?? []);
 	const allImages = imageTokens(input.projection.entries);
 	const sys = input.systemPromptTokens;
 	const sentWithAllImages = estimateTokens(state.messages, coveredMessageIds(kernel), allImages) + sys;
@@ -367,7 +330,7 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 			if (Math.abs(meter.viewTokens - sent) > Math.max(1_000, 0.1 * sent)) tokenCount = floors(meter.viewTokens);
 		} else {
 			const cap = config.modelContextLimit > 0 ? Math.max(0, Math.floor(config.truncate.threshold * config.modelContextLimit) - 1) : Number.MAX_SAFE_INTEGER;
-			const probe = nativeTurn(core, { messages: state.messages, state: structuredClone(kernel), config, tokenCount: Math.min(tokenCount, cap) }, input.branch, zone, excluded);
+			const probe = nativeTurn(core, { messages: state.messages, state: structuredClone(kernel), config, tokenCount: Math.min(tokenCount, cap) }, input.branch, zone);
 			const viewTokens = estimateTokens(probe.messages, coveredMessageIds(probe.state), images) + sys;
 			if (Math.abs(viewTokens - tokenCount) > Math.max(1_000, 0.1 * tokenCount)) tokenCount = floors(viewTokens);
 		}
@@ -385,7 +348,7 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 	const windowKernel = input.compatibility && limit !== config.modelContextLimit ? structuredClone(kernel) : undefined;
 	const truncationKernel = windowKernel ? structuredClone(kernel) : undefined;
 	const textBefore = new Map(state.messages.map((message) => [message.id, message.text ?? ""]));
-	const turn = nativeTurn(core, { messages: state.messages, state: kernel, config, tokenCount }, input.branch, zone, excluded);
+	const turn = nativeTurn(core, { messages: state.messages, state: kernel, config, tokenCount }, input.branch, zone);
 	const emergency = emergencyOf(memory, config, tokenCount, textBefore, turn);
 	memory.nudge = turn.state.nudge;
 	memory.tokenSnapshot = turn.state.tokenSnapshot;
@@ -404,35 +367,25 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 	const turnKey = lastTurnBoundaryId(input.contextEntries) ?? "";
 	const gate = nudgeGate(memory, turnKey, tokenCount, config);
 	const failed = lastAssistantFailed(input.contextEntries);
-	const decided = decideInjection(turn.nudge, gate, failed, turn.state.blocks, true, FOLD_TOOL_NAME, input.steer ?? "default");
-	// The texts this request carries are the recipe's says, and nothing else (pi-context-aware#472).
-	const rendered = new Set<string>();
-	const render = decided.render;
-	const growthNudge = render ? { render: (tools: NudgeTools) => { const text = render(tools); if (text !== undefined) rendered.add(text); return text; }, quoted: nudgeDataLines } : undefined;
-	const injectedTexts = (input.stages ?? growthNudgeOnly())({ tokenCount, ...(growthNudge ? { growthNudge } : {}) }).filter((text) => text.length > 0);
-	const sentNudge = injectedTexts.find((text) => rendered.has(text));
-	// A nudge suppressed because no fold or compact tool is reachable has no parity cause: the classification below
-	// would credit it to the tier trigger (FP-201) or the denominator (FP-203). No preview passes such tools today.
-	if (input.compatibility && sentNudge === undefined && decided.kernelText !== undefined) {
-		throw new Error("A parity preview cannot classify a nudge suppressed because no fold or compact tool is reachable.");
-	}
-	if (sentNudge !== undefined && turn.nudge?.breakdown?.emergencyOverride !== 1) markShown(memory, turnKey, tokenCount);
+	const decided = input.nudgeTool === null
+		? { deferred: false }
+		: decideInjection(turn.nudge, gate, failed, turn.state.blocks, true, input.nudgeTool ?? FOLD_TOOL_NAME);
+	if (decided.text !== undefined && turn.nudge?.breakdown?.emergencyOverride !== 1) markShown(memory, turnKey, tokenCount);
 	let nudgeFix: NudgeFix | undefined;
 	if (compatibleKernel) {
 		const compatible = compatibleNudge(core, state.messages, compatibleKernel, limit, input.config, tokenCount, gate);
 		if (decided.deferred && compatible.text !== undefined) nudgeFix = { cause: "emergency-defer", compatible: compatible.text };
-		else if (compatible.text !== sentNudge) {
-			const fixed = { ...optionalText("sent", sentNudge), ...optionalText("compatible", compatible.text) };
-			// Same nudge, in this package's text: not a trigger or denominator fix (pi-context-aware#257, pi-context-aware#458).
-			// The decisions are compared in the kernel's text; the fix records the text actually sent.
-			if (compatible.text !== undefined && sentNudge !== undefined && decided.kernelText === renameFoldTool(compatible.text, FOLD_TOOL_NAME)) nudgeFix = { cause: "tool-name", ...fixed };
+		else if (compatible.text !== decided.text) {
+			const fixed = { ...optionalText("sent", decided.text), ...optionalText("compatible", compatible.text) };
+			// Same nudge, different tool name: not a trigger or denominator fix (pi-context-aware#257).
+			if (compatible.text !== undefined && decided.text === renameFoldTool(compatible.text, FOLD_TOOL_NAME)) nudgeFix = { cause: "tool-name", ...fixed };
 			else {
 				const atWindow = windowKernel ? compatibleNudge(core, state.messages, windowKernel, config.modelContextLimit, input.config, tokenCount, gate) : undefined;
 				// The denominator moves billion-context-pi's nudge: it is the cause only when billion-context-pi's
 				// rules at the window's size give the nudge the native pass sent. billion-context-pi's text names its
 				// own tool, so it is compared with the fold tool renamed. A mix of causes is left unexplained.
 				if (atWindow === undefined || atWindow.text === compatible.text) nudgeFix = { cause: "tier-trigger", ...fixed };
-				else if (atWindow.text === undefined ? sentNudge === undefined : sentNudge !== undefined && decided.kernelText === renameFoldTool(atWindow.text, FOLD_TOOL_NAME)) nudgeFix = { cause: "denominator", ...fixed };
+				else if (atWindow.text === undefined ? decided.text === undefined : decided.text === renameFoldTool(atWindow.text, FOLD_TOOL_NAME)) nudgeFix = { cause: "denominator", ...fixed };
 			}
 		}
 	}
@@ -450,12 +403,9 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 		}
 		denominator = { window: config.modelContextLimit, bcpLimit: limit, truncationStartDiffers, ...(bcpMessages ? { bcpMessages } : {}) };
 	}
-	// One injection per request: the nudge and the pressure action line share one message (pi-context-aware#461).
-	// It goes after the last message from the session, so every byte before it is the cached prefix.
-	const injected = injectedTexts.join("\n\n");
-	if (injected.length > 0) {
+	if (decided.text !== undefined) {
 		const at = lastSourcedIndex(rebuilt.sources) + 1;
-		rebuilt.messages.splice(at, 0, { role: "user", content: [{ type: "text", text: injected }], timestamp: Date.now() } as Message);
+		rebuilt.messages.splice(at, 0, { role: "user", content: [{ type: "text", text: decided.text }], timestamp: Date.now() } as Message);
 		rebuilt.sources.splice(at, 0, undefined);
 	}
 	if (turn.state.blocks.length > 0) dropOrphanResults(rebuilt);
@@ -467,8 +417,7 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
 		sources: rebuilt.sources,
 		...(appliedMedia.entryIds.length > 0 ? { mediaElidedEntryIds: appliedMedia.entryIds, mediaElisionBefore: appliedMedia.before } : {}),
 		...(appliedHide && appliedHide.entryIds.length > 0 ? { hidePointerEntryIds: appliedHide.entryIds, hidePointerBefore: appliedHide.before } : {}),
-		...(sentNudge !== undefined ? { nudge: sentNudge, nudgeKind: nudgeKindOf(turn.nudge) } : {}),
-		...(injectedTexts.length > 0 ? { says: injectedTexts } : {}),
+		...(decided.text !== undefined ? { nudge: decided.text, nudgeKind: nudgeKindOf(turn.nudge) } : {}),
 		tokens: { before: tokenCount, after: memory.meter.viewTokens },
 		...(emergency ? { emergency } : {}),
 		...(nudgeFix ? { nudgeFix } : {}),
@@ -480,20 +429,25 @@ export function prepareFoldTurn(input: FoldTurnInput): FoldTurnResult | undefine
  * The kernel's processTurn with its recommend stage on the protected zone planFold uses
  * (pi-context-aware#319). The kernel counts every user-role message, an extension-injected
  * custom_message included, as the latest user message, so its recommendation hid the history after
- * one. The node also offers no range a fold would refuse (pi-context-aware#457, see foldableRanges).
- * Only that node is replaced; prune, CCR and truncation are the kernel's. In all-user-role mode, the
- * parity preview's, the kernel's own processTurn runs.
+ * one. Only that node is replaced; prune, CCR and truncation are the kernel's. Without an injected
+ * message on the branch, or in all-user-role mode, the kernel's own processTurn runs.
  */
-function nativeTurn(core: CompressionCore, input: ProcessTurnInput, branch: readonly SessionEntry[], zone: "typed" | "all-user-role", excluded: ReadonlySet<string>): ProcessTurnResult {
-	if (zone === "all-user-role") return core.processTurn(input);
+function nativeTurn(core: CompressionCore, input: ProcessTurnInput, branch: readonly SessionEntry[], zone: "typed" | "all-user-role"): ProcessTurnResult {
+	if (zone === "all-user-role" || !branch.some((entry) => entry.type === "custom_message")) return core.processTurn(input);
 	const errors = validateConfig(input.config);
 	if (errors.length > 0) console.warn(`[acp-kernel] Config validation warnings: ${errors.join("; ")}. Thresholds may not fire correctly.`);
 	const contentStore = input.contentStore ?? createContentStore();
 	const recommend: PipelineNode = {
 		name: "recommend",
 		run(io, ctx) {
-			const { contextRanges, recommendedRanges } = foldableRanges(io.messages, io.state, ctx.config, branch, zone, excluded, ctx.countTokens);
-			const recommendation = { contextRanges, recommendedRanges, nothingToCompress: contextRanges.compressible.length === 0 };
+			const protectedRefs = protectedField(io.messages, io.state, ctx.config, branch, zone).protectedMessageIds
+				?? computeProtectedRefs(io.messages, io.state, ctx.config, ctx.countTokens);
+			const contextRanges = buildCompressibleRanges(io.messages, io.state, ctx.config, protectedRefs, ctx.countTokens);
+			const recommendation = {
+				contextRanges,
+				recommendedRanges: mergeRangesToThreshold(contextRanges.compressible, ctx.config.compress.minCompressRange),
+				nothingToCompress: contextRanges.compressible.length === 0,
+			};
 			return { ...io, effects: { ...io.effects, recommendation } };
 		},
 	};
@@ -655,7 +609,10 @@ function asBillionContextBlocks(kernel: CompressionState, messages: readonly Cor
 	const tagged = new Map(renderVisibleRefs([...messages], kernel, defaultCountTokens).map((message) => [message.id, message]));
 	const summaries = new Map<string, string>();
 	for (const block of kernel.blocks) {
-		block.summary = foldSummaryBody(block.summary);
+		if (block.summary.startsWith(SUMMARY_HEADER)) {
+			const newline = block.summary.indexOf("\n");
+			block.summary = newline < 0 ? "" : block.summary.slice(newline + 1);
+		}
 		summaries.set(block.blockId, block.summary);
 	}
 	for (const block of kernel.blocks) {
@@ -863,8 +820,7 @@ function estimateTokens(messages: readonly CoreMessage[], covered: ReadonlySet<s
 	return tokens;
 }
 
-/** The fold pass's estimate of each projected entry's image tokens, by entry id; images a media elision plan drops are not counted. */
-export function imageTokens(
+function imageTokens(
 	entries: FoldTurnInput["projection"]["entries"],
 	plan?: MediaElisionPlan,
 ): Map<string, number> {
@@ -944,17 +900,6 @@ export function lastAssistantFailed(entries: readonly SessionEntry[]): boolean {
 
 interface Gate { readonly shown: boolean; readonly reInjectReady: boolean }
 
-/** A nudge line that prints a fold or a range from the session: a target block (`  b3  2 msgs  …  "topic"`) or a range (`  m00002–m00003  …`). */
-const NUDGE_DATA_LINE = /^ {2}(?:b\d+|m\d{5}\u2013m\d{5}) /u;
-
-/**
- * The lines of a growth nudge that quote the session: target blocks with the topic the model wrote, and ranges
- * with the tools their calls used. The plan checker does not read a tool name there as an offer of the tool.
- */
-function nudgeDataLines(text: string): string[] {
-	return text.split("\n").filter((line) => NUDGE_DATA_LINE.test(line));
-}
-
 /** billion-context-pi's once-per-turn nudge gate, with its re-anchor when the context shrank. */
 function nudgeGate(memory: FoldTurnMemory, turnKey: string, tokenCount: number, config: Config): Gate {
 	const limit = config.modelContextLimit;
@@ -973,22 +918,12 @@ function markShown(memory: FoldTurnMemory, turnKey: string, tokenCount: number):
 	memory.shownTokens.set(turnKey, tokenCount);
 }
 
-/**
- * The nudge due on this request, if any. `kernelText` is the kernel's text with `foldTool` named, which the parity
- * preview compares with billion-context-pi's (`text` is the same, billion-context-pi's own nudge); `render` gives
- * the nudge in this package's text for the tools a stage names, and nothing when it names neither (pi-context-aware#458).
- */
-function decideInjection(nudge: NudgeDecision | undefined, gate: Gate, turnFailed: boolean, blocks: readonly CompressionBlock[], deferEmergency: boolean, foldTool: string, steer: Steer = "default"): { text?: string; kernelText?: string; deferred: boolean; render?: (tools: NudgeTools) => string | undefined } {
+function decideInjection(nudge: NudgeDecision | undefined, gate: Gate, turnFailed: boolean, blocks: readonly CompressionBlock[], deferEmergency: boolean, foldTool: string): { text?: string; deferred: boolean } {
 	if (!nudge?.shouldInject) return { deferred: false };
 	const emergency = nudge.breakdown?.emergencyOverride === 1;
 	const deferred = deferEmergency && emergency && turnFailed;
 	if (deferred || (!emergency && gate.shown && !gate.reInjectReady)) return { deferred };
-	const decision = { ...nudge, compressibleRanges: viableRanges(nudge.compressibleRanges) };
-	const active = blocks.filter((block) => block.active);
-	const kernelText = kernelNudgeText(decision, active, foldTool);
-	// The nudge in this package's text, for whichever tools a stage names (pi-context-aware#472).
-	const render = (named: NudgeTools) => nudgeText(decision, active, named, foldTool, steer);
-	return { text: kernelText, kernelText, deferred, render };
+	return { text: nudgeText({ ...nudge, compressibleRanges: viableRanges(nudge.compressibleRanges) }, blocks.filter((block) => block.active), foldTool), deferred };
 }
 
 /** The nudge billion-context-pi 0.1.83 would send: kernel tier triggers, no emergency deferral. */
@@ -1001,24 +936,20 @@ function compatibleNudge(core: CompressionCore, messages: CoreMessage[], kernel:
 /** The fold tool the kernel's nudge text names: billion-context-pi's. */
 const KERNEL_FOLD_TOOL = "compress";
 
-export { renameFoldTool };
-
-/** billion-context-pi's nudgeMessage text: the kernel's nudge, with `foldTool` named, and a line on the active blocks. */
-export function kernelNudgeText(nudge: NudgeDecision, blocks: readonly CompressionBlock[], foldTool: string = FOLD_TOOL_NAME): string {
-	return withBlockLine(renameFoldTool(renderNudgeText(nudge, defaultPrompts, {}).text, foldTool), blocks);
-}
-
 /**
- * The nudge this package sends: the kernel's decision in nudge-tools.ts's text, naming only the reachable
- * tools, and the line on the active blocks. `undefined` when neither tool is reachable (pi-context-aware#458).
+ * The kernel's nudge with the fold tool the model can actually call. After cut-over
+ * `compress` is not a registered tool here, so a nudge that names it sends the
+ * model to a tool it cannot call (pi-context-aware#257). Both forms the kernel writes are
+ * renamed: the backticked name and a `compress({` call.
  */
-export function nudgeText(nudge: NudgeDecision, blocks: readonly CompressionBlock[], tools: NudgeTools = FOLD_ONLY, foldTool: string = FOLD_TOOL_NAME, steer: Steer = "default"): string | undefined {
-	const text = reachableNudgeText(nudge, tools, foldTool, steer);
-	return text === undefined ? undefined : withBlockLine(text, blocks);
+export function renameFoldTool(text: string, tool: string): string {
+	if (tool === KERNEL_FOLD_TOOL) return text;
+	return text.replaceAll("`" + KERNEL_FOLD_TOOL + "`", "`" + tool + "`").replace(/(?<![A-Za-z])compress\(\{/gu, tool + "({");
 }
 
-function withBlockLine(text: string, blocks: readonly CompressionBlock[]): string {
-	const lines = [text];
+/** billion-context-pi's nudgeMessage text: the kernel's nudge and a line on the active blocks. */
+export function nudgeText(nudge: NudgeDecision, blocks: readonly CompressionBlock[], foldTool: string = FOLD_TOOL_NAME): string {
+	const lines = [renameFoldTool(renderNudgeText(nudge, defaultPrompts, {}).text, foldTool)];
 	if (blocks.length > 0) {
 		const summary = blocks.reduce((sum, block) => sum + Math.ceil((block.summary || "").length / 4), 0);
 		const compressed = blocks.reduce((sum, block) => sum + (block.compressedTokens || 0), 0);

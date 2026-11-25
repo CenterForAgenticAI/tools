@@ -59,6 +59,7 @@ test("a role a host did not declare is rejected, leaving the session foreground"
 test("the worker role withholds every foreground behaviour except the transcript reference", () => {
 	assert.deepEqual(sessionRoleBehaviour("worker"), {
 		allowCheckin: false,
+		allowAutomaticContinuation: false,
 		autoSendSeed: false,
 		rewriteSeedWithModel: false,
 		injectCacheListing: false,
@@ -72,6 +73,7 @@ test("the worker role withholds every foreground behaviour except the transcript
 test("the foreground role permits everything, so an ordinary session is unchanged", () => {
 	assert.deepEqual(sessionRoleBehaviour("foreground"), {
 		allowCheckin: true,
+		allowAutomaticContinuation: true,
 		autoSendSeed: true,
 		rewriteSeedWithModel: true,
 		injectCacheListing: true,

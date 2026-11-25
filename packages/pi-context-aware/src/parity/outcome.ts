@@ -1,5 +1,4 @@
-import { refusalCodeOf } from "../strategy-runtime/check-plan.js";
-import type { RefusalCode } from "../strategy/contract.js";
+import { STUB_SUMMARY_CODE } from "../folds/stub-summary.js";
 import type { OutcomeEvidence, OutcomeType, ParityDiff, RejectReason } from "./records.js";
 
 /**
@@ -13,39 +12,33 @@ export type ObservedResult =
 	| { readonly kind: "panel"; readonly blocks: number; readonly reasons: readonly RejectReason[] };
 
 const MAX_CLASSIFIED_CHARS = 64 * 1024;
-/**
- * The parity reason each refusal code is recorded as (pi-context-aware#468). Records name no reason for a
- * fold hint, a stub, the claim or a tool; those codes are `other`, as their text was before the codes.
- */
-const REASON_BY_CODE: Readonly<Record<RefusalCode, RejectReason>> = {
-	"split-pair": "split",
-	"protected-zone": "protected-zone",
-	"first-user-kept": "no-fold",
-	"unrecoverable": "other",
-	"forged-pointer": "other",
-	"kept-verbatim": "other",
-	"condenses-instead": "other",
-	"summary-empty": "summary-empty",
-	"summary-short": "summary-short",
-	"summary-long": "summary-long",
-	"summary-stub": "stub-summary",
-	"summary-unwritten": "other",
-	"already-folded": "consumed",
-	"owner-claimed": "other",
-	"unreachable-tool": "other",
-	"forged-role-turn": "other",
-	"unknown-ref": "unknown-ref",
-	"dangling-ref": "dangling-ref",
-	"too-small": "too-small",
-	"too-large": "other",
-	"no-fold": "no-fold",
-	"header-missing": "header-missing",
-	"unrecognized": "other",
-};
+const REASON_PATTERNS: readonly (readonly [RejectReason, RegExp])[] = [
+	["summary-empty", /Summary is empty/u],
+	["summary-short", /Summary too short/u],
+	["summary-long", /Summary too long/u],
+	["unknown-ref", /does not exist in this session|every ref is unknown|Invalid boundary ref/u],
+	["dangling-ref", /cannot be anchored/u],
+	["consumed", /already compressed|not found in visible context|contains no new compressible messages|already covered by active blocks|hidden orphan compress call|none of its content/u],
+	["protected-zone", /protected zone/u],
+	["split", /would split/u],
+	["too-small", /compressible content too small/u],
+	["no-fold", /created no fold|covers no session entry/u],
+	["header-missing", /Session header is unavailable/u],
+	// The native adapter's cut-off summary refusal (pi-context-aware#173); billion-context-pi has no such error.
+	["stub-summary", new RegExp(`\\[${STUB_SUMMARY_CODE}\\]`, "u")],
+];
+const MAX_REASONS = REASON_PATTERNS.length + 1;
 
-/** Map kernel/adapter rejection messages to reason codes, through the plan checker's refusal code of each; unrecognized text is `other`. */
+/** Map kernel/adapter rejection messages to reason codes; unrecognized text is `other`. */
 export function rejectReasons(messages: readonly string[]): RejectReason[] {
-	return [...new Set(messages.map((message) => REASON_BY_CODE[refusalCodeOf(message)]))].sort();
+	const reasons = new Set<RejectReason>();
+	for (const message of messages) {
+		const text = message.slice(0, MAX_CLASSIFIED_CHARS);
+		const matched = REASON_PATTERNS.filter(([, pattern]) => pattern.test(text));
+		if (!matched.length) reasons.add("other");
+		for (const [reason] of matched) reasons.add(reason);
+	}
+	return [...reasons].sort().slice(0, MAX_REASONS);
 }
 
 /**

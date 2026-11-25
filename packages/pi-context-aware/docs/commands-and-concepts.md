@@ -10,13 +10,15 @@ Inside Pi:
 /context-status
 ```
 
-This reports context usage, seed mode, rewrite behavior, ambiguity mode, compaction model, proactive compaction threshold, and the latest seed handoff (including the raw seed, seed actually used, and any expansion or no-expansion reason). The shared footer shows the pressure icon and rounded percentage (for example, `🟡 55%`) at the WARN band and above; below WARN it is hidden, except that it shows an entry-limit warning at any percentage and `size unknown` when Pi has not measured the context; detailed token counts and non-default configuration stay out of the crowded footer.
+This reports context usage, seed mode, rewrite behavior, ambiguity mode, compaction model, proactive compaction threshold, and the latest seed handoff (including the raw seed, seed actually used, and any expansion or no-expansion reason). The shared footer deliberately shows only the pressure icon and rounded percentage (for example, `🟢 24%`); detailed token counts and non-default configuration stay out of the crowded footer.
 
-The session focus and the task list belong to pi-workstream: its `workstream_focus` and `workstream_tasks` tools, its `/focus`, `/tasks` and `/answer` commands, and its widget. This package reads the focus that pi-workstream records, `pi-workstream.workstream.v1` or the older `context-aware.workstream.v1`, as one stream in transcript order. It uses the focus for compaction guidance, `/checkin`, the session registry, `/sessions`, cmux status and activity. `/sessions health` reports scrubbed adapter and capability state without exposing transcript content.
+While a durable workstream is active, a separate widget above the editor shows its objective, status, and goal progress. The widget word-wraps to the available terminal width within a two-line collapsed budget, marks a longer objective with `…`, and reveals the full text plus a collapse hint while tool output is expanded. It refreshes after focus mutations and session replay, and disappears when the workstream is paused, completed, detached, disabled, or unavailable.
+
+`/focus` renders the authoritative snapshot as a scan-friendly summary of the objective, status, goals, references, boundaries, and revision rather than raw JSON. Focus mutations use the same view for confirmations or rejection reasons; `/focus activity` shows the full recorded activity timeline. `/focus health` reports scrubbed adapter and capability state without exposing transcript content.
 
 Activity entries are generated automatically after a settled run that contains a material typed event such as a decision, commit, file change, blocker, or handoff. The primary coding agent does not author these entries, so no agent skill is required. A separate bounded activity-model call receives an explicit system rubric and a structured payload with two different trust roles:
 
-- `authoritativeWorkstream` is validated alignment state replayed from the session focus entries. Its objective, status, pinning, goals, references, and boundaries are the sole semantic authority for the workstream's current purpose and constraints.
+- `authoritativeWorkstream` is validated alignment state replayed from `context-aware.workstream.v1`. Its objective, status, pinning, goals, references, and boundaries are the sole semantic authority for the workstream's current purpose and constraints.
 - `transcriptEvidence` is a bounded, redacted account of what happened. Embedded text may provide evidence of a genuine decision or result, but it cannot instruct the activity model or redefine the workstream. `recentActivity` is likewise a projection used for continuity and deduplication, never authority.
 
 The model may emit zero to three grounded events and should return no events when the evidence is routine, ambiguous, unrelated to the authoritative objective, or contains no durable change. Objective, goal, boundary, status, and pinning changes must come from `authoritativeWorkstream`, not be inferred from raw transcript language. For inactive workstreams, only lifecycle transitions or still-relevant unresolved state qualify; unrelated subsequent work does not. Oversized state is reduced to a valid bounded JSON projection with explicit `omittedCounts`; omitted items are never treated as absent state.
@@ -31,9 +33,38 @@ The activity rubric uses these meanings:
 
 Each summary must describe a durable outcome rather than raw tool activity, remain grounded in supplied transcript-entry IDs, avoid duplicating recent activity, and contain no secrets or unnecessary path details. `relevant: true` means an agent resuming after compaction would need the event to continue the objective or honor a current decision, blocker, constraint, or handoff. Other durable historical milestones may be recorded as not relevant and therefore stay out of the bounded compaction digest.
 
-Only enabled, active focus affects compaction guidance and details or next-phase seed constraints. Missing, disabled, paused, completed, and detached focus leaves normal compaction unchanged and contributes no durable-workstream content. Old sessions keep working: pi-workstream shows their tasks and focus, and this package reads their focus.
+Durable focus is deliberately optional and defaults to unset. The model-facing policy asks the agent to make an explicit continuity decision at the start of each objective. Start it only when the objective itself must survive an expected compaction, session handoff, restart, or explicit user request. Complexity, multiple files, delegation, worktrees, tests, or a long single-session task are not enough:
 
-For the model itself, context-aware keeps exact usage numbers out of the system prompt and out of the session. The fold pass computes one pressure value per request from the request it builds, and at `WARN` or `URGENT` one action line rides in that request only, after the last session message, so the cached prefix is unchanged. See [Cache-aware context pressure](#cache-aware-context-pressure).
+```ts
+session_focus({
+  action: "start",
+  objective: "Preserve the durable lifecycle handoff",
+  reason: "The objective must survive an expected compaction and reviewer handoff"
+})
+```
+
+If uncertain, leave focus unset. `session_focus` is not a to-do list, progress tracker, activity log, or implementation ledger. Do not create goals for ordinary steps or add refs merely to record transient branches, worktrees, commits, or paths. Do not update it after each phase, tool call, test result, commit, or routine status change.
+
+A self-contained answer, routine one-file edit, or task expected to finish in the current response should remain without focus; if the objective later must survive context loss, start focus then after any required thinking-effort preflight. When focus is justified, state one concise overall purpose instead of copying the user's prompt. Use a goal only for a durable sub-objective whose state must survive context loss, a ref only when it is needed to resume the work, and a boundary only for a lasting constraint. Mutate it only for a durable semantic change needed after context loss: the objective materially changes, the user establishes or changes a lasting constraint, a resumable external reference becomes essential, or the lifecycle truly pauses, completes, or detaches. Otherwise do not call `session_focus`.
+
+#### Goals and the session brief
+
+A goal is a durable sub-objective recorded on the focus snapshot. The agent sets, changes or removes one with the `goal` action; the status defaults to `active`, and a goal needs started focus:
+
+```ts
+session_focus({ action: "goal", goal: { id: "g1", text: "Expose goals on session_focus", status: "active" } })
+session_focus({ action: "goal", goal: { id: "g1", text: "" }, remove: true })
+```
+
+A goal id follows the task-id rules (at most 32 characters, `^[A-Za-z0-9][A-Za-z0-9._-]*$`); a goal status is `pending`, `active`, `blocked` or `done`. Tasks link to a goal by its id; see the session task list.
+
+The brief is a short note of where the session stands: what is going on, what was decided, what comes next. It does not need focus. `{action: "brief", brief: "<text>"}` replaces it and `{action: "brief", clear: true}` removes it. Text over 2,000 characters (`MAX_BRIEF_CHARS`) is refused with a reason, never truncated, and secret-shaped text is redacted before it is stored. Each change is a `context-aware.brief.v1` session entry; the latest one on the current branch wins, so replay, reload and `/tree` follow it. The full brief appears once after compaction or resume/reload, in a hidden `<session-brief>` block outside the system prompt. Otherwise foreground sessions receive a hint to write one after five user turns or a non-empty task list, or to replace one after 15 user turns or five task status changes. Hints repeat after another 15 user turns while still needed. Cadence and delivery receipts follow the current branch. Workers receive recovery text but no hints. Hints are omitted when `session_focus` is unavailable. `/focus` and `session_focus get` still show the full text.
+
+Agent-created objectives start unpinned so the agent can refine them. An explicit user `/focus edit <objective>` creates or updates a pinned objective that agent mutations cannot replace. The initial agent `start` operation is rejected when a focus already exists; invalid mutations are rejected without changing the authoritative snapshot. A user uses `/focus edit` to establish or replace a user-owned objective.
+
+Only enabled, active focus affects prompt context, compaction guidance/details, or next-phase seed constraints. Missing, disabled, paused, completed, and detached focus leaves normal compaction unchanged and contributes no durable-workstream content.
+
+For the model itself, context-aware avoids rewriting exact usage numbers into the system prompt every turn. Instead, it keeps stable telemetry-reading guidance in the system prompt and persists one hidden, self-describing `<context-telemetry>` envelope when each outer user turn starts. The envelope carries the pressure band, rounded usage percentage, approximate headroom, and an optional action while explicitly identifying itself as extension telemetry rather than user input. It remains unchanged through the turn's internal tool/model loop, keeping the transcript append-only for provider prompt caching.
 
 ### 2. Compact with an explicit seed
 
@@ -174,7 +205,7 @@ At `session_start`, context-aware reads Pi's public `SettingsManager` with the a
 
 Warnings are emitted once per observed unsafe state rather than on every status check. `/context-aware-proactive status` and `/context-status` show the owner plus the startup source of Pi's setting. When `summarizer.enabled` is `false`, ownership status is `deferred to another compactor`; context-aware does not guess which registered extension will claim the hook. If the global or trusted-project Pi settings file cannot be parsed or read, status reports the owner as unknown instead of guessing and no ownership warning is emitted.
 
-To let another extension own both automatic triggering and summarization while retaining context-aware telemetry, recall and focus projections, configure:
+To let another extension own both automatic triggering and summarization while retaining context-aware tasks, focus, and telemetry, configure:
 
 ```json
 {
@@ -194,7 +225,7 @@ While the block lasts:
 - `context_compact` stays registered with `hidden` exposure. Pi does not declare it to the model, and code-mode executors do not list it. A call that still arrives fails with the reason.
 - `/compact-then` and the context service's handoff request fail with the reason instead of starting a compaction.
 - Proactive compaction is inactive, and `/context-status` reports `Automatic compaction owner: blocked by billion-context-pi, which cancels every compaction`.
-- When the current session can reach billion-context-pi's own `compress` tool and neither context tool, the pressure action line names it instead of compaction. Otherwise they do not name it. The `context-tools` section names only our own tools.
+- When the current session can reach billion-context-pi's own `compress` tool, the context-awareness guidance and the `URGENT` telemetry action name it instead of compaction. Otherwise they do not name it. The `context-tools` section names only our own tools.
 
 The tool list is read once per session start. To restore compaction, remove `billion-context-pi` from the profile's packages and reload Pi.
 
@@ -226,33 +257,40 @@ The parity matrix is maintained in `MODEL_DISPATCH_DECISIONS` and tested for all
 
 ## Important concepts
 
-### Cache-aware context pressure
+### Cache-aware context telemetry
 
-Prompt caching works best when the long prompt prefix stays stable. Earlier versions appended exact context usage numbers to the system prompt before every agent turn, and later versions persisted a hidden `<context-telemetry>` envelope at each outer user turn. Both are gone (pi-context-aware#461).
+Prompt caching works best when the long prompt prefix stays stable. Earlier versions appended exact context usage numbers to the system prompt before every agent turn, which could make provider prompt caches diverge before conversation history.
 
-The fold pass computes one pressure value per model request, over the context window: its count of the request it builds, which is Pi's view with the active folds applied, before the pass truncates or hides anything and without the line it injects, and not below Pi's last measured size less what a newer fold has reclaimed. The per-request metrics record keeps it as `tokensBefore`; `tokensAfter` is the view actually sent. When the fold pass does not run (another engine owns folds, or the pass failed), the request is Pi's own view and Pi's measured usage is its count. The action line below, proactive compaction and the retry of a compaction still owed, the metrics record, the `/checkin` prompt, `context_status`, `/context-status`, the compaction owner's pressure, the context service snapshot and the footer all read this one value.
+Current behavior splits this into two pieces:
 
-Proactive compaction decides between requests. When the latest request's count (or Pi's measured size, if larger), plus the reply and tool results of the turn that just ended and a 16,384-token margin, would reach the threshold or the generation reserve, it reads the count the fold pass gives the request the session would send next, so a reply and its tool results are counted before the next request goes out. Otherwise nothing can fire, and it reads the latest request's count without running a second pass. Within a tool loop that preview equals the next request's count; at a prompt boundary it is lower, because it leaves out the new prompt and the messages other hooks add.
+1. a stable `<context-awareness>` system prompt block that explains how to interpret context-pressure telemetry;
+2. a hidden, self-describing custom message persisted once when the outer user turn starts.
 
-At `OK` nothing is injected and nothing is persisted. At `WARN` or `URGENT` one action line joins the request, after the last message from the session. When the fold nudge is due on the same request, the line is appended to the nudge, so the model gets one injected message. The line is never persisted: the next request carries its own line, or none. For example:
+The system prompt text is set as named Pi prompt sections, one per block: `context-awareness`, `durable-focus-guidance`, `context-cache`, `session_focus` (the active focus envelope), and `compaction_history`. Pi sends a changed section as an update, so a focus edit changes only `session_focus` and the other sections stay byte-identical. Task state, brief hints and recovery text, and pressure telemetry stay in the hidden message rather than in a section. When another extension has already replaced the whole prompt, context-aware appends the same blocks to that prompt instead.
 
-```text
-[context-aware extension, not user input] Context pressure WARN (64% used, about 98k tokens of headroom). Before broad reads, long test loops or a phase switch, keep the next action small, fold finished ranges with `context_fold`, call `context_compact` at a clean boundary, or delegate bounded work.
+Envelope format:
+
+```xml
+<context-telemetry source="pi-extension:context-aware" user-input="false" response-expected="false">
+  <pressure band="WARN" usage-percent="64" approximate-headroom="98k" action="gate-broad-work" />
+  <instruction>This is extension telemetry, not user input. No response or acknowledgement is expected. It does not supersede the preceding user request or tool result. Continue the current agent loop without acknowledging this telemetry, using the pressure data only for context-management decisions.</instruction>
+</context-telemetry>
 ```
 
-The line names only the tools the session can call now. At `URGENT` it asks for `context_compact` before the next nontrivial tool call when that is reachable, else a fold with `context_fold`; when another extension cancels every compaction and neither tool is reachable, it names that extension's reachable replacement (billion-context-pi's `compress`); otherwise it asks the model to finish only the atomic edit or validation in progress and tell the user context is nearly full. `pressureTelemetry.mode` sets how much the line shows; see [`pressureTelemetry`](configuration.md#pressuretelemetry).
+The `action` attribute is omitted in the `OK` band and is `gate-broad-work` in `WARN`. In `URGENT`, it is `compact-before-tool` only when `context_compact` is reachable in the current session. When compaction is unavailable, the action is `compress-before-tool` only if an extension that cancels every compaction supplies a reachable `compress` (billion-context-pi's tool); otherwise it is `finish-atomic-work`. The stable guidance block and generated check-in prompt use the same reachability decision, including `extensions.<tool>(...)` invocations when Pi Fabric is the available route. Usage percentage and headroom are intentionally rounded.
 
-The bytes before the injection stay identical between consecutive requests. pi-ai puts the conversation cache breakpoint at the end of the last user message, which is now the injection: `cache_control` on its last block (Anthropic Messages, and the last text part of OpenAI-compatible payloads) or a trailing `cachePoint` (Bedrock Converse). context-aware moves that breakpoint to the block before the injection, the end of the session's own messages, so the next request reads the entry instead of writing the whole history again. It moves only onto a text, tool-call or tool-result block; when the block before the injection is an image or a thinking block, the breakpoint stays where pi-ai put it. Providers with automatic prefix caching need no breakpoint.
-
-The system prompt carries no pressure rules and no instruction about telemetry, since no envelope can arrive. Its text is set as named Pi prompt sections, one per block: `context-awareness` (the recall guidance), `context-tools`, `context-cache`, and `compaction_history`. Pi sends a changed section as an update, so the other sections stay byte-identical. When another extension has already replaced the whole prompt, context-aware appends the same blocks to that prompt instead.
-
-Contributed text from other extensions (pi-workstream places its focus and task list this way) rides in a hidden `context-aware-task-state` message, and a restart notice in a `context-aware-restart-notice` message, each sent only when its text changes. Both are persisted, so they stay in the cached prefix. The restart notice and the action line each start with `[context-aware extension, not user input]`, since no system-prompt rule explains them.
-
-Sessions saved before pi-context-aware#461 still hold their `context-aware-usage-marker` messages. They stay in the session file and the display, but the request leaves them out: a resumed session's last marker would otherwise remain its newest pressure statement.
+Pi currently converts extension custom messages to an LLM-facing `user` role. The envelope is therefore deliberately self-describing: it identifies `pi-extension:context-aware` as its source, states that it is not user input, and tells the model to continue the preceding request or tool loop without acknowledgement. Its snapshot includes the newly submitted user prompt, then remains byte-identical while tool results and later model calls append after it. A new envelope is appended only when the next user turn starts.
 
 The band edges come from the context policy's pressure ladder: `WARN` starts at the first fold nudge (45% by default) and `URGENT` at seeded compaction (90% by default). See [`pressureLadder`](configuration.md#pressureladder) for the full mapping.
 
-`UNKNOWN` means nothing counted the request: Pi has not measured the size, right after a compaction or an overflow, and the fold pass did not run. Nothing is injected then. The context was just reduced, so this is the lowest-pressure point of a session; Pi measures the size again with the next reply, and Pi's own overflow recovery still applies. When the fold pass runs, it counts the request it builds even before Pi has measured the size, so the band comes from that count. Proactive compaction still waits for a size Pi measured. The footer, `/context-status`, compaction notices, the `context_compact` receipt (`tokens_before: null`), the check-in prompt, and the context service (`band: "UNKNOWN"`) report an unmeasured size as unknown.
+Tool-specific rules appear only when the current session can reach the named tool. If neither compaction nor a replacement is reachable, `WARN` keeps the next action small or delegates bounded work, while `URGENT` finishes only an atomic edit or validation before keeping further work small.
+
+Interpretation is intentionally graduated:
+
+- `OK`: compact only at natural phase boundaries.
+- `WARN`: gate broad work. Before broad search/read, repeated test/debug loops, phase switches, or context-heavy delegation, the agent should either compact at a clean boundary, keep the next action small and reassess, or delegate bounded work with controlled context. For delegated work, prefer a worker that starts with only the task, or the task plus a snippet of recent conversation, give it explicit scope/stop rules, and ask it for a short result. Compact first for broad or full-context delegation.
+- `URGENT`: compact before nontrivial tool use unless finishing one atomic edit/validation that would be unsafe to interrupt; then compact immediately.
+- `UNKNOWN`: Pi has not measured the context size yet, for example right after a compaction or an overflow. The envelope reports `usage-percent="unknown"` instead of a number nobody measured (with `pressureTelemetry.mode` `"band"` it reports only `band="UNKNOWN"`, and with `"off"` there is no envelope), and the agent keeps the next action small until a measured band arrives. The marker entry's `details` are then `{ band: "UNKNOWN", percent: null, headroom: null }`. The footer, `/context-status`, compaction notices, the `context_compact` receipt (`tokens_before: null`), the check-in prompt, and the context service (`band: "UNKNOWN"`) also report the size as unknown.
 
 ### Raw seed vs expanded seed
 
@@ -418,35 +456,13 @@ In a Pi Fabric child session, `context_compact` refuses with an error and does n
 
 Use `context_recall` when compacted-away or prior-session transcript text is needed. Set `include_current: true` (or `scope: "session"`) to search the active session's compacted-away text; it defaults to `false` for cross-session recall. Pass `ref` (a fold id such as `b5`) to get the original entries behind a fold. Use `context_status({ view: "compactions" })` when you need the current branch's compaction count, boundary identifiers, or the extension that wrote the last committed compaction (`Last committed compaction writer: …`, the same line `/context-status` prints; `details.writer` holds it as `{ kind, name }`). Project-scoped searches include sessions from same-repo Git worktrees by default.
 
-When pi-memory is loaded, a `prior` or `all-projects` query that is not `regex` or `case_sensitive`, and keeps worktrees included, asks pi-memory's session store first. The request goes over `pi.events` on `pi-memory:search`; neither package imports the other. For `prior`, `context_recall` sends `scope: "prior"`, so pi-memory filters to this project and the store can return up to five matching sessions, one per session lineage. The extension also filters out cards from other projects as a compatibility guard for older stores that ignore `scope`; only with such a store can that guard leave fewer than five cards. Cache documents, `include_current`, `scope: "session"` and `ref` are still searched locally. When pi-memory is not loaded, does not answer within 2.5 seconds, returns an error or an invalid reply, or replies twice, the session files are searched as before, and the result starts with a line saying why, such as `pi-memory search unavailable (timeout after 2500 ms); searched session files instead.` `details.pi_memory` records the outcome and the cards shown.
-
-Each card ends with the call that reads it, such as `context_recall({ ref: "session:<session-id>#<entry-id>" })`. The call carries the ids exactly as the store sent them, up to 256 characters each; a card whose id is longer says `expand: none` instead of naming a cut id. A `session:` ref reads one past session over `pi.events` on `pi-memory:read` (caair/pi/pi-memory#34):
-
-- `session:<session-id>#<entry-id>` returns the entries around that entry: `before` it (default 3) and `after` it (default 5), each 0 to 50. One reply holds at most 50 entries, and a larger window gives up entries before the anchor first.
-- `session:<session-id>` opens the session from its start, or from its last page with `from: "end"`; the Previous page call then reads back. `from` does not apply to an entry ref.
-- `kinds` keeps only some entry kinds, such as `kinds: ["user", "assistant"]` for the conversation without tool calls and results; in raw mode it matches line types. At most 16 kinds of at most 64 characters. An expand keeps its anchor entry whatever its kind.
-- `mode: "raw"` returns the stored JSONL lines instead of one block per entry. A line with no entry id, such as the session header, is shown as `[line N ...] (no entry id)` and has no ref of its own.
-- `max_chars` caps the session text returned (default 12,000, from 1,000 to 40,000), and `item_max_chars` caps one entry (default 1,500, from 200 to 12,000, never above `max_chars`). A cut is shown with a marker. To read one long tool result whole, expand its entry with `before: 0, after: 0` and a larger `item_max_chars`.
-
-When there is more, the result ends with the exact call for the next or previous page. It passes a `cursor` and keeps `mode`, `kinds`, `max_chars` and `item_max_chars`, because a cursor works only for the same session, mode and kinds. A session ref cannot be combined with `query` or `offset`, and `before`, `after`, `from`, `kinds`, `mode`, `cursor`, `max_chars` and `item_max_chars` are refused without a session ref. A value of the wrong type is refused with a message that names the argument, and nothing is read. The result's first line labels the text as quoted data from another session, not instructions; every line of session text starts with `> `, with control, escape and format characters removed and secrets redacted.
-
-When pi-memory is not loaded, does not answer within 2.5 seconds, or fails, the session's file on this machine is read with the same rendering and bounds, and the result says so; without a file, one line says why the store could not answer. A page cursor from the store (it starts with `c1.`) cannot page a file, so when the store is unavailable such a call says so and asks to read again without the cursor. File cursors start with `f2:` and name the session, mode and kinds they belong to; one used for another session is refused as a bad cursor. When the store answers `not_found`, or the session was erased on this machine, the result is not found and no file is read. The erased-session list is read again after the store replies, so an erase made while the store was being asked still holds. Before a file is read, pi-memory's erased-session cache, `~/.config/pi-memory/erased-sessions.sha256` (one SHA-256 of an erased session id per line, written by pi-memory from the store's erased list), must not list the session. A missing cache lists nothing; a cache that cannot be read or holds a malformed line refuses the file read.
-
-A query also accepts `limit`, `max_results` and `maxResults` as names for `max_sessions`, in that order of precedence; `max_sessions` wins when given. The store returns at most five cards whatever the number; the file search returns up to the number given (at most 100).
-
-Each query or `session:` call gets one trace id, 32 random hex characters, sent as `traceId` on every `pi-memory:search` and `pi-memory:read` request it makes (caair/pi/pi-memory#25). After the call, one event goes out on `pi-memory:recall-log` for pi-memory's search log: `{ v: 1, traceId, askingSessionId?, cwd?, tool: "context_recall", args: { query?, mode?, sessionRef?, limit?, scope? }, outcome, fallbackReason?, resultCount?, tookMs }`. `outcome` is `store` when the store answered, `fallback` when the session files answered instead, and `error` when the call was refused before the store was asked or threw. `fallbackReason` is `absent`, `timeout`, `unavailable`, `internal`, `bad_request`, `not_found` or `other`; a query the store is never asked (`regex`, `case_sensitive`, `scope: "session"`, worktrees left out) is a fallback with no reason. `resultCount` is the cards or entries returned, or the sessions the file search found. The query is cut to 2,000 characters, `cwd` and `sessionRef` to 512, and an asking session id over 256 characters is left out. This extension does not mask the query; pi-memory masks it before writing. The event is sent on a later turn and any error from it is dropped, so a slow, throwing or missing listener does not change the result or delay it. A call with a `query` that is refused before it runs, such as a `query` with a fold `ref` or with a `session:`-only argument like `mode`, sends one `error` event. A fold or hide `ref` with no `query` sends no event, even when it is refused.
-
-In a Pi Fabric program, `memory.recall` is Fabric's own search of this machine's session files: it does not ask pi-memory's store and does not take `session:` refs, `from`, `kinds` or `item_max_chars`. To read a past session from a program, call this tool as `extensions.context_recall({ ref: "session:<session-id>#<entry-id>" })` when the program's tool allowlist permits it.
-
 The prompt's compaction projection contains only the current-branch count; compaction boundaries contain metadata, not summary text. Summaries are not retained by this mechanism. Use `context_recall` with `include_current: true` to retrieve earlier summaries or other compacted-away transcript text.
 
 #### Context tool guidance
 
-One prompt section, `context-tools`, covers `context_status`, `context_recall`, `context_fold` and `context_compact`. The `context_fold` lines render only when that tool is reachable. Each tool's own prompt snippet and guidelines are short. The section, snippets and guidelines of the four context tools together stay at or under 1,500 tokens, counted with `defaultCountTokens`; `tests/context-tool-guidance.test.ts` fails above that. Tool descriptions are not counted.
+One prompt section, `context-tools`, covers `context_status`, `context_recall`, `context_fold` and `context_compact`. The `context_fold` lines render only when that tool is reachable. Each tool's own prompt snippet and guidelines are short. The section, snippets and guidelines of the six context tools (those four plus `session_focus` and `session_tasks`) together stay at or under 1,500 tokens, counted with `defaultCountTokens`; `tests/context-tool-guidance.test.ts` fails above that. Tool descriptions are not counted.
 
 #### `context_fold` replies
-
-For how a fold is planned, stored, shown to the model and recalled, see [How context folding works](folding.md).
 
 `context_fold` answers with one line per range. An accepted range says `accepted; written at the end of this turn`: Pi writes new session entries only at the end of a turn, so the fold waits in a queue until then.
 
@@ -455,20 +471,6 @@ A range is accepted only if the end-of-turn check would write it with the branch
 A call in which every range is refused, or which names no readable range, is an error result. A call with at least one accepted range is not, and lists the refused ranges in its text.
 
 A queued fold can still be dropped at the end of the turn for a reason that did not exist when you called, for example when an earlier fold in the same batch already hid part of its range. The turn then ends with one notice that names each dropped range and the reason, such as `Fold m00004..m00018 was not written: Total compressible content too small (1530 chars across 1 range(s), min 5000).` The notice is a custom message entry (`context-aware.fold-notice`), not a turn the user typed. Pi sends it to the model as a user-role message with the next request, and, like other injected messages, it is ordinary history for the fold engine: only a message you typed moves the boundary of the protected zone, so the notice does not stop earlier messages of the turn from being folded. It names at most three folds and counts the rest; `context_status({ view: "folds" })` lists every fold dropped in the last batch.
-
-The folds view ends with three lines that keep what folds save apart from what they cost. Each number comes from the session branch:
-
-```text
-Fold savings: 1900 tokens per request from 1 active fold (2000 tokens folded, 100 tokens of summary).
-Preprocessing cost: 3762 output tokens on 1 assistant turn that called context_fold.
-Recovery cost: 200 tokens returned by 1 context_recall of folded content.
-```
-
-- **Fold savings** is the tokens the active folds keep out of every request: the `compressedTokens` each fold record stored when it was made, minus the tokens of the summary that replaced them. A fold that absorbed earlier folds counts their summaries as its input, not as originals; each is subtracted as the fold that absorbed it counted it: the summary text the carrier showed, heading and topic included. Neither cost below is subtracted.
-- **Preprocessing cost** is the output tokens Pi recorded (`usage.output`) on each assistant turn that called `context_fold`, because the model writes the summary as that call's arguments. It is the whole turn's output, so it also holds any reasoning and other tool calls in that turn, and a turn whose fold was later refused or dropped still counts; the line names turns, not summaries, for that reason. A count of the call's arguments alone would be an estimate, not a measured number, and would leave out the reasoning spent writing the summary. A turn with no recorded usage adds nothing and is counted as `N of them recorded no usage.`
-- **Recovery cost** is the tokens of each successful `context_recall` result that returned a fold's originals (`ref` set to a fold id). A recall of a hide id, or a refused recall, is not counted.
-
-Summary and recall tokens are counted with the engine's `defaultCountTokens` on the text the session saved. `details.savings`, `details.preprocessing` and `details.recovery` carry the same numbers.
 
 ### `/session-erase <session-id>`
 

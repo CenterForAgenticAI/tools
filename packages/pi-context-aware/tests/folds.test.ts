@@ -258,99 +258,6 @@ test("rebuilt state continues block ids, and a higher fold absorbs an earlier on
 	assert.match(text, /EPSILON-QUESTION/u);
 });
 
-/** Every null-replacement context_edit target in drafts. */
-function nullEditTargets(drafts: readonly { type: string; targetId?: string; replacement?: unknown }[]): string[] {
-	return drafts.flatMap((draft) => draft.type === "context_edit" && draft.replacement === null && draft.targetId ? [draft.targetId] : []);
-}
-
-/** The projected model context the drafts give, and what a null edit for every hidden id would give (pi-context-aware#441). */
-function projectionsWithAndWithoutRedundantEdits(manager: SessionManager, drafts: Parameters<typeof applyFoldDrafts>[1], hiddenIds: readonly string[]): [string, string] {
-	const header = manager.getHeader();
-	assert.ok(header);
-	const lean = SessionManager.inMemory("/tmp", undefined, [header, ...manager.getBranch()]);
-	applyFoldDrafts(lean, drafts);
-	const full = SessionManager.inMemory("/tmp", undefined, [header, ...manager.getBranch()]);
-	applyFoldDrafts(full, drafts);
-	for (const id of hiddenIds) full.appendContextEdit(id, null);
-	return [contextText(lean), contextText(full)];
-}
-
-test("a nested fold writes no null edit for an entry the absorbed fold already omits (pi-context-aware#441)", () => {
-	const manager = SessionManager.inMemory("/tmp");
-	const ids = seed(manager);
-	// The child fold covers m00003..m00004: m00003 carries its summary and m00004 is omitted.
-	const child = planFold({ branch: manager.getBranch(), startRef: "m00003", endRef: "m00004", summary: SUMMARY,
-		modelContextLimit: 64_000, config: TEST_CONFIG });
-	assert.ok(child.ok, JSON.stringify(child));
-	assert.deepEqual(nullEditTargets(child.drafts), [ids[3]]);
-	applyFoldDrafts(manager, child.drafts);
-	user(manager, "EPSILON-QUESTION");
-	assistant(manager, "EPSILON-ANSWER");
-	user(manager, "ZETA-QUESTION");
-	assistant(manager, "ZETA-ANSWER");
-
-	const parent = planFold({ branch: manager.getBranch(), startRef: "m00001", endRef: "m00006",
-		summary: "Distilled: alpha, beta and gamma were all handled in the opening.", modelContextLimit: 64_000, config: TEST_CONFIG });
-	assert.ok(parent.ok, JSON.stringify(parent));
-	const [record] = parent.records;
-	assert.deepEqual(record?.directBlockIds, ["b1"]);
-	assert.equal(record?.carrierId, ids[0]);
-	// The record still covers every entry; only the redundant edit for m00004 is gone.
-	assert.deepEqual(record?.hiddenIds, ids.slice(1, 6));
-	// The absorbed carrier (m00003) shows a summary, so it still needs its null edit.
-	assert.deepEqual(nullEditTargets(parent.drafts), [ids[1], ids[2], ids[4], ids[5]]);
-
-	const [lean, full] = projectionsWithAndWithoutRedundantEdits(manager, parent.drafts, record!.hiddenIds);
-	assert.equal(lean, full, "dropping the redundant edit must not change the projected context");
-	applyFoldDrafts(manager, parent.drafts);
-	const text = contextText(manager);
-	assert.match(text, /Distilled: alpha, beta and gamma/u);
-	assert.doesNotMatch(text, /Summary of the first exchange|ALPHA|BETA|GAMMA/u);
-	assert.match(text, /EPSILON-QUESTION/u);
-	assert.deepEqual(foldStateFromBranch(manager.getBranch()).active.map((fold) => fold.blockId), ["b2"]);
-});
-
-test("a fold queued after another at the same boundary writes no null edit for the first fold's entries", () => {
-	const manager = SessionManager.inMemory("/tmp");
-	const ids = seed(manager);
-	user(manager, "EPSILON-QUESTION");
-	assistant(manager, "EPSILON-ANSWER");
-	user(manager, "ZETA-QUESTION");
-	assistant(manager, "ZETA-ANSWER");
-	const queued = planQueuedFolds(manager, [
-		{ startRef: "m00001", endRef: "m00004", summary: SUMMARY },
-		{ startRef: "b1", endRef: "m00006", summary: "Distilled: alpha, beta and gamma were all handled in the opening." },
-	], 64_000, TEST_CONFIG);
-	assert.deepEqual(queued.dropped, []);
-	// The engine default keeps the first user message (ids[0]) visible, so ids[1] carries both summaries.
-	assert.deepEqual(nullEditTargets(queued.drafts), ids.slice(2, 6), "each entry is omitted once");
-	applyFoldDrafts(manager, queued.drafts);
-	assert.doesNotMatch(contextText(manager), /Summary of the first exchange|ALPHA-ANSWER|BETA|GAMMA/u);
-	assert.match(contextText(manager), /Distilled: alpha, beta and gamma/u);
-});
-
-test("an ACP import writes each nested block's null edits once, with the same projected context", () => {
-	const manager = SessionManager.inMemory("/tmp");
-	const ids = seed(manager);
-	user(manager, "EPSILON-QUESTION");
-	assistant(manager, "EPSILON-ANSWER");
-	const imported = importAcpSideFile({ entries: manager.getEntries(), branch: manager.getBranch(),
-		sessionId: manager.getSessionId(), sideFileText: JSON.stringify({ schemaVersion: 1, blocks: [
-			{ blockId: "b1", runId: "r1", tier: 1, summary: "LEGACY-B1 alpha and beta", active: false,
-				effectiveMessageIds: ids.slice(0, 4), directBlockIds: [], compressedTokens: 40, createdAt: 1 },
-			{ blockId: "b2", runId: "r2", tier: 2, summary: "LEGACY-B2 the whole opening", active: true,
-				effectiveMessageIds: ids.slice(0, 6), directBlockIds: ["b1"], compressedTokens: 80, createdAt: 2 },
-		] }) });
-	assert.ok(imported.status === "imported", JSON.stringify(imported));
-	assert.deepEqual(imported.records.map((record) => record.blockId), ["b1", "b2"]);
-	assert.deepEqual(nullEditTargets(imported.drafts), [ids[1], ids[2], ids[3], ids[4], ids[5]], "each entry is omitted once");
-	const allHidden = imported.records.flatMap((record) => record.hiddenIds);
-	const [lean, full] = projectionsWithAndWithoutRedundantEdits(manager, imported.drafts, allHidden);
-	assert.equal(lean, full);
-	assert.match(lean, /LEGACY-B2 the whole opening/u);
-	assert.doesNotMatch(lean, /LEGACY-B1|ALPHA|GAMMA/u);
-});
-
 test("a range that splits a tool call from its result folds both, so no result is orphaned", () => {
 	const manager = SessionManager.inMemory("/tmp");
 	user(manager, "READ-REQUEST please read the file");
@@ -479,7 +386,7 @@ test("queued folds report a range that no longer resolves instead of silently dr
 	user(manager, "NEW-BRANCH");
 	const queued = planQueuedFolds(manager, [request], 64_000, TEST_CONFIG);
 	assert.deepEqual(queued, { drafts: [], dropped: [{ startRef: "m00001", endRef: "m00004",
-		errors: ['endId="m00004" does not exist in this session (typo or wrong session) — use a ref from the current context.'] }] });
+		errors: ['endId="m00004" does not exist in this session (typo or wrong session) — run acp_status for current refs.'] }] });
 });
 
 test("import widening must not touch an erased tool result outside the requested text", () => {

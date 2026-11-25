@@ -9,8 +9,8 @@
 import { randomUUID } from "node:crypto";
 import type { AssistantMessage, Api, Context, Model, ProviderHeaders, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { WORKSTREAM_ACTIVITY_ENTRY_TYPE } from "./workstream-context.js";
-import { parseActivityEvent, parseWorkstreamSnapshot, type ActivityEvent, type WorkstreamSnapshot } from "../snapshot-contracts/schema.js";
-import { redactText, sanitizeActivityEvent, sanitizeSnapshot } from "../snapshot-contracts/safety.js";
+import { parseActivityEvent, parseWorkstreamSnapshot, type ActivityEvent, type WorkstreamSnapshot } from "./workstream-schema.js";
+import { redactText, sanitizeActivityEvent, sanitizeSnapshot } from "./workstream-safety.js";
 
 export const ACTIVITY_ENTRY_TYPE = WORKSTREAM_ACTIVITY_ENTRY_TYPE;
 export const LUNA_PROVIDER = "openai" as const;

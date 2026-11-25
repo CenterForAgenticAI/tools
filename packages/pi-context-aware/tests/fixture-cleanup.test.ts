@@ -5,12 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { registerMetricsRecorder, DEFAULT_METRICS_SETTINGS, pendingMetricsWrites } from "../src/metrics/recorder.js";
-import { requestPressure } from "../src/folds/request-pressure.js";
 import { removeFixtureDir, removeFixtureDirNow } from "./fixture-cleanup.js";
 
 // pi-context-aware#360: a fixture deleted its agent directory while the metrics
 // recorder's queued write was still landing, and rmSync failed with ENOTEMPTY.
 
+const ladder = { foldNudgeStartFraction: 0.45, foldNudgeEndFraction: 0.75, seededCompactionFraction: 0.9, recoverableHideFraction: 0.95 };
 const ctx = { sessionManager: { getSessionId: () => "s", getLeafId: () => "l", getBranch: () => [] }, model: { id: "m", contextWindow: 1000 } } as unknown as ExtensionContext;
 
 function delayedRecorder(root: string) {
@@ -20,6 +20,7 @@ function delayedRecorder(root: string) {
 	const recorder = registerMetricsRecorder({
 		agentDir: () => root,
 		settings: () => DEFAULT_METRICS_SETTINGS,
+		ladder: () => ladder,
 		write: async (dir) => {
 			await gate;
 			fs.mkdirSync(path.join(dir, "context-aware", "metrics", "v1"), { recursive: true });
@@ -27,7 +28,7 @@ function delayedRecorder(root: string) {
 			landed = true;
 		},
 	});
-	recorder.observers.onTurn?.(ctx, undefined, requestPressure({ tokens: 0, window: 1000, measured: false, source: "host" }), true);
+	recorder.observers.onTurn?.(ctx, undefined);
 	return { recorder, release, landed: () => landed };
 }
 

@@ -86,11 +86,6 @@ const POLICIES: ReadonlySet<string> = new Set(["verbatim", "one-line", "condense
 const KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u;
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu;
-/**
- * Every Unicode format character (`\p{Cf}`): bidirectional overrides and isolates, which can make a line read in
- * another order, zero-width characters, the soft hyphen and tag characters. They are removed, not shown.
- */
-const FORMAT = /\p{Cf}/gu;
 
 interface StoredHint {
 	readonly ownerKey: string;
@@ -109,12 +104,9 @@ function own<T>(value: unknown, key: string): T | undefined {
 	}
 }
 
-/**
- * One printable line: format characters are removed, control characters and runs of whitespace become one space,
- * then the text is clipped with a visible `…`.
- */
+/** One printable line: control characters and runs of whitespace become one space, then the text is clipped. */
 export function oneLine(text: string, max = MAX_HINT_LINE_CHARS): string {
-	const flat = text.replace(FORMAT, "").replace(CONTROL, " ").replace(/\s+/gu, " ").trim();
+	const flat = text.replace(CONTROL, " ").replace(/\s+/gu, " ").trim();
 	return flat.length <= max ? flat : `${flat.slice(0, max - 1).trimEnd()}…`;
 }
 

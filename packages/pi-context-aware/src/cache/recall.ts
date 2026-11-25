@@ -2,7 +2,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import * as path from "node:path";
 import { bool, obj, opt, str, type Static } from "@earendil-works/pi-schema";
 import { frameCacheReference } from "../seed/seed-authority.js";
-import { redactText } from "../snapshot-contracts/safety.js";
+import { redactText } from "../workstream/workstream-safety.js";
 import { erasedIdsForCacheDirectory } from "./context-cache.js";
 
 /** Public recall controls. Unknown properties are intentionally rejected. */

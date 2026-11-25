@@ -69,10 +69,8 @@ const LONG_SUMMARY = "The synthetic archive review settled every numbered item i
  * Turn-preparation cases (pi-context-aware#186, pi-context-aware#184). Each builds its own session,
  * so the protected recent tail falls where the mechanism matters, and states what real bcp does.
  * Refs are bcp's: one per message of its projection, in session order. After the built entries
- * come the prompt, a short fixture note (a custom message bcp reads as a user message) and
- * the in-flight compress call. The note holds the slot this extension's usage marker held until
- * pi-context-aware#461 removed the marker: without it bcp's protected tail reaches one message further
- * back, and the cases below would no longer land where their mechanism matters. bcp protects the last five visible messages, then back until 5,000
+ * come the prompt, this extension's usage marker (a custom message bcp reads as a user message) and
+ * the in-flight compress call. bcp protects the last five visible messages, then back until 5,000
  * tokens, plus the last user message. Coverage counts are what real bcp 0.1.83 folds.
  */
 /** One step's compress arguments: a bare range list, or the full arguments with top-level fields. */
@@ -95,7 +93,7 @@ const MAX_CHARS_CASES = [
 ];
 const MECHANISMS = [
 	// m1-m4 archive, then three probes (m5-m10) whose text and call bcp keeps as one message. Its five
-	// newest messages are the third probe, its result, the prompt, the note and the compress call; the
+	// newest messages are the third probe, its result, the prompt, the marker and the compress call; the
 	// old native projection splits the third probe in two and cuts between its halves.
 	{ id: "mechanism-projection", build(s) { archive(s); for (const i of [1, 2, 3]) { s.assistant([fauxText(`Probe ${i}.`), fauxToolCall("archive_probe", { item: i }, { id: `p${i}` })]); s.result(`p${i}`, sized(`R${i}`, 6_000)); } },
 		steps: [[{ startId: "m00002", endId: "m00010", topic: "archive", summary: "The synthetic archive and the first probes are settled. Retain the numbered decisions and continue with the later review." }]],
@@ -136,11 +134,7 @@ const MECHANISMS = [
 	...MAX_CHARS_CASES,
 ];
 
-/**
- * Run one case. `promptNote`: every prompt carries the fixture note, a hidden custom message sent from
- * before_agent_start, as Pi sends any extension's per-turn message.
- */
-async function runCase(item, { promptNote = false } = {}) {
+async function runCase(item) {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `${item.id}-`));
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const text = (i) => `Synthetic archive item ${i}.\n${"Invented archive review: keep the numbered decision and its reversible ordering. ".repeat(2000)}`;
@@ -158,7 +152,6 @@ async function runCase(item, { promptNote = false } = {}) {
 	const nestedAt = (step) => item.nested || (item.nestedSteps ?? []).includes(step);
 	let current = 0;
 	const observer = (pi) => {
-		if (promptNote) pi.on("before_agent_start", () => ({ message: { customType: "parity-fixture-note", content: "Synthetic fixture note.", display: false } }));
 		pi.registerTool({ name: "archive_probe", label: "synthetic archive", description: "Synthetic fixture tool", parameters: obj({ item: num() }), async execute() { return { content: [{ type: "text", text: "Synthetic archive result." }], details: {} }; } });
 		if (item.nested || item.nestedSteps) pi.registerTool({ name: "nested_probe", label: "nested synthetic", description: "Execute a synthetic compress through the real host boundary", parameters: obj({}), async execute(_id, _params, _signal, _update, ctx) {
 			return (await ctx.executeTool("compress", compressArgs(item.steps[current]))).result;
@@ -217,7 +210,7 @@ for (const item of cases) {
 const only = process.env.PARITY_MECHANISMS?.split(",").filter(Boolean);
 for (const item of MECHANISMS.filter((candidate) => !only || only.includes(candidate.id))) {
 	try {
-		const { records } = await runCase(item, { promptNote: true });
+		const { records } = await runCase(item);
 		const failures = mechanismFailures(records, item);
 		console.log(`mechanism ${item.id}: ${failures.length ? "FAIL" : "PASS"}`);
 		for (const failure of failures) { failed = true; console.log(`MECHANISM ${item.id} ${failure}`); }

@@ -3,7 +3,7 @@
 import {
 	parseRegistryProjection,
 	type RegistryProjection,
-} from "../snapshot-contracts/schema.js";
+} from "../workstream/workstream-schema.js";
 import {
 	findOverlaps,
 	type OverlapResult,
@@ -12,7 +12,7 @@ import {
 	redactText,
 	sanitizeRegistryProjection,
 	type RedactionOptions,
-} from "../snapshot-contracts/safety.js";
+} from "../workstream/workstream-safety.js";
 import type { WorkspaceLocation } from "../platform/peer-contracts.js";
 
 export interface SessionViewOptions {

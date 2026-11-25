@@ -187,7 +187,8 @@ test("REQ-CONTRIB-002: contributions are placed in the per-turn message in regis
 		assert.deepEqual(contributors.register({ ownerKey: "owner-b", render: () => [{ id: "b1", text: "BRAVO-ONE" }] }), { ok: true });
 		const text = await live.turn("first");
 		assert.ok(text, "the turn has a per-turn message");
-		assert.equal(text, "ALPHA-ONE\n\nALPHA-TWO\n\nBRAVO-ONE", "owners in registration order, texts in render order, and nothing else: " + JSON.stringify(text.slice(0, 80)));
+		assert.ok(text.startsWith("ALPHA-ONE\n\nALPHA-TWO\n\nBRAVO-ONE"), "owners in registration order, texts in render order, before the telemetry: " + JSON.stringify(text.slice(0, 80)));
+		assert.ok(text.includes("<context-telemetry"), "telemetry still follows");
 		const sent = JSON.stringify(live.requests.at(-1));
 		assert.ok(sent.includes("ALPHA-ONE") && sent.includes("BRAVO-ONE"), "the model received the contributions");
 		const sha = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
@@ -202,40 +203,14 @@ test("REQ-CONTRIB-002: contributions are placed in the per-turn message in regis
 	});
 });
 
-test("REQ-CONTRIB-002: contributions ride in the task-state message, with no usage telemetry (pi-context-aware#461)", async () => {
+test("REQ-CONTRIB-002: contributions go after the task list and the brief, before the telemetry", async () => {
 	await withLive("after-brief", async (live) => {
 		const contributors = contributorsOf(live.service());
 		assert.deepEqual(contributors.register({ ownerKey: "owner-a", render: () => [{ id: "a1", text: "ALPHA-ONE" }] }), { ok: true });
-		const before = live.manager.getBranch().length;
-		await live.turn("first");
-		const entry = perTurnEntry(live.manager.getBranch().slice(before));
-		assert.equal(entry?.customType, "context-aware-task-state");
-		assert.equal(textOf(entry?.content), "ALPHA-ONE");
-		assert.doesNotMatch(JSON.stringify(live.requests.at(-1)), /context-telemetry/u, "no envelope reaches the model");
-	});
-});
-
-test("REQ-ENV-003: task and brief text reach the model when they change, in their own message, and are not repeated when they do not", async () => {
-	await withLive("env-003", async (live) => {
-		const owner = mutable("brief-owner", [{ id: "brief", text: "BRIEF-ENV-V1" }]);
-		assert.ok(contributorsOf(live.service()).register(owner.registration).ok);
-		const turn = async (text: string) => {
-			const before = live.manager.getBranch().length;
-			await live.turn(text);
-			return perTurnEntry(live.manager.getBranch().slice(before));
-		};
-		const count = (needle: string) => JSON.stringify(live.requests.at(-1)).split(needle).length - 1;
-		const first = await turn("one");
-		assert.equal(first?.customType, "context-aware-task-state");
-		assert.equal(textOf(first?.content), "BRIEF-ENV-V1");
-		assert.equal(count("BRIEF-ENV-V1"), 1, "the model received the brief");
-		assert.equal(await turn("two"), undefined, "unchanged: no per-turn message at all, so no usage marker either");
-		assert.equal(count("BRIEF-ENV-V1"), 1, "the model still has the brief once, from the first turn");
-		owner.set([{ id: "brief", text: "BRIEF-ENV-V2" }]);
-		const third = await turn("three");
-		assert.equal(third?.customType, "context-aware-task-state");
-		assert.equal(textOf(third?.content), "BRIEF-ENV-V2", "the changed brief is sent");
-		assert.equal(count("BRIEF-ENV-V2"), 1);
+		const text = await live.turn("first");
+		assert.ok(text);
+		const at = text.indexOf("ALPHA-ONE");
+		assert.ok(at >= 0 && at < text.indexOf("<context-telemetry"), "before the telemetry");
 	});
 });
 
@@ -248,7 +223,7 @@ test("REQ-CONTRIB-002: with no contribution the per-turn message is byte-identic
 		empty = await live.turn("first");
 		assert.deepEqual(shownRecords(live.manager), [], "nothing shown, nothing recorded");
 	});
-	assert.equal(plain, undefined, "no per-turn message without contributors (pi-context-aware#461)");
+	assert.ok(plain !== undefined && plain.length > 0);
 	assert.equal(empty, plain);
 });
 

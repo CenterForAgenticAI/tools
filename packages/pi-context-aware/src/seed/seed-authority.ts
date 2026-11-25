@@ -1,10 +1,9 @@
 /** Deterministic authority and provenance checks for generated compaction seeds. */
 
-import { findForgedRoleTurns } from "../compaction/role-label-escape.js";
-import { redactText } from "../snapshot-contracts/safety.js";
+import { redactText } from "../workstream/workstream-safety.js";
 
 export const GENERATED_SEED_FOLLOW_UP_ENTRY_TYPE = "context-aware.seed-follow-up.v1" as const;
-export const SEED_AUTHORITY_GUARD_IMPLEMENTATION_VERSION = "seed-authority-4" as const;
+export const SEED_AUTHORITY_GUARD_IMPLEMENTATION_VERSION = "seed-authority-2" as const;
 const MAX_RETAINED_CANDIDATE_CHARS = 4_000;
 const MAX_SIDE_EFFECT_NAMED_TARGETS = 128;
 
@@ -141,24 +140,10 @@ export interface SeedAuthorityGuardOptions extends SeedAuthorityOptions {
 	readonly cacheReferenceText?: string;
 	/** A durable objective may be supplied separately from the conversation. */
 	readonly durableObjective?: string;
-	/**
-	 * The text the user typed as an explicit seed, verbatim, before any rewrite. A line of the candidate
-	 * that repeats one of its lines is the user's own words and is not checked for a forged role turn;
-	 * every other line is. Read only when the origin is `explicit-raw-seed`. Omitted, no line is exempt:
-	 * a seed a model rewrote or another extension sent is not the user's typing.
-	 */
-	readonly typedSeedText?: string;
 	/** Existing authority is the ceiling for mutation permission. */
 	readonly currentMutationAuthority?: MutationAuthority;
 	/** A validated grounded surface retained across prior generated compactions. */
 	readonly groundedSideEffectAuthority?: SideEffectAuthoritySurface;
-	/**
-	 * Report a project reference the grounding never names as an advisory, not a
-	 * refusal. Set for a seed the working agent writes itself with
-	 * `context_compact`: a coordinator's handoff names the other projects it works
-	 * with, and those names come from tool output, which never grounds a project.
-	 */
-	readonly projectSwitchAdvisory?: boolean;
 }
 
 export type SeedAuthorityRejectionReason =
@@ -169,12 +154,7 @@ export type SeedAuthorityRejectionReason =
 	// `changes` and `tests`, which an honest handoff cannot avoid.
 	| "mutation-authority-escalation"
 	| "objective-switch"
-	| "side-effect-authority-change"
-	// A generated restriction (`do not push`) narrows what the next phase may do.
-	// It is recorded, never refused, and never becomes grounded authority.
-	| "side-effect-restriction"
-	// A line of a generated seed that presents itself as a user, system or assistant turn (pi-context-aware#474).
-	| "forged-role-turn";
+	| "side-effect-authority-change";
 
 // A record, not a list, so adding a reason to the union fails to compile here.
 const SEED_AUTHORITY_REJECTION_REASONS: Readonly<Record<SeedAuthorityRejectionReason, true>> = {
@@ -184,8 +164,6 @@ const SEED_AUTHORITY_REJECTION_REASONS: Readonly<Record<SeedAuthorityRejectionRe
 	"mutation-authority-escalation": true,
 	"objective-switch": true,
 	"side-effect-authority-change": true,
-	"side-effect-restriction": true,
-	"forged-role-turn": true,
 };
 
 /** Narrow a reason read back from a session entry. */
@@ -541,33 +519,11 @@ function statedSideEffectClaim(state: "allowed" | "forbidden", source: SideEffec
 	return { state, source };
 }
 
-/**
- * The longest stretch of one sentence a negation is carried across. A list of
- * prohibitions longer than this is rare, and a misread one only ever reads as a
- * restriction, which the guard records without refusing.
- */
-const MAX_NEGATED_LIST_CHARS = 240;
-
-/**
- * Whether a negation earlier in the same sentence governs this match through a
- * list: `Do not kill terminals, close workspaces, change files or Git state`.
- * A word that turns the sentence (`but`, `then`, `instead`) ends the list.
- */
-function negatedByListLead(match: RegExpMatchArray, text: string): boolean {
-	const before = text.slice(Math.max(0, match.index! - MAX_NEGATED_LIST_CHARS), match.index);
-	const sentence = before.split(/[.;!?\n]/u).at(-1) ?? "";
-	const lead = [...sentence.matchAll(/\b(?:do\s+not|don't|never|without|nor)\b/giu)].at(-1);
-	if (!lead) return false;
-	const list = sentence.slice(lead.index + lead[0].length);
-	if (!/,|\b(?:or|and)\b/iu.test(list)) return false;
-	return !/\b(?:but|then|instead|except|however|rather|once|after|before|until|unless|so)\b/iu.test(list);
-}
-
 function explicitClaimState(match: RegExpMatchArray, text: string): "allowed" | "forbidden" {
 	if (match.groups?.negation) return "forbidden";
 	const prefix = text.slice(Math.max(0, match.index! - 32), match.index);
 	const prefixedNegation = prefix.match(/\b(?:(?:do\s+not|don't|never)|without)(?<intervening>(?:\s+\w+){0,2})\s*$/iu);
-	if (!prefixedNegation) return negatedByListLead(match, text) ? "forbidden" : "allowed";
+	if (!prefixedNegation) return "allowed";
 	const intervening = prefixedNegation.groups?.intervening ?? "";
 	return /\b(?:push|pushing|publish|publishing|commit|committing|modify|modifying|edit|editing|change|changing|write|writing|implement|implementing|touch|touching|alter|altering|update|updating|merge|merging|approve|approving|close|closing|reopen|reopening|retarget|retargeting)\s+(?:then|before|after|but)\b/iu.test(intervening)
 		? "allowed"
@@ -956,29 +912,13 @@ function classifyCacheReferences(
  * happens to contain `new` or `unrelated` near the word `work`.
  */
 const OBJECTIVE_SWITCH_PATTERNS: readonly RegExp[] = [
-	// `switch back to` returns to earlier work; it never abandons it.
-	/\b(?:switch|switched|pivot|pivoted|move|redirect)\b(?!\s+back\b)[^.\n]{0,40}\bto\b[^.\n]{0,40}\b(?:task|objective|project|repository|deliverable|focus)\b/giu,
-	/\b(?:switch|pivot|replace|abandon|discard|drop)\b\s+(?:the\s+|this\s+|our\s+)?(?:current\s+|active\s+|existing\s+)?(?:task|objective|project|repository|deliverable|focus)\b/giu,
-	/\b(?:a|an|the)\s+(?:new|different|unrelated|separate)\s+(?:task|objective|project|repository|deliverable|focus)\b/giu,
+	/\b(?:switch|switched|pivot|pivoted|move|redirect)\b[^.\n]{0,40}\bto\b[^.\n]{0,40}\b(?:task|objective|project|repository|deliverable|focus)\b/iu,
+	/\b(?:switch|pivot|replace|abandon|discard|drop)\b\s+(?:the\s+|this\s+|our\s+)?(?:current\s+|active\s+|existing\s+)?(?:task|objective|project|repository|deliverable|focus)\b/iu,
+	/\b(?:a|an|the)\s+(?:new|different|unrelated|separate)\s+(?:task|objective|project|repository|deliverable|focus)\b/iu,
 ];
 
-/** `do not switch repository` forbids a switch; it does not make one. */
-const OBJECTIVE_SWITCH_NEGATION = /\b(?:do\s+not|don't|never|without|not|no\s+need\s+to)(?:\s+\w+){0,2}\s*$/iu;
-
 function hasExplicitObjectiveSwitch(candidateText: string): boolean {
-	// Inline code names things (a layout called `focus`); it does not direct work.
-	const prose = candidateText.replace(/`[^`\n]*`/gu, " ");
-	return OBJECTIVE_SWITCH_PATTERNS.some((pattern) => [...prose.matchAll(pattern)].some((match) =>
-		!OBJECTIVE_SWITCH_NEGATION.test(prose.slice(Math.max(0, match.index - 32), match.index))));
-}
-
-/**
- * A change that only makes the candidate stricter than its grounding: a claim
- * the grounding leaves unstated, or allows, that the candidate forbids. Carrying
- * a restriction forward cannot let the next phase do more than it could.
- */
-export function isRestrictiveSideEffectChange(change: SideEffectAuthorityChange): boolean {
-	return change.candidateState === "forbidden" && (change.changeKind === "added" || change.changeKind === "strengthened");
+	return OBJECTIVE_SWITCH_PATTERNS.some((pattern) => pattern.test(candidateText));
 }
 
 export function guardGeneratedSeed(candidateText: string, options: SeedAuthorityGuardOptions): SeedAuthorityGuardResult {
@@ -1036,20 +976,12 @@ export function guardGeneratedSeed(candidateText: string, options: SeedAuthority
 	};
 
 	if (candidateForDecision.origin === "cache-reference") record("cache-origin", [candidateForDecision.origin], "blocking");
-	// A line that presents itself as a user, system or assistant turn would reach the next phase as if
-	// someone had said it (pi-context-aware#474). Only a line the user typed is the user's own words: an
-	// explicit seed's rewrite is a model's text, so every line it adds is checked.
-	const typedSeedText = options.origin === "explicit-raw-seed" ? options.typedSeedText : undefined;
-	record("forged-role-turn", findForgedRoleTurns(candidateText, typedSeedText).map((turn) => `line ${turn.line}: ${turn.role} ${turn.form}`), "blocking");
 	if (candidateForDecision.origin !== "explicit-raw-seed" && unredactedAuthorityChanges.length > 0) {
-		const describe = (change: SideEffectAuthorityChange): string =>
-			`${change.dimension}${change.target ? `:${change.target}` : ""}:${change.groundedState}->${change.candidateState}`;
-		// Redaction keeps the order and length of the change list, so one index
-		// pairs each redacted change with the change it was made from.
-		const restrictive = authorityChanges.filter((_, index) => isRestrictiveSideEffectChange(unredactedAuthorityChanges[index]!));
-		const permissive = authorityChanges.filter((_, index) => !isRestrictiveSideEffectChange(unredactedAuthorityChanges[index]!));
-		record("side-effect-restriction", restrictive.map(describe), "advisory");
-		record("side-effect-authority-change", permissive.map(describe), "blocking");
+		record(
+			"side-effect-authority-change",
+			authorityChanges.map((change) => `${change.dimension}${change.target ? `:${change.target}` : ""}:${change.groundedState}->${change.candidateState}`),
+			"blocking",
+		);
 	}
 	if (cacheReferences.ungroundedFiles.length > 0) record("cache-material-originated-term", cacheReferences.ungroundedFiles, "advisory");
 
@@ -1073,11 +1005,7 @@ export function guardGeneratedSeed(candidateText: string, options: SeedAuthority
 		options.repositoryCanonicalIdentityAt,
 	).filter(({ identity }) => !groundedProjects.has(identity));
 	if (switchedProjects.length > 0) {
-		record(
-			"project-switch",
-			switchedProjects.map(({ value }) => value),
-			candidateForDecision.origin === "explicit-raw-seed" || options.projectSwitchAdvisory === true ? "advisory" : "blocking",
-		);
+		record("project-switch", switchedProjects.map(({ value }) => value), candidateForDecision.origin === "explicit-raw-seed" ? "advisory" : "blocking");
 	}
 
 	const groundedTerms = new Set(groundedForDecision.objectiveTerms);

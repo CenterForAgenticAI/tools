@@ -8,7 +8,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import type { RegisteredToolView } from "../src/compaction/compaction-blocker.js";
 import { decideContextToolSurface } from "../src/context-tools/surface.js";
-import { engineOverrideContradictsPresence, foldModeForEngine, resolveContextEngine, resolveSessionStrategy } from "../src/folds/engine-resolver.js";
+import { engineOverrideContradictsPresence, foldModeForEngine, resolveContextEngine } from "../src/folds/engine-resolver.js";
 import { foldModeFor, resolveFoldConfig } from "../src/folds/fold-engine.js";
 
 // pi-context-aware#309: one resolver names the engine. Expected values are literals from the
@@ -46,9 +46,9 @@ test("the override contradicts presence only when it forces folds over a loaded 
 	assert.equal(engineOverrideContradictsPresence({ tools: bcpLoaded, override: "compaction-only" }), false);
 });
 
-test("the tool surface follows the session's methods, not the tool list", () => {
+test("the tool surface follows the engine, not the tool list", () => {
 	const names = (tools: RegisteredToolView[], override?: "folds" | "compaction-only") =>
-		decideContextToolSurface(tools, undefined, resolveSessionStrategy({ tools, settings: { engine: override ?? "auto" } }).methods).map((entry) => entry.name as string);
+		decideContextToolSurface(tools, undefined, resolveContextEngine({ tools, override })).map((entry) => entry.name as string);
 	assert.ok(names(bcpAbsent).includes("context_fold"));
 	assert.ok(!names(bcpLoaded).includes("context_fold"));
 	assert.ok(names(bcpLoaded, "folds").includes("context_fold"), "folds override registers context_fold with billion-context-pi loaded");

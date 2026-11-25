@@ -6,7 +6,7 @@ import type { FoldsConfig } from "../platform/config-layers.js";
 import type { PressureLadderConfig } from "../policy/context-policy.js";
 import { applyFoldDrafts } from "../folds/fold-engine.js";
 import { cloneFoldTurnMemory, createFoldTurnMemory, previewFoldTurnState, type FoldTurnMemory, type FoldTurnModel, type FoldTurnResult } from "../folds/fold-turn.js";
-import { coveredEntryIds, foldDrafts, isEditableEntry, omittedEntryIds, readFoldRecord, type FoldRecord } from "../folds/fold-entries.js";
+import { coveredEntryIds, foldDrafts, isEditableEntry, readFoldRecord, type FoldRecord } from "../folds/fold-entries.js";
 import { parseCompressArgs } from "../folds/kernel/parse-compress-input.js";
 import { baseIdOf, SUMMARY_HEADER } from "../folds/kernel/prune.js";
 import { bcpOutcome, compareOutcomes, nativeOutcome, rejectedUnknownRef, type ObservedResult } from "./outcome.js";
@@ -271,17 +271,13 @@ export function previewShadowCalls(input: PreviewInput, calls: readonly ShadowCa
 			sourceHashes.set(key, sourceHashes.has(key) || typeof block.summary !== "string" ? undefined : shortHash(block.summary.trim()));
 			sourceTopicHashes.set(key, topicHash(typeof block.topic === "string" ? block.topic : undefined));
 		}
-		// foldDrafts emits the carrier edit first, then hide edits for entries not yet omitted, then the metadata.
-		const carrierEdits: (SessionBoundaryDraft | undefined)[] = [];
-		let segmentStart = true;
-		for (const draft of imported.drafts) {
-			if (segmentStart) carrierEdits.push(draft);
-			segmentStart = draft.type === "custom";
-		}
+		let draftOffset = 0;
 		const importedIds = new Set<string>();
-		for (const [recordIndex, record] of imported.records.entries()) {
-			const summary = carrierEdits[recordIndex];
-			if (!summary || summary.type !== "context_edit" || summary.targetId !== record.carrierId || !summary.replacement) continue;
+		for (const record of imported.records) {
+			// foldDrafts emits the carrier, the hidden edits, then metadata for each record.
+			const summary = imported.drafts[draftOffset];
+			draftOffset += coveredEntryIds(record).length + 1;
+			if (!summary || summary.type !== "context_edit" || !summary.replacement) continue;
 			const covered = coveredEntryIds(record).filter((id) => id !== kept);
 			const [carrierId, ...hiddenIds] = covered;
 			if (!carrierId) { diffs.push({ kind: "import-skipped", reason: "opening-only block kept by first-user policy" }); continue; }
@@ -293,7 +289,7 @@ export function previewShadowCalls(input: PreviewInput, calls: readonly ShadowCa
 				topicHashes.set(blockKey(record), sourceTopicHashes.get(blockKey(record))!);
 			}
 			applyFoldDrafts(preview, foldDrafts({ ...record, carrierId, hiddenIds, range: { startId: carrierId, endId: covered.at(-1)! },
-				directBlockIds: record.directBlockIds.filter((id) => importedIds.has(id)) }, summaryText, omittedEntryIds(preview.getBranch())));
+				directBlockIds: record.directBlockIds.filter((id) => importedIds.has(id)) }, summaryText));
 			importedIds.add(record.blockId);
 		}
 		if (imported.skippedBlocks.length) diffs.push({ kind: "import-skipped", reason: `${imported.skippedBlocks.length} blocks skipped` });

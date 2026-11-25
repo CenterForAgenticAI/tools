@@ -55,19 +55,10 @@ function latchAppends(dir: string) {
 	const held: (() => void)[] = [];
 	let waiters: { count: number; resolve: () => void }[] = [];
 	const state = { started: 0, active: 0, peak: 0, open: false };
-	// The store appends through a verified descriptor. Linux names its file through /proc/self/fd;
-	// elsewhere (macOS) the file is found under `dir` by its device and inode.
-	const underDir = (file: unknown): boolean => {
-		if (typeof file !== "object" || file === null || !("fd" in file)) return String(file).startsWith(dir);
-		const fd = Number(file.fd);
-		try { return fs.readlinkSync(`/proc/self/fd/${fd}`).startsWith(dir); } catch { /* No /proc: match by identity. */ }
-		const held = fs.fstatSync(fd);
-		return fs.readdirSync(dir, { recursive: true, encoding: "utf8" }).some((name) => {
-			try { const info = fs.lstatSync(path.join(dir, name)); return info.dev === held.dev && info.ino === held.ino; } catch { return false; }
-		});
-	};
+	// The store appends through a verified descriptor; resolve it to the file it names.
+	const target = (file: unknown) => typeof file === "object" && file !== null && "fd" in file ? fs.readlinkSync(`/proc/self/fd/${String(file.fd)}`) : String(file);
 	const latched = async (...args: Parameters<typeof original>) => {
-		if (!underDir(args[0])) return await original(...args);
+		if (!target(args[0]).startsWith(dir)) return await original(...args);
 		state.started++;
 		state.active++;
 		state.peak = Math.max(state.peak, state.active);

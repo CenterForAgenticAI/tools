@@ -8,7 +8,7 @@ import { planFold } from "../src/folds/fold-adapter.js";
 import { applyFoldDrafts } from "../src/folds/fold-engine.js";
 import { stampRequestId } from "../src/folds/fold-entries.js";
 import * as foldTurnModule from "../src/folds/fold-turn.js";
-import { createFoldTurnMemory, prepareFoldTurn, type FoldTurnInput, type FoldTurnMemory, type FoldTurnResult } from "../src/folds/fold-turn.js";
+import { createFoldTurnMemory, prepareFoldTurn, renameFoldTool, type FoldTurnInput, type FoldTurnMemory, type FoldTurnResult } from "../src/folds/fold-turn.js";
 import type { Config } from "../src/folds/kernel/index.js";
 import { compareBatchRequestWithMemory, hashRequestMessages } from "../src/parity/compare.js";
 import { PARITY_RECORD_VERSION, type CompressRecord, type NextRequestRecord, type RequestHashes } from "../src/parity/records.js";
@@ -362,26 +362,6 @@ test("#201 criterion 3: the nudge is appended once per turn with billion-context
 	assert.ok(!again.messages.some(isNudge));
 });
 
-test("CR-GATE-CONTROL-PROOF: a nudge the stages rendered but did not inject (a refused say) is offered again on the next request of the turn", () => {
-	// Over 75% of the window: the kernel wants the over-limit nudge on every request; the gate allows one per turn.
-	const manager = nudgeSession();
-	const memory = createFoldTurnMemory();
-	const fold = { fold: true, compact: false };
-	let rendered: string | undefined;
-	// The first request's stages render the nudge and inject nothing, as when the plan checker refuses the say.
-	const refused = prepareFoldTurn({ ...turnInput(manager, memory, { hostTokens: 100_000, contextWindow: 120_000 }), stages: (request) => { rendered = request.growthNudge?.render(fold); return []; } });
-	assert.ok(refused, "the request lines up with the projection");
-	assert.match(rendered ?? "", /^\u26A0\uFE0F Context limit reached[\s\S]*`context_fold`/u, "the over-limit nudge was due and rendered");
-	assert.equal(refused.nudge, undefined, "nothing was sent");
-	// The same turn, no growth, still over the limit: the kernel wants the nudge again and the once-per-turn gate is
-	// still open, because nothing was sent, so it is sent now.
-	const again = prepareFoldTurn({ ...turnInput(manager, memory, { hostTokens: 100_000, contextWindow: 120_000 }), stages: (request) => { const text = request.growthNudge?.render(fold); return text === undefined ? [] : [text]; } });
-	assert.equal(again?.nudge, rendered, "the nudge is offered again and sent");
-	// Once sent, the gate closes for the rest of the turn.
-	const third = prepareFoldTurn({ ...turnInput(manager, memory, { hostTokens: 100_000, contextWindow: 120_000 }), stages: (request) => { const text = request.growthNudge?.render(fold); return text === undefined ? [] : [text]; } });
-	assert.equal(third?.nudge, undefined);
-});
-
 test("#201 criterion 3: with active folds the nudge ends with billion-context-pi's block line", () => {
 	const manager = nudgeSession();
 	fold(manager, "m00002", "m00003", SUMMARY(1), "call-1");
@@ -500,13 +480,9 @@ test("FP-202 (ranxianglei/billion-context-pi#666): the emergency nudge waits for
 	manager.appendMessage(fauxAssistantMessage("Recovered."));
 	const sent = turn(manager, memory, { hostTokens: 116_000, contextWindow: 120_000, compatibility: true });
 	assert.match(sent.nudge ?? "", /^\u26A0\uFE0F Context limit reached/u);
-	// The same decision as billion-context-pi's, in this package's text (pi-context-aware#257, pi-context-aware#458): the ranges offered
-	// are the same; the header names the tool this session can call.
+	// Same nudge as billion-context-pi's, apart from the fold tool it names (pi-context-aware#257).
 	assert.equal(sent.nudgeFix?.cause, "tool-name");
-	const ranges = (text: string) => text.slice(text.indexOf("Compressible ranges"));
-	assert.equal(ranges(sent.nudge ?? ""), ranges(sent.nudgeFix?.compatible ?? ""));
-	assert.match(sent.nudge ?? "", /Fold with `context_fold` a finished range/u);
-	assert.doesNotMatch(sent.nudgeFix?.compatible ?? "", /Fold with `context_fold`/u, "billion-context-pi's nudge has no such line");
+	assert.equal(sent.nudge, renameFoldTool(sent.nudgeFix?.compatible ?? "", "context_fold"));
 });
 
 // ---- Register entries FP-201 and FP-202 ----

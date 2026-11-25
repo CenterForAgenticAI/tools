@@ -485,7 +485,7 @@ predicate that matches only that difference.
 | FP-203 | Ladder steps are shares of the whole window | billion-context-pi reads each nudge step as a share of the window less the model's output reserve (the smaller of the model's maximum output and a quarter of the window; none on `anthropic-messages`). The native pass reads every ladder step as a share of the whole window (pi-context-aware#244), so on a model with a large output limit the nudge appears at a different token count. Applies only to a `content` difference, and only when the preview recorded a `denominator` nudge fix: billion-context-pi's own rules at the window's size send the nudge the native pass sent, and swapping its nudge for billion-context-pi's makes the non-summary content equal. The tier-2 trigger of FP-201 is not the cause, and a nudge that depends on both is left unexplained. | pi-context-aware#244 |
 | FP-204 | Truncation starts at a share of the whole window | billion-context-pi starts emergency truncation at the last ladder step of the window less the output reserve; the native pass starts it at the same step of the whole window, so one side shortens oversized messages where the other does not. Applies only to a `content` or `tool-results` difference, and only when the preview recorded `ours.denominator` with `truncationStartDiffers` and the content keys of the request billion-context-pi's limit produces: billion-context-pi's request must equal that request (its nudge aside). Any other difference stays unexplained. | pi-context-aware#244 |
 | FP-205 | Recoverable hide pointer | billion-context-pi truncates oversized old messages in the request at the last ladder step and leaves no way back to the original. The native engine does the same shortening (the same candidates, the same head, tail and marker), and also saves it as a recoverable hide (pi-context-aware#268): a `context_edit` plus a `context-aware.hide.v1` record, written at the next boundary. The saved message therefore carries one more line after the marker, `[Recover the original with context_recall({ ref: "h1" }).]`. Applies only to a `content` or `tool-results` difference, and only when the preview recorded `ours.hidePointer`: swapping each recorded original content key in billion-context-pi's request for its replacement makes the two requests equal. Any other difference stays unexplained. | pi-context-aware#268 |
-| FP-257 | Nudge names the live fold tool | billion-context-pi's nudge tells the model to call `compress`, which is not a tool of this package. The native nudge sends the same decision in this package's text: it names `context_fold`, adds `context_compact` only when that is reachable, drops the "stronger alert" sentence, and points to the `context_fold` guidelines instead of carrying the fold rules (pi-context-aware#458, pi-context-aware#456). Applies only to a `content` difference, and only when the preview recorded a `tool-name` nudge fix: the native decision, written in the kernel's text with only the fold tool renamed, equals billion-context-pi's nudge. | pi-context-aware#257 |
+| FP-257 | Nudge names the live fold tool | billion-context-pi's nudge tells the model to call `compress`. After cut-over the tool is `context_fold`, so the native nudge names it. Applies only to a `content` difference, and only when the preview recorded a `tool-name` nudge fix: the native nudge is billion-context-pi's with the fold tool renamed and nothing else changed. | pi-context-aware#257 |
 
 Every shadow next-request comparison requires expected-summary evidence. An
 explicit empty body and topic list certifies that no summaries were planned;
@@ -830,28 +830,16 @@ the current user owns. A redirected store is rejected: the write fails, the
 failure is ignored, and the live call is not affected.
 
 These checks cannot be raced. The recorder holds each checked directory open
-and opens the next name through a path that names that directory by identity,
-never by its pathname again. On Linux this is the directory's descriptor
-(`/proc/self/fd/<fd>/<name>`). On macOS it is the volume file system path
-`/.vol/<device>/<inode>/<name>`, which the kernel resolves by file ID, not by
-walking names. `/.vol` is offered only on macOS; on any other platform it
-would be an ordinary pathname. Either path is used only after it stats as the
-held directory (same device and inode). A directory that is renamed or
-replaced by a symlink after its check therefore cannot redirect a read or a
-write. On a platform or file system where neither path reaches the held
-directory (for example Linux without `/proc`), the store is refused in the
-same way, so the recorder writes nothing there.
-`/fold-parity` then reports that readiness is unknown. There is no fallback to
-pathname checks, which would reopen the race. The metrics store and the
-erasure deletes use the same identity paths. The `v1` in the path is the
-store layout, not the record schema version.
-
-`/.vol` is safe only on a volume that never gives a held directory's ID to
-another directory. APFS object IDs only increase, and HFS+ catalog IDs are
-reused only after they wrap at 2^32, so on both a renamed or recreated
-directory cannot take the held one's ID. FAT32 and exFAT volumes, whose IDs
-depend on where an entry sits, answer `/.vol` look-ups with ENOENT (checked on
-macOS with disk images of each), so on such a volume the store is refused.
+and opens the next name through that directory's descriptor
+(`/proc/self/fd/<fd>/<name>`), never by its pathname again. A directory that is
+renamed or replaced by a symlink after its check therefore cannot redirect a
+read or a write. On a platform without such descriptor paths (for example
+macOS, or Linux without `/proc`), the store is refused in the same way, so the
+recorder writes nothing there. `/fold-parity` then
+reports that readiness is unknown. This refusal is deliberate (decided
+2026-10-11): Linux evidence is enough for the cut-over, and a fallback to
+pathname checks would reopen the race. The `v1` in the path is the store layout, not
+the record schema version.
 
 Delete a session's JSONL file to erase its diagnostics. Issue pi-context-aware#151 must also
 delete `fold-parity/v1/sessions/<id>.jsonl` when erasing that session. This

@@ -229,20 +229,18 @@ test("the check-in prompt in a Fabric child does not offer compaction", async ()
 	assert.match(prompt, /Compaction is not available in this session/u);
 });
 
-/** The system prompt's context sections: no pressure rules since pi-context-aware#461, so the context-tools list names compaction. */
 async function contextAwarenessGuidance(role: "root" | "child"): Promise<string> {
 	return asSession(role, () => withExtension(`child-guard-guidance-${role}`, ["context_compact", "context_recall"], async ({ harness, ctx }) => {
 		const event = { type: "before_agent_start", prompt: "continue", systemPrompt: "base", systemPromptOptions: {} };
 		const result = await harness.dispatch("before_agent_start", event, ctx) as { systemPrompt?: string } | undefined;
-		const sections = [/<context-awareness>[\s\S]*?<\/context-awareness>/u, /<context-tools>[\s\S]*?<\/context-tools>/u]
-			.map((pattern) => result?.systemPrompt?.match(pattern)?.[0]);
-		assert.ok(sections.every(Boolean), "expected the context-awareness and context-tools sections");
-		return sections.join("\n");
+		const section = result?.systemPrompt?.match(/<context-awareness>[\s\S]*?<\/context-awareness>/u)?.[0];
+		assert.ok(section, "expected the context-awareness section");
+		return section;
 	}));
 }
 
 test("per-turn guidance tells a root session to call context_compact", async () => {
-	assert.match(await contextAwarenessGuidance("root"), /- context_compact: end a phase at a clean boundary/u);
+	assert.match(await contextAwarenessGuidance("root"), /call context_compact/u);
 });
 
 test("per-turn guidance in a Fabric child does not name a compaction tool", async () => {

@@ -191,8 +191,8 @@ function unwrappedSteps(body) {
 		.filter((step) => step.length > 0)
 		// Delegation to another npm script: that script is covered by this rule.
 		.filter((step) => !/^npm run [\w:-]+$/.test(step))
-		// The native compiler's Node launcher only emits into the checkout.
-		.filter((step) => !/^node node_modules\/@typescript\/native\/bin\/tsc(?:\s|$)/.test(step))
+		// Only steps that execute code can create temp files. A step like
+		// `rm -rf .test-dist` or `tsc -p ...` has nothing to contain.
 		.filter((step) => EXECUTORS.test(step))
 		// Anything left must be launched BY the wrapper, after optional VAR=value.
 		.filter((step) => !/^(?:\w+=\S*\s+)*node\s+\S*(?:^|\/)with-temp-root\.mjs\s/.test(step));

@@ -2,11 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
 	ACTIVITY_SCHEMA_VERSION,
+	PLATFORM_CONTRACT,
 	REGISTRY_SCHEMA_VERSION,
 	WORKSTREAM_SCHEMA_VERSION,
-	MAX_GOAL_REASON_CHARS,
 	MAX_PINNED_VERBATIM_BLOCK_CHARS,
-	MAX_PURPOSE_CHARS,
 	asIntercomConnectionId,
 	asPiSessionId,
 	asTerminalId,
@@ -14,12 +13,11 @@ import {
 	parseActivityEvent,
 	parseCapabilityGate,
 	parseRegistryProjection,
-	parseWorkstreamMutation,
 	parseWorkstreamSnapshot,
 	type ActivityEvent,
 	type RegistryProjection,
 	type WorkstreamSnapshot,
-} from "../src/snapshot-contracts/schema.js";
+} from "../src/workstream/workstream-schema.js";
 
 const identity = {
 	workstreamId: asWorkstreamId("ws-1"),
@@ -105,42 +103,13 @@ test("activity and registry contracts are independently versioned and bounded at
 	assert.equal(parseActivityEvent({ ...activity, summary: "x".repeat(161) }), null);
 });
 
-test("optional capability gates are explicit", () => {
+test("the supported host baseline and optional capability gates are explicit", () => {
+	assert.equal(PLATFORM_CONTRACT.codingAgent, "^0.80.6");
+	assert.equal(PLATFORM_CONTRACT.piAi, "^0.80.6");
+	assert.equal(PLATFORM_CONTRACT.incompatibleHostAction, "upgrade");
+	assert.deepEqual(PLATFORM_CONTRACT.codingAgentPublicSeams, ["ExtensionAPI", "ExtensionContext", "SessionManager", "appendEntry", "modelRegistry"]);
+	assert.deepEqual(PLATFORM_CONTRACT.piAiPublicSeams, ["complete", "stream", "completeSimple", "streamSimple"]);
+	assert.deepEqual(PLATFORM_CONTRACT.optionalCapabilities, ["luna-activity", "cmux", "tmux", "intercom", "worktree-launcher"]);
 	assert.deepEqual(parseCapabilityGate({ capability: "cmux", enabled: true, available: false, reason: "probe unavailable" }), { capability: "cmux", enabled: true, available: false, reason: "probe unavailable" });
 	assert.equal(parseCapabilityGate({ capability: "unknown", enabled: true, available: true }), null);
-});
-
-// pi-workstream writes the focus record now. These are the fields and kinds it
-// adds to the shared schema; a snapshot that carries them must still parse, or
-// the registry, cmux and activity lose the session's focus.
-test("a snapshot written by pi-workstream with a purpose and a goal reason parses and keeps both", () => {
-	const written = snapshot({ purpose: "Why this session exists", goalReason: "The operator set the goal" });
-	const parsed = parseWorkstreamSnapshot(written);
-	assert.equal(parsed?.purpose, "Why this session exists");
-	assert.equal(parsed?.goalReason, "The operator set the goal");
-	assert.deepEqual(parsed, written);
-	assert.equal(parseWorkstreamSnapshot(snapshot())?.purpose, undefined);
-	assert.equal(Object.hasOwn(parseWorkstreamSnapshot(snapshot()) ?? {}, "goalReason"), false);
-});
-
-test("a purpose or goal reason that is empty, not text, or over its cap is refused", () => {
-	assert.equal(parseWorkstreamSnapshot(snapshot({ purpose: "x".repeat(MAX_PURPOSE_CHARS) }))?.purpose?.length, MAX_PURPOSE_CHARS);
-	assert.equal(parseWorkstreamSnapshot({ ...snapshot(), purpose: "x".repeat(MAX_PURPOSE_CHARS + 1) }), null);
-	assert.equal(parseWorkstreamSnapshot({ ...snapshot(), purpose: "" }), null);
-	assert.equal(parseWorkstreamSnapshot({ ...snapshot(), purpose: 7 }), null);
-	assert.equal(parseWorkstreamSnapshot(snapshot({ goalReason: "x".repeat(MAX_GOAL_REASON_CHARS) }))?.goalReason?.length, MAX_GOAL_REASON_CHARS);
-	assert.equal(parseWorkstreamSnapshot({ ...snapshot(), goalReason: "x".repeat(MAX_GOAL_REASON_CHARS + 1) }), null);
-	assert.equal(parseWorkstreamSnapshot({ ...snapshot(), goalReason: "" }), null);
-});
-
-test("the issue and change ref kinds that pi-workstream writes parse; an unknown kind does not", () => {
-	const refs = [{ kind: "issue" as const, value: "group/project#12" }, { kind: "change" as const, value: "group/project!7" }];
-	assert.deepEqual(parseWorkstreamSnapshot(snapshot({ refs }))?.refs, refs);
-	assert.equal(parseWorkstreamSnapshot({ ...snapshot(), refs: [{ kind: "ticket", value: "x" }] }), null);
-});
-
-test("a purpose mutation that pi-workstream records parses", () => {
-	const mutation = { kind: "purpose", actor: "user", reason: "purpose set", timestamp: "2026-07-16T00:01:00.000Z", priorRevision: 1, newRevision: 2, accepted: true, workstreamId: "ws-1" };
-	assert.equal(parseWorkstreamMutation(mutation)?.kind, "purpose");
-	assert.equal(parseWorkstreamMutation({ ...mutation, kind: "mood" }), null);
 });

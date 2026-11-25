@@ -237,15 +237,14 @@ test("compaction outcome no-op hooks are callable", () => {
 
 test("compaction caller honours cancellation without recording proactive failure", async () => {
 	const extension = await import("../src/index.js");
-	// Pi runs every handler for an event, so keep them all; a later registration must not replace an earlier one.
-	const handlers = new Map<string, Array<(event: Record<string, unknown>, ctx: ExtensionContext) => unknown>>();
+	const handlers = new Map<string, (event: Record<string, unknown>, ctx: ExtensionContext) => unknown>();
 	const tools = new Map<string, unknown>();
 	const commands = new Map<string, unknown>();
 	const api = {
 		events: { emit: () => {}, on: () => () => {} },
 		registerFlag: () => {},
 		getFlag: () => undefined,
-		on: (name: string, handler: (event: Record<string, unknown>, ctx: ExtensionContext) => unknown) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
+		on: (name: string, handler: (event: Record<string, unknown>, ctx: ExtensionContext) => unknown) => handlers.set(name, handler),
 		registerTool: (tool: { name: string }) => tools.set(tool.name, tool),
 		registerCommand: (name: string, definition: unknown) => commands.set(name, definition),
 		sendMessage: () => {},
@@ -303,7 +302,7 @@ test("compaction caller honours cancellation without recording proactive failure
 	);
 	assert.equal(queued.terminate, true);
 	idle = true;
-	for (const handler of handlers.get("agent_settled") ?? []) await handler({}, ctx);
+	await handlers.get("agent_settled")?.({}, ctx);
 	assert.equal(compactions.length, 1);
 
 	compactions[0]?.onError?.(new Error("Compaction cancelled"));

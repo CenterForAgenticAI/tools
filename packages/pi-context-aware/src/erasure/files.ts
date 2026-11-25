@@ -2,46 +2,6 @@
 import fs from "node:fs";
 import path from "node:path";
 
-/**
- * Paths that may reach the directory a descriptor holds by its identity rather than by a pathname that
- * can be renamed or swapped for a symlink: the descriptor's magic link on Linux (`/proc/self/fd/<fd>`)
- * and on systems with a traversable `/dev/fd`, and on macOS only the volume file system path
- * `/.vol/<dev>/<ino>`, which the kernel resolves by file ID, not by walking names. Elsewhere `/.vol` would
- * be an ordinary pathname, so it is never offered there. A candidate counts only after it stats as the
- * held directory.
- *
- * `/.vol` is safe because the volumes that answer it do not reuse a file ID while it is held: APFS
- * object IDs only increase, and HFS+ catalog IDs are reused only after they wrap at 2^32. FAT32 and
- * exFAT volumes, whose IDs depend on where an entry sits, answer `/.vol` look-ups with ENOENT, so no
- * candidate verifies and the store refuses there.
- */
-export function descriptorPathCandidates(fd: number, held: { readonly dev: bigint; readonly ino: bigint }): string[] {
-	const candidates = [`/proc/self/fd/${fd}`, `/dev/fd/${fd}`];
-	if (process.platform === "darwin") candidates.push(`/.vol/${held.dev}/${held.ino}`);
-	return candidates;
-}
-
-/**
- * The first descriptor path that reaches the directory `fd` holds (same device and inode), or undefined.
- * The held descriptor keeps the inode allocated, so the path keeps naming that directory until it is closed.
- */
-export function heldDirectoryPath(fd: number): string | undefined {
-	const held = fs.fstatSync(fd, { bigint: true });
-	return descriptorPathCandidates(fd, held).find((candidate) => {
-		try {
-			const reached = fs.statSync(`${candidate}/.`, { bigint: true });
-			return reached.dev === held.dev && reached.ino === held.ino;
-		} catch { return false; }
-	});
-}
-
-// No pathname fallback: without a descriptor path a concurrent rename can redirect deletion.
-function heldPath(fd: number): string {
-	const found = heldDirectoryPath(fd);
-	if (!found) throw new Error("Platform cannot safely delete through held directories");
-	return found;
-}
-
 export function withStoreDirectory<T>(agentDir: string, directory: string, action: (held: string) => T): T {
 	const root = fs.realpathSync.native(agentDir);
 	const relative = path.relative(path.resolve(agentDir), path.resolve(directory));
@@ -49,14 +9,23 @@ export function withStoreDirectory<T>(agentDir: string, directory: string, actio
 	const flags = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
 	let fd = fs.openSync(root, flags);
 	try {
+		// No pathname fallback: without descriptor paths a concurrent rename can redirect deletion.
+		const descriptorRoot = ["/proc/self/fd", "/dev/fd"].find((candidate) => {
+			try {
+				const info = fs.statSync(`${candidate}/${fd}/.`) as unknown as { ino: number; dev: number };
+				const held = fs.fstatSync(fd);
+				return info.ino === held.ino && info.dev === held.dev;
+			} catch { return false; }
+		});
+		if (!descriptorRoot) throw new Error("Platform cannot safely delete through held directories");
 		for (const part of relative.split(path.sep).filter(Boolean)) {
-			const next = fs.openSync(`${heldPath(fd)}/${part}`, flags);
+			const next = fs.openSync(`${descriptorRoot}/${fd}/${part}`, flags);
 			fs.closeSync(fd);
 			fd = next;
 			const info = fs.fstatSync(fd);
 			if (process.getuid && info.uid !== process.getuid()) throw new Error("Store directory belongs to another user");
 		}
-		return action(heldPath(fd));
+		return action(`${descriptorRoot}/${fd}`);
 	} finally { fs.closeSync(fd); }
 }
 

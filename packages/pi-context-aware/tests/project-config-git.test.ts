@@ -56,7 +56,7 @@ async function loadExtensionIn(root: string, cwd: string, label: string): Promis
 	return { gitCommands, tools };
 }
 
-test("extension load finds the top-level project config without git", { skip: process.platform === "win32" }, async () => {
+test("extension load finds the top-level project config with one git command", { skip: process.platform === "win32" }, async () => {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-project-git-")));
 	try {
 		fs.mkdirSync(path.join(root, "agent"));
@@ -67,7 +67,7 @@ test("extension load finds the top-level project config without git", { skip: pr
 
 		// Without a project file, load registers the handoff tool.
 		const bare = await loadExtensionIn(root, nested, "bare");
-		assert.deepEqual(bare.gitCommands, []);
+		assert.deepEqual(bare.gitCommands, [`-C ${nested} rev-parse --show-toplevel`]);
 		assert.equal(bare.tools.has("context_compact"), true);
 
 		// A project file at the top level that sets summarizer.enabled defers the
@@ -76,7 +76,7 @@ test("extension load finds the top-level project config without git", { skip: pr
 		fs.mkdirSync(path.join(repo, ".pi"));
 		fs.writeFileSync(path.join(repo, ".pi", "context-aware.json"), JSON.stringify({ summarizer: { enabled: true } }));
 		const configured = await loadExtensionIn(root, nested, "configured");
-		assert.deepEqual(configured.gitCommands, []);
+		assert.deepEqual(configured.gitCommands, [`-C ${nested} rev-parse --show-toplevel`]);
 		assert.equal(configured.tools.has("context_compact"), false);
 	} finally {
 		await removeFixtureDir(root);

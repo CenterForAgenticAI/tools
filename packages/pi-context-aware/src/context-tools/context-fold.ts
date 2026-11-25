@@ -24,14 +24,12 @@ import type { ExtensionAPI, ExtensionContext, ToolExposure } from "@earendil-wor
 import { arr, obj, opt, str, type Static, union } from "@earendil-works/pi-schema";
 
 import { summaryLimitOf } from "../folds/fold-adapter.js";
-import type { FoldEngine, FoldRequestFailure, FoldRequestResult } from "../folds/fold-engine.js";
+import type { FoldEngine, FoldRequestResult } from "../folds/fold-engine.js";
 import { MAX_FOLD_ITEMS_PER_CALL, pickFoldRangesKey } from "../folds/fold-entries.js";
 import { parseCompressArgs } from "../folds/kernel/index.js";
 import { foldRequestDetails, type FoldRequestRecovery } from "../folds/fold-recovery.js";
-import type { Steer } from "../strategy/guidance.js";
 import { FOLD_TOOL_NAME } from "../folds/fold-turn.js";
 import { finite, schemaTool } from "../schema-tool.js";
-import { hasMethod } from "../strategy/methods.js";
 import type { ContextToolSurfaceEntry } from "./surface.js";
 
 const RangeSpec = obj({
@@ -66,34 +64,11 @@ export type ContextFoldInput = Static<typeof contextFoldSchema>;
 
 const DESCRIPTION = "Replace older conversation ranges with detailed summaries you write. Single range: context_fold({ content: [{ startId, endId, summary }] }). Batch: context_fold({ content: [{ topic, startId, endId, summary }, ...] }); each entry gets its own summary.";
 const SNIPPET = "context_fold({ content: [{ startId, endId, summary }] }) or batch multiple ranges";
-/** The one guideline that names context_compact, left out while the session's methods leave out compact (pi-context-aware#526). */
-const COMPACT_GUIDELINE = "If context_compact is available, use it instead at a phase boundary, or when most of the context is already fold summaries and folding again frees too little.";
-/**
- * That guideline as each steer words it (pi-context-aware#459). It is the only guideline a guidance variant changes,
- * and `default` is today's line.
- */
-const STEERED_COMPACT_GUIDELINES: Readonly<Record<Steer, string>> = {
-	"default": COMPACT_GUIDELINE,
-	"compact-boundary": "If context_compact is available and a phase is finished, compact rather than fold that phase range by range. Fold within a running phase.",
-	"fold-first": "Prefer folding. If context_compact is available, use it only at a phase boundary, when most of the context is already fold summaries and folding again frees too little.",
-};
-/**
- * How to fold: which ranges to pick and what a summary keeps (pi-context-aware#456). The fold nudge points here
- * instead of resending the rules, and these lines count toward the context-tool guidance limit of
- * pi-context-aware#195 (tests/context-tool-guidance.test.ts). The bounds are the engine's defaults: minCompressRange
- * 5,000 characters, summaries of 50 to maxSummaryLength 20,000 characters, preserveRecentMessages 5.
- */
 const GUIDELINES = [
 	"Each message has an acp tag with its mNNNNN ref, token size, and type. Fold ranges by their refs.",
-	"Fold every range a nudge lists that is finished work: spent tool output, logs, exploration, settled discussion. Fold by need, not to reach a percentage, and keep context small by folding, not by avoiding tools. Never fold what the current task still uses, the last few messages (protected), or entries a verbatim fold hint keeps.",
-	"Start and end a range so each tool call stays with its result. A range needs 5,000 characters or more; a summary 50 to 20,000 (raise summaryMaxChars rather than lose facts).",
-	"Batch unrelated ranges in one call, each with its own topic and summary. To fold earlier folds again, name their fold ids (bN) as startId and endId; raw messages between them join the new fold.",
-	"The summary is the only record of the range: make it self-contained, so the task can continue without the original. Record task state as history (TASK AS OF THIS FOLD: ...), not as an instruction.",
-	"Keep verbatim: full paths with line numbers, signatures and the code line that is the finding, exact errors, values and versions, decisions with their reason, constraints, the user's goal and how it changed, why each step was taken, open questions, and the refs of key messages.",
-	"Quote the user only with the message ref (User said (m00132): \"...\"); otherwise mark it paraphrased. For a message too long to quote, the summary must not change its scope, constraints, priorities or acceptance criteria. Keep an Open objectives: line with the ref of each request neither done nor superseded, also when folding folds again.",
-	"Drop logs once the error or result is kept, repeated reads and status checks, spent search output, and back-and-forth once the outcome is known. Keep a dead end as one line (tried X, failed because Y), and one line on what each large dropped item covered.",
-	"When space is short keep, in order: goal and constraints, decisions, exact artifacts, findings, lessons. Write dense bullets under short headers in plain unicode, never \\uXXXX escapes, and not in the style of earlier summaries.",
-	COMPACT_GUIDELINE,
+	"Batch multiple unrelated ranges in one call; each gets its own topic and summary.",
+	"Write dense, self-contained summaries; preserve file paths, signatures, errors, and decisions verbatim.",
+	"Never fold content the current step is actively using.",
 ] as const;
 
 export interface FoldItem {
@@ -249,35 +224,12 @@ export interface ContextFoldDetails {
 	readonly results: readonly FoldRequestResult[];
 }
 
-/** Ranges a refusal lists by name; the rest are counted. */
-const MAX_OFFERED_RANGES = 8;
-
-/**
- * What a refused range can fold instead (pi-context-aware#457). The ranges the engine would accept now,
- * as the fold nudge offers them: a list of single refs was read as a menu, and models folded one or
- * two refs at a time, below the size minimum. The ref list remains only when no offer was computed.
- */
-export function refusalTail(result: Pick<FoldRequestFailure, "validRefs" | "offeredRanges">, compact = true): string {
-	const offered = result.offeredRanges;
-	if (offered === undefined) {
-		return result.validRefs.length > 0 ? " Valid refs: " + result.validRefs.slice(0, 40).join(", ") + (result.validRefs.length > 40 ? ", ..." : "") + "." : "";
-	}
-	if (offered.length === 0) return compact ? " No other range can be folded now; if context is still too large, call context_compact at a clean boundary." : " No other range can be folded now.";
-	const listed = offered.slice(0, MAX_OFFERED_RANGES).map((range) => range.startRef + ".." + range.endRef + " (~" + range.tokens + " tokens)");
-	const more = offered.length > MAX_OFFERED_RANGES ? ", and " + (offered.length - MAX_OFFERED_RANGES) + " more" : "";
-	return " Ranges you can fold now, each whole: " + listed.join(", ") + more + ".";
-}
-
-/**
- * Run one call: one engine request per item, ids by position. A refusal names context_compact only while the
- * session's methods include compact (pi-context-aware#526); an engine that cannot say keeps today's advice.
- */
-export function runFold(engine: Pick<FoldEngine, "request"> & Partial<Pick<FoldEngine, "engine">>, ctx: ExtensionContext, toolCallId: string, params: ContextFoldInput) {
+/** Run one call: one engine request per item, ids by position. */
+export function runFold(engine: Pick<FoldEngine, "request">, ctx: ExtensionContext, toolCallId: string, params: ContextFoldInput) {
 	const read = readFold(params);
 	if (typeof read === "string") return { content: [{ type: "text" as const, text: read }], details: undefined, isError: true };
 	const { items, reasons } = read;
 	const summaryMaxChars = summaryLimitOf(params.summaryMaxChars);
-	const compactOffered = () => engine.engine === undefined || hasMethod(engine.engine(ctx).strategy.methods, "compact");
 	const lines: string[] = [];
 	const recoveries: FoldRequestRecovery[] = [];
 	let accepted = 0;
@@ -290,7 +242,8 @@ export function runFold(engine: Pick<FoldEngine, "request"> & Partial<Pick<FoldE
 		const result = engine.request(ctx, { ...item, ...(summaryMaxChars !== undefined ? { summaryMaxChars } : {}), requestId: toolCallId + "#" + index });
 		const span = item.startRef + ".." + item.endRef;
 		if (!result.ok) {
-			lines.push(label + " (" + span + ") refused: " + result.errors.join(" ") + refusalTail(result, compactOffered()));
+			const valid = result.validRefs.length > 0 ? " Valid refs: " + result.validRefs.slice(0, 40).join(", ") + (result.validRefs.length > 40 ? ", ..." : "") + "." : "";
+			lines.push(label + " (" + span + ") refused: " + result.errors.join(" ") + valid);
 			return;
 		}
 		accepted++;
@@ -307,48 +260,30 @@ export function runFold(engine: Pick<FoldEngine, "request"> & Partial<Pick<FoldE
 }
 
 export interface ContextFoldSurface {
-	/**
-	 * Register the fold names this session's surface decision lists; withdraw the rest as hidden. `compact` is false
-	 * when the session's methods leave out compact: the guidelines then name no context_compact.
-	 */
-	apply(entries: readonly ContextToolSurfaceEntry[], compact?: boolean): void;
-	/**
-	 * Word the guideline that names context_compact by `steer` (pi-context-aware#459). Registered tools are registered
-	 * again only when the steer changes, so the tool guidance stays the same between requests of one session until
-	 * its guidance, methods or model change.
-	 */
-	steer(steer: Steer): void;
+	/** Register the fold names this session's surface decision lists; withdraw the rest as hidden. */
+	apply(entries: readonly ContextToolSurfaceEntry[]): void;
 }
 
-/** The context_fold guidelines for a session: the compact line worded by `steer`, or left out without compact. */
-function guidelinesFor(compact: boolean, steer: Steer): string[] {
-	return compact ? GUIDELINES.map((line) => (line === COMPACT_GUIDELINE ? STEERED_COMPACT_GUIDELINES[steer] : line)) : GUIDELINES.filter((line) => line !== COMPACT_GUIDELINE);
-}
-
-export function createContextFoldSurface(pi: ExtensionAPI, engine: Pick<FoldEngine, "request"> & Partial<Pick<FoldEngine, "engine">>): ContextFoldSurface {
-	let guidedCompact = true;
-	let steered: Steer = "default";
+export function createContextFoldSurface(pi: ExtensionAPI, engine: Pick<FoldEngine, "request">): ContextFoldSurface {
 	const register = (name: typeof FOLD_TOOL_NAME, exposure: ToolExposure) => pi.registerTool(schemaTool({
 		name,
 		label: "Context Fold",
 		description: DESCRIPTION,
 		promptSnippet: SNIPPET,
-		promptGuidelines: guidelinesFor(guidedCompact, steered),
+		promptGuidelines: [...GUIDELINES],
 		parameters: contextFoldSchema,
 		exposure,
 		execute: async (toolCallId, params, _signal, _onUpdate, ctx) => runFold(engine, ctx, toolCallId, params),
 	}));
 	const registered = new Map<typeof FOLD_TOOL_NAME, ToolExposure>();
 	return {
-		apply(entries, compact = true) {
+		apply(entries) {
 			const wanted = new Map<typeof FOLD_TOOL_NAME, ToolExposure>();
 			for (const entry of entries) {
 				if (entry.name === FOLD_TOOL_NAME) wanted.set(entry.name, entry.exposure);
 			}
-			const guidanceChanged = guidedCompact !== compact;
-			guidedCompact = compact;
 			for (const [name, exposure] of wanted) {
-				if (registered.get(name) === exposure && !guidanceChanged) continue;
+				if (registered.get(name) === exposure) continue;
 				register(name, exposure);
 				registered.set(name, exposure);
 			}
@@ -357,11 +292,6 @@ export function createContextFoldSurface(pi: ExtensionAPI, engine: Pick<FoldEngi
 				register(name, "hidden");
 				registered.set(name, "hidden");
 			}
-		},
-		steer(steer) {
-			if (steer === steered) return;
-			steered = steer;
-			for (const [name, exposure] of registered) register(name, exposure);
 		},
 	};
 }

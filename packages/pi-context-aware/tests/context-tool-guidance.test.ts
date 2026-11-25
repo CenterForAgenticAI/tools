@@ -4,25 +4,23 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import { defaultCountTokens } from "../src/folds/kernel/tokenize.js";
 import { buildContextToolsSection } from "../src/platform/prompt-sections.js";
 import { createHostPi, createSession } from "./compaction-owner-harness.js";
 
-// pi-context-aware#195 (REQ-TOOLS-001): the guidance for the context tools measures at or under 1,500 tokens.
+// pi-context-aware#195 (REQ-TOOLS-001): the guidance for the six context tools measures at or under 1,500 tokens.
 // The count covers the prompt section plus each tool's promptSnippet and promptGuidelines; descriptions are not counted.
 
 const LIMIT = 1500;
-// session_focus and session_tasks moved to pi-workstream, which measures its own guidance.
-const TOOLS = ["context_fold", "context_recall", "context_status", "context_compact"] as const;
+const SIX = ["context_fold", "context_recall", "context_status", "context_compact", "session_focus", "session_tasks"] as const;
 const OLD_NAMES = /\b(compress|decompress|search_context|acp_status|compact_session|search_prior_sessions|session_recall|session_compaction_history)\b/u;
 
 interface RegisteredTool { promptSnippet?: string; promptGuidelines?: string[]; exposure?: string }
 
-/** A branch that records a draw of by-model-v1 (pi-context-aware#459), and the model the session runs. */
-interface Steered { readonly modelId: string }
-
-async function loadTools(steered?: Steered): Promise<Map<string, RegisteredTool>> {
+async function loadTools(): Promise<Map<string, RegisteredTool>> {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-tool-guidance-")));
 	const agentDir = path.join(root, "agent");
 	fs.mkdirSync(agentDir, { recursive: true });
@@ -33,12 +31,9 @@ async function loadTools(steered?: Steered): Promise<Map<string, RegisteredTool>
 	try {
 		fs.writeFileSync(path.join(agentDir, "context-aware.json"), JSON.stringify({ contextCache: { enabled: false }, sessionNaming: { scope: "off" }, workstream: { enabled: false } }));
 		const host = createHostPi();
-		// Pi activates a tool registered with direct exposure; the steered line needs context_compact reachable.
-		if (steered) host.api.setActiveTools(["read", "context_status", "context_recall", "context_fold", "context_compact"]);
 		const extension = await import(`../src/index.js?tool-guidance=${Date.now()}`);
 		extension.default(host.api);
-		const branch = steered ? [{ type: "custom", id: "a1", parentId: null, timestamp: "2026-11-20T00:00:00.000Z", customType: "context-aware.strategy-assignment.v2", data: { schemaVersion: 2, guidance: "by-model-v1", seed: "459-test", variants: ["by-model-v1"], drawnFor: "tool-guidance-session" } }] : undefined;
-		const session = createSession(root, "tool-guidance-session", steered ? { branch, model: { id: steered.modelId, contextWindow: 200_000 } } : {});
+		const session = createSession(root, "tool-guidance-session");
 		await host.handler("session_start")({ reason: "startup" }, session.ctx);
 		await host.handler("session_shutdown")({}, session.ctx).catch(() => {});
 		return host.tools as unknown as Map<string, RegisteredTool>;
@@ -59,7 +54,7 @@ function worstCase(tools: Map<string, RegisteredTool>): { total: number; parts: 
 	const section = buildContextToolsSection(ALL) ?? "";
 	const parts: Record<string, number> = { "context-tools section": defaultCountTokens(section) };
 	const texts = [section];
-	for (const name of TOOLS) {
+	for (const name of SIX) {
 		// context_fold registers only while billion-context-pi is absent; a stub with the same text stands in if it did not.
 		const tool = tools.get(name);
 		assert.ok(tool, `${name} is registered`);
@@ -68,25 +63,15 @@ function worstCase(tools: Map<string, RegisteredTool>): { total: number; parts: 
 		texts.push(text);
 	}
 	const text = texts.join("\n");
-	return { total: defaultCountTokens(section) + TOOLS.reduce((sum, name) => sum + parts[name]!, 0), parts, text };
+	return { total: defaultCountTokens(section) + SIX.reduce((sum, name) => sum + parts[name]!, 0), parts, text };
 }
 
-test("REQ-TOOLS-001: section, snippets and guidelines of the context tools measure at or under 1,500 tokens", async () => {
+test("REQ-TOOLS-001: section, snippets and guidelines of the six tools measure at or under 1,500 tokens", async () => {
 	const tools = await loadTools();
 	const { total, parts } = worstCase(tools);
 	console.log(`context tool guidance: ${total} tokens ${JSON.stringify(parts)}`);
 	assert.ok(total <= LIMIT, `guidance is ${total} tokens, over ${LIMIT}: ${JSON.stringify(parts)}`);
 	assert.ok(total > 300, "the count includes real guidance, not an empty render");
-});
-
-test("#459: under by-model-v1 the guidance for Opus and for GPT also measures at or under 1,500 tokens, with its steered line", async () => {
-	for (const [modelId, line] of [["claude-opus-5-5", /compact rather than fold that phase range by range/u], ["gpt-6.1-sol", /Prefer folding\. If context_compact is available, use it only at a phase boundary/u]] as const) {
-		const tools = await loadTools({ modelId });
-		const { total, parts, text } = worstCase(tools);
-		console.log(`context tool guidance, by-model-v1 on ${modelId}: ${total} tokens ${JSON.stringify(parts)}`);
-		assert.match(text, line, `${modelId} gets its steered line`);
-		assert.ok(total <= LIMIT, `${modelId}: guidance is ${total} tokens, over ${LIMIT}`);
-	}
 });
 
 test("the budget check goes red when a tool's guidance grows", async () => {
@@ -122,7 +107,7 @@ test("AC-196-3: the context-tools section has no alias line", () => {
 	assert.doesNotMatch(section, /aliases|Old names|decompress|search_context|acp_status|\bcompress\b/u);
 });
 
-async function sectionsFor(active: readonly string[], foreignTools: readonly string[] = []): Promise<Record<string, string>> {
+async function guidanceFor(active: readonly string[], foreignTools: readonly string[] = []) {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "context-aware-tool-wiring-")));
 	const agentDir = path.join(root, "agent");
 	fs.mkdirSync(agentDir, { recursive: true });
@@ -137,12 +122,26 @@ async function sectionsFor(active: readonly string[], foreignTools: readonly str
 		extension.default(host.api);
 		for (const name of foreignTools) (host.api as unknown as { registerTool(tool: { name: string }): void }).registerTool({ name });
 		const session = createSession(root, "tool-wiring-session");
-		await host.handler("session_start")({ reason: "startup" }, session.ctx);
+		const sessionManager = SessionManager.inMemory(root);
+		for (let index = 0; index < 4; index += 1) {
+			sessionManager.appendMessage({ role: "user", content: "Invented archive review text. ".repeat(1_200), timestamp: 1 });
+			sessionManager.appendMessage(fauxAssistantMessage("Invented archive answer text. ".repeat(1_200)));
+		}
+		sessionManager.appendMessage({ role: "user", content: "Continue.", timestamp: 1 });
+		const ctx = {
+			...session.ctx,
+			sessionManager,
+			model: { ...session.ctx.model!, contextWindow: 70_000 },
+			getContextUsage: () => undefined,
+		};
+		await host.handler("session_start")({ reason: "startup" }, ctx);
 		host.api.setActiveTools([...active]);
 		const event = { type: "before_agent_start", prompt: "hello", systemPrompt: "base", systemPromptOptions: { sections: {} as Record<string, string> } };
-		await host.handler("before_agent_start")(event as never, session.ctx);
-		await host.handler("session_shutdown")({}, session.ctx).catch(() => {});
-		return event.systemPromptOptions.sections;
+		await host.handler("before_agent_start")(event as never, ctx);
+		const messages = sessionManager.buildSessionContext().messages.filter((message) => message.role !== "system");
+		const rendered = await host.handler("context")({ type: "context", messages }, ctx);
+		await host.handler("session_shutdown")({}, ctx).catch(() => {});
+		return { sections: event.systemPromptOptions.sections, hasFoldNudge: (JSON.stringify(rendered) ?? "").includes("`context_fold`") };
 	} finally {
 		if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
@@ -151,20 +150,27 @@ async function sectionsFor(active: readonly string[], foreignTools: readonly str
 }
 
 test("CR-FOLD-WIRING-UNTESTED: the section's flags follow the registered and reachable tools in a real session", async () => {
-	const withFold = (await sectionsFor(["context_status", "context_recall", "context_fold", "context_compact"]))["context-tools"] ?? "";
+	const withFold = (await guidanceFor(["context_status", "context_recall", "context_fold", "context_compact"])).sections["context-tools"] ?? "";
 	assert.match(withFold, /- context_fold:/u);
 	assert.match(withFold, /fold what you have finished with/u);
 	assert.doesNotMatch(withFold, OLD_NAMES);
-	const withoutFold = (await sectionsFor(["context_status", "context_recall", "context_compact"]))["context-tools"] ?? "";
+	const withoutFold = (await guidanceFor(["context_status", "context_recall", "context_compact"])).sections["context-tools"] ?? "";
 	assert.match(withoutFold, /- context_recall:/u);
 	assert.doesNotMatch(withoutFold, /context_fold|\bcompress\b|fold what you have/u);
-	assert.equal((await sectionsFor([]))["context-tools"], undefined, "no section when no context tool is reachable");
+	assert.equal((await guidanceFor([])).sections["context-tools"], undefined, "no section when no context tool is reachable");
+});
+
+test("fold nudges follow the session's active tool list", async () => {
+	const supported = await guidanceFor(["context_fold"]);
+	assert.equal(supported.hasFoldNudge, true);
+	const restricted = await guidanceFor(["session_tasks"]);
+	assert.equal(restricted.hasFoldNudge, false);
 });
 
 test("CR-ALIAS-BCP-LOADED: no session lists an old tool name, with or without billion-context-pi's acp_cache tool", async () => {
-	const loaded = (await sectionsFor(["context_status", "context_recall", "context_compact"], ["acp_cache"]))["context-tools"] ?? "";
+	const loaded = (await guidanceFor(["context_status", "context_recall", "context_compact"], ["acp_cache"])).sections["context-tools"] ?? "";
 	assert.match(loaded, /- context_recall:/u);
 	assert.doesNotMatch(loaded, OLD_NAMES);
-	const absent = (await sectionsFor(["context_status", "context_recall", "context_compact"]))["context-tools"] ?? "";
+	const absent = (await guidanceFor(["context_status", "context_recall", "context_compact"])).sections["context-tools"] ?? "";
 	assert.doesNotMatch(absent, OLD_NAMES);
 });

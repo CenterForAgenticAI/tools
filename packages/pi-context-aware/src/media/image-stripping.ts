@@ -13,7 +13,7 @@
  * The session file is not touched, so the originals stay recoverable.
  */
 
-export type ProviderPayloadProtocol = "anthropic-messages" | "openai-chat" | "openai-responses" | "google-generative";
+export type ProviderPayloadProtocol = "anthropic-messages" | "openai-chat" | "openai-responses";
 
 export type PayloadProtocolDetection =
 	| { readonly ok: true; readonly protocol: ProviderPayloadProtocol | null }
@@ -128,16 +128,10 @@ export function detectPayloadProtocol(payload: unknown): PayloadProtocolDetectio
 	if (!isRecord(payload)) return { ok: false, reason: "the request body is not a JSON object" };
 	const hasMessages = Array.isArray(payload.messages);
 	const hasInput = Array.isArray(payload.input) || typeof payload.input === "string";
-	const hasContents = Array.isArray(payload.contents);
-	// Cloud Code routing fields vary by provider; the nested contents list is the wire marker.
-	const hasRequestContents = isRecord(payload.request) && Array.isArray(payload.request.contents);
 	if (hasMessages && hasInput) return { ok: false, reason: "the request body has both messages and input" };
-	if (hasMessages && (hasContents || hasRequestContents)) return { ok: false, reason: "the request body has both messages and contents" };
-	if (hasInput && (hasContents || hasRequestContents)) return { ok: false, reason: "the request body has both input and contents" };
-	if (hasContents && hasRequestContents) return { ok: false, reason: "the request body has both contents and request.contents" };
-	if (hasContents || hasRequestContents) return { ok: true, protocol: "google-generative" };
 	if (hasInput) return { ok: true, protocol: "openai-responses" };
 	if (hasMessages) return detectMessagesProtocol(payload.messages as unknown[]);
+	if (Array.isArray(payload.contents)) return { ok: false, reason: "Google-style contents are not supported" };
 	return { ok: false, reason: "the request body has no messages, input, or contents list" };
 }
 
@@ -145,9 +139,6 @@ function isTopLevelImage(protocol: ProviderPayloadProtocol, part: unknown): part
 	if (!isRecord(part)) return false;
 	if (protocol === "anthropic-messages") return part.type === "image";
 	if (protocol === "openai-chat") return part.type === "image_url";
-	if (protocol === "google-generative") {
-		return isRecord(part.inlineData) && typeof part.inlineData.mimeType === "string" && part.inlineData.mimeType.startsWith("image/");
-	}
 	return part.type === "input_image";
 }
 
@@ -180,11 +171,6 @@ function describeImage(protocol: ProviderPayloadProtocol, part: JsonRecord): Ima
 		const imageUrl = isRecord(part.image_url) ? part.image_url.url : part.image_url;
 		return describeDataUrl(imageUrl);
 	}
-	if (protocol === "google-generative" && isRecord(part.inlineData)) {
-		const mimeType = typeof part.inlineData.mimeType === "string" ? part.inlineData.mimeType : undefined;
-		const bytes = typeof part.inlineData.data === "string" ? base64Bytes(part.inlineData.data) : undefined;
-		return { ...(mimeType ? { mimeType } : {}), ...(bytes === undefined ? {} : { bytes }) };
-	}
 	return describeDataUrl(part.image_url);
 }
 
@@ -204,7 +190,6 @@ function placeholderText(description: ImageDescription): string {
 
 function placeholderPart(protocol: ProviderPayloadProtocol, image: JsonRecord): JsonRecord {
 	const text = placeholderText(describeImage(protocol, image));
-	if (protocol === "google-generative") return { text };
 	if (protocol === "openai-responses") return { type: "input_text", text };
 	// An Anthropic cache breakpoint on a removed image moves to its placeholder,
 	// so the request keeps the same number of breakpoints in the same place.
@@ -238,9 +223,8 @@ function stripParts(protocol: ProviderPayloadProtocol, parts: readonly unknown[]
 	return removed > 0 ? { parts: next, removed } : null;
 }
 
-/** Gemini uses `parts`; Responses tool outputs carry their content in `output`. */
-function contentKey(protocol: ProviderPayloadProtocol, item: JsonRecord): "content" | "output" | "parts" {
-	if (protocol === "google-generative") return "parts";
+/** The key of an item's content list: Responses tool outputs carry it in `output`. */
+function contentKey(protocol: ProviderPayloadProtocol, item: JsonRecord): "content" | "output" {
 	if (protocol === "openai-responses" && (item.type === "function_call_output" || item.type === "custom_tool_call_output")) {
 		return "output";
 	}
@@ -267,9 +251,8 @@ export function stripHistoricalImages(payload: unknown, options: ImageStripOptio
 	const { protocol } = detection;
 	if (protocol === null) return { kind: "unchanged", protocol: null };
 	const body = payload as JsonRecord;
-	const request = protocol === "google-generative" && isRecord(body.request) && Array.isArray(body.request.contents) ? body.request : null;
-	const listKey = protocol === "google-generative" ? "contents" : protocol === "openai-responses" ? "input" : "messages";
-	const items = (request ?? body)[listKey];
+	const listKey = protocol === "openai-responses" ? "input" : "messages";
+	const items = body[listKey];
 	if (!Array.isArray(items)) return { kind: "unchanged", protocol };
 
 	const stripped = items.map((item) => stripItem(protocol, item));
@@ -288,7 +271,7 @@ export function stripHistoricalImages(payload: unknown, options: ImageStripOptio
 	return {
 		kind: "stripped",
 		protocol,
-		payload: request ? { ...body, request: { ...request, [listKey]: nextItems } } : { ...body, [listKey]: nextItems },
+		payload: { ...body, [listKey]: nextItems },
 		removedImages,
 		strippedMessages: toStrip.size,
 	};

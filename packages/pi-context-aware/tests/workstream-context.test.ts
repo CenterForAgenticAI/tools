@@ -12,8 +12,8 @@ import {
 	selectActiveWorkstream,
 	selectRecentRelevantActivity,
 } from "../src/workstream/workstream-context.js";
-import { createWorkstreamSnapshot, workstreamEntry } from "./workstream-fixture.js";
-import { asPiSessionId, asWorkstreamId, type ActivityEvent, type WorkstreamSnapshot } from "../src/snapshot-contracts/schema.js";
+import { createWorkstreamSnapshot, workstreamEntry } from "../src/workstream/workstream-state.js";
+import { asPiSessionId, asWorkstreamId, type ActivityEvent, type WorkstreamSnapshot } from "../src/workstream/workstream-schema.js";
 
 const now = "2026-07-20T00:00:00.000Z";
 
@@ -398,9 +398,6 @@ test("full activity remains available to UI callers but only three relevant entr
 	assert.match(projection.guidance, /Revision: 1/);
 	assert.match(projection.guidance, /Ship the durable context handoff/);
 	assert.match(projection.guidance, /Preserve transcript custom-entry authority/);
-	// Sessions from before the move hold the old type, so the handoff names both.
-	assert.ok(projection.guidance.includes("pi-workstream.workstream.v1"), "names the type pi-workstream writes");
-	assert.ok(projection.guidance.includes("context-aware.workstream.v1"), "names the type older sessions hold");
 	assert.match(projection.guidance, /relevant-2|activity relevant-2/);
 	assert.doesNotMatch(projection.guidance, /routine-1|routine-2/);
 	assert.doesNotMatch(buildWorkstreamContextEnvelope(current) ?? "", /relevant-4|<activity|activity relevant-/);

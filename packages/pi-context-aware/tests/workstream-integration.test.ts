@@ -1,13 +1,14 @@
 import { removeFixtureDir } from "./fixture-cleanup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import process from "node:process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createWorkstreamSnapshot, workstreamEntry } from "./workstream-fixture.js";
+import { createLauncherHandoff } from "../src/seed/launcher-handoff.js";
+import { replayWorkstreamEntries } from "../src/workstream/workstream-replay.js";
+import { createWorkstreamSnapshot, workstreamEntry } from "../src/workstream/workstream-state.js";
 import type { ActivityComplete } from "../src/workstream/workstream-activity.js";
 import { piPromptHandler } from "./pi-prompt-render.js";
 
@@ -126,10 +127,9 @@ test("final integration registers and executes durable workstream lifecycle and 
     for (const eventName of ["session_start", "before_agent_start", "agent_settled", "session_before_compact", "session_shutdown"]) {
       assert.ok(harness.events.has(eventName), `expected ${eventName} lifecycle registration`);
     }
+    assert.ok(harness.commands.has("focus"));
     assert.ok(harness.commands.has("sessions"), "session discovery must be user-facing");
-    // The focus record, the task list and their commands belong to pi-workstream.
-    for (const command of ["focus", "tasks", "answer"]) assert.equal(harness.commands.has(command), false, `/${command} must not be registered here`);
-    for (const tool of ["session_focus", "session_tasks"]) assert.equal(harness.tools.has(tool), false, `${tool} must not be registered here`);
+    assert.ok(harness.tools.has("session_focus"));
 
     const snapshot = createWorkstreamSnapshot({
       workstreamId: "ws-integration",
@@ -143,7 +143,6 @@ test("final integration registers and executes durable workstream lifecycle and 
     const entries: unknown[] = [workstreamEntry(snapshot, { entryId: "snapshot-entry", timestamp: "2026-07-20T16:00:00.000Z" })];
     const ctx = contextFor(root, harness, "integration-session", entries);
     await firstHandler(harness, "session_start")({}, ctx);
-    await extension.drainSessionHousekeeping();
     const registryRoot = path.join(root, "agent", "session-registry", "v1");
     const projectDirs = fs.readdirSync(registryRoot);
     assert.equal(projectDirs.length, 1, "session_start must publish a private registry projection");
@@ -166,7 +165,9 @@ test("final integration registers and executes durable workstream lifecycle and 
     await sessionsCommand.handler("", ctx);
     assert.match(harness.notifications.at(-1) ?? "", /integration-session/);
     assert.match(harness.notifications.at(-1) ?? "", /Ship the durable integration/);
-    await sessionsCommand.handler("health", ctx);
+    const focusCommand = harness.commands.get("focus");
+    assert.ok(focusCommand);
+    await focusCommand.handler("health", ctx);
     assert.match(harness.notifications.at(-1) ?? "", /capabilities=/);
 
     await firstHandler(harness, "session_shutdown")({}, ctx);
@@ -195,10 +196,6 @@ case "$1" in
 esac
 `);
   fs.chmodSync(cmuxBin, 0o755);
-  // macOS checks a newly written executable on its first run, and under a
-  // parallel test run that check alone can outlast the adapter's 1 s probe.
-  // Run the fake once here so the probes time the fake, not that check.
-  execFileSync(cmuxBin, ["--version"], { stdio: "ignore" });
   process.env.HOME = root;
   process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
   process.env.CMUX_BIN = cmuxBin;
@@ -219,6 +216,15 @@ esac
     const ctx = contextFor(root, harness, "cmux-failure-session", entries);
 
     await firstHandler(harness, "session_start")({}, ctx);
+    const focusCommand = harness.commands.get("focus");
+    assert.ok(focusCommand);
+    await focusCommand.handler("health", ctx);
+    const focusHealth = harness.notifications.at(-1) ?? "";
+    assert.match(focusHealth, /cmux:degraded/);
+    assert.match(focusHealth, /\nLast errors:/u);
+    assert.doesNotMatch(focusHealth, /\\nLast errors:/u);
+    assert.doesNotMatch(focusHealth, /super-secret/);
+
     await firstHandler(harness, "session_shutdown")({}, ctx);
     const sessionsCommand = harness.commands.get("sessions");
     assert.ok(sessionsCommand);
@@ -264,9 +270,9 @@ test("disabled cmux projections stay fail-open without a false degraded health d
     const ctx = contextFor(root, harness, "cmux-disabled-session", entries);
 
     await firstHandler(harness, "session_start")({}, ctx);
-    const sessionsCommand = harness.commands.get("sessions");
-    assert.ok(sessionsCommand);
-    await sessionsCommand.handler("health", ctx);
+    const focusCommand = harness.commands.get("focus");
+    assert.ok(focusCommand);
+    await focusCommand.handler("health", ctx);
     const health = harness.notifications.at(-1) ?? "";
     assert.match(health, /cmux:disabled/);
     assert.doesNotMatch(health, /cmux:degraded/);
@@ -278,6 +284,142 @@ test("disabled cmux projections stay fail-open without a false degraded health d
     else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
     if (priorCmuxBin === undefined) delete process.env.CMUX_BIN;
     else process.env.CMUX_BIN = priorCmuxBin;
+    await removeFixtureDir(root);
+  }
+});
+
+test("final integration consumes optional launcher handoff without owning launch", async () => {
+  const root = tempRoot();
+  const priorHome = process.env.HOME;
+  const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.HOME = root;
+  process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
+  try {
+    const extension = await import(`../src/index.js?launcher=${Date.now()}`);
+    const harness = makeHarness();
+    extension.default(harness.api);
+    const childEntries: unknown[] = [];
+    const handoff = createLauncherHandoff({
+      handoffId: "handoff-1",
+      workstreamId: "ws-parent",
+      parentPiSessionId: "parent-session",
+      objective: "Continue launched workstream",
+      status: "active",
+      refs: [{ kind: "graft-spec", value: "0001-durable-session-workstreams" }],
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+    const acknowledgements: unknown[] = [];
+    const ctx = {
+      ...contextFor(root, harness, "child-session", childEntries),
+      launcherHandoff: handoff,
+      launcherChild: { piSessionId: "child-session", terminal: { terminalId: "terminal-1", kind: "other", location: "pane-1" } },
+      acknowledgeLauncherHandoff: (acknowledgement: unknown) => acknowledgements.push(acknowledgement),
+    } as unknown as ExtensionContext;
+    await firstHandler(harness, "session_start")({}, ctx);
+    assert.ok(harness.entries.some((entry) => typeof entry === "object" && entry !== null && (entry as { customType?: string }).customType === "context-aware.workstream.v1"), "session_start must consume handoff into the child transcript");
+    assert.equal(acknowledgements.length, 1);
+  } finally {
+    if (priorHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorHome;
+    if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+    await removeFixtureDir(root);
+  }
+});
+
+test("launcher acknowledgement failures degrade health without leaking secrets", async () => {
+  const root = tempRoot();
+  const priorHome = process.env.HOME;
+  const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.HOME = root;
+  process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
+  try {
+    const extension = await import(`../src/index.js?launcher-failure=${Date.now()}`);
+    const harness = makeHarness();
+    extension.default(harness.api);
+    const childEntries: unknown[] = [];
+    const handoff = createLauncherHandoff({
+      handoffId: "failed-ack-handoff",
+      workstreamId: "ws-launcher-failure",
+      parentPiSessionId: "parent-session",
+      objective: "Continue launched workstream safely",
+      status: "active",
+      refs: [{ kind: "graft-spec", value: "0001-durable-session-workstreams" }],
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+    const ctx = {
+      ...contextFor(root, harness, "failed-ack-child", childEntries),
+      launcherHandoff: handoff,
+      launcherChild: { piSessionId: "failed-ack-child", terminal: { terminalId: "terminal-failure", kind: "other", location: "pane-failure" } },
+      acknowledgeLauncherHandoff: () => { throw new Error("token=launcher-secret"); },
+    } as unknown as ExtensionContext;
+
+    await firstHandler(harness, "session_start")({}, ctx);
+    assert.ok(harness.entries.some((entry) => typeof entry === "object" && entry !== null && (entry as { customType?: string }).customType === "context-aware.workstream.v1"), "session_start must append the handoff snapshot before acknowledgement failure");
+
+    const focusCommand = harness.commands.get("focus");
+    assert.ok(focusCommand);
+    await focusCommand.handler("health", ctx);
+    const health = harness.notifications.at(-1) ?? "";
+    assert.match(health, /worktree-launcher:degraded/);
+    assert.match(health, /acknowledgement-failed/);
+    assert.doesNotMatch(health, /launcher-secret/);
+  } finally {
+    if (priorHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorHome;
+    if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+    await removeFixtureDir(root);
+  }
+});
+
+test("transcript authority suppresses a divergent launcher handoff", async () => {
+  const root = tempRoot();
+  const priorHome = process.env.HOME;
+  const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.HOME = root;
+  process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
+  try {
+    const extension = await import(`../src/index.js?authority=${Date.now()}`);
+    const harness = makeHarness();
+    extension.default(harness.api);
+    const authoritative = createWorkstreamSnapshot({
+      workstreamId: "ws-authoritative",
+      piSessionId: "authoritative-child",
+      objective: "Continue the pinned workstream",
+      objectivePinned: true,
+      refs: [{ kind: "graft-spec", value: "0001-durable-session-workstreams" }],
+      now: new Date("2026-07-20T16:00:00.000Z"),
+      idFactory: () => "authoritative-snapshot",
+    });
+    const childEntries: unknown[] = [workstreamEntry(authoritative, { entryId: "authoritative-entry", timestamp: "2026-07-20T16:00:00.000Z" })];
+    const handoff = createLauncherHandoff({
+      handoffId: "divergent-handoff",
+      workstreamId: "ws-launcher",
+      parentPiSessionId: "launcher-parent",
+      objective: "Replace the pinned workstream",
+      status: "active",
+      refs: [{ kind: "graft-spec", value: "0001-durable-session-workstreams" }],
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+    const acknowledgements: unknown[] = [];
+    const ctx = {
+      ...contextFor(root, harness, "authoritative-child", childEntries),
+      launcherHandoff: handoff,
+      launcherChild: { piSessionId: "authoritative-child", terminal: { terminalId: "terminal-authority", kind: "other", location: "pane-authority" } },
+      acknowledgeLauncherHandoff: (acknowledgement: unknown) => acknowledgements.push(acknowledgement),
+    } as unknown as ExtensionContext;
+
+    await firstHandler(harness, "session_start")({}, ctx);
+
+    assert.equal(replayWorkstreamEntries(childEntries).snapshot?.workstreamId, "ws-authoritative");
+    assert.equal(harness.entries.length, 0, "authoritative transcript must prevent launcher append");
+    assert.equal(acknowledgements.length, 0, "authoritative transcript must prevent launcher acknowledgement");
+  } finally {
+    if (priorHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorHome;
+    if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
     await removeFixtureDir(root);
   }
 });

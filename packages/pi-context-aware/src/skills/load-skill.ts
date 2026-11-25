@@ -136,44 +136,9 @@ export function resolveSkill(requested: string, skills: readonly DiscoveredSkill
 	return { ok: true, skill, shadowed };
 }
 
-/** The fields of Pi's `SlashCommandInfo` this module reads. */
-export interface SessionCommand {
-	name: string;
-	description?: string;
-	source: string;
-	sourceInfo?: { path?: string };
-}
-
-/**
- * The skills the running session loaded, read from Pi's command list.
- *
- * Pi lists every loaded skill as a `skill:<name>` command whose `sourceInfo.path`
- * is the SKILL.md it read. This includes skills an extension added through
- * `resources_discover`, which a fresh resource loader without extensions never
- * sees. The path is the one Pi recorded, never one built from caller input.
- */
-export function skillsFromCommands(commands: readonly SessionCommand[]): DiscoveredSkill[] {
-	const skills: DiscoveredSkill[] = [];
-	for (const command of commands) {
-		if (command.source !== "skill" || !command.name.startsWith("skill:")) continue;
-		const filePath = command.sourceInfo?.path;
-		if (typeof filePath !== "string" || filePath === "") continue;
-		skills.push({ name: command.name.slice("skill:".length), description: command.description ?? "", filePath });
-	}
-	return skills;
-}
-
-/** Discovered skills first, then live session skills whose path is not already listed. */
-function withSessionSkills(discovered: readonly DiscoveredSkill[], session: readonly DiscoveredSkill[]): DiscoveredSkill[] {
-	const seen = new Set(discovered.map((skill) => skill.filePath));
-	return [...discovered, ...session.filter((skill) => !seen.has(skill.filePath))];
-}
-
 /** The slice of Pi's extension API this registration needs. */
 export interface LoadSkillToolAPI {
 	registerTool<TParams extends object, TDetails>(tool: ToolDefinition<TParams, TDetails>): void;
-	/** Pi's live command list; optional so a host without it keeps the loader fallback. */
-	getCommands?(): readonly SessionCommand[];
 	on(
 		event: "before_agent_start",
 		handler: (event: { systemPrompt: string; systemPromptOptions?: { skills?: readonly DiscoveredSkill[] } }, ctx: ExtensionContext) => unknown,
@@ -315,9 +280,8 @@ export interface LoadSkillRegistrationOptions {
  * Skills are captured from `before_agent_start`, which carries both the fully
  * assembled system prompt and the structured `systemPromptOptions.skills` Pi
  * built it from. A delegate worker's list is intentionally scoped to its agent
- * declaration, so a miss triggers Pi's full resource loader, plus the skills
- * the live session loaded (its `skill:` commands), before the tool reports an
- * unknown name. The context prompt remains a fallback for a first
+ * declaration, so a miss triggers Pi's full resource loader before the tool
+ * reports an unknown name. The context prompt remains a fallback for a first
  * call that somehow precedes the event. Neither source is a path built from
  * caller input.
  *
@@ -371,16 +335,7 @@ export function registerLoadSkillTool(
 			let fromFallback = false;
 			if (hasCapturedEvent && !resolved.ok && (resolved.reason === "unknown" || resolved.reason === "no-skills")) {
 				fallbackPromise ??= discoverSkills(fallbackContext!.cwd, fallbackContext!.projectTrusted).catch(() => []);
-				let sessionSkills: DiscoveredSkill[] = [];
-				try {
-					sessionSkills = skillsFromCommands(pi.getCommands?.() ?? []);
-				} catch {
-					// A host whose command list throws keeps the loader fallback alone.
-				}
-				// The loader runs without extensions, so it misses skills an extension added
-				// through resources_discover (for example pi-caair-dev-tools stack-fallback-skills
-				// and skill-groups). The session's own command list carries those.
-				const fallback = withSessionSkills(await fallbackPromise, sessionSkills);
+				const fallback = await fallbackPromise;
 				if (fallback && fallback.length > 0) {
 					skills = fallback;
 					resolved = resolveSkill(params.name, fallback);

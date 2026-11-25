@@ -211,7 +211,7 @@ const NUDGE_FIXES: readonly ParityRegisterEntry[] = [
 	},
 	{
 		id: "FP-257", title: "Nudge names the live fold tool", issue: "pi-context-aware#257",
-		reason: "billion-context-pi's nudge tells the model to call compress, which is not a tool of this package. The native nudge sends the same decision in this package's text: it names context_fold, adds context_compact only when that is reachable, drops the 'stronger alert' sentence, and points to the context_fold guidelines instead of carrying the fold rules (pi-context-aware#458, pi-context-aware#456). The match compares the kernel's text with only the fold tool renamed.",
+		reason: "billion-context-pi's nudge tells the model to call compress; compress is not a tool of this package, so the native nudge names context_fold. The nudge is otherwise the same.",
 		matches: nudgeFixOnly("tool-name"),
 	},
 ];

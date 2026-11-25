@@ -17,7 +17,7 @@ This keeps post-compaction sessions from starting with under-specified instructi
 
 ## What it provides
 
-- **Context budget status**: a pressure-only footer item gives the glanceable band and percentage while `/context-status` reports full token usage, headroom, and configuration; at `WARN` and `URGENT` agents receive one non-persisted action line per request, computed from the view the fold pass sends.
+- **Context budget status**: a pressure-only footer item gives the glanceable band and percentage while `/context-status` reports full token usage, headroom, and configuration; agents receive cache-friendly `<context-telemetry>` envelopes for context pressure.
 - **Self-contained compaction handoffs**: `/compact-then` and `context_compact` rewrite raw seeds into fresh-session-ready prompts.
 - **Live rewrite preview**: while the model rewrites the seed, the UI streams the emerging prompt/question in a compact widget above the editor.
 - **Distinct compaction state**: when compaction starts, the rewrite preview clears and the UI switches to a separate “Compressing conversation into handoff summary…” loading state.
@@ -28,8 +28,9 @@ This keeps post-compaction sessions from starting with under-specified instructi
 - **Transcript recovery**: compaction summaries include a `Prior transcript: ~/.pi/agent/sessions/...` line so later agents can recover full pre-compaction context if needed.
 - **Seed metadata**: compaction details preserve raw seed, expanded seed, ambiguity mode, confidence/fallback metadata, and transcript path.
 - **Prior-session search and compaction boundaries**: `context_recall` can search earlier session transcripts, including the current session when `include_current: true`; `context_status` with the `compactions` view reports current-branch compaction counts, boundary identifiers and the last committed compaction writer without scanning the transcript.
-- **Session focus projections**: pi-workstream owns the focus and the task list. This package reads the focus from the session file (both `pi-workstream.workstream.v1` and the older `context-aware.workstream.v1`) for compaction, `/checkin`, private session registry records, exact overlap warnings and cmux status.
-- **User-facing session health**: `/sessions health` exposes scrubbed adapter/capability state; `/sessions` lists bounded session projections and `/sessions jump <id>` delegates only through an available launcher.
+- **Optional durable workstreams**: agents can start a concise, unpinned focus when its purpose must survive context loss; transcript-authoritative state, a persistent width-aware active-focus widget above the editor, bounded context/compaction projections, private session registry records, exact overlap warnings, and optional terminal/launcher metadata are wired through the Pi lifecycle.
+- **Session task list**: an enumerable checklist that survives compaction. `session_tasks` and `/tasks` keep tasks in the transcript, the list is re-rendered into the prompt every turn, a settle-time nudge names what is still open, and the remaining tasks ride the compaction seed into the next phase.
+- **User-facing session health**: `/focus health` and `/sessions health` expose scrubbed adapter/capability state; `/sessions` lists bounded session projections and `/sessions jump <id>` delegates only through an available launcher.
 - **Typed cross-extension service**: protocol v1 exposes pressure/headroom, session lineage, stable context-cache references, optional explicit one-way artifact promotion, and bounded seeded handoffs without parsing model-facing markers.
 - **Runtime overrides**: CLI flags can temporarily override the extension config for a single Pi process.
 

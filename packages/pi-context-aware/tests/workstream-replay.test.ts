@@ -1,15 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-	LEGACY_WORKSTREAM_ENTRY_TYPE,
-	WORKSTREAM_ENTRY_TYPE,
+	appendWorkstreamSnapshot,
 	createWorkstreamSnapshot,
 	detachWorkstream,
 	inheritWorkstream,
 	workstreamEntry,
-} from "./workstream-fixture.js";
-import { isWorkstreamEntryType, replayWorkstreamEntries } from "../src/snapshot-contracts/transcript.js";
-import { WORKSTREAM_SCHEMA_VERSION, asPiSessionId, asWorkstreamId, type WorkstreamSnapshot } from "../src/snapshot-contracts/schema.js";
+} from "../src/workstream/workstream-state.js";
+import {
+	replayWorkstreamEntries,
+	resolveWorkstreamInheritance,
+} from "../src/workstream/workstream-replay.js";
+import { WORKSTREAM_SCHEMA_VERSION, asPiSessionId, asWorkstreamId, type WorkstreamSnapshot } from "../src/workstream/workstream-schema.js";
 import { focusChain, focusEntry, historyTime, ordinaryMessage } from "./replay-history.js";
 import { randomFocusHistory, referenceReplay } from "./replay-reference.js";
 
@@ -30,37 +32,13 @@ function snapshot(revision: number, objective: string, eventId = `event-${revisi
 	});
 }
 
-test("replay reads both the pi-workstream entry type and the older context-aware one", () => {
-	assert.equal(WORKSTREAM_ENTRY_TYPE, "pi-workstream.workstream.v1");
-	assert.equal(LEGACY_WORKSTREAM_ENTRY_TYPE, "context-aware.workstream.v1");
-	assert.equal(isWorkstreamEntryType(WORKSTREAM_ENTRY_TYPE), true);
-	assert.equal(isWorkstreamEntryType(LEGACY_WORKSTREAM_ENTRY_TYPE), true);
-	assert.equal(isWorkstreamEntryType("context-aware.tasks.v1"), false);
-	assert.equal(isWorkstreamEntryType("pi-workstream.tasks.v1"), false);
-	assert.equal(isWorkstreamEntryType(undefined), false);
-	for (const customType of [WORKSTREAM_ENTRY_TYPE, LEGACY_WORKSTREAM_ENTRY_TYPE]) {
-		const result = replayWorkstreamEntries([workstreamEntry(snapshot(1, `written as ${customType}`), { entryId: "entry-1", timestamp: now, customType })]);
-		assert.equal(result.authority, "transcript", customType);
-		assert.equal(result.snapshot?.objective, `written as ${customType}`);
-	}
-});
-
-test("an old session's focus chain continues across the rename into one stream", () => {
-	// A session started before pi-workstream took over keeps its old entries; the
-	// next revision is written under the new type and must extend the same chain.
-	const result = replayWorkstreamEntries([
-		workstreamEntry(snapshot(1, "before the move", "event-1"), { entryId: "entry-1", timestamp: now, customType: LEGACY_WORKSTREAM_ENTRY_TYPE }),
-		workstreamEntry(snapshot(2, "after the move", "event-2"), { entryId: "entry-2", timestamp: now, customType: WORKSTREAM_ENTRY_TYPE, priorRevision: 1, previousEventId: "event-1" }),
-	]);
-	assert.equal(result.chainValid, true);
-	assert.equal(result.snapshot?.revision, 2);
-	assert.equal(result.snapshot?.objective, "after the move");
-});
-
-test("entries of any other type are not focus, even when they hold a valid snapshot", () => {
-	const result = replayWorkstreamEntries([workstreamEntry(snapshot(1, "wrong type"), { entryId: "entry-1", timestamp: now, customType: "pi-workstream.tasks.v1" })]);
-	assert.equal(result.authority, null);
-	assert.equal(result.snapshot, null);
+test("append accepts only complete schema snapshots and uses the versioned custom type", () => {
+	const calls: Array<[string, unknown]> = [];
+	appendWorkstreamSnapshot({ appendEntry: (type, data) => calls.push([type, data]) }, snapshot(1, "append"));
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]?.[0], "context-aware.workstream.v1");
+	assert.equal((calls[0]?.[1] as WorkstreamSnapshot).objective, "append");
+	assert.throws(() => appendWorkstreamSnapshot({ appendEntry: () => undefined }, { ...snapshot(1, "bad"), objective: "" }));
 });
 
 test("accepted focus provenance is stored in the authoritative entry and recovered by replay", () => {
@@ -198,7 +176,7 @@ test("transcript provenance survives a later complete snapshot that omits option
 		provenance: { source: "transcript", parentPiSessionId: asPiSessionId("pi-parent"), inheritedWorkstreamId: asWorkstreamId("ws-authority") },
 	}), { entryId: "entry-1", timestamp: now });
 	const second = workstreamEntry(snapshot(2, "second"), { entryId: "entry-2", timestamp: now });
-	const result = replayWorkstreamEntries([second, first]);
+	const result = resolveWorkstreamInheritance([second, first]);
 	assert.equal(result.snapshot?.objective, "second");
 	assert.equal(result.provenance?.parentPiSessionId, "pi-parent");
 });
@@ -207,13 +185,23 @@ test("transcript provenance is authoritative and projections cannot override it"
 	const transcript = workstreamEntry(snapshot(1, "transcript", "event-1", {
 		provenance: { source: "transcript", parentPiSessionId: asPiSessionId("pi-parent"), inheritedWorkstreamId: asWorkstreamId("ws-authority") },
 	}), { entryId: "entry-1", timestamp: now });
-	const result = replayWorkstreamEntries([transcript, {
+	const launcher = {
+		schemaVersion: 1,
+		handoffId: "handoff-1",
+		workstreamId: "ws-launcher",
+		parentPiSessionId: "pi-launcher",
+		objective: "launcher projection",
+		status: "active",
+		expiresAt: "2026-07-18T00:00:00.000Z",
+	};
+	const result = resolveWorkstreamInheritance([transcript, {
 		type: "custom", id: "activity", parentId: null, timestamp: now,
 		customType: "context-aware.activity.v1", data: { objective: "activity projection" },
-	}]);
+	}], { launcherHandoff: launcher, now: new Date(now) });
 	assert.equal(result.authority, "transcript");
 	assert.equal(result.snapshot?.objective, "transcript");
 	assert.equal(result.provenance?.source, "transcript");
+	assert.equal(result.launcherFallback, undefined);
 });
 
 test("all non-transcript projections stay neutral even when they carry newer objectives", () => {
@@ -226,7 +214,13 @@ test("all non-transcript projections stay neutral even when they carry newer obj
 		{ type: "custom", id: "peer", parentId: null, timestamp: now, customType: "pi-intercom.v1", data: { objective: "peer" } },
 		{ type: "custom", id: "terminal", parentId: null, timestamp: now, customType: "context-aware.terminal.v1", data: { objective: "terminal" } },
 	];
-	const result = replayWorkstreamEntries([...projections, transcript]);
+	const result = resolveWorkstreamInheritance([...projections, transcript], {
+		launcherHandoff: {
+			schemaVersion: 1, handoffId: "handoff", workstreamId: "ws-launcher", parentPiSessionId: "pi-launcher",
+			objective: "launcher", status: "active", expiresAt: "2026-07-18T00:00:00.000Z",
+		},
+		now: new Date(now),
+	});
 	assert.equal(result.authority, "transcript");
 	assert.equal(result.snapshot?.objective, "transcript");
 });
@@ -323,6 +317,24 @@ test("a detached stream wins an equal-updatedAt replay tie by transcript chronol
 	]);
 	assert.equal(result.snapshot?.workstreamId, "ws-detached");
 	assert.equal(result.snapshot?.piSessionId, "pi-detached");
+});
+
+test("launcher fallback is validated, expiring, and never creates transcript authority", () => {
+	const handoff = {
+		schemaVersion: 1,
+		handoffId: "handoff-1",
+		workstreamId: "ws-launcher",
+		parentPiSessionId: "pi-launcher",
+		objective: "launcher objective",
+		status: "active",
+		expiresAt: "2026-07-18T00:00:00.000Z",
+	};
+	const fallback = resolveWorkstreamInheritance([], { launcherHandoff: handoff, now: new Date(now) });
+	assert.equal(fallback.authority, null);
+	assert.equal(fallback.snapshot, null);
+	assert.equal(fallback.provenance?.source, "launcher");
+	assert.equal(resolveWorkstreamInheritance([], { launcherHandoff: handoff, now: new Date("2026-07-19T00:00:00.000Z") }).provenance, undefined);
+	assert.equal(resolveWorkstreamInheritance([], { launcherHandoff: { ...handoff, objective: "" }, now: new Date(now) }).provenance, undefined);
 });
 
 test("fork/clone keeps workstream identity but isolates Pi session, while detach mints a new stream", () => {

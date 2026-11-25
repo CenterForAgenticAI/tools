@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import * as path from "node:path";
 
@@ -38,43 +38,15 @@ export interface ManifestLockOptions {
 	startTimeOf?: (pid: number) => string | null;
 }
 
-let preparedStartTime: string | undefined;
-let preparingStartTime: Promise<void> | undefined;
-
-/** Memoize only our own immutable identity; foreign pids must always be probed afresh. */
-export function prepareProcessStartTime(): Promise<void> {
-	return preparingStartTime ??= new Promise<void>((resolve) => {
-		const fromProc = procStartTime(process.pid);
-		if (fromProc) {
-			preparedStartTime = fromProc;
-			resolve();
-			return;
-		}
-		execFile("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", timeout: 5000 }, (error, stdout) => {
-			// A failed probe stays unmemoized, so processStartTime probes again instead of keeping null.
-			const out = error ? "" : stdout.trim();
-			if (out) preparedStartTime = out;
-			resolve();
-		});
-	});
-}
-
-/** Linux procfs start ticks (field 22), or null when this host has no procfs. */
-function procStartTime(pid: number): string | null {
+/** Start time of a process, or null when this host cannot report it. */
+export function processStartTime(pid: number): string | null {
 	try {
 		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
 		// Field 2 (comm) may contain spaces and parentheses; fields resume after the last ")".
-		const field22 = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+		const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+		const field22 = rest[19];
 		if (field22 && /^\d+$/.test(field22)) return field22;
 	} catch { /* no procfs */ }
-	return null;
-}
-
-/** Start time of a process, or null when this host cannot report it. */
-export function processStartTime(pid: number): string | null {
-	if (pid === process.pid && preparedStartTime !== undefined) return preparedStartTime;
-	const fromProc = procStartTime(pid);
-	if (fromProc) return fromProc;
 	try {
 		const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim();
 		if (out) return out;

@@ -2,9 +2,9 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { parseRegistryProjection, type RegistryProjection, type WorkstreamRef } from "../snapshot-contracts/schema.js";
+import { parseRegistryProjection, type RegistryProjection, type WorkstreamRef } from "./workstream-schema.js";
 
-export type OverlapKind = "issue" | "change" | "gitlab-mr" | "github-issue" | "graft-spec" | "commit" | "branch" | "path";
+export type OverlapKind = "gitlab-mr" | "github-issue" | "graft-spec" | "commit" | "branch" | "path";
 export type OverlapClassification = "none" | "intentional-chain" | "potential-collision" | "workspace-collision";
 
 export interface OverlapCandidate extends RegistryProjection {
@@ -25,17 +25,8 @@ export interface OverlapResult {
 	readonly action: string;
 }
 
-const STRONG_KINDS: readonly OverlapKind[] = ["issue", "change", "gitlab-mr", "github-issue", "graft-spec", "commit"];
+const STRONG_KINDS: readonly OverlapKind[] = ["gitlab-mr", "github-issue", "graft-spec", "commit"];
 const MATCH_KINDS: readonly OverlapKind[] = [...STRONG_KINDS, "branch", "path"];
-
-/** Ref kinds that never count as overlap, each with the reason. Every other accepted kind is in MATCH_KINDS. */
-export const OVERLAP_EXCLUDED_KINDS: Readonly<Record<string, string>> = {
-	url: "a web address names no unit of work, and many sessions cite the same documentation page",
-	other: "free text has no form to compare exactly",
-};
-
-/** The ref kinds that count as overlap, strongest first. */
-export const OVERLAP_MATCH_KINDS: readonly OverlapKind[] = MATCH_KINDS;
 
 function collapse(value: string): string {
 	return value.trim().replaceAll(/\s+/g, " ");
@@ -50,16 +41,6 @@ function stripGitLabUrl(value: string): string {
 	return normalizeGitLabHost(value)
 		.replace(/\/-\/merge_requests\//i, "!")
 		.replace(/\/merge_requests\//i, "!");
-}
-
-/** An issue or change URL reads as host/project#12 or host/project!12; a short form stays project#12. */
-function stripWorkItemUrl(value: string): string {
-	return value
-		.replace(/^https?:\/\//i, "")
-		.replace(/\/$/, "")
-		.replace(/\/(?:-\/)?issues\//i, "#")
-		.replace(/\/(?:-\/)?merge_requests\//i, "!")
-		.replace(/\/pull\//i, "!");
 }
 
 function stripGitHubUrl(value: string): string {
@@ -83,10 +64,6 @@ export function normalizeOverlapRef(ref: WorkstreamRef): string | null {
 	let value = (ref.kind === "path" ? ref.value.trim() : collapse(ref.value)).replaceAll("\\", "/");
 	if (!value) return null;
 	switch (ref.kind) {
-		case "issue":
-		case "change":
-			value = stripWorkItemUrl(value).toLowerCase();
-			break;
 		case "gitlab-mr":
 			value = stripGitLabUrl(value).replace(/\.json$/i, "").toLowerCase();
 			break;

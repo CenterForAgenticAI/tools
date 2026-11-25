@@ -15,7 +15,7 @@ import {
 	readPolicyEntryLayers,
 	resolveConfigLayers,
 } from "../src/platform/config-layers.js";
-import { contextBand } from "../src/platform/context-telemetry.js";
+import { buildContextTelemetry, contextBand } from "../src/platform/context-telemetry.js";
 import {
 	DEFAULT_PRESSURE_LADDER,
 	createContextPolicyController,
@@ -166,7 +166,8 @@ test("the default ladder starts WARN at the first fold nudge and URGENT at seede
 	assert.equal(contextBand(0.45), "WARN");
 	assert.equal(contextBand(0.85), "WARN", "85% sits between the last fold nudge and compaction");
 	assert.equal(contextBand(0.9), "URGENT");
-	assert.equal(contextBand(0.5), "WARN");
+	assert.match(buildContextTelemetry({ fraction: 0.5, headroom: 100_000 }), /band="WARN"[^>]*action="gate-broad-work"/u);
+	assert.match(buildContextTelemetry({ fraction: 0.85, headroom: 30_000 }), /band="WARN"/u);
 });
 
 test("a configured ladder moves the telemetry bands and reports each threshold's layer", () => {
@@ -178,8 +179,9 @@ test("a configured ladder moves the telemetry bands and reports each threshold's
 	assert.equal(policy.ladderSources.foldNudgeEndFraction, "default");
 	assert.equal(policy.ladderSources.seededCompactionFraction, "project");
 
-	assert.equal(contextBand(0.35, policy.bands), "WARN");
-	assert.equal(contextBand(0.35), "OK", "the default ladder starts WARN at 45%");
+	assert.match(buildContextTelemetry({ fraction: 0.35, headroom: 1_000 }, { bands: policy.bands }), /band="WARN"/u);
+	assert.match(buildContextTelemetry({ fraction: 0.35, headroom: 1_000 }), /band="OK"/u);
+	assert.match(buildContextTelemetry({ fraction: 0.82, headroom: 1_000 }, { bands: policy.bands }), /band="URGENT"[^>]*action="compact-before-tool"/u);
 	assert.equal(contextBand(0.82, policy.bands), "URGENT");
 });
 

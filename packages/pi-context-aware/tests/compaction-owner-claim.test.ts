@@ -1466,22 +1466,6 @@ const REPLACEMENTS: Array<[string, (env: ReturnType<typeof controllers>, old: Re
 	["extension reload", async (env, old) => { old.shutdown(); const next = env.make(); next.start(env.ctx); await env.fabric.flush(); return next; }],
 ];
 
-test("pi-context-aware#472: the controller names the claim's holder for the strategy view: self, other, or none", async () => {
-	const env = controllers();
-	const first = env.make();
-	assert.equal(first.owner, "none", "nothing claimed yet");
-	first.start(env.ctx);
-	await env.fabric.flush();
-	assert.equal(first.owner, "self");
-	const second = env.make();
-	second.start(env.ctx);
-	await env.fabric.flush();
-	assert.equal(second.active, false, "Fabric refuses a second owner");
-	assert.equal(second.owner, "other", "another owner holds the claim");
-	first.shutdown();
-	assert.equal(first.owner, "none", "a withdrawn claim is held by nobody");
-});
-
 test("CR-007: a call made under an earlier claim that fails late leaves the new claim held and unfaulted", async () => {
 	assert.equal(REPLACEMENTS.length, 2, "both replacement paths are exercised");
 	for (const [label, replace] of REPLACEMENTS) {

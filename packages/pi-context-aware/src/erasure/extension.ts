@@ -4,7 +4,7 @@ import path from "node:path";
 import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { SessionDatabase, UnsafeDatabaseFileError } from "./database.js";
 import { eraseSession, formatErasureReceipt, missingSessionSources, missingSourceNotice, sweepMissingSessions, type ErasureSession } from "./session-erasure.js";
-import { heldDirectoryPath, readStoreHeader, storeDirectories, withStoreDirectory } from "./files.js";
+import { readStoreHeader, storeDirectories, withStoreDirectory } from "./files.js";
 import { restoredErasedSessions } from "./restored.js";
 import { parseEraseArgs, runTextErasure, TEXT_USAGE } from "./erase-command.js";
 
@@ -15,10 +15,7 @@ export async function discoverProfileSessions(agentDir: string): Promise<Erasure
 	for (const directory of storeDirectories(agentDir, root).filter((dir) => dir === root || path.dirname(dir) === root)) {
 		const held = withStoreDirectory(agentDir, directory, (dir) => {
 			const fd = fs.openSync(`${dir}/.`, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
-			// The listing outlives the callback, so it reads through this descriptor's own identity path.
-			const held = heldDirectoryPath(fd);
-			if (!held) { fs.closeSync(fd); throw new Error("Platform cannot safely delete through held directories"); }
-			return { fd, path: held };
+			return { fd, path: path.join(path.dirname(dir), String(fd)) };
 		});
 		try {
 			for (const session of await SessionManager.listAll(held.path)) {

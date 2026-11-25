@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Time and peak-heap measurement for focus replay.
+ * Time and peak-heap measurement for task and focus replay.
  * Not part of `npm test`.
  *
  * Each case runs in its own child process with `--expose-gc`, on generated
@@ -8,8 +8,8 @@
  * transcript and do not share heap state.
  *
  * Implementations:
- *   replay      the shipped `replayWorkstreamEntries` over the whole
- *               generated branch, parsing included.
+ *   replay      the shipped `replayWorkstreamEntries` or `replayTasksEntries`
+ *               over the whole generated branch, parsing included.
  *   reference   the pre-#148 focus replay (tests/replay-reference.ts) without
  *               its entry limit, also end to end. It copies a predecessor path
  *               for every reachable snapshot, so it shows the quadratic shape
@@ -35,7 +35,7 @@ const SELF = fileURLToPath(import.meta.url);
 const DIST = new URL("../.test-dist/", import.meta.url);
 
 const FULL_CASES = [
-	...["200000", "1000000"].map((size) => ({ fixture: "sparse", size, impls: ["replay"] })),
+	...["200000", "1000000"].map((size) => ({ fixture: "sparse", size, impls: ["replay", "tasks"] })),
 	{ fixture: "sparse", size: "200000", impls: ["reference"] },
 	...["2500", "5000", "10000"].map((size) => ({ fixture: "linked-chain", size, impls: ["replay", "reference"] })),
 	...["20000", "100000"].map((size) => ({ fixture: "linked-chain", size, impls: ["replay"] })),
@@ -43,32 +43,49 @@ const FULL_CASES = [
 	...["20000", "100000"].map((size) => ({ fixture: "legacy-chain", size, impls: ["replay"] })),
 	...["1000x8", "2000x8", "4000x8"].map((size) => ({ fixture: "competing-legacy", size, impls: ["replay", "reference"] })),
 	{ fixture: "competing-legacy", size: "12500x8", impls: ["replay"] },
+	...["10000", "100000"].map((size) => ({ fixture: "task-history", size, impls: ["tasks"] })),
 ];
 
 const QUICK_CASES = [
-	{ fixture: "sparse", size: "20000", impls: ["replay", "reference"] },
+	{ fixture: "sparse", size: "20000", impls: ["replay", "tasks", "reference"] },
 	{ fixture: "linked-chain", size: "2000", impls: ["replay", "reference"] },
 	{ fixture: "legacy-chain", size: "2000", impls: ["replay", "reference"] },
 	{ fixture: "competing-legacy", size: "250x8", impls: ["replay", "reference"] },
+	{ fixture: "task-history", size: "2000", impls: ["tasks"] },
 ];
 
 async function load() {
-	const [history, focus, reference] = await Promise.all([
+	const [history, focus, tasks, reference] = await Promise.all([
 		import(new URL("tests/replay-history.js", DIST)),
-		import(new URL("src/snapshot-contracts/transcript.js", DIST)),
+		import(new URL("src/workstream/workstream-replay.js", DIST)),
+		import(new URL("src/session-tasks/session-tasks.js", DIST)),
 		import(new URL("tests/replay-reference.js", DIST)),
 	]);
-	return { history, focus, reference };
+	return { history, focus, tasks, reference };
+}
+
+function taskList(tasks) {
+	const planned = tasks.planTasks([
+		{ title: "Read the selected branch" },
+		{ title: "Keep the newest snapshot" },
+		{ title: "Record the measurement" },
+	], "agent");
+	if (!planned.ok) throw new Error(planned.reason);
+	return planned.value;
 }
 
 function fixture(modules, name, size) {
 	const { history } = modules;
-	if (name === "sparse") return history.sparseHistory(Number(size), 20);
+	if (name === "sparse") return history.sparseHistory(Number(size), 20, taskList(modules.tasks));
 	if (name === "linked-chain") return history.focusChain(Number(size));
 	if (name === "legacy-chain") return history.focusChain(Number(size), { linked: false });
 	if (name === "competing-legacy") {
 		const [levels, width] = size.split("x").map(Number);
 		return history.competingLegacyHistory(levels, width);
+	}
+	if (name === "task-history") {
+		const list = taskList(modules.tasks);
+		return history.tasksHistory(Number(size), () => list);
 	}
 	throw new Error(`unknown fixture ${name}`);
 }
@@ -79,6 +96,12 @@ function runner(modules, impl, entries) {
 		return () => {
 			const result = modules.focus.replayWorkstreamEntries(entries);
 			return `focus ${result.snapshot?.eventId ?? "none"}`;
+		};
+	}
+	if (impl === "tasks") {
+		return () => {
+			const result = modules.tasks.replayTasksEntries(entries);
+			return `tasks revision ${result.snapshot?.revision ?? "none"}`;
 		};
 	}
 	if (impl === "reference") {
